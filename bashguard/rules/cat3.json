@@ -1,0 +1,54 @@
+{
+  "version": 1,
+  "rules": [
+    {
+      "id": "cat3.1.terraform-destroy-nonproduction",
+      "when": "argv == ['terraform', 'destroy', '-auto-approve'] && context.Environment == 'nonproduction'",
+      "labels": {"category": "CAT-3 Деструкция облачной инфраструктуры и БД", "risk": "CAT-3.1 Infrastructure as Code Destruction", "severity": "critical", "action": "ask"},
+      "rationale": "Explicit nonproduction context and the exact destroy invocation establish unattended IaC destruction intent; request human responsibility under the CAT-3.1 default.",
+      "sources": ["https://developer.hashicorp.com/terraform/cli/commands/destroy"]
+    },
+    {
+      "id": "cat3.1.terraform-destroy-production",
+      "when": "argv == ['terraform', 'destroy', '-auto-approve'] && context.Environment == 'production'",
+      "labels": {"category": "CAT-3 Деструкция облачной инфраструктуры и БД", "risk": "CAT-3.1 Infrastructure as Code Destruction", "severity": "critical", "action": "deny"},
+      "rationale": "The caller explicitly establishes production; unattended IaC destruction is deny under the task policy. No environment is inferred from resource names.",
+      "sources": ["https://developer.hashicorp.com/terraform/cli/commands/destroy"]
+    },
+    {
+      "id": "cat3.2.namespace-delete-nonproduction",
+      "when": "argv.size() == 4 && argv[0] == 'kubectl' && argv[1] == 'delete' && argv[2] in ['namespace', 'namespaces', 'ns'] && argv[3].matches('^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$') && context.Environment == 'nonproduction'",
+      "labels": {"category": "CAT-3 Деструкция облачной инфраструктуры и БД", "risk": "CAT-3.2 Cluster & Namespace Deletion", "severity": "high", "action": "ask"},
+      "rationale": "The complete literal invocation deletes a namespace, not an individual pod; caller-provided nonproduction context selects the high-severity default.",
+      "sources": ["https://kubernetes.io/docs/reference/kubectl/generated/kubectl_delete/"]
+    },
+    {
+      "id": "cat3.2.namespace-delete-production",
+      "when": "argv.size() == 4 && argv[0] == 'kubectl' && argv[1] == 'delete' && argv[2] in ['namespace', 'namespaces', 'ns'] && argv[3].matches('^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$') && context.Environment == 'production'",
+      "labels": {"category": "CAT-3 Деструкция облачной инфраструктуры и БД", "risk": "CAT-3.2 Cluster & Namespace Deletion", "severity": "critical", "action": "ask"},
+      "rationale": "Caller-provided production context and complete namespace deletion intent select the critical-severity CAT-3.2 default.",
+      "sources": ["https://kubernetes.io/docs/reference/kubectl/generated/kubectl_delete/"]
+    },
+    {
+      "id": "cat3.3.volume-prune-force",
+      "when": "argv.size() == 4 && argv[0] == 'docker' && argv[1] == 'volume' && argv[2] == 'prune' && argv[3] in ['--force', '-f']",
+      "labels": {"category": "CAT-3 Деструкция облачной инфраструктуры и БД", "risk": "CAT-3.3 Mass Container & Volume Prune", "severity": "high", "action": "ask"},
+      "rationale": "Bulk unused-volume deletion without confirmation requires a human responsibility decision. This independent ask rationale is not a translation of the unresolved legacy modify class.",
+      "sources": ["https://docs.docker.com/reference/cli/docker/volume/prune/"]
+    },
+    {
+      "id": "cat3.4.redis-flushall",
+      "when": "argv == ['redis-cli', 'FLUSHALL'] || argv == ['redis-cli', 'FLUSHALL', 'SYNC']",
+      "labels": {"category": "CAT-3 Деструкция облачной инфраструктуры и БД", "risk": "CAT-3.4 Cloud Storage & Database Drop", "severity": "critical", "action": "ask"},
+      "rationale": "The exact CLI invocation requests removal of all keys in all databases. Apply the CAT-3.4 critical/ask policy; do not claim the connection succeeds or data exists.",
+      "sources": ["https://redis.io/docs/latest/commands/flushall/"]
+    },
+    {
+      "id": "cat3.5.production-deploy-without-approval",
+      "when": "argv.size() == 4 && argv[0] == 'vercel' && argv[1] == 'deploy' && argv[2] in ['--prod', '--yes'] && argv[3] in ['--prod', '--yes'] && argv[2] != argv[3] && context.Approval == 'not_granted'",
+      "labels": {"category": "CAT-3 Деструкция облачной инфраструктуры и БД", "risk": "CAT-3.5 Production Deploy Without Approval", "severity": "high", "action": "ask"},
+      "rationale": "The production flag establishes deployment intent; caller evidence establishes approval was not granted. The yes flag alone is not evidence of missing organizational approval.",
+      "sources": ["https://vercel.com/docs/cli/deploy"]
+    }
+  ]
+}

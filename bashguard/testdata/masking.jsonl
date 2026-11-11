@@ -1,0 +1,2 @@
+{"command":"printf café café","edits":[{"start":7,"end":12,"replacement":"MASKED"}]}
+{"command":"printf 'same' 'same'","edits":[{"start":14,"end":20,"replacement":"'MASKED'"}]}

@@ -1,0 +1,53 @@
+{
+  "version": 1,
+  "rules": [
+    {
+      "id": "ast.redis-redirect",
+      "scope": "ast",
+      "when": "ast.Stmts.size() == 1 && ast_nodes.exists(n, type(n) == syntax.Redirect && cel.bind(r, syntax.Redirect(n), operator(r) == '>' && !has(r.N) && r.Word.Parts.size() == 1 && type(r.Word.Parts[0]) == syntax.Lit && syntax.Lit(r.Word.Parts[0]).Value == 'audit.log' && type(r.parent()) == syntax.Stmt && cel.bind(s, syntax.Stmt(r.parent()), s.parent() == ast && !s.Negated && !s.Background && !s.Coprocess && !s.Disown && s.Redirs.size() == 1 && s.children().exists(child, type(child) == syntax.CallExpr && cel.bind(cmd, syntax.CallExpr(child), cmd.Assigns.size() == 0 && calls.exists(c, c.Start == start(cmd) && c.Words.all(w, w.Static) && c.Words.map(w, w.Value) == ['redis-cli', 'FLUSHALL']))))))",
+      "rationale": "Exact top-level FLUSHALL CLI form with stdout redirected to audit.log; the redirect remains part of the checked AST.",
+      "labels": {
+        "category": "CAT-3 Деструкция облачной инфраструктуры и БД",
+        "risk": "CAT-3.4 Cloud Storage & Database Drop",
+        "severity": "critical",
+        "action": "ask"
+      },
+      "sources": [
+        "https://redis.io/docs/latest/commands/flushall/",
+        "https://www.gnu.org/software/bash/manual/html_node/Command-Substitution.html"
+      ]
+    },
+    {
+      "id": "ast.redis-pipeline",
+      "scope": "ast",
+      "when": "ast.Stmts.size() == 1 && ast.Stmts.all(s, !s.Negated && !s.Background && !s.Coprocess && !s.Disown && s.Redirs.size() == 0 && type(s.Cmd) == syntax.BinaryCmd && operator(s.Cmd) == '|' && [syntax.BinaryCmd(s.Cmd)].all(b, !b.X.Negated && !b.X.Background && !b.X.Coprocess && !b.X.Disown && b.X.Redirs.size() == 0 && type(b.X.Cmd) == syntax.CallExpr && syntax.CallExpr(b.X.Cmd).Assigns.size() == 0 && calls.exists(c, c.Start == start(b.X.Cmd) && c.Words.all(w, w.Static) && c.Words.map(w, w.Value) == [\"redis-cli\",\"FLUSHALL\"]) && !b.Y.Negated && !b.Y.Background && !b.Y.Coprocess && !b.Y.Disown && b.Y.Redirs.size() == 0 && type(b.Y.Cmd) == syntax.CallExpr && syntax.CallExpr(b.Y.Cmd).Assigns.size() == 0 && calls.exists(c, c.Start == start(b.Y.Cmd) && c.Words.all(w, w.Static) && c.Words.map(w, w.Value) == [\"cat\"])))",
+      "rationale": "The AST proves a foreground pipeline whose left call is exactly FLUSHALL and whose right call is exactly cat, not a conditional or quoted occurrence.",
+      "labels": {
+        "category": "CAT-3 Деструкция облачной инфраструктуры и БД",
+        "risk": "CAT-3.4 Cloud Storage & Database Drop",
+        "severity": "critical",
+        "action": "ask"
+      },
+      "sources": [
+        "https://redis.io/docs/latest/commands/flushall/",
+        "https://www.gnu.org/software/bash/manual/html_node/Command-Substitution.html"
+      ]
+    },
+    {
+      "id": "ast.redis-substitution",
+      "scope": "ast",
+      "when": "ast.Stmts.size() == 1 && ast.Stmts.all(s, !s.Negated && !s.Background && !s.Coprocess && !s.Disown && s.Redirs.size() == 0 && type(s.Cmd) == syntax.CallExpr && syntax.CallExpr(s.Cmd).Assigns.size() == 0 && [syntax.CallExpr(s.Cmd)].all(c, c.Args.size() == 2 && c.Args[0].Parts.size() == 1 && type(c.Args[0].Parts[0]) == syntax.Lit && syntax.Lit(c.Args[0].Parts[0]).Value == 'printf' && c.Args[1].Parts.size() == 1 && type(c.Args[1].Parts[0]) == syntax.DblQuoted && [syntax.DblQuoted(c.Args[1].Parts[0])].all(q, !q.Dollar && q.Parts.size() == 1 && type(q.Parts[0]) == syntax.CmdSubst && [syntax.CmdSubst(q.Parts[0])].all(sub, !sub.Backquotes && !sub.TempFile && !sub.ReplyVar && sub.Stmts.size() == 1 && sub.Stmts.all(inner, !inner.Negated && !inner.Background && !inner.Coprocess && !inner.Disown && inner.Redirs.size() == 0 && type(inner.Cmd) == syntax.CallExpr && syntax.CallExpr(inner.Cmd).Assigns.size() == 0 && calls.exists(c, c.Start == start(inner.Cmd) && c.Words.all(w, w.Static) && c.Words.map(w, w.Value) == [\"redis-cli\",\"FLUSHALL\"]))))))",
+      "rationale": "Exact FLUSHALL call inside a double-quoted command substitution passed to printf; quoted literal text and conditional inner commands do not satisfy this AST shape.",
+      "labels": {
+        "category": "CAT-3 Деструкция облачной инфраструктуры и БД",
+        "risk": "CAT-3.4 Cloud Storage & Database Drop",
+        "severity": "critical",
+        "action": "ask"
+      },
+      "sources": [
+        "https://redis.io/docs/latest/commands/flushall/",
+        "https://www.gnu.org/software/bash/manual/html_node/Command-Substitution.html"
+      ]
+    }
+  ]
+}
