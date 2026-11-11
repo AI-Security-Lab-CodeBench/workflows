@@ -1,0 +1,14 @@
+{"id":"redirect","command":"redis-cli FLUSHALL >audit.log"}
+{"id":"pipeline","command":"redis-cli FLUSHALL | cat"}
+{"id":"substitution","command":"printf \"$(redis-cli FLUSHALL)\""}
+{"id":"quoted-pipeline","command":"'redis-cli' 'FLUSHALL' | cat"}
+{"id":"input-redirect","command":"redis-cli FLUSHALL <audit.log"}
+{"id":"append-redirect","command":"redis-cli FLUSHALL >>audit.log"}
+{"id":"conditional","command":"redis-cli FLUSHALL && cat"}
+{"id":"quoted-text","command":"printf '$(redis-cli FLUSHALL)'"}
+{"id":"conditional-substitution","command":"printf \"$(false && redis-cli FLUSHALL)\""}
+{"id":"dynamic-substitution","command":"printf \"$(redis-cli $ACTION)\""}
+{"id":"background-pipeline","command":"redis-cli FLUSHALL | cat &"}
+{"id":"redirect-data","command":"printf 'redis-cli FLUSHALL >audit.log'"}
+{"id":"function-body","command":"f() { redis-cli FLUSHALL | cat; }"}
+{"id":"negated-pipeline","command":"! redis-cli FLUSHALL | cat"}
