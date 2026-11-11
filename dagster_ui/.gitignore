@@ -1,0 +1,12 @@
+.upstream
+node_modules
+public
+tooling/node_modules
+tooling/.yarn
+build
+.next
+*.tsbuildinfo
+next-env.d.ts
+build.backup-*
+.codebench-build.lock
+.codebench-package-*

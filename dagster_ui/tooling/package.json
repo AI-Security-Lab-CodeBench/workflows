@@ -1,0 +1,9 @@
+{
+  "name": "codebench-dagster-ui-tooling",
+  "private": true,
+  "packageManager": "yarn@4.12.0",
+  "dependencies": {
+    "@yarnpkg/cli-dist": "4.12.0",
+    "zod": "4.1.12"
+  }
+}

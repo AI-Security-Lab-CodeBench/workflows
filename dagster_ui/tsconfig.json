@@ -1,0 +1,18 @@
+{
+  "extends": "./.upstream/js_modules/app-oss/tsconfig.json",
+  "compilerOptions": {
+    "baseUrl": ".",
+    "paths": {
+      "@shared/assets/AssetsOverviewRoot": ["src/AssetsOverviewRoot.tsx"],
+      "@shared/*": [".upstream/js_modules/ui-core/src/shared/*"],
+      "@dagster-io/ui-core/*": [".upstream/js_modules/ui-core/src/*"],
+      "@dagster-io/ui-components": [".upstream/js_modules/ui-components/src"],
+      "@dagster-io/ui-components/editor": [".upstream/js_modules/ui-components/src/editor"],
+      "@dagster-io/dg-docs-components/*": [".upstream/js_modules/dg-docs-components/src/*"],
+      "@upstream-app/*": [".upstream/js_modules/app-oss/src/*"],
+      "zod": ["tooling/node_modules/zod"]
+    }
+  },
+  "include": ["src", "tests", "next-env.d.ts", ".upstream/js_modules/app-oss/typings.d.ts"],
+  "exclude": ["node_modules", "tooling"]
+}

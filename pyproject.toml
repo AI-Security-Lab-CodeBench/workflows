@@ -1,0 +1,46 @@
+[project]
+name = "codebench-pipeline"
+version = "0.1.0"
+description = "Typed, category-configurable dataset building and review"
+requires-python = ">=3.12,<3.14"
+dependencies = [
+  "dagster==1.13.29",
+  "dagster-webserver==1.13.29",
+  "pandera[pandas,polars]>=0.26,<1",
+  "dagster-pandera==0.29.29",
+  "starlette==1.10.0",
+  "uvicorn==0.54.0",
+  "pandas>=2.2,<4",
+  "pyarrow>=18",
+  "boto3>=1.40,<2",
+  "polars>=1.32,<2",
+  "pydantic>=2.11,<3",
+  "mcp>=1.12,<2",
+]
+
+[dependency-groups]
+dev = ["basedpyright>=1.31", "ruff>=0.12", "pandas-stubs>=2.2", "boto3-stubs[s3]>=1.40,<2"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["codebench_pipeline"]
+
+[tool.dagster]
+module_name = "codebench_pipeline.definitions"
+code_location_name = "Dataset building"
+
+[tool.basedpyright]
+include = ["codebench_pipeline"]
+typeCheckingMode = "strict"
+venvPath = "."
+venv = ".venv"
+
+[tool.ruff]
+target-version = "py312"
+line-length = 110
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I"]
