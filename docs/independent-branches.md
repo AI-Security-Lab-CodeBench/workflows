@@ -1,9 +1,10 @@
 # Independent collection, unified dataset
 
-The November 11, 2026 clarification requires independent collection branches,
-not separate released datasets. The earlier branch-specific releases and
-confidence-based automatic publication are superseded. Historical outputs and
-decisions remain evidence; they are not approval for the new combined dataset.
+The current November 11, 2026 instruction requires automatic eligible-source
+collection in independent branches and uncertainty-only final human review.
+Earlier branch-specific releases, mandatory corpus admission and all-row review
+are superseded. Historical outputs and decisions remain evidence, not current
+authorization for the combined dataset.
 
 ## Graph and admission
 
@@ -12,7 +13,7 @@ decisions remain evidence; they are not approval for the new combined dataset.
                          /           \
            Existing datasets       Documentation crawl
              source catalog          source catalog
-             human source gate       inspected-source binding
+             eligibility binding     eligibility binding
              documents               documents
              adapters                adapters
              extraction              extraction
@@ -23,24 +24,25 @@ decisions remain evidence; they are not approval for the new combined dataset.
                     merged proposed annotations
                     bounded incremental agentic review
                     exact normalized deduplication
-                    unified human review queue
-                    completed human decisions
+                    uncertainty-only human review queue
+                    real decisions if queue nonempty
                     one dataset release
 ```
 
 `seeds` configures corpus inputs, `documentation_sources` configures original
 documentation/forum inputs, and `documentation` supplies semantic references for
-labeling. These are distinct contracts. Corpus admission requires actual human
-source approval. Original documentation requires inspected provenance, permitted
-reuse and unchanged captured bytes; relabeling a corpus as documentation cannot
-bypass admission.
+labeling. These are distinct contracts. Both collection branches automatically
+crawl or load eligible sources with inspected provenance, permitted reuse,
+content eligibility and unchanged captured bytes. `human_source_decisions` is
+removed from the active graph. Relabeling a corpus as documentation cannot bypass
+machine eligibility.
 
 Collection remains independent through labeling. Agentic review runs in the
 unified tail, in bounded packets containing only records without a current
-review result. A waiting corpus gate does not stop documentation work.
+review result. Neither branch waits for human source admission.
 Final publication requires current authorized
 outputs from every configured branch. An unconfigured branch contributes no
-records; it is not a completed human selection. A configured but blocked branch
+records; it is not an empty configured branch. A configured but blocked branch
 cannot be silently omitted from a purported complete release.
 
 ## Shared finalization
@@ -52,16 +54,25 @@ retains a survivor mapping. Quoted content, shell semantics and meaningful
 context or label disagreements must not be collapsed. Fuzzy siblings,
 resource-name substitution and safe-counterpart construction remain deferred.
 
-Every retained release candidate requires human review, regardless of model
-confidence. Machine-ineligible rows remain inspectable and cannot be made
-eligible merely by approving them. Human exclusions precede the category-wide
-publication cap. There is one current `datasets/dataset_release`, not one per
-source family, and no automatic publication bypass.
+Only rows with any `medium` or `low` among category, risk, severity, class and
+independent reviewer confidence enter the final human queue. All five `high`
+means low uncertainty and automatic admission if machine eligible, with no human
+decision. Machine-ineligible rows remain inspectable and cannot be made eligible
+by approval. Eligibility and required human approval precede the category-wide
+publication cap.
+
+There is one current `datasets/dataset_release`, not one per source family or
+admission route. An empty queue lets the build release automatically without
+inventing human decisions or completion. A nonempty queue makes the same release
+wait for real terminal decisions and explicit completion. Included low-uncertainty
+rows have `human_reviewed=false`; actually approved uncertain rows have
+`human_reviewed=true`.
 
 ## Review and invalidation
 
 Review is a persisted external-input stage. Waiting does not occupy a running
-worker. Completing the exact current snapshot signals downstream materialization.
+worker. For a nonempty queue, completing the exact current snapshot signals
+downstream materialization. An empty queue needs no human completion.
 Decisions bind source evidence, merged/deduplicated records, configuration,
 implementation and the decision generation. An upstream change or retraction
 makes affected publication stale; it never revives an older automatic release.
@@ -69,8 +80,10 @@ makes affected publication stale; it never revives an older automatic release.
 Unchanged records retain their model reviews and saved human decisions when their
 relevant evidence and policy fingerprints still match. Packet membership,
 ordering or a changed neighboring record must not invalidate them. A new or
-changed record requires new review; a changed release snapshot still requires
-explicit completion. Carry-forward keeps the original reviewer and audit origin.
+changed record requires new model review and, if uncertain, a human decision.
+A changed release snapshot requires explicit completion when its queue is
+nonempty; an empty queue is revalidated automatically. Carry-forward keeps the
+original reviewer and audit origin.
 
 Unchanged collection outputs remain reusable. Reading historical tables does not
 rerun inference or grant approval. A changed configured branch invalidates shared

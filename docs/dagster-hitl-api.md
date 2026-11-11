@@ -110,11 +110,16 @@ Review is now stage-scoped and reusable; see `reusable-review.md`.
 completion label, minimum/maximum approvals, `can_continue`, `continuation_label`
 and `additional_publication_stages`.
 `/reviews/{stage_id}` and its decision/complete/reopen/retract/continue/evidence
-subroutes use the same contracts below. The `sources` stage gates ingestion;
-the `annotations` stage gates publication.
+subroutes use the same contracts below. There is no active `sources` ingestion
+gate or `human_source_decisions` asset. Both branches automatically acquire
+eligible sources under provenance, license and content checks. The `annotations`
+stage gates publication only when its uncertainty queue is nonempty.
 
-The shared `annotations` stage reviews deduplicated records from both collection
-branches. There is no active `documentation_annotations` or automatic companion.
+The shared `annotations` stage reviews uncertain deduplicated records from both
+collection branches. All five `high` confidences means low uncertainty; any
+`medium` or `low` among category, risk, severity, class and independent reviewer
+confidence requires human review. There is no active `documentation_annotations`
+or separate automatic release asset.
 Generic clients still reject undeclared cross-stage responses.
 Legacy `/review` paths select the `annotations` stage.
 
@@ -134,8 +139,9 @@ an original ID column such as `model_id`, without a `candidate_id` table column.
 Snapshots and completion tokens carry `review_stage`; snapshots also bind
 `min_approvals` and `max_approvals`.
 The annotation batch snapshot includes only low/medium-confidence candidate IDs
-and their machine-eligible subset. The source batch includes every source candidate,
-regardless of confidence. All queued candidates require an explicit terminal
+and their machine-eligible subset, using all five confidence dimensions.
+Historical source batches remain evidence, not active ingestion authorization.
+All queued candidates require an explicit terminal
 decision, including ineligible rows.
 Human approval cannot override existing eligibility checks.
 
@@ -202,9 +208,10 @@ decisions and the audit history are retained. Prior completion authorization
 and dependent publications immediately become stale.
 
 `POST /reviews/{stage_id}/continue` accepts the completion payload for a completed
-stage whose descriptor permits continuation. Source completion automatically
-launches a native Dagster preparation run; this endpoint resumes after a failed
-run or processes subsequent changes. The batch retains `continuation_run_id`.
+stage whose descriptor permits continuation. Generic registered stages can use
+this endpoint to resume a failed run or process subsequent changes. Historical
+source-completion launches aren't part of automatic collection. The batch retains
+`continuation_run_id`.
 An unchanged plan creates no new run and preserves the existing run link.
 Launch success is not build success: follow the native run for its final status.
 
@@ -213,21 +220,30 @@ registered immutable CSV. New publications have the nine command columns followe
 by `human_reviewed` (`true` or `false`); historical nine-column CSVs remain unchanged.
 The native run link is `/runs/{run_id}`.
 
-The annotation Review view exposes a current publication only after completion
-of its exact unified snapshot. All released rows have `human_reviewed=true`.
-Historical automatic publications remain history, not current authorization.
+For a nonempty queue, the annotation Review view exposes a current publication
+only after completion of its exact unified snapshot. If the queue is empty, the
+build releases automatically through the same `dataset_release`, without a human
+decision or human reviewer. The empty ledger batch receives a completion token
+under the explicit `automatic low-uncertainty policy` actor; it contains no row
+decisions. Automatically admitted machine-eligible
+all-high rows have `human_reviewed=false`; actually approved uncertain rows have
+`human_reviewed=true`. Historical publications remain history, not authorization.
 
 ## Mandatory publication boundary
 
 Resolving the current snapshot, changing decisions and registering publication
 use the same SQLite transaction protocol. Upstream current-reference/config
 writers must participate so review authorization cannot race a snapshot change.
-The publisher checks completion and snapshot binding again when committing
-output. A manual release-only materialization cannot bypass this boundary.
+The publisher checks snapshot binding again when committing output. A nonempty
+queue requires current completion authorization; an empty queue requires
+revalidated emptiness and machine eligibility, not a fabricated human token.
+A manual release-only materialization cannot bypass this boundary.
 
 The service preserves immutable evidence manifests and prior decisions.
-Publication includes only eligible human-approved rows from the deduplicated
-union, with category-wide caps applied after human exclusions. The release
+Publication includes machine-eligible low-uncertainty rows without decisions and
+machine-eligible uncertain rows with actual human approval from the deduplicated
+union. Approval cannot override machine ineligibility. Category-wide caps apply
+after eligibility and required approval. The release
 remains a Pandera-validated DataFrame persisted as Parquet, plus the ten-column
 CSV; detailed audit evidence stays in sidecars. Retraction invalidates current
 publication and never makes an older automatic publication silently current.

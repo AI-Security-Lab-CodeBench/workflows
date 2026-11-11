@@ -112,7 +112,8 @@ def build_catalog(
             + (
                 "This is the original-documentation branch, not permission to admit a corpus."
                 if branch == "documentation"
-                else "Every dataset source requires actual human review regardless of confidence."
+                else "Eligible selected sources proceed automatically; no human source approval is required. "
+                "Withhold sources with unresolved provenance, reuse terms or relevance."
             ),
             json.dumps({"scope": source_scope(rules), "sources": payload}, ensure_ascii=False),
             config.model,

@@ -196,7 +196,9 @@ class ReviewSnapshots:
             review_stage="annotations",
             snapshot_id=snapshot_id,
             candidate_ids=prepared.human_review_ids,
-            record_fingerprints=record_fingerprints,
+            record_fingerprints={
+                identifier: record_fingerprints[identifier] for identifier in prepared.human_review_ids
+            },
             eligible_candidate_ids=tuple(
                 identifier for identifier in prepared.eligible_ids if identifier in prepared.human_review_ids
             ),

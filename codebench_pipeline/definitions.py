@@ -29,7 +29,6 @@ from codebench_pipeline.dataset_registry import DatasetRegistry
 from codebench_pipeline.human_review import CompletionToken
 from codebench_pipeline.review_assets import human_assets
 from codebench_pipeline.review_config import HumanReviewConfig
-from codebench_pipeline.source_review_assets import source_review_assets
 from codebench_pipeline.stage_configuration import stage_configs as stage_configs
 from codebench_pipeline.stage_descriptions import describe_stage
 from codebench_pipeline.storage import fingerprint
@@ -79,7 +78,6 @@ def build_definitions(home: Path) -> Definitions:
         definition.map_asset_specs(describe_stage)
         for definition in [
             *source_assets(),
-            *source_review_assets(),
             *annotation_assets(),
             *human_assets(),
             *source_assets("documentation"),
@@ -109,7 +107,7 @@ def build_definitions(home: Path) -> Definitions:
 
     job = UnresolvedAssetJobDefinition(
         name="build_dataset",
-        description="Plan independent corpus and documentation processing; corpus admission remains human-gated.",
+        description="Process eligible corpus and documentation inventories without source approval.",
         selection=AssetSelection.assets(
             *(AssetKey(["datasets", *name.split("/")]) for name in PREPARATION_STAGES)
         ),
@@ -122,7 +120,7 @@ def build_definitions(home: Path) -> Definitions:
     )
     documentation_job = UnresolvedAssetJobDefinition(
         name="build_documentation",
-        description="Process original documentation through independent agent review without waiting for corpus admission.",
+        description="Automatically prepare eligible documentation through independent labeling and agent review.",
         selection=AssetSelection.assets(
             *(
                 AssetKey(["datasets", *name.split("/")])
@@ -141,7 +139,7 @@ def build_definitions(home: Path) -> Definitions:
     )
     release_job = UnresolvedAssetJobDefinition(
         name="release_dataset",
-        description="Publish only the current completed human-review batch; manual runs use the same admission gate.",
+        description="Release eligible low-uncertainty rows automatically; uncertain rows require completed human review.",
         selection=AssetSelection.assets(
             *(
                 AssetKey(["datasets", name])
@@ -179,7 +177,6 @@ def build_definitions(home: Path) -> Definitions:
                         for branch in branches
                     },
                     "documentation": spec.documentation.model_dump_json(),
-                    "source_review": plan.source_revision,
                     "code": {name: value for name, value in code_versions().items()},
                 }
             )

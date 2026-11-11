@@ -152,7 +152,7 @@ class SourceAgentAssessmentTests(unittest.TestCase):
             self.assertEqual(documents.loc[0, "content"], output.inspected[0].text)
             self.assertTrue({"analysis", "confidence", "rationale"}.isdisjoint(documents.columns))
 
-    def test_high_confidence_sources_still_require_every_human_decision_and_completion(self) -> None:
+    def test_legacy_source_authorization_preserves_historical_decision_and_completion_contract(self) -> None:
         with tempfile.TemporaryDirectory() as temporary, dataset_instance(Path(temporary)) as instance:
             root = Path(temporary)
             spec = load_build_config(write_fixture(root), root)

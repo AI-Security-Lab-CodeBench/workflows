@@ -1,5 +1,12 @@
 # Isolated labeling and review exchange
 
+This guide describes the standalone exchange CLI and its legacy numeric-confidence,
+nine-column export contract, not the current Dagster release path. The active
+dataset pipeline uses five low/medium/high confidences, automatic eligible-source
+collection and uncertainty-only final human review. See
+[confidence-review-policy.md](confidence-review-policy.md) for admission,
+snapshot validity and the ten-column release contract.
+
 This CLI uses only the Python standard library and repository inert validators.
 It never invokes a provider, shell command from the dataset, network, or credential
 store. A coordinator supplies each packet to a fresh isolated agent with no tools,

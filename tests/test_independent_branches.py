@@ -6,8 +6,6 @@ from unittest.mock import patch
 
 import pandas as pd
 from configuration_fixture import write_fixture
-from dagster import AssetKey
-from review_test_support import approve_fixture_sources
 from test_dataset_incremental import provider_response
 
 from codebench_pipeline.data_view_models import DatasetQueryRequest, TableResponse
@@ -20,11 +18,9 @@ from codebench_pipeline.definitions import build_definitions
 from codebench_pipeline.human_review import DecisionChange, HumanReviewError
 from codebench_pipeline.human_review_store import HumanReviewStore
 from codebench_pipeline.release_runner import ReleaseRunner
-from codebench_pipeline.review_api_models import DecisionRequest, EvidenceTarget, RetractionRequest
+from codebench_pipeline.review_api_models import DecisionRequest, EvidenceTarget
 from codebench_pipeline.review_service import ReviewService
-from codebench_pipeline.review_workflow import ReviewWorkflow
 from codebench_pipeline.runtime_instance import dataset_instance
-from codebench_pipeline.source_review_inputs import SourceReviewSource, source_stage
 from codebench_pipeline.storage import IntegrityError
 
 
@@ -70,7 +66,7 @@ class IndependentBranchDatasetTests(unittest.TestCase):
                 transaction.get_current_batch(self.spec.dataset_id, "sources")
             self.assertEqual(missing.exception.code, "not_found")
 
-    def test_documentation_prepares_while_dataset_sources_await_user_completion(self) -> None:
+    def test_both_configured_branches_prepare_without_source_human_completion(self) -> None:
         spec = self.spec.model_copy(
             update={
                 "catalog": self.spec.documentation_catalog,
@@ -79,31 +75,21 @@ class IndependentBranchDatasetTests(unittest.TestCase):
         )
         DatasetRegistry(self.home).register(spec)
         outcome = run_registered(spec.dataset_id, self.home)
-        self.assertEqual(outcome.branches["dataset"].status, "awaiting_source_review")
-        self.assertEqual(outcome.branches["documentation"].status, "reviewed")
-        self.assertIsNone(outcome.branches["documentation"].review_stage)
+        self.assertEqual(outcome.branches["dataset"].status, "awaiting_human_review")
+        self.assertEqual(outcome.branches["documentation"].status, "awaiting_human_review")
+        self.assertEqual(outcome.branches["documentation"].review_stage, "annotations")
         self.assertIn("documentation/proposed_annotations", outcome.materialized_stages)
         self.assertIn("reviewed_annotations", outcome.materialized_stages)
-        self.assertNotIn("human_review_queue", outcome.materialized_stages)
-        self.assertNotIn("source_documents", outcome.materialized_stages)
+        self.assertIn("human_review_queue", outcome.materialized_stages)
+        self.assertIn("source_documents", outcome.materialized_stages)
+        self.assertNotIn("human_source_decisions", outcome.materialized_stages)
+        self.assertEqual(outcome.branches["dataset"].blocked_stages, ())
         self.assertEqual(outcome.branches["documentation"].blocked_stages, ())
         with HumanReviewStore(self.home).reader() as transaction:
-            self.assertEqual(transaction.get_current_batch(spec.dataset_id, "sources").state, "open")
             with self.assertRaises(HumanReviewError) as missing:
-                transaction.get_current_batch(spec.dataset_id, "annotations")
+                transaction.get_current_batch(spec.dataset_id, "sources")
             self.assertEqual(missing.exception.code, "not_found")
-        with dataset_instance(self.home) as instance:
-            result = (
-                build_definitions(self.home)
-                .resolve_job_def("build_dataset")
-                .execute_in_process(
-                    instance=instance,
-                    partition_key=spec.dataset_id,
-                    asset_selection=[AssetKey(["datasets", "human_source_decisions"])],
-                    raise_on_error=False,
-                )
-            )
-        self.assertFalse(result.success)
+            self.assertEqual(transaction.get_current_batch(spec.dataset_id, "annotations").state, "open")
 
     def test_documentation_only_build_reports_unconfigured_dataset_and_reuses_outputs(self) -> None:
         DatasetRegistry(self.home).register(self.spec)
@@ -134,6 +120,8 @@ class IndependentBranchDatasetTests(unittest.TestCase):
                 "reviewed_annotations",
                 "deduplicated_annotations",
                 "human_review_queue",
+                "human_review_decisions",
+                "dataset_release",
             },
         )
         with dataset_instance(self.home) as instance:
@@ -216,8 +204,6 @@ class IndependentBranchDatasetTests(unittest.TestCase):
         )
         DatasetRegistry(self.home).register(spec)
         run_registered(spec.dataset_id, self.home)
-        approve_fixture_sources(self.home, spec.dataset_id)
-        run_registered(spec.dataset_id, self.home)
         empty = spec.catalog.model_copy(update={"documents": [], "search_request": None})
         DatasetRegistry(self.home).register(spec.model_copy(update={"catalog": empty}))
         with patch(
@@ -245,7 +231,7 @@ class IndependentBranchDatasetTests(unittest.TestCase):
                 {"documentation"},
             )
 
-    def test_dataset_retraction_preserves_documentation_but_documentation_changes_stale_it(self) -> None:
+    def test_dataset_changes_preserve_documentation_but_documentation_changes_stale_it(self) -> None:
         spec = self.spec.model_copy(
             update={
                 "catalog": self.spec.documentation_catalog,
@@ -253,8 +239,6 @@ class IndependentBranchDatasetTests(unittest.TestCase):
             }
         )
         DatasetRegistry(self.home).register(spec)
-        run_registered(spec.dataset_id, self.home)
-        approve_fixture_sources(self.home, spec.dataset_id)
         run_registered(spec.dataset_id, self.home)
         with dataset_instance(self.home) as instance:
             data = DatasetDataService(self.home, instance)
@@ -272,17 +256,9 @@ class IndependentBranchDatasetTests(unittest.TestCase):
             before = data.query("documentation/proposed_annotations", query)
             assert isinstance(before, TableResponse)
             self.assertIsNone(before.publication_state)
-            workflow = ReviewWorkflow(self.home, source_stage(), SourceReviewSource(self.home, instance))
-            view = workflow.view(query)
-            decision = view.decisions[0]
-            workflow.retract(
-                RetractionRequest(
-                    dataset_id=spec.dataset_id,
-                    snapshot_id=view.batch.snapshot.snapshot_id,
-                    expected=view.batch,
-                    candidate_id=decision.candidate_id,
-                    expected_row_revision=decision.row_revision,
-                    reviewer="fixture human",
+            DatasetRegistry(self.home).register(
+                spec.model_copy(
+                    update={"catalog": spec.catalog.model_copy(update={"collection_revision": "changed-dataset"})}
                 )
             )
             after = data.query("documentation/proposed_annotations", query)

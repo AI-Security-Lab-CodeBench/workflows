@@ -10,7 +10,6 @@ from unittest.mock import patch
 from configuration_fixture import write_fixture
 from dagster import AssetKey, AssetRecordsFilter, build_sensor_context, partition_loading_context
 from pydantic import BaseModel
-from review_test_support import approve_fixture_sources
 
 from codebench_pipeline.dataset_cli import execute_build, execute_registered_build
 from codebench_pipeline.dataset_config import load_build_config
@@ -18,11 +17,9 @@ from codebench_pipeline.dataset_records import LabelDecision, ReviewDecision
 from codebench_pipeline.dataset_registry import DatasetRegistry
 from codebench_pipeline.dataset_source_models import SourceSelection
 from codebench_pipeline.definitions import build_definitions
-from codebench_pipeline.human_review_store import HumanReviewStore
 from codebench_pipeline.model_config import ModelConfig
 from codebench_pipeline.models import AdapterSpec
 from codebench_pipeline.runtime_instance import dataset_instance
-from codebench_pipeline.source_review_runner import SourceReviewRunner
 
 
 def provider_response(
@@ -114,10 +111,7 @@ class IncrementalDatasetTests(unittest.TestCase):
     def build(self) -> dict[str, bool]:
         self.path.write_text(json.dumps(self.configuration), encoding="utf-8")
         with redirect_stdout(io.StringIO()):
-            discovered = execute_build(self.path, self.home)
-            approve_fixture_sources(self.home, self.configuration["dataset_id"])
-            prepared = execute_registered_build(self.configuration["dataset_id"], self.home)
-            return {**discovered, **prepared}
+            return execute_build(self.path, self.home)
 
     def materializations(self, dataset: str) -> dict[str, int]:
         with dataset_instance(self.home) as instance:
@@ -140,7 +134,8 @@ class IncrementalDatasetTests(unittest.TestCase):
         with dataset_instance(self.home) as instance:
             self.assertEqual(len(instance.get_runs()), runs_before)
 
-    def test_source_continuation_does_not_launch_documentation_only_changes(self) -> None:
+    def test_added_documentation_branch_preserves_current_dataset_outputs(self) -> None:
+        before = self.materializations(self.configuration["dataset_id"])
         registry = DatasetRegistry(self.home)
         spec = registry.get(self.configuration["dataset_id"])
         registry.register(
@@ -151,16 +146,27 @@ class IncrementalDatasetTests(unittest.TestCase):
                 }
             )
         )
-        with dataset_instance(self.home) as instance:
-            with HumanReviewStore(self.home).reader() as transaction:
-                token = transaction.get_current_batch(spec.dataset_id, "sources").completion
-            assert token is not None
-            with patch(
-                "codebench_pipeline.source_review_runner.urlopen",
-                side_effect=AssertionError("Source continuation must not launch documentation work"),
-            ):
-                effect = SourceReviewRunner(self.home, instance, 3000)(token)
-            self.assertIsNone(effect.run_id)
+        with redirect_stdout(io.StringIO()):
+            changed = execute_registered_build(spec.dataset_id, self.home)
+        finalization = {
+            "merged_proposed_annotations",
+            "reviewed_annotations",
+            "deduplicated_annotations",
+            "human_review_queue",
+        }
+        self.assertEqual(
+            set(changed),
+            {
+                f"documentation/{stage}"
+                for stage in self.first
+                if stage not in finalization | {"category_rules"}
+            }
+            | finalization,
+        )
+        after = self.materializations(spec.dataset_id)
+        self.assertEqual({stage for stage in before if before[stage] != after[stage]}, finalization)
+        with redirect_stdout(io.StringIO()):
+            self.assertEqual(execute_registered_build(spec.dataset_id, self.home), {})
 
     def test_reviewer_change_materializes_only_review_and_queue(self) -> None:
         before = self.materializations(self.configuration["dataset_id"])

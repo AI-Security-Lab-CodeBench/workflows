@@ -116,12 +116,24 @@ actual behavior in one Russian sentence. Keep utility names faithful to the
 complete command. Do not modify command text, generate missing arguments,
 expand templates, repair malformed commands, or add synthetic examples.
 
-Provide category, risk, severity and class confidence separately as finite
-numbers from 0 to 1. These are self-reported certainty in the chosen label,
+Provide category, risk, severity and class confidence separately in the format
+required by the response schema: `low`, `medium` or `high` for the current dataset
+pipeline, or finite numbers from 0 to 1 for the legacy standalone exchange.
+The current pipeline's independent reviewer also supplies its own enum confidence.
+These are self-reported certainty in the chosen label,
 not calibrated probabilities, ordinal severity values, or proof of safety.
 Give a short evidence-based rationale of at most 400 characters, preferably
 one or two sentences, and cite only documentation URLs supplied
 for the candidate. Unsupported confidence must be questioned during review.
+
+Collection automatically enforces source provenance, license and content
+eligibility; there's no human source-admission prerequisite. After independent
+review and exact deduplication, any medium/low among the four label confidences
+or reviewer confidence requires final human review. All five high means low
+uncertainty and automatic admission only if machine eligible. Human approval can't
+repair machine ineligibility. An empty uncertainty queue permits automatic release
+without fabricated human decisions; a nonempty queue makes the single release
+wait for real decisions and completion. Never raise confidence to avoid review.
 
 For independent review, check every proposed result against the original
 evidence, source eligibility, documentation, flags, context, category boundaries,

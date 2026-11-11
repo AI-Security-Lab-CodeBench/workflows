@@ -9,21 +9,21 @@ from codebench_pipeline.dataset_plan import plan_dataset
 from codebench_pipeline.dataset_registry import DatasetRegistry
 from codebench_pipeline.definitions import build_definitions
 from codebench_pipeline.human_review_store import HumanReviewStore
+from codebench_pipeline.release_runner import ReleaseRunner
 from codebench_pipeline.review_snapshots import ReviewSnapshots
 from codebench_pipeline.runtime_instance import dataset_instance
-from codebench_pipeline.source_review_inputs import SourceReviewSource
 from codebench_pipeline.stage_configuration import stage_configs
 from codebench_pipeline.storage import exclusive
 
 BuildStatus = Literal[
     "unconfigured",
-    "awaiting_source_review",
     "awaiting_human_review",
     "reviewed",
     "review_completed",
     "unchanged",
+    "published",
 ]
-ReviewStage = Literal["sources", "annotations"]
+ReviewStage = Literal["annotations"]
 
 
 class BranchOutcome(BaseModel):
@@ -40,6 +40,7 @@ class BranchOutcome(BaseModel):
 class BuildOutcome(BaseModel):
     model_config = ConfigDict(frozen=True)
     run_id: str | None
+    release_run_id: str | None = None
     job: str = "build_dataset"
     dataset: str
     category: str
@@ -89,6 +90,15 @@ def run_registered(dataset_id: str, home: Path) -> BuildOutcome:
                 if not current.selected and not current.blocked
                 else None
             )
+            if (
+                shared_batch is not None
+                and not shared_batch.snapshot.candidate_ids
+                and shared_batch.completion is None
+            ):
+                transaction.complete(
+                    shared_batch.snapshot, shared_batch, reviewer="automatic low-uncertainty policy"
+                )
+                shared_batch = transaction.get_batch(shared_batch.batch_id)
             for branch in branch_names:
                 materialized = tuple(
                     stage
@@ -113,18 +123,9 @@ def run_registered(dataset_id: str, home: Path) -> BuildOutcome:
                         status="unconfigured",
                     )
                     continue
-                waiting_for_sources = branch == "dataset" and current.waiting_for == "sources"
-                batch = (
-                    transaction.ensure_current_batch(
-                        SourceReviewSource(home, instance).current(dataset_id).snapshot
-                    )
-                    if waiting_for_sources
-                    else shared_batch
-                )
+                batch = shared_batch
                 status: BuildStatus = (
-                    "awaiting_source_review"
-                    if waiting_for_sources
-                    else "unchanged"
+                    "unchanged"
                     if not materialized
                     else "reviewed"
                     if batch is None
@@ -137,9 +138,7 @@ def run_registered(dataset_id: str, home: Path) -> BuildOutcome:
                     skipped_stages=skipped,
                     blocked_stages=blocked,
                     status=status,
-                    review_stage="sources"
-                    if waiting_for_sources
-                    else "annotations"
+                    review_stage="annotations"
                     if batch is not None
                     else None,
                     review_batch_id=batch.batch_id if batch is not None else None,
@@ -149,8 +148,18 @@ def run_registered(dataset_id: str, home: Path) -> BuildOutcome:
         status = primary.status
         if shared_batch is not None and caches:
             status = "awaiting_human_review" if shared_batch.state == "open" else "review_completed"
+        release_run_id: str | None = None
+        if shared_batch is not None and shared_batch.completion is not None:
+            with HumanReviewStore(home).reader() as transaction:
+                previous = transaction.last_publication(dataset_id)
+            published = ReleaseRunner(home, instance)(shared_batch.completion)
+            if previous != published:
+                release_run_id = published.dagster_run_id
+                caches.update({"human_review_decisions": False, "dataset_release": False})
+                status = "published"
         outcome = BuildOutcome(
             run_id=run_id,
+            release_run_id=release_run_id,
             dataset=dataset_id,
             category=spec.rules.category_id,
             storage=spec.storage.backend,

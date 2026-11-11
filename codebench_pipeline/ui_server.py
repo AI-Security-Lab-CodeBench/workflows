@@ -16,11 +16,7 @@ from codebench_pipeline.data_api import make_dataset_api
 from codebench_pipeline.data_views import DatasetDataService
 from codebench_pipeline.release_runner import ReleaseContinuation
 from codebench_pipeline.review_service import ReviewService
-from codebench_pipeline.review_stages import ReviewRegistration
-from codebench_pipeline.review_workflow import ReviewWorkflow
 from codebench_pipeline.runtime_instance import dataset_instance
-from codebench_pipeline.source_review_inputs import SourceReviewSource, source_stage
-from codebench_pipeline.source_review_runner import SourceReviewRunner
 from codebench_pipeline.viewer import viewer_environment
 
 
@@ -71,17 +67,10 @@ def serve(home: Path, bundle: Path, port: int) -> None:
     with dataset_instance(home) as instance:
         data = DatasetDataService(home, instance)
         review = ReviewService(home, data, ReleaseContinuation(home, instance, port))
-        sources = ReviewWorkflow(
-            home,
-            source_stage(),
-            SourceReviewSource(home, instance),
-            on_complete=SourceReviewRunner(home, instance, port),
-        )
         api = make_dataset_api(
             data,
             review,
             port,
-            stages=(ReviewRegistration(source_stage(), sources),),
         )
         with WorkspaceProcessContext(instance, target, version=__version__) as workspace:
             app = integrated_app(NativeWebserver(workspace, bundle), api)

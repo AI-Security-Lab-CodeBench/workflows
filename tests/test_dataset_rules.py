@@ -178,8 +178,10 @@ class DatasetExportTests(unittest.TestCase):
                 root,
                 10,
             )
-            rows = read_csv(root / "review/pending.csv")
-            self.assertEqual(report["records"], 0)
+            rows = read_csv(root / "commands.csv")
+            self.assertEqual(report["records"], 2)
+            self.assertEqual(read_csv(root / "review/pending.csv"), [])
+            self.assertEqual([row["human_reviewed"] for row in rows], ["false", "false"])
             self.assertEqual([row["command"] for row in rows], [c.command for c in candidates])
             self.assertEqual(rows[0]["category"], rules.canonical)
             self.assertEqual(rows[0]["source"], candidates[0].source_id)

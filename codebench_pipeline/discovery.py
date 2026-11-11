@@ -75,8 +75,9 @@ def select_sources(
         "mark reuse_decision permitted only when inspected terms permit collection. "
         "For each source, give concise analysis of relevance, provenance and reuse evidence, a short "
         "decision rationale, and confidence exactly low, medium or high. Confidence describes your "
-        "evidence assessment, not human approval. Every dataset source requires human review regardless "
-        "of confidence. Return proposals only; no source has been approved."
+        "evidence assessment, not human approval. Eligible sources proceed automatically after "
+        "provenance, reuse and content checks; no human source approval is required. "
+        "Return evidence-grounded proposals; unresolved eligibility remains withheld."
     )
     match purpose:
         case "dataset":

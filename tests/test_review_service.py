@@ -265,7 +265,7 @@ class ReviewServiceTests(unittest.TestCase):
 
     def test_publication_download_is_historical_and_dataset_bound_after_reopen(self) -> None:
         saved = self.service.decide(self.change(self.service.view(self.query).batch))
-        payload = b"command,description,util,severity,category,risk,source,seed,class\r\n"
+        payload = b"command,description,util,severity,category,risk,source,seed,class,human_reviewed\r\n"
         ObjectStore(self.spec.storage).write("release/fixture/commands.csv", payload)
         with self.service.store.transaction() as tx:
             token = tx.complete(self.resolved.snapshot, saved.batch, "human")

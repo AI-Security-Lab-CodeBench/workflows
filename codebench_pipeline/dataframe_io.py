@@ -159,7 +159,7 @@ class DataFrameIOManager(ConfigurableIOManager):
             if self.review_home is not None and context.asset_key.path[0] == "datasets":
                 from codebench_pipeline.source_review_guard import SOURCE_GATED_STAGES, authorize_output
 
-                with HumanReviewStore(Path(self.review_home)).transaction(timeout=10) as tx:
+                with HumanReviewStore(Path(self.review_home)).transaction(timeout=10):
                     from codebench_pipeline.dataset_branches import FINALIZATION_STAGES
 
                     if context.asset_key.path[-1] in FINALIZATION_STAGES:
@@ -182,10 +182,10 @@ class DataFrameIOManager(ConfigurableIOManager):
                                 raise IntegrityError("Finalization outputs must be tables")
                             case _:
                                 assert_never(obj)
-                    if context.asset_key.path[-1] in SOURCE_GATED_STAGES | {"human_source_decisions"}:
+                    if context.asset_key.path[-1] in SOURCE_GATED_STAGES:
                         match obj:
                             case pd.DataFrame():
-                                authorize_output(context, self, obj, tx)
+                                authorize_output(context, self, obj)
                             case CategoryRules():
                                 raise IntegrityError("Source-dependent outputs must be tables")
                             case _:

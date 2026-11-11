@@ -1,51 +1,63 @@
-# Confidence information and mandatory human gates
+# Automatic collection and uncertainty-only human review
 
-The November 11, 2026 user instruction changes the current dataset pipeline's
-confidence and release contracts. Historical CSVs and evidence remain unchanged.
+The current November 11, 2026 user instruction supersedes mandatory corpus
+admission and all-row final review. Historical CSVs, decisions and evidence remain
+unchanged. This is the operational contract for the requested pipeline.
 
-## Dataset/source selection
+## Automatic source collection
 
-Every candidate source has an agent `analysis`, `rationale` and `confidence`.
-Confidence is required and is exactly `low`, `medium` or `high`; numbers and
-missing values are rejected. Supplied-source and live-discovery agents both
-produce these fields. They are visible as full, selectable, scrollable table cells.
+Both Existing datasets and Documentation crawl automatically crawl or load every
+eligible configured source. Provenance, license/reuse terms, content eligibility
+and captured-byte integrity remain mandatory. Confidence isn't a substitute for
+these checks. Machine-ineligible sources remain inspectable with exclusion
+reasons, but human approval cannot make them eligible.
 
-All dataset/corpus source candidates pass through the independent `sources` human-review stage.
-High confidence never authorizes source use. Every source decision must be
-terminal before completion; only human-approved machine-eligible sources flow
-to acquisition. The source token is checked at computation and output commit.
+Source candidates retain agent `analysis`, `rationale` and `confidence`. Source
+confidence is exactly `low`, `medium` or `high`, not a number or a missing value.
+It is evidence, not a human-admission trigger. `human_source_decisions` and the
+`sources` admission stage are removed from the active collection graph. Historical
+source decisions remain evidence, not current authorization.
 
-Original documentation has a separate inventory and full processing branch,
-as clarified by the user later on November 11. It does not require or receive
-dataset source approval. Its own provenance/reuse/content binding is checked
-at computation and commit. See [independent branches](independent-branches.md).
+The branches remain independently executable through labeling and converge before
+shared independent agentic review. A configured blocked branch cannot be silently
+omitted from the final release. See [independent branches](independent-branches.md).
 
-## Command-row review
+## Command-row uncertainty
 
 The classifier supplies four enum confidences: category, risk, severity and class.
 The independent reviewer supplies its own enum confidence in its judgment.
-These are qualitative judgments, not calibrated probabilities or numeric thresholds.
+These are qualitative judgments, not calibrated probabilities.
 
-- Every retained row enters the unified `human_review_queue` after exact
-  normalized deduplication, including rows with all five confidences `high`.
-- Confidence helps the reviewer inspect uncertainty; it never authorizes release.
-- Machine-rejected or unsupported rows are not admitted. A rejected
-  row remains inspectable but ineligible; inclusion approval cannot manufacture
-  supporting evidence. Resolving such a judgment requires a new supported
-  label/review pass.
+- Any `medium` or `low` among these five confidences means medium-or-higher
+  uncertainty and requires review in the shared `human_review_queue`.
+- All five `high` means low uncertainty. Such a row needs no human decision and
+  is automatically admitted only if machine eligible.
+- Missing or invalid confidence is a validation failure, never an implicit `high`.
+- Machine-ineligible rows are never admitted by inclusion approval. Uncertain
+  ineligible rows remain in the queue but cannot be approved for release;
+  all-high ineligible rows remain inspectable in the full deduplicated table.
+  Supporting evidence must be resolved through a new valid label/review pass.
 
-Each branch's `reviewed_annotations` retains its classified rows. The shared
-merged and deduplicated tables feed one `annotations` review stage. Dataset
-source review remains a separate `sources` stage with its own decisions and
-snapshot. There is no branch-specific final command review or automatic stage.
+The queue follows conservative exact normalized deduplication of the unified
+agent-reviewed dataset. Full evidence, exclusions, branch/source identities and
+duplicate-to-survivor mappings remain inspectable outside the queue. There is
+one final `annotations` review stage, not branch-specific final reviews.
 
-## Publication and retraction
+## Single release and human markers
 
-The only terminal asset is `dataset_release`. Preparation stops at the unified
-review queue. Explicit human completion signals downstream materialization after
-every retained row has a terminal decision. No worker waits while a human reviews.
-Per-risk caps apply to eligible approved records across both collection branches
-in input order, so changed decisions can change which rows fit under a cap.
+`dataset_release` is the only terminal dataset asset. When the uncertainty queue
+is empty, the build releases eligible rows automatically through this same asset,
+without human decisions or a human reviewer. The ledger completes the empty
+snapshot under the explicit `automatic low-uncertainty policy` actor and issues
+the same snapshot-bound authorization used at publication. No row approval is created.
+If uncertain rows exist, the single release waits for their real terminal
+decisions and explicit completion of the current snapshot. Low-uncertainty rows
+need no decision even in that mixed release. Waiting doesn't occupy a worker.
+
+Admission combines machine-eligible all-high rows and machine-eligible uncertain
+rows actually approved by a human. Rejected rows are excluded. Category-wide
+per-risk caps apply after eligibility and required approval across both branches,
+in input order. Caps don't reduce the uncertainty queue or bypass decisions.
 
 New releases have these ten columns:
 
@@ -53,28 +65,35 @@ New releases have these ten columns:
 command,description,util,severity,category,risk,source,seed,class,human_reviewed
 ```
 
-`human_reviewed` is the literal `true` for included rows approved in the human
-command-review stage. There are no automatically admitted rows. Mandatory
-human source selection alone does not make a command row human-reviewed.
+`human_reviewed` is the literal `false` for automatically admitted low-uncertainty
+rows and `true` for included uncertain rows with actual human approval, including
+valid per-record carried decisions. Agentic approval and historical source
+selection don't make a command human-reviewed.
 
-The newest ledger publication is authoritative. Retraction or changed evidence
-makes it stale; readers never silently fall back to an older automatic release.
-Historical CSV downloads remain immutable. Terminal publication can be retried
-without repeating inference.
+## Snapshot validity and reuse
 
-## Source rows and command rows
+Both automatic and reviewed admission bind the exact current input, policy,
+configuration and implementation snapshot. Recheck eligibility and queue emptiness
+at commit for automatic release; recheck decisions and completion authorization
+for a nonempty queue. Changed evidence, policy or retraction makes affected
+publication stale. An empty queue doesn't authorize reuse of stale inputs.
 
-A source row is not a command row. A configuration with one supplied document
-initially has one source-selection record; extraction may produce many commands
-from that document. This code-only repository does not import a historical
-collection. Local historical acceptance is not current human source or command
-approval.
+Reuse model reviews and real human decisions per record only when all relevant
+evidence, labels, semantic documentation, eligibility and policy still match.
+Packet order and neighboring changes don't invalidate an unchanged record.
+Completion authorization doesn't carry to a new snapshot: a nonempty queue needs
+explicit completion again; an empty queue is revalidated automatically.
+Historical evidence and CSVs stay immutable, and no older publication silently
+becomes current. Publication retries don't repeat valid inference.
 
-## Documentation references
+## Source rows and semantic references
 
-Semantic documentation selection is separate from corpus licensing admission.
-Grounded references may support labeling with unresolved licensing, recorded
-as `use_scope=semantic_reference_only` and a separate `reuse_review` decision.
-This does not grant permission to redistribute the evidence bundle or ingest
-its text as corpus examples. Explicit prohibitions and ungrounded excerpts
-remain excluded.
+A source row isn't a command row. One supplied document can yield many commands;
+source confidence doesn't determine command uncertainty. This code-only repository
+doesn't import a historical collection or grant its rows current approval.
+
+Semantic documentation selection remains separate from corpus licensing
+eligibility. Grounded references may support labeling with unresolved licensing,
+recorded as `use_scope=semantic_reference_only` and a separate `reuse_review`
+decision. That doesn't permit redistribution of the evidence bundle or ingestion
+as corpus examples. Explicit prohibitions and ungrounded excerpts remain excluded.

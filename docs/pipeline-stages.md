@@ -18,17 +18,20 @@ All source commands, context, snippets and model responses are inert, untrusted
 data. No stage executes a collected command. Source selection decides which
 documents to process. Filtering decides which extracted records can enter
 inference. Labeling and separate agentic review assess individual records.
-Agent proposals are not human approval: source use and final inclusion have
-separate gates: dataset/corpus selection requires a human; original documentation
-has an independent inspected-source binding. All retained final records require
-human review, regardless of confidence. Conservative exact normalized
+Both branches automatically crawl or load eligible sources, enforcing provenance,
+license/reuse terms, content eligibility and inspected-source bindings. Agent
+proposals aren't human approval. Final human review covers only rows with any
+`medium` or `low` among the four label confidences or independent reviewer
+confidence. All five `high` means low uncertainty and automatic admission only
+if machine eligible. Conservative exact normalized
 deduplication runs on the combined agent-reviewed dataset before human review.
 Fuzzy linking and safe-counterpart pairing remain deferred.
 
 The sections below describe common stage behavior and the dataset paths.
 Documentation instantiates collection stages through `proposed_annotations` at
-`datasets/documentation/<stage>`, except shared `category_rules` and dataset-only
-`human_source_decisions`. Its collection does not wait on corpus admission.
+`datasets/documentation/<stage>`, except shared `category_rules`.
+`human_source_decisions` is removed from the active graph; neither branch waits
+on human source admission.
 Both branches converge before shared agentic review, deduplication, final human
 review and release.
 See [independent branch contracts](independent-branches.md) for configuration
@@ -71,7 +74,8 @@ relevant inspection commands and counterexamples also belong in scope.
 **Output:** `SourceCatalogTable`, one row per returned source, with identity,
 URL, licensing, attribution, revision, retrieval time, parsing hints, sample,
 decision, analysis, rationale and low/medium/high confidence. Search/fetch and
-selector evidence is retained separately. High source confidence never bypasses human selection.
+selector evidence is retained separately. Source confidence doesn't trigger human
+admission or override machine eligibility; eligible sources advance automatically.
 The live catalog isn't an inventory of every search hit.
 
 **Gate/inspection:** Provided seeds must declare accessible, permitted sources
@@ -88,35 +92,25 @@ license, command or revision evidence withholds a proposal as `needs_review`.
 page evidence. Discovery failures are retained; failures with no inspected pages
 fail the asset. Inspect catalog decisions and discovery receipts, not just counts.
 
-## `datasets/human_source_decisions`
+## Historical `datasets/human_source_decisions`
 
-**Input:** The inspected source catalog and the completed `sources` review.
-
-**Goal:** Materialize exactly which eligible sources the reviewer picked.
-
-**Why:** Search results and model proposals are not permission to use a source.
-
-**Output:** A version-bound `HumanReviewDecisionsTable` over stable source IDs.
-Only approved, machine-eligible catalog rows reach acquisition. Rejected and
-withheld sources remain in the catalog with their provenance and rationale.
-
-**Gate/inspection:** Discovery stops at `awaiting_source_review`. Complete
-Source selection in the native Review tab to launch the remaining preparation
-assets as a native asynchronous Dagster run. Direct materialization uses the
-same authorization check. Retraction makes source-dependent outputs stale.
+This source-admission stage is removed from the active graph. Its historical
+decisions and snapshots remain inspectable evidence, not current authorization.
+The active collection path goes from the catalog to automatic acquisition of
+eligible sources without a human decision or completion token.
 
 ## `datasets/source_documents`
 
-This stage additionally depends on `human_source_decisions`. Live discovery
+This stage depends on the catalog's machine eligibility, not human admission. Live discovery
 uses the exact retained inspected capture, not a later refetch that could differ
-from what was reviewed. Provided files must still match their recorded hashes.
+from what was inspected. Provided files must still match their recorded hashes.
 
 **Input:** The catalog and snapshot configuration, including local source seeds
 when using provided sources, plus a maximum acquisition size.
 
-**Goal:** Persist the approved source text and its actual byte hash.
+**Goal:** Automatically persist every eligible source's text and actual byte hash.
 
-**Why:** Extraction needs stable, reviewed source text rather than search
+**Why:** Extraction needs stable, inspected source text rather than search
 snippets. Live discovery captures are bounded by the configured fetch limit;
 they are not a claim to contain the complete remote document.
 
@@ -234,7 +228,8 @@ the same per-risk page budget; they are not uninspected evidence.
 Missing or ungrounded evidence is withheld, not manufactured. Partial coverage
 is recorded as partial. Coverage is conservative command-prefix matching, not a
 proof of complete behavioral semantics. Both inference stages receive the table;
-the final human review must still assess relevance and version limitations.
+the independent reviewer must assess relevance and version limitations for every
+row, and final human review does so for uncertain rows.
 
 ## `datasets/proposed_annotations`
 
@@ -326,7 +321,8 @@ matching, resource renaming, model-based equivalence or safe-pair gate applies.
 
 ## `datasets/dataset_release`
 
-**Input:** Unified deduplicated annotations, completed human decisions, category rules and the per-risk publication cap
+**Input:** Unified deduplicated annotations, real completed decisions when the
+uncertainty queue is nonempty, category rules and the per-risk publication cap
 (default and maximum 250, independently within each dataset partition).
 
 **Goal:** Produce the accepted canonical release table.
@@ -344,19 +340,26 @@ source ID and `seed` is `-`; the current candidate contract doesn't support
 synthetic prompt/model provenance.
 
 **Gate/inspection:** Publication checks complete matching candidate/label/review
-identities and revalidates labels. This human-completion asset requires a current
-completed unified review. It publishes only eligible human-approved rows.
-`human_reviewed` is `true` for every released row. Accepted labels and approving independent
+identities and revalidates labels. This single asset publishes machine-eligible
+all-high rows without human decisions, marked `human_reviewed=false`, plus
+machine-eligible uncertain rows actually approved by a human, marked
+`human_reviewed=true`. If the queue is nonempty, release waits for real terminal
+decisions and explicit completion of the current snapshot. An empty queue lets
+the build release automatically without a fabricated reviewer, decision or
+human completion token. Accepted labels and approving independent
 reviews remain mandatory; human inclusion cannot repair an unsupported label.
-Human exclusions precede the cap in input order. Final validation checks nonblank fields,
+Eligibility and required human approval precede the cap in input order.
+Final validation checks nonblank fields,
 column order and allowed taxonomy/class/severity values. No random sampling or
 pairing is performed; exact deduplication is the preceding shared stage.
 There is no fresh source licensing or
 source-body audit here; consult the catalog and snapshots.
 
 This asset persists Parquet and an immutable run-scoped CSV/JSONL/card bundle.
-The IO boundary rechecks the snapshot, exact record set, completion generation
-and frozen decision digest while holding the shared review transaction.
+The IO boundary rechecks the snapshot, exact record set, current completion
+generation and frozen decision digest while holding the shared review transaction.
+For an empty queue, the automatic policy completes a verified empty decision set;
+machine eligibility and the exact empty-queue snapshot remain bound to its token.
 The committed SQLite publication reference is authoritative, not a mutable
 object-store pointer. Root `commands.csv`/`README.md` are not replaced.
 An empty release is not quota completion. Historical nine-column releases are
@@ -367,18 +370,21 @@ preserved; newly published releases use the ten-column contract.
 **Input:** Unified deduplicated annotations, rules and the same publication cap as the release.
 It precedes `human_review_decisions` and `dataset_release`.
 
-**Goal:** Expose all retained records for mandatory human inclusion review.
+**Goal:** Expose only medium-or-higher uncertainty rows for final inclusion review.
 
-**Why:** Disagreement, rejection and capacity limits must remain inspectable
-instead of disappearing from the accepted-only release.
+**Why:** Uncertain judgments need human decisions without adding all-high rows to
+the queue. Full-table evidence and cap exclusions remain inspectable separately.
 
 **Output:** `ReviewQueueTable`, preserving candidate, label and review columns
 plus `exclusion_reason`. Machine-eligible rows have an empty reason; other rows
 retain the actual label/review exclusion. Caps do not exclude rows from human review.
 
-**Gate/inspection:** Every retained row remains visible regardless of confidence
-or machine acceptance, with machine-ineligible rows unable to receive inclusion
-approval. High confidence does not remove a record from this queue.
+**Gate/inspection:** Any `medium` or `low` among category, risk, severity, class or
+independent reviewer confidence puts a row in this queue. All five `high` removes
+it from the queue, not from machine eligibility checks. Missing/invalid confidence
+fails validation. Uncertain machine-ineligible rows cannot receive inclusion
+approval; all-high ineligible rows remain inspectable in the full deduplicated
+table and never enter release. Every queued row requires a real terminal decision.
 This isn't an all-pipeline error inbox: source exclusions stay in
 the catalog, quarantined candidates stay in `filtered_commands`, and inference
 failures stay in observations/receipts. Nothing here records human sign-off or
@@ -386,19 +392,23 @@ automatically resolves a withheld row.
 
 ## `datasets/human_review_decisions`
 
-**Input:** The prepared queue and a completion authorization bound to the current
-dataset/evidence snapshot, generation and exact decision digest.
+**Input:** The prepared uncertainty queue and a completion
+authorization bound to the current dataset/evidence snapshot, generation and exact
+decision digest.
 
 **Goal:** Materialize the frozen human decision set separately from original labels.
 
-**Why:** A saved or machine-approved annotation is not permission to publish.
+**Why:** Uncertain annotations need real human decisions separate from model judgments.
 
 **Output:** `HumanReviewDecisionsTable` with candidate/batch/snapshot identities,
 generation and revisions, approve/reject, notes, reviewer and decision timestamp.
-Parquet attributes carry completion binding even when there are no rows.
+An empty queue retains its automatic-policy completion binding in Parquet
+attributes, with zero decision rows. The policy actor is not a human reviewer.
+Automatic-admission evidence remains separate from real human decisions.
 
 **Gate/inspection:** Open/pending reviews remain in the durable ledger and Review
-tab; this asset materializes only in `release_dataset`. Every expected record
+tab; release materializes the decision output without requiring human action for
+an empty queue. Every expected queued record
 must be present and terminal. Approval cannot override machine eligibility.
 The IO boundary revalidates authorization before advancing its current reference.
 Reopening increments the generation. Changed evidence starts an open batch,
@@ -406,7 +416,8 @@ carrying terminal decisions only for rows with unchanged evidence/policy,
 eligibility and selection bounds. Changed/new rows start pending; retracted rows
 are never restored from older approval. Carried decisions retain reviewer,
 notes, timestamps and their origin batch in the audit history. The new snapshot
-still requires explicit completion. Legacy snapshots without row fingerprints
+still requires explicit completion if its queue is nonempty; an empty queue is
+revalidated automatically. Legacy snapshots without row fingerprints
 cannot carry decisions. Prior decisions and immutable evidence remain available.
 Names are self-reported, not authenticated identities. Approval concerns record
 inclusion, never execution of the stored command.
