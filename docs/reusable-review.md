@@ -39,11 +39,19 @@ active run for the same completion or an already-current publication; a failed
 run can be retried without repeating human decisions or inference. The synchronous
 `ReleaseRunner` remains available for in-process callers and regression checks.
 
-The command adapter supplies all retained records from the unified deduplicated
-dataset to human review, including high-confidence judgments. Dataset source
-selection remains a separate mandatory gate. Original documentation collection
-does not wait for or manufacture corpus approval. Both branches feed one final
-review and release. See [confidence policy](confidence-review-policy.md) for the
+The command adapter supplies only uncertain records from the unified deduplicated
+dataset to human review. Any `medium` or `low` among category, risk, severity,
+class and independent reviewer confidence requires review. All five `high` means
+low uncertainty: machine-eligible rows need no decision. Machine-ineligible rows
+remain inspectable and cannot be admitted by approval.
+
+Both branches crawl or load eligible sources automatically, with provenance,
+license and content checks; `human_source_decisions` is removed from the active
+graph. They feed one final queue and one `dataset_release`. If the queue is empty,
+the build completes the empty batch under the explicit automatic-policy actor
+and releases without human decisions or a human completion signal. Otherwise
+the single release waits for real terminal queue decisions and explicit completion.
+See [confidence policy](confidence-review-policy.md) for the
 ten-column publication envelope and per-row `human_reviewed` marker.
 
 Adapters may declare `additional_publication_stages` for an independently
@@ -52,10 +60,13 @@ descriptor metadata, not a frontend assumption that all reviews are annotations.
 The unified annotation adapter advertises no automatic companion.
 
 For an operation that computes before committing an artifact, check authorization
-again at the commit boundary, just as `release_admission.py` does. Hold
+again at the commit boundary. For a nonempty uncertainty queue, hold
 `HumanReviewStore.transaction()` while resolving the current source and calling
 `transaction.authorize_completion(snapshot, token)`, then commit the output.
-Writers of the underlying current references/configuration must participate in
+For an empty queue, revalidate queue emptiness, machine eligibility and the current
+snapshot at commit without inventing a human token. Automatically admitted rows
+have `human_reviewed=false`; actually approved uncertain rows have
+`human_reviewed=true`. Writers of underlying current references/configuration must participate in
 that same transaction protocol. The workflow is a local authority, not a
 distributed locking service.
 
@@ -80,7 +91,8 @@ selection bounds still match. The decision retains notes, reviewer, timestamps
 and row revision; `carried_from_batch_id` and a `carried` audit event link its
 origin. Pending/retracted decisions never revive older approvals. Completion
 tokens and continuation runs do not carry; the new snapshot needs explicit
-completion after its new or changed records are decided.
+completion after its new or changed records are decided when its queue is nonempty.
+The dataset adapter revalidates an empty queue automatically without human action.
 
 Current batches are isolated by `(dataset_id, review_stage)`. Records keep their
 stable IDs even through filtering and sorting. The transport field
@@ -122,8 +134,9 @@ transport uses the registered dataset identity. Review URLs preserve both
 `CompletionEffect` may return a publication, a native run ID, or neither.
 Descriptors advertise `can_continue` and a continuation label. Successful run
 IDs persist on the batch; an unchanged/no-op continuation preserves the previous
-link. Source selection launches preparation asynchronously through Dagster,
-so the browser does not wait for crawling or model calls to finish.
+link. Generic stages can launch continuations asynchronously through Dagster,
+so the browser doesn't wait for long work. Historical source-selection
+continuations aren't an active collection prerequisite.
 
 Stale and legacy-unreviewed materializations remain inspectable but are rejected
 as authorized pipeline inputs. Historical publication downloads remain
@@ -146,7 +159,9 @@ uv run python -m codebench_pipeline.dataset_cli build \
 
 This uses the registered source paths, model roles, policy and settings rather
 than registering an example config over them. Preparation rematerializes only
-the changed dependency closure and stops at human review. Existing published
+the changed dependency closure and stops at human review only when the final
+uncertainty queue is nonempty. With an empty queue it automatically releases
+machine-eligible rows through the same terminal asset. Existing published
 artifacts remain historical evidence; they are not silently approved.
 
 Subrisk IDs, names, definitions, guidance and routing belong to each category's

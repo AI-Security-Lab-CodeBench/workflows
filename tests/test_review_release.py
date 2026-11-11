@@ -9,7 +9,6 @@ from unittest.mock import patch
 
 from configuration_fixture import write_fixture
 from pydantic import BaseModel, JsonValue, TypeAdapter
-from review_test_support import approve_fixture_sources
 from test_dataset_incremental import provider_response
 
 from codebench_pipeline.data_view_models import DatasetQueryRequest, TableResponse
@@ -65,9 +64,6 @@ class ReviewReleaseTests(unittest.TestCase):
         with redirect_stdout(io.StringIO()):
             self.prepared = execute_build(self.config, self.home)
         self.spec = load_build_config(self.config, self.home)
-        approve_fixture_sources(self.home, self.spec.dataset_id)
-        with redirect_stdout(io.StringIO()):
-            self.prepared.update(execute_registered_build(self.spec.dataset_id, self.home))
         self.instance = self.stack.enter_context(dataset_instance(self.home))
         self.data = DatasetDataService(self.home, self.instance)
         self.service = ReviewService(self.home, self.data, ReleaseRunner(self.home, self.instance))
@@ -124,7 +120,9 @@ class ReviewReleaseTests(unittest.TestCase):
         )
         reader = csv.DictReader(io.StringIO(payload.decode()))
         self.assertEqual(tuple(reader.fieldnames or ()), FIELDS)
-        self.assertEqual([row["command"] for row in reader], [expected_command])
+        rows = list(reader)
+        self.assertEqual([row["command"] for row in rows], [expected_command])
+        self.assertEqual([row["human_reviewed"] for row in rows], ["true"])
         released = self.data.query("dataset_release", DatasetQueryRequest(dataset_id=self.spec.dataset_id))
         assert isinstance(released, TableResponse)
         self.assertEqual(released.publication_state, "published")

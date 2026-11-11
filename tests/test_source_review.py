@@ -6,21 +6,35 @@ from contextlib import ExitStack, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
+import pandas as pd
 from configuration_fixture import write_fixture
 from dagster import AssetKey, AssetRecordsFilter
+from pandera.typing import DataFrame
+from pydantic import BaseModel
 from test_dataset_incremental import provider_response
 
 from codebench_pipeline.data_view_models import DatasetQueryRequest, TableResponse
 from codebench_pipeline.data_views import DatasetDataService
+from codebench_pipeline.dataframe_schemas import SourceCatalogTable, SourceDocumentsTable
 from codebench_pipeline.dataset_cli import execute_build, execute_registered_build
-from codebench_pipeline.dataset_config import load_build_config
-from codebench_pipeline.dataset_run import run_registered
+from codebench_pipeline.dataset_config import SnapshotConfig, load_build_config
+from codebench_pipeline.dataset_documents import snapshot_documents
+from codebench_pipeline.dataset_plan import INPUT_STAGES, plan_dataset
+from codebench_pipeline.dataset_registry import DatasetRegistry
+from codebench_pipeline.dataset_source_models import SourceSelection
 from codebench_pipeline.definitions import build_definitions
-from codebench_pipeline.human_review import DecisionChange
+from codebench_pipeline.documentation_authorization import (
+    frame_inventory_authorization,
+    inventory_authorization,
+    inventory_binding,
+)
+from codebench_pipeline.human_review import DecisionChange, HumanReviewError
+from codebench_pipeline.model_config import ModelConfig
 from codebench_pipeline.review_api_models import CompletionRequest, DecisionRequest, RetractionRequest
 from codebench_pipeline.review_workflow import ReviewWorkflow
 from codebench_pipeline.runtime_instance import dataset_instance
 from codebench_pipeline.source_review_inputs import SourceReviewSource, source_stage
+from codebench_pipeline.stage_configuration import stage_configs
 
 
 class SourceReviewTests(unittest.TestCase):
@@ -34,10 +48,7 @@ class SourceReviewTests(unittest.TestCase):
         for seed in config["seeds"]["documents"]:
             seed["local_path"] = str((original.parent / seed["local_path"]).resolve())
         config["seeds"]["documents"].append(
-            {
-                **config["seeds"]["documents"][0],
-                "source_id": "second-source-fixture",
-            }
+            {**config["seeds"]["documents"][0], "source_id": "second-source-fixture"}
         )
         config["storage"] = {"local_root": str(self.home / "tables")}
         self.config = self.home / "config.json"
@@ -47,7 +58,7 @@ class SourceReviewTests(unittest.TestCase):
                 patch(f"codebench_pipeline.{module}.infer_typed", side_effect=provider_response)
             )
         with redirect_stdout(io.StringIO()):
-            self.discovered = execute_build(self.config, self.home)
+            self.prepared = execute_build(self.config, self.home)
         self.spec = load_build_config(self.config, self.home)
         self.instance = self.stack.enter_context(dataset_instance(self.home))
         self.data = DatasetDataService(self.home, self.instance)
@@ -56,118 +67,178 @@ class SourceReviewTests(unittest.TestCase):
             self.home, source_stage(), SourceReviewSource(self.home, self.instance)
         )
 
-    def decide(self, identity: str, choice: str, revision: int = 0) -> None:
-        view = self.workflow.view(self.query)
-        self.workflow.decide(
-            DecisionRequest(
-                dataset_id=self.spec.dataset_id,
-                snapshot_id=view.batch.snapshot.snapshot_id,
-                change=DecisionChange.model_validate(
-                    {
-                        "batch_id": view.batch.batch_id,
-                        "generation": view.batch.generation,
-                        "candidate_id": identity,
-                        "expected_row_revision": revision,
-                        "decision": choice,
-                        "reviewer": "source reviewer",
-                    }
-                ),
+    def documents(self) -> TableResponse:
+        result = self.data.query("source_documents", self.query)
+        assert isinstance(result, TableResponse)
+        return result
+
+    def test_sources_load_without_review_and_unchanged_build_reuses_outputs(self) -> None:
+        self.assertIn("source_documents", self.prepared)
+        self.assertIn("human_review_queue", self.prepared)
+        self.assertNotIn("human_source_decisions", INPUT_STAGES)
+        self.assertEqual(
+            {str(row.values["source_id"]) for row in self.documents().page.rows},
+            {seed.source_id for seed in self.spec.catalog.documents},
+        )
+        plan = plan_dataset(
+            self.spec, stage_configs(self.spec), self.instance, home=self.home
+        )
+        self.assertEqual(plan.selected, ())
+        self.assertIsNone(plan.waiting_for)
+        self.assertEqual(
+            self.instance.fetch_materializations(
+                AssetRecordsFilter(asset_key=AssetKey(["datasets", "human_source_decisions"])),
+                limit=1,
+            ).records,
+            [],
+        )
+        with redirect_stdout(io.StringIO()):
+            self.assertEqual(execute_registered_build(self.spec.dataset_id, self.home), {})
+
+    def test_inventory_revision_stales_and_rebinds_identical_source_rows(self) -> None:
+        _, before = inventory_authorization(
+            self.home, self.instance, self.spec.dataset_id, "dataset"
+        )
+        updated = self.spec.model_copy(
+            update={"catalog": self.spec.catalog.model_copy(update={"collection_revision": "refresh"})}
+        )
+        DatasetRegistry(self.home).register(updated)
+        self.assertEqual(self.documents().publication_state, "stale")
+        with redirect_stdout(io.StringIO()):
+            rebuilt = execute_registered_build(self.spec.dataset_id, self.home)
+        self.assertIn("source_documents", rebuilt)
+        _, after = inventory_authorization(
+            self.home, self.instance, self.spec.dataset_id, "dataset"
+        )
+        self.assertNotEqual(before, after)
+        stored = self.data.read_current(self.spec.dataset_id, "source_documents")
+        assert isinstance(stored.value, pd.DataFrame)
+        self.assertEqual(frame_inventory_authorization(stored.value, "dataset"), after)
+        self.assertIsNone(stored.publication_state)
+
+    def test_only_machine_selected_sources_load_regardless_of_source_confidence(self) -> None:
+        def select(
+            schema: type[BaseModel], system: str, prompt: str, model: ModelConfig, out: Path
+        ) -> BaseModel:
+            result = provider_response(schema, system, prompt, model, out)
+            if isinstance(result, SourceSelection):
+                return SourceSelection(
+                    sources=[
+                        source.model_copy(
+                            update={
+                                "confidence": "low",
+                                "decision": "needs_review"
+                                if source.source_id == "second-source-fixture"
+                                else "selected",
+                            }
+                        )
+                        for source in result.sources
+                    ]
+                )
+            return result
+
+        DatasetRegistry(self.home).register(
+            self.spec.model_copy(
+                update={"catalog": self.spec.catalog.model_copy(update={"collection_revision": "selection"})}
             )
         )
+        with (
+            patch("codebench_pipeline.dataset_catalog.infer_typed", side_effect=select),
+            redirect_stdout(io.StringIO()),
+        ):
+            execute_registered_build(self.spec.dataset_id, self.home)
+        self.assertEqual(
+            [row.values["source_id"] for row in self.documents().page.rows],
+            [self.spec.catalog.documents[0].source_id],
+        )
 
-    def complete(self) -> None:
+    def test_source_review_retraction_does_not_invalidate_inventory_outputs(self) -> None:
+        view = self.workflow.view(self.query)
+        for identity in view.batch.snapshot.candidate_ids:
+            self.workflow.decide(
+                DecisionRequest(
+                    dataset_id=self.spec.dataset_id,
+                    snapshot_id=view.batch.snapshot.snapshot_id,
+                    change=DecisionChange(
+                        batch_id=view.batch.batch_id,
+                        generation=view.batch.generation,
+                        candidate_id=identity,
+                        expected_row_revision=0,
+                        decision="approve",
+                        reviewer="historical fixture reviewer",
+                    ),
+                )
+            )
         view = self.workflow.view(self.query)
         self.workflow.complete(
             CompletionRequest(
                 dataset_id=self.spec.dataset_id,
                 snapshot_id=view.batch.snapshot.snapshot_id,
                 expected=view.batch,
-                reviewer="source reviewer",
+                reviewer="historical fixture reviewer",
             )
-        )
-
-    def test_discovery_waits_and_manual_gate_materialization_cannot_bypass_selection(self) -> None:
-        self.assertEqual(
-            set(self.discovered),
-            {"category_rules", "source_catalog", "merged_proposed_annotations", "reviewed_annotations"},
-        )
-        outcome = run_registered(self.spec.dataset_id, self.home)
-        self.assertEqual(outcome.status, "awaiting_source_review")
-        self.assertIsNone(outcome.run_id)
-        premature = (
-            build_definitions(self.home)
-            .resolve_job_def("build_dataset")
-            .execute_in_process(
-                instance=self.instance,
-                partition_key=self.spec.dataset_id,
-                asset_selection=[AssetKey(["datasets", "human_source_decisions"])],
-                raise_on_error=False,
-            )
-        )
-        self.assertFalse(premature.success)
-        self.assertEqual(
-            self.instance.fetch_materializations(
-                AssetRecordsFilter(asset_key=AssetKey(["datasets", "source_documents"])),
-                limit=1,
-            ).records,
-            [],
-        )
-
-    def test_retraction_stales_descendants_and_reselection_changes_the_prepared_records(self) -> None:
-        identities = self.workflow.view(self.query).batch.snapshot.candidate_ids
-        self.decide(identities[0], "approve")
-        self.decide(identities[1], "reject")
-        self.complete()
-        with redirect_stdout(io.StringIO()):
-            prepared = execute_registered_build(self.spec.dataset_id, self.home)
-        self.assertIn("labeling_documentation", prepared)
-        documents = self.data.query("source_documents", self.query)
-        assert isinstance(documents, TableResponse)
-        self.assertEqual([row.values["source_id"] for row in documents.page.rows], [identities[0]])
-        before = (
-            self.instance.fetch_materializations(
-                AssetRecordsFilter(asset_key=AssetKey(["datasets", "source_catalog"])),
-                limit=1,
-            )
-            .records[0]
-            .storage_id
         )
         completed = self.workflow.view(self.query)
-        changed = self.workflow.retract(
+        self.workflow.retract(
             RetractionRequest(
                 dataset_id=self.spec.dataset_id,
                 snapshot_id=completed.batch.snapshot.snapshot_id,
                 expected=completed.batch,
-                candidate_id=identities[0],
+                candidate_id=completed.batch.snapshot.candidate_ids[0],
                 expected_row_revision=1,
-                reviewer="source reviewer",
+                reviewer="historical fixture reviewer",
             )
         )
-        stale = self.data.query("reviewed_annotations", self.query)
-        assert isinstance(stale, TableResponse)
-        self.assertEqual(stale.publication_state, "stale")
-        paused = run_registered(self.spec.dataset_id, self.home)
-        self.assertEqual(paused.status, "awaiting_source_review")
-        self.assertIsNotNone(paused.run_id)
+        self.assertIsNone(self.documents().publication_state)
         self.assertEqual(
-            set(paused.materialized_stages), {"merged_proposed_annotations", "reviewed_annotations"}
+            plan_dataset(self.spec, stage_configs(self.spec), self.instance, home=self.home).selected,
+            (),
         )
-        self.assertIsNone(run_registered(self.spec.dataset_id, self.home).run_id)
-        self.decide(identities[0], "reject", changed.decision.row_revision)
-        self.complete()
-        with redirect_stdout(io.StringIO()):
-            rebuilt = execute_registered_build(self.spec.dataset_id, self.home)
-        self.assertNotIn("source_catalog", rebuilt)
-        after = (
-            self.instance.fetch_materializations(
-                AssetRecordsFilter(asset_key=AssetKey(["datasets", "source_catalog"])),
-                limit=1,
+
+    def test_inventory_change_during_compute_prevents_output_commit(self) -> None:
+        previous = self.data.read_current(self.spec.dataset_id, "source_documents").reference
+        updated = self.spec.model_copy(
+            update={
+                "snapshots": self.spec.snapshots.model_copy(
+                    update={"maximum_bytes": self.spec.snapshots.maximum_bytes + 1}
+                )
+            }
+        )
+        DatasetRegistry(self.home).register(updated)
+
+        def changed_inventory(
+            catalog: DataFrame[SourceCatalogTable], config: SnapshotConfig
+        ) -> DataFrame[SourceDocumentsTable]:
+            frame = snapshot_documents(catalog, config)
+            DatasetRegistry(self.home).register(
+                updated.model_copy(
+                    update={
+                        "catalog": updated.catalog.model_copy(update={"collection_revision": "concurrent"})
+                    }
+                )
             )
-            .records[0]
-            .storage_id
+            return frame
+
+        with patch(
+            "codebench_pipeline.dataset_assets_sources.snapshot_documents", side_effect=changed_inventory
+        ):
+            result = build_definitions(self.home).resolve_job_def("build_dataset").execute_in_process(
+                instance=self.instance,
+                partition_key=self.spec.dataset_id,
+                asset_selection=[AssetKey(["datasets", "source_documents"])],
+                raise_on_error=False,
+            )
+        self.assertFalse(result.success)
+        self.assertEqual(
+            self.data.read_current(self.spec.dataset_id, "source_documents").reference, previous
         )
-        self.assertEqual(after, before)
-        empty = self.data.query("reviewed_annotations", self.query)
-        assert isinstance(empty, TableResponse)
-        self.assertEqual(empty.page.total_rows, 0)
-        self.assertIsNone(empty.publication_state)
+
+    def test_inventory_binding_cannot_cross_collection_branches(self) -> None:
+        _, binding = inventory_authorization(
+            self.home, self.instance, self.spec.dataset_id, "dataset"
+        )
+        frame = pd.DataFrame()
+        frame.attrs[inventory_binding("documentation")] = binding.model_dump(mode="json")
+        with self.assertRaises(HumanReviewError) as raised:
+            frame_inventory_authorization(frame, "documentation")
+        self.assertEqual(raised.exception.code, "stale")

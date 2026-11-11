@@ -16,7 +16,6 @@ from codebench_pipeline.dataframe_schemas import (
     DocumentAdaptersTable,
     DocumentationTable,
     FilteredCommandsTable,
-    HumanReviewDecisionsTable,
     SourceCatalogTable,
     SourceDocumentsTable,
 )
@@ -105,64 +104,22 @@ def source_assets(branch: Branch = "dataset") -> list[AssetsDefinition]:
         dagster_type=TABLE_TYPES[SourceDocumentsTable],
         ins={
             "source_catalog": table_input("source_catalog", SourceCatalogTable, branch),
-            "human_source_decisions": table_input("human_source_decisions", HumanReviewDecisionsTable),
         },
     )
     def source_documents(
         context: AssetExecutionContext,
         config: SnapshotConfig,
         source_catalog: DataFrame[SourceCatalogTable],
-        human_source_decisions: DataFrame[HumanReviewDecisionsTable],
         dataset_io_manager: ResourceParam[DataFrameIOManager],
     ) -> Output[DataFrame[SourceDocumentsTable]]:
         return cached_table(
             context,
             dataset_io_manager,
             config,
-            {"source_catalog": source_catalog, "human_source_decisions": human_source_decisions},
+            {"source_catalog": source_catalog},
             SourceDocumentsTable,
-            lambda evidence: snapshot_documents(
-                SourceCatalogTable.validate(
-                    source_catalog.loc[
-                        source_catalog["source_id"].isin(
-                            human_source_decisions.loc[
-                                human_source_decisions["human_decision"] == "approve", "candidate_id"
-                            ]
-                        )
-                    ].copy()
-                ),
-                config,
-            ),
+            lambda evidence: snapshot_documents(source_catalog, config),
         )
-
-    documents_asset = source_documents
-    if branch == "documentation":
-
-        @asset(
-            name="source_documents",
-            key_prefix=key_prefix,
-            group_name="dataset_building",
-            partitions_def=DATASET_PARTITIONS,
-            io_manager_key="dataset_io_manager",
-            dagster_type=TABLE_TYPES[SourceDocumentsTable],
-            ins={"source_catalog": table_input("source_catalog", SourceCatalogTable, branch)},
-        )
-        def documentation_source_documents(
-            context: AssetExecutionContext,
-            config: SnapshotConfig,
-            source_catalog: DataFrame[SourceCatalogTable],
-            dataset_io_manager: ResourceParam[DataFrameIOManager],
-        ) -> Output[DataFrame[SourceDocumentsTable]]:
-            return cached_table(
-                context,
-                dataset_io_manager,
-                config,
-                {"source_catalog": source_catalog},
-                SourceDocumentsTable,
-                lambda evidence: snapshot_documents(source_catalog, config),
-            )
-
-        documents_asset = documentation_source_documents
 
     @asset(
         key_prefix=key_prefix,
@@ -271,7 +228,7 @@ def source_assets(branch: Branch = "dataset") -> list[AssetsDefinition]:
     return [
         *([category_rules] if branch == "dataset" else []),
         source_catalog,
-        documents_asset,
+        source_documents,
         document_adapters,
         command_candidates,
         filtered_commands,

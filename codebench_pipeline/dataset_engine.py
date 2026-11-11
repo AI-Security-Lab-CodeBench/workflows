@@ -92,8 +92,8 @@ def cached_table(
     schema: type[Schema],
     compute: Callable[[Path], DataFrame[Schema]],
 ) -> Output[DataFrame[Schema]]:
-    from codebench_pipeline.documentation_authorization import DOCUMENTATION_BINDING
-    from codebench_pipeline.source_review_guard import SOURCE_BINDING, SOURCE_GATED_STAGES, authorize_compute
+    from codebench_pipeline.documentation_authorization import inventory_binding
+    from codebench_pipeline.source_review_guard import SOURCE_GATED_STAGES, authorize_compute
 
     stage = context.asset_key.path[-1]
     source_token = authorize_compute(context, storage, inputs) if stage in SOURCE_GATED_STAGES else None
@@ -108,9 +108,13 @@ def cached_table(
             evidence = Path(temporary)
             try:
                 frame = schema.validate(compute(evidence))
+                if stage == "source_catalog":
+                    frame.attrs["codebench_source_inventory"] = {
+                        "branch": branch,
+                        "signature": signature,
+                    }
                 if source_token is not None:
-                    binding = DOCUMENTATION_BINDING if branch == "documentation" else SOURCE_BINDING
-                    frame.attrs[binding] = source_token.model_dump(mode="json")
+                    frame.attrs[inventory_binding(branch)] = source_token.model_dump(mode="json")
             finally:
                 receipts: dict[str, JsonValue] = {}
                 for path in sorted(evidence.rglob("*")):

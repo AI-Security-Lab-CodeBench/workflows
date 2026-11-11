@@ -33,9 +33,10 @@ existing data before replacing it; never overwrite concurrent work.
 - Maintain independently executable **Existing datasets** and **Documentation
   crawl** collection branches. Show each as a named surrounding group in Dagster
   lineage, with a separately named shared finalization group.
-- Corpus source admission requires actual human approval. Waiting for corpus
-  admission must not stop documentation collection, labeling or agentic review.
-  Original documentation still requires eligible provenance and reuse terms.
+- Crawl or load every eligible configured source automatically in both branches.
+  Enforce provenance, license/reuse terms and content eligibility before acquisition.
+  `human_source_decisions` is not part of the active graph; source confidence
+  neither requires human admission nor overrides machine eligibility.
 - Each branch extracts raw candidates, filters, gathers semantic documentation
   and labels records in isolated invocations. Preserve raw extraction and
   transformation/exclusion evidence.
@@ -50,10 +51,19 @@ existing data before replacing it; never overwrite concurrent work.
   similarities. Preserve duplicate-to-survivor provenance and exclusion reasons.
   Fuzzy similarity, resource renaming, safe-pair construction and model-conditioned
   deduplication are not part of this stage.
-- All retained release candidates flow through **one mandatory human review**
-  stage and **one final dataset release**. Confidence is review information, not
-  permission to bypass human review. There is no automatic release branch.
-- Apply category-wide caps only to the unified release. Report actual coverage
+- After exact deduplication, send only medium-or-higher uncertainty rows to the
+  shared final human queue. Any `medium` or `low` among the four label confidences
+  (category, risk, severity, class) or independent reviewer confidence requires
+  review. All five `high` means low uncertainty and automatic admission only if
+  machine eligible. Machine-ineligible rows remain inspectable and cannot be
+  admitted by human approval.
+- Use **one final dataset release**. An empty uncertainty queue lets the build
+  release automatically, with `human_reviewed=false` and no fabricated decisions.
+  A nonempty queue makes that same release wait for real terminal decisions and
+  explicit completion. Low-uncertainty rows need no decision; actually approved
+  uncertain rows carry `human_reviewed=true`.
+- Apply category-wide caps only after eligibility and required human approval in
+  the unified release. Report actual coverage
   and deficits; never pad counts with synthetic commands or renamed resources.
 
 ## Dagster execution and human review
@@ -62,8 +72,9 @@ existing data before replacing it; never overwrite concurrent work.
   persisted outputs. Keep category configurations independent and selective
   execution available.
 - Human review is a durable external-input stage, not a sleeping compute worker.
-  Persist its waiting state and decisions; a completion signal permits downstream
-  materialization. Pending review is not a successful final release.
+  For a nonempty uncertainty queue, persist its waiting state and real decisions;
+  completion permits downstream materialization. Pending review is not a release.
+  An empty queue requires no human identity, decision or completion signal.
 - Apply the same input, configuration and implementation-version invalidation
   principles to human review as to computed stages. Bind decisions and completion
   authorization to the exact reviewed snapshot. Upstream changes, changed review
@@ -80,7 +91,8 @@ existing data before replacing it; never overwrite concurrent work.
 - Bound LLM review packets by record count and context size. Execute only missing
   or invalidated record reviews, independently of packet membership and ordering.
   Preserve original inference receipts and explicit human-decision carry-forward
-  provenance. A new release snapshot still requires explicit completion.
+  provenance. A new release snapshot with a nonempty uncertainty queue still
+  requires explicit completion; an empty queue is revalidated automatically.
 - Distinguish never materialized, waiting, failed, empty, cached, unchanged and
   stale states in planning and viewing. Do not report a skipped stage as built.
 - Keep registry, tables and Dagster history explicit. The launcher must align

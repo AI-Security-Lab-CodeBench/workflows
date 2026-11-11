@@ -68,9 +68,9 @@ class DatasetGraphTests(unittest.TestCase):
                 assets.get_all_asset_keys(),
                 {AssetKey(["datasets", *name.split("/")]) for name in INPUT_STAGES},
             )
-            self.assertIn(
-                AssetKey(["datasets", "human_source_decisions"]),
+            self.assertEqual(
                 assets.get(AssetKey(["datasets", "source_documents"])).parent_keys,
+                {AssetKey(["datasets", "source_catalog"])},
             )
             self.assertIn(
                 AssetKey(["datasets", "filtered_commands"]),
@@ -100,7 +100,7 @@ class DatasetGraphTests(unittest.TestCase):
                     for incoming in node.definition.input_defs:
                         self.assertNotEqual(incoming.dagster_type.key, "String")
 
-    def test_pending_dataset_sources_do_not_block_documentation_planning(self) -> None:
+    def test_both_configured_branches_plan_without_source_approval(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             home = Path(temporary)
             spec = load_build_config(write_fixture(home), home)
@@ -108,30 +108,9 @@ class DatasetGraphTests(unittest.TestCase):
             spec = spec.model_copy(update={"catalog": catalog, "documentation_catalog": catalog})
             with dataset_instance(home) as instance:
                 plan = plan_dataset(spec, stage_configs(spec), instance, home=home)
-            self.assertEqual(plan.waiting_for, "sources")
-            self.assertEqual(
-                {stage for stage in plan.selected if not stage.startswith("documentation/")},
-                {"category_rules", "source_catalog", "merged_proposed_annotations", "reviewed_annotations"},
-            )
-            self.assertEqual(
-                {stage for stage in plan.selected if stage.startswith("documentation/")},
-                {stage for stage in PREPARATION_STAGES if stage.startswith("documentation/")},
-            )
-            self.assertEqual(
-                set(plan.blocked),
-                {
-                    stage
-                    for stage in PREPARATION_STAGES
-                    if not stage.startswith("documentation/")
-                    and stage
-                    not in {
-                        "category_rules",
-                        "source_catalog",
-                        "merged_proposed_annotations",
-                        "reviewed_annotations",
-                    }
-                },
-            )
+            self.assertIsNone(plan.waiting_for)
+            self.assertEqual(set(plan.selected), set(PREPARATION_STAGES))
+            self.assertEqual(plan.blocked, ())
             self.assertIn(AssetKey(["datasets", "documentation", "source_documents"]), plan.asset_selection)
 
     def test_unconfigured_branches_do_not_schedule_empty_inventories(self) -> None:

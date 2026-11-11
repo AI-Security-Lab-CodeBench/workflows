@@ -13,19 +13,12 @@ from codebench_pipeline.dataset_asset_types import DATASET_PARTITIONS
 from codebench_pipeline.dataset_branches import FINALIZATION_STAGES, Branch, stage_branch, stage_name
 from codebench_pipeline.dataset_config import DatasetBuildSpec, catalog_for_branch
 from codebench_pipeline.dataset_engine import stage_signature
-from codebench_pipeline.human_review import HumanReviewError
-from codebench_pipeline.human_review_store import HumanReviewStore
-from codebench_pipeline.source_review_inputs import SourceReviewSource, source_authorization
 from codebench_pipeline.storage import fingerprint
 
 INPUT_STAGES: dict[str, dict[str, str]] = {
     "category_rules": {},
     "source_catalog": {"category_rules": "category_rules"},
-    "human_source_decisions": {"source_catalog": "source_catalog"},
-    "source_documents": {
-        "source_catalog": "source_catalog",
-        "human_source_decisions": "human_source_decisions",
-    },
+    "source_documents": {"source_catalog": "source_catalog"},
     "document_adapters": {"source_documents": "source_documents"},
     "command_candidates": {"source_documents": "source_documents", "adapters": "document_adapters"},
     "filtered_commands": {
@@ -45,10 +38,9 @@ INPUT_STAGES.update(
         stage_name(stage, "documentation"): {
             name: stage_name(parent, "documentation")
             for name, parent in dependencies.items()
-            if parent != "human_source_decisions"
         }
         for stage, dependencies in tuple(INPUT_STAGES.items())
-        if stage not in {"category_rules", "human_source_decisions"}
+        if stage != "category_rules"
     }
 )
 
@@ -148,23 +140,6 @@ def plan_dataset(
             if stage.rsplit("/", 1)[-1] == "proposed_annotations":
                 values[stage] = unavailable_annotations(spec, stage_branch(stage), "waiting")
             continue
-        source_version: str | None = None
-        if stage == "human_source_decisions":
-            if "source_catalog" not in selected:
-                try:
-                    with HumanReviewStore(home).reader() as tx:
-                        _, authorization = source_authorization(
-                            SourceReviewSource(home, instance), spec.dataset_id, tx
-                        )
-                    source_version = fingerprint(authorization.model_dump(mode="json"))
-                    source_revision = source_version
-                except HumanReviewError as error:
-                    if error.code not in {"not_found", "pending", "stale"}:
-                        raise
-            if source_version is None:
-                waiting_for = "sources"
-                blocked.append(stage)
-                continue
         key = AssetKey(["datasets", *stage.split("/")])
         records = instance.fetch_materializations(
             AssetRecordsFilter(asset_key=key, asset_partitions=[spec.dataset_id]), limit=1
@@ -177,13 +152,9 @@ def plan_dataset(
             continue
         inputs = {name: values[parent] for name, parent in dependencies.items()}
         expected = (
-            source_version
-            if source_version is not None
-            else (
-                fingerprint(spec.rules.model_dump_json())
-                if stage == "category_rules"
-                else stage_signature(stage.rsplit("/", 1)[-1], configurations[stage], inputs)
-            )
+            fingerprint(spec.rules.model_dump_json())
+            if stage == "category_rules"
+            else stage_signature(stage.rsplit("/", 1)[-1], configurations[stage], inputs)
         )
         materialization = records[0].asset_materialization
         if materialization is None:

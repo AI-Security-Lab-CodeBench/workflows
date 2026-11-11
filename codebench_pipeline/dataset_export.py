@@ -21,6 +21,7 @@ from codebench_pipeline.dataset_records import (
 )
 from codebench_pipeline.dataset_table_contract import FIELDS, REVIEW_FIELDS
 from codebench_pipeline.dataset_table_contract import table_schema as table_schema
+from codebench_pipeline.review_policy import requires_human_review
 
 
 def prepare_dataset(
@@ -55,13 +56,15 @@ def prepare_dataset(
     human_review_ids: list[str] = []
     for candidate in candidates:
         label, decision = proposed[candidate.candidate_id], checked[candidate.candidate_id]
-        human_review_ids.append(candidate.candidate_id)
+        uncertain = requires_human_review(label, decision)
+        if uncertain:
+            human_review_ids.append(candidate.candidate_id)
         reason = ""
         if label.decision != "accept" or decision.verdict != "approve":
             reason = f"label={label.decision}; review={decision.verdict}"
         else:
             eligible_ids.append(candidate.candidate_id)
-        if not reason:
+        if not reason and uncertain:
             if approved_ids is None:
                 reason = "human review required"
             elif candidate.candidate_id not in approved_ids:
@@ -78,7 +81,7 @@ def prepare_dataset(
             "source": candidate.source_id,
             "seed": "-",
             "class": label.class_,
-            "human_reviewed": "true" if not reason else "false",
+            "human_reviewed": "true" if not reason and uncertain else "false",
         }
         evidence: dict[str, JsonValue] = {
             "candidate_id": candidate.candidate_id,
@@ -194,8 +197,9 @@ def prepare_dataset(
         "and capped records; review/reviewed.csv and reviewed.jsonl retain all decisions.\n\n"
         "Labeling and review use separate isolated invocations; receipts remain in caller output directories. "
         "Agentic review is not human approval. Confidences are low/medium/high self-reported judgments, "
-        "not calibrated probabilities. Every retained candidate requires human review, including "
-        "high-confidence records; human_reviewed marks actual human-approved inclusions. "
+        "not calibrated probabilities. Medium or higher uncertainty requires human review; "
+        "all five confidences must be high for automatic inclusion. "
+        "human_reviewed marks actual human-approved inclusions only. "
         "Category policy is preserved in rules.json.\n\n"
         "## Coverage and limitations\n\n"
         "statistics.json reports per-risk counts, class, severity, utilities, deficits and source coverage. "

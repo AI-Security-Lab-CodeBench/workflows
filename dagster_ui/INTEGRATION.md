@@ -73,6 +73,24 @@ browser reload restores server decisions and the saved reviewer.
 
 ## Reusable review stages
 
+The active dataset workflow registers one final `annotations` uncertainty review,
+not a human source-admission stage. Both collection branches crawl or load eligible
+sources automatically under provenance, license and content checks.
+`human_source_decisions` is removed from the active graph. Generic stage support
+below remains reusable; historical source-selection examples aren't active gates.
+
+The final queue contains rows with any `medium` or `low` among category, risk,
+severity, class and independent reviewer confidence. All five `high` means low
+uncertainty and automatic admission only if machine eligible, without a decision.
+Ineligible evidence remains inspectable and approval cannot admit it. A nonempty
+queue blocks the single `dataset_release` until real terminal decisions and
+explicit completion. An empty queue lets the build release automatically through
+that same asset, with no human decisions, human reviewer or human completion.
+The empty batch is completed under an explicit automatic-policy actor and retains
+a valid snapshot-bound publication token.
+Automatically admitted rows have `human_reviewed=false`; actually approved
+uncertain rows have `human_reviewed=true`. Caps apply after eligibility and approval.
+
 `GET /codebench/api/review-stages` returns:
 
 ```json
@@ -131,6 +149,8 @@ discarded in-memory state.
 
 Completion returns `{batch, counts, completion, publication, run_id}`.
 `completion` is required; `publication` and `run_id` are nullable.
+This describes an explicit human completion request, not the automatic empty-queue
+build path, which doesn't require that request or a human completion token.
 A completed generic review is saved and read-only with Reopen even without
 a publication. Publication links and the publication-registered notice
 appear only when an actual publication reference exists. The completion
@@ -150,10 +170,10 @@ completion, publication and run ID. An unchanged continuation can return no
 new run. `continuation_failed` is surfaced as a server error, without retries
 or an automatic save, approval or completion.
 
-Source selection and documentation crawling need no asset-specific frontend
-configuration: source eligibility, title, completion label and continuation
-all come from the discovered descriptor. In particular, a source stage can
-return a pipeline run without producing a publication. Run navigation renders
+Generic review stages need no asset-specific frontend configuration: eligibility,
+title, completion label and continuation come from the discovered descriptor.
+A generic stage can return a pipeline run without producing a publication;
+automatic source collection doesn't require such a review. Run navigation renders
 independently of publication/download controls. `batch.continuation_run_id`
 (nullable, default `null`) restores that link on a fresh page load.
 
@@ -181,18 +201,23 @@ preservation of other saved rows, and dependent-result invalidation.
 
 `publication_state: "stale"` renders a warning on any table, including human
 decision materializations. Rows remain inspectable as historical data, never
-as current approvals. A publication whose authorization is not the current
-completed batch is explicitly labeled historical, including its download.
+as current approvals. A human-authorized publication whose authorization isn't the
+current completed batch is explicitly labeled historical, including its download.
+Automatic empty-queue publication instead binds the current machine-eligible
+snapshot and must not be mislabeled stale merely because it has no human completion.
 The context module remains `ReviewStageContext.tsx`; the renderer map retains
 its string-keyed lookup around the upstream closed tab union.
 
 Lead execution and browser QA scenarios:
 
-1. Discover a source-selection descriptor on its configured asset. Verify its
-   title and completion label, reject at least one source, save all rows, then
-   explicitly complete. Confirm only approved sources reach the crawling run;
-   documentation crawling participates in that run. No CSV publication is
-   required for the native run link. Reload and follow the same persisted link.
+1. Confirm both branches collect eligible sources without a source Review gate.
+   Inspect provenance/license/content exclusions. With all five confidences high,
+   verify an empty final queue automatically produces the single release with
+   `human_reviewed=false` and no fabricated human decisions. With any one of the
+   five medium/low, verify that row enters the shared queue and blocks release
+   until real decisions and completion. Mixed releases keep low-uncertainty rows
+   decision-free and mark only actually approved uncertain rows `human_reviewed=true`.
+   Confirm approval can't admit machine-ineligible rows and caps apply afterward.
 2. In an open batch, retract both an approved and a rejected row. Confirm each
    becomes pending, retains selection and shows refreshed server counts and
    revision. Other saved rows keep their decisions and notes.

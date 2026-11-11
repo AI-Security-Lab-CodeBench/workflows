@@ -17,18 +17,18 @@ Patterns route candidates but never assign safety labels.
     "source_catalog": """
 **Input:** Category scope and provided source seeds or bounded live searches, plus the selector model.
 
-**Goal:** Propose which dataset/corpus sources are eligible for human selection.
+**Goal:** Select eligible dataset/corpus sources for automatic acquisition.
 
 **Why:** Provenance, command relevance and reuse eligibility must be considered before extraction.
 Relevant benign counterexamples are included; danger is not an exclusion reason.
 
 **Output:** `SourceCatalogTable` with source URLs, licensing, revisions, samples and decision reasons.
-Model selection is not human approval. Source selection must be completed before acquisition proceeds.
+Only machine-eligible selected sources proceed automatically; no human source approval is required.
 Exclusions stay here. Search snippets are not inspected page evidence.
 Inspect `sample` and the retained selection/search receipts.
 """,
     "source_documents": """
-**Input:** Source catalog, completed human source decisions and snapshot settings.
+**Input:** The eligible source catalog and snapshot settings.
 
 **Goal:** Capture the complete source text and its actual byte hash.
 
@@ -37,8 +37,8 @@ Inspect `sample` and the retained selection/search receipts.
 **Output:** `SourceDocumentsTable` with inert `content`, SHA-256 and source attribution.
 Hash mismatches, oversized bodies, invalid UTF-8 or detected sensitive content fail acquisition.
 Excluded sources remain in the catalog. UI samples truncate long cells; persisted text is complete.
-Every output is bound to current source approval; retraction makes dependent materializations stale.
-Original documentation has a separate acquisition branch, without this human-admission dependency.
+Every output is bound to its current inventory; changed evidence makes dependent materializations stale.
+Original documentation has a separately bound acquisition branch. Neither branch waits for human admission.
 """,
     "human_source_decisions": """
 **Input:** The discovered/inspected source catalog and a completed Source selection review.
@@ -143,7 +143,7 @@ all configured branches to be current and complete.
     "deduplicated_annotations": """
 **Input:** The unified merged reviewed annotations with original evidence and category rules.
 
-**Goal:** Remove only proven exact normalized command duplicates before mandatory human review.
+**Goal:** Remove only proven exact normalized command duplicates before uncertainty-based human review.
 
 **Why:** One category release must avoid exact duplicates without erasing meaningful command or label differences.
 
@@ -160,16 +160,17 @@ Fuzzy matching, resource renaming, safe-pair construction and model-conditioned 
 **Why:** Consumers need inclusion decisions and explicit per-row human-review provenance.
 
 **Output:** `CommandsTable`: command, description, util, severity, category, risk, source, seed, class,
-human_reviewed. Every retained record requires explicit human approval, regardless of confidence.
+human_reviewed. Medium or higher uncertainty requires explicit human approval; eligible rows whose
+five confidences are high are automatic and have human_reviewed=false.
 Human exclusions precede category-wide per-risk caps on the unified release. Snapshot, record-set
 and frozen decision hashes are checked
 again when output is committed; manual materialization cannot bypass this boundary.
 Parquet and a ten-column CSV bundle are registered through an authoritative publication ledger.
-Older published outputs remain historical. An empty release requires explicit completion.
+Older published outputs remain historical. An empty human queue completes automatically with no human decisions.
 Retracted or superseded approval marks old outputs stale; completing changed decisions rebuilds release.
 """,
     "human_review_decisions": """
-**Input:** The prepared review queue and an authorization issued by explicit human completion.
+**Input:** The uncertain-row queue and its snapshot-bound completion authorization.
 
 **Goal:** Materialize the exact completed batch as a typed decision table.
 
@@ -179,20 +180,23 @@ Retracted or superseded approval marks old outputs stale; completing changed dec
 and snapshot binding. Its Parquet metadata also binds empty tables to the completed batch.
 Open reviews live in the durable ledger and Review tab; this asset materializes only at publication.
 Unchanged row evidence and policy preserve saved decisions across changed table snapshots,
-with original reviewer and carry-forward audit provenance. New snapshots require explicit completion;
+with original reviewer and carry-forward audit provenance. Nonempty snapshots require explicit completion;
 changed or retracted row decisions are never resurrected from old approval.
+An empty queue is completed by the automatic policy, with zero human decisions.
 Reviewer names are self-reported. Approving a record does not authorize executing its command.
 """,
     "human_review_queue": """
 **Input:** The unified deduplicated annotations and category rules.
 
-**Goal:** Expose every retained release candidate for mandatory human inclusion decisions.
+**Goal:** Expose final rows with medium or higher uncertainty for human inclusion decisions.
 
-**Why:** Confidence informs human review; it never bypasses approval or creates an automatic release.
+**Why:** Any medium/low classifier or reviewer confidence requires human review; all five high
+confidences permit automatic inclusion only when machine eligibility also passes.
 
 **Output:** `ReviewQueueTable` with original candidate/label/review fields and `exclusion_reason`.
 Machine-eligible records have an empty reason; caps are applied only after human exclusions.
-This queue precedes human_review_decisions and release. Source exclusions stay in source_catalog,
+This queue precedes human_review_decisions and release. Low-uncertainty rows remain visible in
+deduplicated_annotations and need no human decisions. Source exclusions stay in source_catalog,
 filtered candidates stay in filtered_commands, and inference failures stay in observations/receipts.
 Machine-rejected or unsupported rows remain ineligible. No row here implies human sign-off.
 """,
@@ -226,7 +230,7 @@ def describe_stage(spec: DescribedAsset) -> AssetSpec:
         if stage == "source_catalog":
             description = """
 **Input:** Explicit original-documentation sources or bounded documentation searches and category scope.
-**Goal:** Select trustworthy, relevant documentation command sources independently of dataset admission.
+**Goal:** Select trustworthy, relevant documentation command sources independently of corpus collection.
 **Why:** Documentation and corpus discovery are separate branches, not interchangeable approval paths.
 **Output:** SourceCatalogTable with actual analysis, rationale, enum confidence, provenance and reuse evidence.
 Only eligible original documentation proceeds. Missing license/trust evidence stays withheld; agent/SFT
@@ -236,15 +240,15 @@ corpora cannot enter this branch. No human source decision or synthetic approval
             description = """
 **Input:** The selected documentation catalog and its own snapshot configuration.
 **Goal:** Persist the exact inspected documentation bodies for command extraction.
-**Why:** Documentation processing must proceed without reading unapproved dataset sources.
+**Why:** Documentation processing must use its own inspected inventory rather than corpus sources.
 **Output:** SourceDocumentsTable bound to the documentation inventory and content hashes.
 Selected, eligible documentation only; changed bytes, sensitive text and oversized sources fail.
-This is a processing binding, not a human review token. Dataset approval/retraction cannot authorize
+This is a processing binding, not a human review token. Dataset inventory changes cannot authorize
 or invalidate these independent documentation inputs.
 """.strip()
         else:
             description = (
                 "Documentation branch: uses only its own inspected-source binding and preparation. "
-                "Pending dataset admission is not an input.\n\n" + description
+                "The dataset inventory is not an input.\n\n" + description
             )
     return spec.replace_attributes(description=description, group_name=group_name)

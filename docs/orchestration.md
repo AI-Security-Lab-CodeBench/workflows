@@ -4,11 +4,11 @@ The default job is **build_dataset**, in code location **Dataset building**.
 Its assets are namespaced under **datasets**, with named native collection and
 finalization groups.
 Dataset/corpus and original-documentation branches share category rules and
-processing code, not admission state. `build_dataset` supports selective planning
-across both; pending dataset source selection does not stop documentation.
+processing code, with separate provenance and eligibility bindings. `build_dataset`
+supports selective planning across both; neither waits for human source admission.
 `build_documentation` runs only documentation collection. Both branches converge
 after labeling into one merged dataset, bounded incremental agentic review,
-conservative exact deduplication, one mandatory human review and one `release_dataset` job.
+conservative exact deduplication, uncertainty-only human review and one `release_dataset` job.
 Configured branches must be current and authorized before final publication.
 Model training is not part of this namespace or job.
 
@@ -57,16 +57,20 @@ In the browser:
 4. Open **Data** for complete persisted rows, bounded server-side filtering,
    sorting and pagination. Expand a row to inspect full text, not the 500-character
    metadata sample. A changed snapshot requires explicit refresh.
-5. For configured dataset/corpus sources, open **Review** on `source_catalog`, select the category and decide
-   which eligible sources to include. **Complete selection and continue**
-   launches the remaining preparation in a native Dagster run.
-   Documentation does not use this source gate. Open **Review** on the shared
-   `human_review_queue`, select the category and enter a
+5. Both branches crawl or load eligible sources automatically. Inspect provenance,
+   license/content eligibility and exclusions in `source_catalog`; there is no
+   active source-admission Review stage. If the shared `human_review_queue`
+   contains uncertain rows, open **Review**, select the category and enter a
    reviewer name. Save each record as approved, rejected or pending, with notes.
-   Approvals concern dataset inclusion, never command execution. Every retained
-   record appears in this queue, including high-confidence judgments.
+   Approvals concern dataset inclusion, never command execution. A row enters this
+   queue when any of category, risk, severity, class or independent reviewer
+   confidence is `medium` or `low`. All five `high` means low uncertainty; eligible
+   rows are admitted without a decision and marked `human_reviewed=false`.
    Every queued record needs a terminal
-   decision, and human approval cannot bypass machine gates.
+   decision, and human approval cannot bypass machine gates. Included uncertain
+   rows with actual approval are marked `human_reviewed=true`. If the queue is
+   empty, the build releases automatically through the same `dataset_release`,
+   without a reviewer, invented decisions or human completion.
    **Complete review and publish** launches the native release job and promptly
    returns its run link. Refresh the snapshot after that run succeeds to see the
    CSV download. **Continue publication** resumes a failed launch or returns the
@@ -107,10 +111,12 @@ uv run python -m codebench_pipeline.dataset_cli ui --home .codebench-datasets
 ```
 
 The CLI initializes persistent Dagster metadata and registers the dataset partition.
-The dataset branch stops after configured corpus discovery and creates a pending
-source-review batch. It cannot ingest corpora until selection is completed.
-The documentation branch continues independently without a synthetic source
-approval. Empty inventories are reported as unconfigured, not approved.
+Both branches automatically collect every eligible configured source, enforcing
+provenance, license/reuse terms, content checks and captured-byte integrity.
+`human_source_decisions` is removed from the active graph. Unconfigured branches
+remain distinct from empty or blocked configured branches. Finalization releases
+automatically if the uncertainty queue is empty; otherwise it waits for real
+terminal queue decisions and explicit completion.
 Receipts expose both branch outcomes and identify the
 waiting stage and blocked descendants. Later builds select only changed preparation stages and
 their affected descendants, loading unchanged upstream DataFrames from storage.
@@ -141,31 +147,32 @@ maintaining these descriptions is mandatory in [the working rules](../AGENTS.md)
 
 The following are dataset/common stage names. Documentation instantiates the
 collection stages through `proposed_annotations` under `documentation/`, except
-shared `category_rules` and dataset-only `human_source_decisions`.
+shared `category_rules`. `human_source_decisions` is historical, not an active stage.
 Finalization is shared, not duplicated.
 See [branch contracts and migration](independent-branches.md).
 
 1. `category_rules`: typed, versioned taxonomy and policy (the only non-table asset).
 2. `source_catalog`: selected and excluded sources with provenance and reasons.
-3. `human_source_decisions`: completed, snapshot-bound source-selection decisions.
-4. `source_documents`: approved sources' inert text and attribution.
-5. `document_adapters`: per-source declarative parsing mappings.
-6. `command_candidates`: extracted records, context and positions.
-7. `filtered_commands`: all candidates with eligibility or quarantine reasons.
-8. `labeling_documentation`: supplied or live-crawled semantics for eligible operations.
-9. `proposed_annotations`: independent labels, confidence and rationale.
-10. `merged_proposed_annotations`: authorized labels and evidence from available branches.
-11. `reviewed_annotations`: shared bounded agentic review with per-record reuse.
-12. `deduplicated_annotations`: conservative exact normalized survivors with an audit mapping.
-13. `human_review_queue`: all retained annotations and machine exclusion reasons.
-14. `human_review_decisions`: the completed, version-bound unified decision table.
-15. `dataset_release`: the single current release, with `human_reviewed=true` after the nine command columns.
+3. `source_documents`: automatically acquired eligible sources' inert text and attribution.
+4. `document_adapters`: per-source declarative parsing mappings.
+5. `command_candidates`: extracted records, context and positions.
+6. `filtered_commands`: all candidates with eligibility or quarantine reasons.
+7. `labeling_documentation`: supplied or live-crawled semantics for eligible operations.
+8. `proposed_annotations`: independent labels, confidence and rationale.
+9. `merged_proposed_annotations`: current branch labels and evidence, including withheld and rejected labels.
+10. `reviewed_annotations`: shared bounded agentic review with per-record reuse.
+11. `deduplicated_annotations`: conservative exact normalized survivors with an audit mapping.
+12. `human_review_queue`: only medium-or-higher uncertainty annotations, with machine exclusion reasons.
+13. `human_review_decisions`: real, version-bound terminal queue decisions; no invented rows for automatic admission.
+14. `dataset_release`: the single current release, with per-row `human_reviewed` after the nine command columns.
 
 The authoritative publication pointer is the SQLite review ledger, committed
 after immutable Parquet, CSV and audit sidecars are written. A manual release
 materialization uses the same admission gate. Decisions bind the exact evidence
-snapshot and a digest of the completed decision set; stale revisions, missing
-records and changed decisions fail explicitly. Rejection precedes the per-risk cap.
+snapshot and a digest of the completed decision set when the queue is nonempty;
+automatic release revalidates the current empty queue and machine eligibility
+instead of requiring human completion. Stale revisions, missing records and changed
+decisions fail explicitly. Eligibility and required approval precede the per-risk cap.
 Historical raw outputs remain inspectable but are not retroactively human-approved.
 
 Model review caches validated results and receipts by each record's relevant input,
@@ -173,7 +180,8 @@ independently of batch membership. Adding or changing a row reviews only missing
 or invalidated rows. Human batches similarly carry terminal decisions only when
 the row evidence/policy fingerprint, eligibility and selection bounds match.
 Carried decisions retain their reviewer and audit origin. A changed snapshot is
-open until explicit completion; old completion tokens never carry forward.
+open until explicit completion if the uncertainty queue is nonempty. An empty
+queue is revalidated automatically; old completion tokens never carry forward.
 
 One local dataset home is the review authority, including when table objects are
 in S3. Config/current-reference writers share its transaction protocol; separate

@@ -20,12 +20,23 @@ Both collection branches converge before shared agentic review:
 ```text
 Existing datasets -----\
                         -> merged labels -> bounded agentic review
-Documentation crawl ---/      -> exact dedup -> human review -> one release
+Documentation crawl ---/      -> exact dedup -> uncertainty queue -> one release
 ```
 
-Unchanged model results and human decisions are reused per record. A new release
-snapshot still needs explicit completion. Retraction and changed evidence
-invalidate publication. Collected shell strings are never executed.
+Both branches crawl or load eligible sources automatically, with provenance,
+license and content checks. There is no active human source-admission stage.
+After exact deduplication, any medium/low confidence among category, risk, severity,
+class and independent reviewer confidence requires final human review. All five
+high means low uncertainty, not proof of eligibility.
+
+Machine-eligible low-uncertainty rows need no human decision and carry
+`human_reviewed=false`. Actually approved uncertain rows carry `human_reviewed=true`;
+approval never overrides machine ineligibility. An empty queue lets the build
+publish automatically through the same `dataset_release`, without invented human
+decisions. Otherwise the single release waits for real queue decisions and explicit
+completion. Unchanged model results and human decisions are reused per record.
+Changed snapshots invalidate publication and require fresh completion when the
+queue is nonempty. Collected shell strings are never executed.
 
 ## Install and inspect
 
@@ -90,8 +101,9 @@ uv run python -m codebench_pipeline.dataset_cli build \
   --dataset cloud_infrastructure_commands --home .codebench-datasets
 ```
 
-This may invoke configured providers. Corpus admission and final command review
-remain human gates. Inspect full persisted cells in the native Data/Review tabs;
+This may invoke configured providers. Eligible sources load automatically; only
+the final uncertainty queue requires human decisions. Inspect full persisted cells
+in the native Data/Review tabs;
 viewing does not require running inference again.
 
 ## Verify
