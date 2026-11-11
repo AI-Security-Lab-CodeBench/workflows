@@ -1,0 +1,371 @@
+# Dataset building with Dagster
+
+The default job is **build_dataset**, in code location **Dataset building**.
+Its assets are namespaced under **datasets**, with named native collection and
+finalization groups.
+Dataset/corpus and original-documentation branches share category rules and
+processing code, not admission state. `build_dataset` supports selective planning
+across both; pending dataset source selection does not stop documentation.
+`build_documentation` runs only documentation collection. Both branches converge
+after labeling into one merged dataset, bounded incremental agentic review,
+conservative exact deduplication, one mandatory human review and one `release_dataset` job.
+Configured branches must be current and authorized before final publication.
+Model training is not part of this namespace or job.
+
+## View existing data without rebuilding
+
+Use the **same home that produced the materializations**. In this workspace the
+previously verified category data is in `.codebench-selective`; `.codebench` contains
+the historical pipeline and `.codebench-datasets` contains earlier dataset runs.
+Opening the new graph against the historical instance displays "Never materialized"
+even though the tables exist in another home.
+Those historical releases predate the human gate. The new Data tab identifies
+them as `legacy_unreviewed`; it does not silently grant human approval.
+
+```sh
+uv run python -m codebench_pipeline.ui_build
+uv run python -m codebench_pipeline.dataset_cli ui --home .codebench-selective --port 3001
+```
+
+Build the UI once before launching it. This is a project-owned build-time
+extension of pinned Dagster 1.13.29, not a source fork or supported runtime plugin.
+See [build and upgrade instructions](../dagster_ui/BUILD.md).
+
+The launcher prints the dataset home, Dagster history directory and viewing URL.
+It sets both `CODEBENCH_HOME` and `DAGSTER_HOME` for the child process, overriding
+conflicting inherited values. It does not build data, start inference or move
+history. For future builds replace `.codebench-selective` with their actual `--home`.
+An uninitialized home is rejected instead of silently opening an empty instance.
+Local instances explicitly use Dagster's immediate run coordinator. The standalone
+UI can launch preparation without a queue daemon; a successful launch is still
+distinct from a successful run.
+
+In the browser:
+
+1. Open **Catalog**, then **datasets / dataset_release** for the combined dataset.
+   Native lineage groups distinguish `existing_datasets`, `documentation_crawl`,
+   `dataset_finalization` and `dataset_configuration`.
+2. The Overview shows the latest materialization and its category partition.
+   To choose a particular category, open **Partitions**, click the name
+   `cloud_infrastructure_commands`, and open
+   its materialization details. Until a name is clicked, the details pane says
+   **No partition selected / None** even when the Materialized counter is 2;
+   the partition-filter checkboxes do not select a details row.
+3. In materialization **Metadata**, find `sample` to see rows. The Overview also
+   shows row count and columns. Collapse Description/Columns or filter metadata
+   for `sample` if the table is below the fold.
+4. Open **Data** for complete persisted rows, bounded server-side filtering,
+   sorting and pagination. Expand a row to inspect full text, not the 500-character
+   metadata sample. A changed snapshot requires explicit refresh.
+5. For configured dataset/corpus sources, open **Review** on `source_catalog`, select the category and decide
+   which eligible sources to include. **Complete selection and continue**
+   launches the remaining preparation in a native Dagster run.
+   Documentation does not use this source gate. Open **Review** on the shared
+   `human_review_queue`, select the category and enter a
+   reviewer name. Save each record as approved, rejected or pending, with notes.
+   Approvals concern dataset inclusion, never command execution. Every retained
+   record appears in this queue, including high-confidence judgments.
+   Every queued record needs a terminal
+   decision, and human approval cannot bypass machine gates.
+   **Complete review and publish** launches the native release job and promptly
+   returns its run link. Refresh the snapshot after that run succeeds to see the
+   CSV download. **Continue publication** resumes a failed launch or returns the
+   same active/current result without starting a duplicate run. Use **Retract** on a saved row to return it to
+   pending without clearing other decisions. Complete again after changing the
+   decision to publish a replacement dataset. Prior outputs remain inspectable
+   as stale history, but cannot feed downstream builds.
+6. Inspect `human_review_queue` for unified human decisions,
+   `merged_proposed_annotations` and `reviewed_annotations` for shared model review,
+   and `deduplicated_annotations` for exact duplicate elimination,
+   `filtered_commands` for quarantined extraction candidates, and `source_catalog`
+   for source exclusions. These are different outputs, not missing release rows.
+
+For full cell values and an explicit category, bypass the bounded UI sample:
+
+```sh
+uv run python -m codebench_pipeline.dataset_cli show \
+  --home .codebench-selective --dataset cloud_infrastructure_commands \
+  --stage dataset_release --limit 10
+```
+
+`show` reads persisted Parquet and prints JSON with total/shown row counts; it
+does not create a run or materialization. `--stage` accepts the registered
+stages below; `category_rules` prints its typed JSON instead of rows. `--limit`
+bounds rows from 1 to 1000, not cell lengths. The UI's first-N sample limits
+individual cells to 500 characters; this command preserves full cell contents.
+
+If the UI says "Never materialized", check **Deployment > Configuration**:
+its storage base directory must be `<chosen home>/dagster`. Do not click
+**Materialize all** merely to compensate for viewing the wrong history.
+
+## Run a complete dataset
+
+```sh
+uv sync --frozen --python 3.12
+uv run python -m codebench_pipeline.dataset_cli build --config configs/datasets/cat3.json --home .codebench-datasets
+uv run python -m codebench_pipeline.dataset_cli ui --home .codebench-datasets
+```
+
+The CLI initializes persistent Dagster metadata and registers the dataset partition.
+The dataset branch stops after configured corpus discovery and creates a pending
+source-review batch. It cannot ingest corpora until selection is completed.
+The documentation branch continues independently without a synthetic source
+approval. Empty inventories are reported as unconfigured, not approved.
+Receipts expose both branch outcomes and identify the
+waiting stage and blocked descendants. Later builds select only changed preparation stages and
+their affected descendants, loading unchanged upstream DataFrames from storage.
+An unchanged configuration creates no run and emits no materializations.
+Run receipts in `$CODEBENCH_HOME/build-<run-id>.json` record selected stages,
+skipped stages, selection reasons and per-stage cache hits. Registration alone is available through
+`dataset_cli register`; validation without registration through `dataset_cli validate`.
+Both accept the same `--config` and `--home` arguments.
+
+In the UI, open **Jobs → build_dataset → Materialize all**, select a dataset partition,
+and inspect **Config → Add config** before launch. Open an asset's latest
+materialization to inspect **sample**, **dagster/row_count**, column schema,
+configuration and inference receipts. Samples are bounded by `storage.sample_rows`
+and individual displayed cells by 500 characters; persisted tables are complete.
+The `dataset_build_requests` sensor is stopped by default. It uses the same
+selective planner as the CLI and emits no request for an unchanged partition.
+The UI's explicit **Materialize all** action remains a manual full selection;
+use the CLI or sensor for automatic incremental selection.
+
+## Data contracts
+
+The graph passes actual pandas DataFrames, annotated as `DataFrame[Schema]` and
+validated by Pandera, rather than strings containing artifact paths:
+
+Every asset's Description explains its inputs, goal, rationale and output.
+The [stage guide](pipeline-stages.md) adds detailed gates and limitations;
+maintaining these descriptions is mandatory in [the working rules](../AGENTS.md).
+
+The following are dataset/common stage names. Documentation instantiates the
+collection stages through `proposed_annotations` under `documentation/`, except
+shared `category_rules` and dataset-only `human_source_decisions`.
+Finalization is shared, not duplicated.
+See [branch contracts and migration](independent-branches.md).
+
+1. `category_rules`: typed, versioned taxonomy and policy (the only non-table asset).
+2. `source_catalog`: selected and excluded sources with provenance and reasons.
+3. `human_source_decisions`: completed, snapshot-bound source-selection decisions.
+4. `source_documents`: approved sources' inert text and attribution.
+5. `document_adapters`: per-source declarative parsing mappings.
+6. `command_candidates`: extracted records, context and positions.
+7. `filtered_commands`: all candidates with eligibility or quarantine reasons.
+8. `labeling_documentation`: supplied or live-crawled semantics for eligible operations.
+9. `proposed_annotations`: independent labels, confidence and rationale.
+10. `merged_proposed_annotations`: authorized labels and evidence from available branches.
+11. `reviewed_annotations`: shared bounded agentic review with per-record reuse.
+12. `deduplicated_annotations`: conservative exact normalized survivors with an audit mapping.
+13. `human_review_queue`: all retained annotations and machine exclusion reasons.
+14. `human_review_decisions`: the completed, version-bound unified decision table.
+15. `dataset_release`: the single current release, with `human_reviewed=true` after the nine command columns.
+
+The authoritative publication pointer is the SQLite review ledger, committed
+after immutable Parquet, CSV and audit sidecars are written. A manual release
+materialization uses the same admission gate. Decisions bind the exact evidence
+snapshot and a digest of the completed decision set; stale revisions, missing
+records and changed decisions fail explicitly. Rejection precedes the per-risk cap.
+Historical raw outputs remain inspectable but are not retroactively human-approved.
+
+Model review caches validated results and receipts by each record's relevant input,
+independently of batch membership. Adding or changing a row reviews only missing
+or invalidated rows. Human batches similarly carry terminal decisions only when
+the row evidence/policy fingerprint, eligibility and selection bounds match.
+Carried decisions retain their reviewer and audit origin. A changed snapshot is
+open until explicit completion; old completion tokens never carry forward.
+
+One local dataset home is the review authority, including when table objects are
+in S3. Config/current-reference writers share its transaction protocol; separate
+hosts with independent review databases are not a distributed review service.
+Reviewer identity is self-reported. The UI/API binds to loopback and rejects
+foreign-origin writes; it does not provide authenticated reviewer roles.
+
+Human review is reusable for other stages, including model-candidate selection.
+Stage registrations provide records, evidence, eligibility and completion rules;
+the native Review tab discovers them rather than hardcoding annotation assets.
+See [the integration contract](reusable-review.md). Rebuild existing registered
+data with `dataset_cli build --dataset <dataset_id> --home <home>` to retain its
+individual settings instead of replacing them with an example configuration.
+
+Filtered-out records remain in `filtered_commands`; they are not relabeled or
+silently discarded. Agentic approval is not human approval. No command text is
+executed. Exact normalized deduplication precedes human review; fuzzy similarity
+and safe-counterpart pairing remain deferred.
+
+## Versioned configuration
+
+Each `configs/datasets/*.json` is the complete initial configuration for one category:
+inline `rules`, `seeds`, `documentation.snippets`, model roles, stage settings and
+storage. Seeds are inspected source references or bounded search queries, not
+synthetic commands or random-number seeds. Referenced raw document bytes may live
+outside the JSON; their paths resolve relative to it. No additional rules,
+source-manifest, search-request or semantics configuration file is required.
+Unknown fields and wrong scalar types fail.
+Each stage has its own strict Dagster configuration. Registered versions are retained
+under `dataset-specifications`; changing a file does not erase an old version.
+
+The inline `rules` define category ID/name/version, complete policy,
+risk definitions and command-family patterns, class definitions, severities and
+description language. Patterns determine routing, never safety. The current v0
+contract permits allow/deny/ask and low/medium/high/critical. Another category uses
+another single configuration file without changing Python. CAT-2 remains a local
+multicategory example and is excluded from this repository.
+
+Use a distinct `dataset_id` for each category. Its registry, asset storage and
+materialization history are partition-isolated. Top-level `revision` records
+configuration history; changing it alone does not rerun acquisition. The separate
+`seeds.revision` requests source collection refresh. Old split configuration files
+remain preserved as historical examples, but the default loader no longer uses them.
+When migrating an existing home, register the consolidated configuration for every
+category before enabling the sensor. Previous registry versions and artifacts remain.
+
+Each configuration explicitly supplies four model roles: `selector`, `adapter`,
+`labeler`, `reviewer`. Each role can independently use native authentication or
+an OpenAI-compatible endpoint. For example, one role can be:
+
+```json
+{
+  "provider": "openai_compatible",
+  "model": "your-model-id",
+  "base_url": "https://your-provider.example/v1",
+  "api_key_env": "DATASET_REVIEW_API_KEY",
+  "timeout_seconds": 900.0,
+  "max_output_tokens": 8192,
+  "structured_output": "json_schema"
+}
+```
+
+The transport appends `/chat/completions`. Use `json_object` for providers without
+JSON-schema response format support. Local strict validation always applies.
+Credentials are environment references, not stored values. There is no automatic
+provider fallback or response repair. Native mode uses supported `omo` authentication
+and a fresh no-tools/no-session invocation per record. Native sampling/token controls
+use CLI defaults, recorded honestly in receipts; API generation controls are explicit.
+Malformed JSON, unsupported taxonomy and overlong rationales fail closed with retained
+evidence. Failed attempts are visible as Dagster asset observations.
+
+## Sources and examples
+
+The shipped configurations explicitly use `provided_sources`: actual inspected,
+revision-pinned tldr documents, not a fresh internet search. Selection, snapshotting,
+adapter inference, extraction, labeling and review all still run in the configured
+chain. Inline source seeds bind hashes, original URLs, licensing and attribution.
+The capture bytes remain local and ignored. See the [local input setup](../README.md#local-source-inputs);
+the checked-in CAT-3 source configuration retains their provenance metadata.
+
+For live discovery set `seeds.mode` to `keenable`, supply `seeds.search_request`,
+and leave `seeds.documents` empty. The inline search request contains risk-specific
+search groups, `results_per_query` and `pages_per_risk`; the configured
+selector role controls the actual inference invocation. Risk IDs must belong to
+the category. The public keyless Keenable MCP endpoint is the default. Override the transport using
+`CODEBENCH_KEENABLE_COMMAND` / `CODEBENCH_KEENABLE_ARGS` or
+`CODEBENCH_KEENABLE_URL`. Optional environment/header maps use
+`CODEBENCH_KEENABLE_ENV` / `CODEBENCH_KEENABLE_HEADERS`.
+Search snippets remain separate from inspected pages. Native model authentication
+is independent of the MCP transport. Each risk search can include `inspection_urls`
+for known command and license pages; these are fetched first within the same
+`pages_per_risk` budget.
+
+For semantic documentation crawling, set `documentation.mode` to `keenable`,
+leave `documentation.snippets` empty and supply `documentation.search_request`
+with the same bounded search structure. The selector model is used unless a
+documentation model is explicitly configured. The stage depends on filtered
+commands and category rules, retains fetched pages and inference receipts, and
+reports missing operation coverage. Non-verbatim excerpts are withheld; unresolved
+licensing is tracked separately from semantic suitability, without granting
+corpus reuse or evidence redistribution. Explicit prohibitions remain excluded.
+An empty result cannot support an accepted label. The default
+`provided_snippets` mode remains offline.
+
+## Parquet storage, including MinIO
+
+The IO manager owns persistence. Asset functions do not pass storage locations.
+Default local storage is `$CODEBENCH_HOME/dataframes`; category rules use JSON,
+all table values use Parquet. Both assets and cached stages have hash-checked
+immutable objects. Changing current asset references preserves previous versions.
+To use an existing MinIO/S3 bucket, add this top-level configuration:
+
+```json
+{
+  "storage": {
+    "backend": "s3",
+    "bucket": "dataset-tables",
+    "endpoint_url": "http://localhost:9000",
+    "region": "us-east-1",
+    "access_key_env": "DATASET_S3_ACCESS_KEY",
+    "secret_key_env": "DATASET_S3_SECRET_KEY",
+    "prefix": "datasets",
+    "sample_rows": 10
+  }
+}
+```
+
+Create the bucket separately. AWS can omit endpoint and credential references to use
+its normal SDK credential chain. Local and S3 use the same IO manager contract;
+Dagster metadata itself remains in the persistent Dagster instance, not in S3.
+Object hashes, conditional writes and immutable evidence reject silent overwrites.
+The real MinIO verification can be repeated with an installed binary:
+
+```sh
+uv run python -m codebench_pipeline.minio_qa --binary /path/to/minio --report .codebench-datasets/minio-qa.json
+```
+
+This owns an ephemeral loopback-only server on ports 19000/19001, uses generated
+credentials without logging them, checks actual Parquet, cache reuse and previews,
+and stops/removes its server data afterward. Those ports must be available.
+
+## Reuse and retained evidence
+
+Stage signatures include effective configuration, input DataFrame contents,
+relevant rule fields, source/documentation hashes, implementation bytes and lockfile.
+The planner compares partition-specific materialization fingerprints before
+starting a run. Cache reuse is a separate recovery mechanism within a selected
+stage; a cache hit is not misreported as a skipped materialization.
+
+| Changed configuration | Selected stages after an initial build |
+| --- | --- |
+| Nothing, or only top-level revision | None |
+| Reviewer settings | Affected review outputs and shared finalization |
+| Labeler settings | Affected labeling/review outputs and shared finalization |
+| Policy, description language, or rule version | Rules, labeling, review and shared finalization |
+| Documentation snippets | Documentation, labeling, review and shared finalization |
+| Publication cap | Shared review preparation and release authorization |
+| Extraction settings | Extraction, filtering, labeling, review and shared finalization |
+| Source/search seeds | Source catalog and dependent acquisition/processing stages |
+
+Rule changes use stage-specific projections: changing only labeling policy does
+not invalidate source selection or filtering. Changing command-family patterns
+can affect both. Unselected categories receive no materializations.
+Implementation and dependency changes conservatively invalidate stage caches;
+changing a category does not require changing either.
+
+Every successful stage retains effective config, exact code snapshots and inference
+receipts with prompt/input hashes, response, observed model and timestamps. Failed
+attempts also retain receipts. Storage corruption fails instead of being repaired.
+The current table parser supports text, Markdown, JSON, JSONL and CSV; declarative
+adapters cannot execute generated code. Complex multiline shell forms require
+additional parser support and should not be assumed equivalent to simple examples.
+
+The small examples verify orchestration; they do not meet the 250-record-per-risk
+collection target. The current cap is per dataset partition, not a cross-category
+combined release. Historical CAT-3 CSV bundle publication remains available below.
+
+## Historical compatibility and checks
+
+The old graph is in `codebench_pipeline.legacy_definitions`; the existing
+`python -m codebench_pipeline.cli` commands continue to use it and `.codebench`.
+Do not confuse historical replay or its optional discovery branch with this new
+full configured job. Existing source data, root CSVs and `strategy/` are preserved.
+
+```sh
+uv run python -B -m unittest discover -s tests -v
+uv run basedpyright
+uv run ruff check codebench_pipeline tests/test_dataset*.py tests/test_dataframe_io.py
+```
+
+The locked dagster-pandera integration emits its upstream beta warning; validation
+is still enforced. Dagster's own UI is desktop-oriented; its mobile layout clips
+and overlaps content. Use a desktop viewport. No custom web application or
+external spreadsheet is needed. Runtime evidence and collected datasets stay
+local rather than being bundled with this code-only publication.

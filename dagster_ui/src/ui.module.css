@@ -1,0 +1,55 @@
+.surface, .dialog {
+  --space-small: 8px;
+  --space-medium: 12px;
+  --space-large: 16px;
+  --touch-target: 44px;
+  --pane-floor: 320px;
+  --cell-height: 160px;
+}
+.surface {
+  box-sizing: border-box;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+  overflow: auto;
+  padding: var(--space-large);
+  color: var(--color-text-default);
+  background: var(--color-background-default);
+}
+.stack { display: flex; flex-direction: column; gap: var(--space-large); min-width: 0; }
+.toolbar { display: flex; flex-wrap: wrap; align-items: end; gap: var(--space-small); }
+.field { display: flex; flex-direction: column; gap: var(--space-small); min-width: 0; max-width: 100%; }
+.select {
+  min-height: var(--touch-target);
+  max-width: 100%;
+  padding: var(--space-small);
+  font: inherit;
+  color: var(--color-text-default);
+  background: var(--color-background-default);
+  border: 1px solid var(--color-border-default);
+  border-radius: var(--space-small);
+}
+.select:focus-visible, .surface a:focus-visible, .preview:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+}
+.reel { min-width: 0; overflow: auto; }
+.preview { display: block; max-width: var(--pane-floor); max-height: var(--cell-height); white-space: pre; overflow: auto; user-select: text; }
+.literal { white-space: pre-wrap; overflow-wrap: anywhere; font-family: var(--font-mono); margin: 0; }
+.fields { margin: 0; }
+.fields dd { margin: var(--space-small) 0 0; }
+.fields dt { overflow-wrap: anywhere; }
+.split { display: flex; flex-wrap: wrap; align-items: start; gap: var(--space-large); min-width: 0; }
+.pane { flex: 1 1 var(--pane-floor); min-width: 0; max-width: 100%; }
+.inspector { padding: var(--space-large); border: 1px solid var(--color-border-default); overflow-wrap: anywhere; }
+.surface button:not([role='radio']), .dialog button:not([role='radio']) { min-height: var(--touch-target); }
+.radioOption { min-height: var(--touch-target); }
+.surface input, .surface textarea { min-height: var(--touch-target); max-width: 100%; }
+.surface textarea { width: 100%; }
+.surface a { color: var(--color-link-default); overflow-wrap: anywhere; }
+.surface th, .surface td { font-variant-numeric: tabular-nums; }
+.surface td { vertical-align: top; }
+.status { padding: var(--space-medium); background: var(--color-background-light); overflow-wrap: anywhere; }
+.dialog { max-width: calc(100vw - var(--space-large) * 2); }
+.dialogBody { max-height: 70dvh; overflow: auto; }
