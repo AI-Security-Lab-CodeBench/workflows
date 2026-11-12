@@ -44,11 +44,13 @@ existing data before replacing it; never overwrite concurrent work.
   with explicit trust and pinned module hashes. Only those modules are imported;
   collected commands and downloaded scripts remain inert. Preserve source
   positions and actual transformations; core code owns canonical validation.
-- Each branch extracts raw candidates, filters, gathers semantic documentation
-  and labels each eligible command in one isolated LLM invocation, producing
-  `proposed_annotations`. Preserve raw extraction and transformation/exclusion evidence.
-- Converge authorized, current labeled branch outputs into **one** category
-  dataset at `merged_proposed_annotations`, then apply conservative exact deduplication.
+- Each branch independently acquires sources, applies adapters and extracts raw
+  `command_candidates`. Preserve raw extraction and transformation/exclusion evidence.
+- Converge authorized, current branch candidates at `merged_command_candidates`
+  before shared `filtered_commands`, `labeling_documentation` and `proposed_annotations`.
+  Label each eligible command in one isolated LLM invocation, then apply
+  conservative exact deduplication to the unified annotations.
+  Namespace candidate and source identities by branch and retain original identities.
   There is no independent per-command LLM reviewer stage. `reviewed_annotations`
   is historical and remains readable; never manufacture `review_verdict` or
   `review_confidence` for current rows.

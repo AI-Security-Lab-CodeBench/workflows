@@ -14,7 +14,7 @@ from codebench_pipeline.dataframe_schemas import (
     model_records,
     validated_frame,
 )
-from codebench_pipeline.dataset_annotation import annotate
+from codebench_pipeline.dataset_annotation import annotate, relevant_documentation
 from codebench_pipeline.dataset_config import (
     AnnotationConfig,
     DocumentationConfig,
@@ -60,7 +60,17 @@ def proposed_annotations(
         }
         for label in labels
     ]
-    return validated_frame(rows, ProposedAnnotationsTable)
+    frame = validated_frame(rows, ProposedAnnotationsTable)
+    frame.attrs = {
+        **commands.attrs,
+        "row_documentation": {
+            candidate.candidate_id: [
+                doc.model_dump(mode="json") for doc in relevant_documentation(candidate, docs)
+            ]
+            for candidate in candidates
+        },
+    }
+    return frame
 
 
 @pa.check_types

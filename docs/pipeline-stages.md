@@ -27,12 +27,12 @@ deduplication runs on the combined labeled dataset before human review.
 Fuzzy linking and safe-counterpart pairing remain deferred.
 
 The sections below describe common stage behavior and the dataset paths.
-Documentation instantiates collection stages through `proposed_annotations` at
+Documentation instantiates collection stages through `command_candidates` at
 `datasets/documentation/<stage>`, except shared `category_rules`.
 `human_source_decisions` is removed from the active graph; neither branch waits
 on human source admission.
-Both branches converge before shared deduplication, final human
-review and release.
+Both branches converge at `merged_command_candidates` before shared filtering,
+semantic documentation, labeling, deduplication, final human review and release.
 See [independent branch contracts](independent-branches.md) for configuration
 and source-binding rules.
 
@@ -150,9 +150,29 @@ is line-oriented, not a general shell parser: prose or console output can become
 candidates, and multiline shell constructs aren't reconstructed. Invalid
 structured fields fail the stage instead of silently dropping the record.
 
+## `datasets/merged_command_candidates`
+
+**Input:** Current authorized `command_candidates` from both collection branches.
+
+**Goal:** Merge extracted rows before any shared processing or labeling.
+
+**Why:** Acquisition must remain independent without duplicating category processing.
+
+**Output:** `CommandCandidatesTable` with branch-prefixed candidate/source IDs.
+The `origins` attribute preserves original branch, candidate ID and source ID;
+`branch_metadata` preserves input attributes. `codebench_finalization` binds each
+configured branch's exact candidate digest, or an explicit unconfigured/waiting state.
+
+**Gate/inspection:** A configured empty table is bound as configured, not omitted.
+Missing, changed or unauthorized configured inputs become waiting placeholders,
+never historical substitutes. Only the merge can materialize partial waiting
+inputs for inspection; filtering and every later stage require all configured
+branches to be current. `build_documentation` stops at its own command candidates;
+the registered build performs this merge and the shared tail.
+
 ## `datasets/filtered_commands`
 
-**Input:** Every command candidate, category command patterns and filtering
+**Input:** Every merged command candidate, category command patterns and filtering
 settings.
 
 **Goal:** Mark records eligible for labeling or quarantine them with a concrete
@@ -229,28 +249,19 @@ not calibrated proof. Invalid responses fail the stage, not a fabricated
 
 This asset is absent from the active graph. Historical review artifacts remain
 readable, but current rows receive no fabricated review verdict or confidence.
-The single labeling pass flows directly into merged annotations.
+The single shared labeling pass flows directly into exact deduplication.
 
-## `datasets/merged_proposed_annotations`
+## Historical branch processing and annotation merge
 
-**Input:** Current authorized labeled outputs from available configured
-collection branch and category configuration.
-
-**Goal:** Form one traceable category dataset without conflating source identities.
-
-**Why:** Collection independence must not produce separate final datasets.
-
-**Output:** A typed proposed-annotation table retaining branch-qualified identities,
-original evidence, row-specific semantic documentation and branch completeness.
-
-**Gate/inspection:** Available authorized rows can advance through shared finalization
-while another branch waits; a blocked configured branch prevents final publication.
-An unconfigured branch contributes no records. No prior publication is silently
-substituted for current branch output.
+`datasets/merged_proposed_annotations` and the documentation branch's old
+`filtered_commands`, `labeling_documentation` and `proposed_annotations` are absent
+from the active graph. Persisted tables and immutable review manifests remain
+readable, including original inference receipts, without rematerialization.
+They never authorize new shared processing or release.
 
 ## `datasets/deduplicated_annotations`
 
-**Input:** The merged labeled table.
+**Input:** The shared `proposed_annotations` table, including per-row semantic evidence.
 
 **Goal:** Remove only proven exact normalized duplicates before human review.
 

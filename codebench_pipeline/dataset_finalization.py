@@ -12,23 +12,19 @@ from codebench_pipeline.category_rules import CategoryRules
 from codebench_pipeline.data_views import DatasetDataService
 from codebench_pipeline.dataframe_io import DataFrameIOManager, frame_bytes
 from codebench_pipeline.dataframe_schemas import (
-    DocumentationTable,
+    CommandCandidatesTable,
     ProposedAnnotationsTable,
     ReviewQueueTable,
     frame_records,
-    model_records,
     validated_frame,
 )
-from codebench_pipeline.dataset_annotation import relevant_documentation
 from codebench_pipeline.dataset_asset_types import DATASET_PARTITIONS, TABLE_TYPES, rules_input, table_input
 from codebench_pipeline.dataset_branches import FINALIZATION_STAGES, Branch, stage_branch, stage_name
 from codebench_pipeline.dataset_config import PublicationConfig
 from codebench_pipeline.dataset_engine import cached_table
-from codebench_pipeline.dataset_plan import plan_dataset, unavailable_annotations
-from codebench_pipeline.dataset_records import CandidateRecord
+from codebench_pipeline.dataset_plan import plan_dataset, unavailable_candidates
 from codebench_pipeline.dataset_tables import review_queue
 from codebench_pipeline.human_review import HumanReviewError
-from codebench_pipeline.models import SemanticSnippet
 from codebench_pipeline.object_store import sha256
 from codebench_pipeline.stage_configuration import stage_configs
 from codebench_pipeline.typed_config import TypedConfig
@@ -36,41 +32,41 @@ from codebench_pipeline.typed_config import TypedConfig
 FINALIZATION_BINDING: Final = "codebench_finalization"
 
 
-def available_proposals(
+def available_candidates(
     home: Path,
     data: DatasetDataService,
     dataset_id: str,
-) -> tuple[dict[Branch, DataFrame[ProposedAnnotationsTable]], dict[str, JsonValue]]:
+) -> tuple[dict[Branch, DataFrame[CommandCandidatesTable]], dict[str, JsonValue]]:
     spec = data.specification(dataset_id)
     plan = plan_dataset(spec, stage_configs(spec), data.instance, home=home)
     pending = tuple(stage for stage in (*plan.selected, *plan.blocked) if stage not in FINALIZATION_STAGES)
     binding: dict[str, JsonValue] = {}
-    frames: dict[Branch, DataFrame[ProposedAnnotationsTable]] = {}
+    frames: dict[Branch, DataFrame[CommandCandidatesTable]] = {}
     branches: tuple[Branch, ...] = ("dataset", "documentation")
     for branch in branches:
         if branch in plan.unconfigured:
             binding[branch] = {"state": "unconfigured"}
-            frames[branch] = ProposedAnnotationsTable.validate(
-                unavailable_annotations(spec, branch, "unconfigured")
+            frames[branch] = CommandCandidatesTable.validate(
+                unavailable_candidates(spec, branch, "unconfigured")
             )
         elif any(stage == "category_rules" or stage_branch(stage) == branch for stage in pending):
             binding[branch] = {"state": "waiting"}
-            frames[branch] = ProposedAnnotationsTable.validate(
-                unavailable_annotations(spec, branch, "waiting")
+            frames[branch] = CommandCandidatesTable.validate(
+                unavailable_candidates(spec, branch, "waiting")
             )
         else:
-            stored = data.read_current(dataset_id, stage_name("proposed_annotations", branch))
+            stored = data.read_current(dataset_id, stage_name("command_candidates", branch))
             if stored.publication_state == "stale":
                 raise HumanReviewError("stale", "A configured collection branch is no longer authorized")
             if not isinstance(stored.value, pd.DataFrame):
-                raise HumanReviewError("conflict", "Proposed annotations must be a table")
-            frames[branch] = ProposedAnnotationsTable.validate(stored.value)
+                raise HumanReviewError("conflict", "Command candidates must be a table")
+            frames[branch] = CommandCandidatesTable.validate(stored.value)
             binding[branch] = {"state": "configured", "digest": stored.reference.digest}
     return frames, binding
 
 
 def finalization_binding(home: Path, data: DatasetDataService, dataset_id: str) -> dict[str, JsonValue]:
-    return available_proposals(home, data, dataset_id)[1]
+    return available_candidates(home, data, dataset_id)[1]
 
 
 def authorize_finalization_output(
@@ -89,10 +85,10 @@ def authorize_finalization_output(
         raise HumanReviewError("pending", "Final human review waits for every configured branch")
 
 
-def merge_proposals(
-    dataset: DataFrame[ProposedAnnotationsTable],
-    documentation: DataFrame[ProposedAnnotationsTable],
-) -> DataFrame[ProposedAnnotationsTable]:
+def merge_candidates(
+    dataset: DataFrame[CommandCandidatesTable],
+    documentation: DataFrame[CommandCandidatesTable],
+) -> DataFrame[CommandCandidatesTable]:
     rows: list[dict[str, JsonValue]] = []
     origins: dict[str, JsonValue] = {}
     for branch, frame in (("dataset", dataset), ("documentation", documentation)):
@@ -100,9 +96,13 @@ def merge_proposals(
             original = str(row["candidate_id"])
             identifier = f"{branch}:{original}"
             origins[identifier] = {"branch": branch, "candidate_id": original, "source_id": row["source_id"]}
-            rows.append({**row, "candidate_id": identifier})
-    merged = validated_frame(rows, ProposedAnnotationsTable)
+            rows.append({**row, "candidate_id": identifier, "source_id": f"{branch}:{row['source_id']}"})
+    merged = validated_frame(rows, CommandCandidatesTable)
     merged.attrs["origins"] = origins
+    merged.attrs["branch_metadata"] = {
+        "dataset": dict(dataset.attrs),
+        "documentation": dict(documentation.attrs),
+    }
     return merged
 
 
@@ -154,28 +154,28 @@ def finalization_assets() -> list[AssetsDefinition]:
         group_name="dataset_building",
         partitions_def=DATASET_PARTITIONS,
         io_manager_key="dataset_io_manager",
-        dagster_type=TABLE_TYPES[ProposedAnnotationsTable],
+        dagster_type=TABLE_TYPES[CommandCandidatesTable],
         ins={
-            "dataset_annotations": table_input("proposed_annotations", ProposedAnnotationsTable),
-            "documentation_annotations": table_input(
-                "proposed_annotations", ProposedAnnotationsTable, "documentation"
+            "dataset_candidates": table_input("command_candidates", CommandCandidatesTable),
+            "documentation_candidates": table_input(
+                "command_candidates", CommandCandidatesTable, "documentation"
             ),
         },
     )
-    def merged_proposed_annotations(
+    def merged_command_candidates(
         context: AssetExecutionContext,
         config: TypedConfig,
-        dataset_annotations: DataFrame[ProposedAnnotationsTable],
-        documentation_annotations: DataFrame[ProposedAnnotationsTable],
+        dataset_candidates: DataFrame[CommandCandidatesTable],
+        documentation_candidates: DataFrame[CommandCandidatesTable],
         dataset_io_manager: ResourceParam[DataFrameIOManager],
-    ) -> Output[DataFrame[ProposedAnnotationsTable]]:
+    ) -> Output[DataFrame[CommandCandidatesTable]]:
         if dataset_io_manager.review_home is None:
             raise HumanReviewError("pending", "Finalization requires a registered dataset")
         home = Path(dataset_io_manager.review_home)
         binding = finalization_binding(
             home, DatasetDataService(home, context.instance), context.partition_key
         )
-        for branch, frame in (("dataset", dataset_annotations), ("documentation", documentation_annotations)):
+        for branch, frame in (("dataset", dataset_candidates), ("documentation", documentation_candidates)):
             expected = (
                 {"state": frame.attrs["branch_state"]}
                 if "branch_state" in frame.attrs
@@ -184,30 +184,9 @@ def finalization_assets() -> list[AssetsDefinition]:
             if binding[branch] != expected:
                 raise HumanReviewError("stale", "Merge inputs differ from current authorized branches")
 
-        def compute(evidence: Path) -> DataFrame[ProposedAnnotationsTable]:
-            merged = merge_proposals(dataset_annotations, documentation_annotations)
+        def compute(evidence: Path) -> DataFrame[CommandCandidatesTable]:
+            merged = merge_candidates(dataset_candidates, documentation_candidates)
             merged.attrs[FINALIZATION_BINDING] = binding
-            documents: dict[str, JsonValue] = {}
-            branch_frames: tuple[tuple[Branch, DataFrame[ProposedAnnotationsTable]], ...] = (
-                ("dataset", dataset_annotations),
-                ("documentation", documentation_annotations),
-            )
-            for branch, frame in branch_frames:
-                if "branch_state" in frame.attrs:
-                    continue
-                stored = DatasetDataService(home, context.instance).read_current(
-                    context.partition_key,
-                    stage_name("labeling_documentation", branch),
-                )
-                if not isinstance(stored.value, pd.DataFrame):
-                    raise HumanReviewError("conflict", "Labeling documentation must be a table")
-                semantic = model_records(DocumentationTable.validate(stored.value), SemanticSnippet)
-                for candidate in model_records(frame, CandidateRecord):
-                    documents[f"{branch}:{candidate.candidate_id}"] = [
-                        doc.model_dump(mode="json")
-                        for doc in relevant_documentation(candidate, semantic)
-                    ]
-            merged.attrs["row_documentation"] = documents
             return merged
 
         return cached_table(
@@ -215,10 +194,10 @@ def finalization_assets() -> list[AssetsDefinition]:
             dataset_io_manager,
             config,
             {
-                "dataset_annotations": dataset_annotations,
-                "documentation_annotations": documentation_annotations,
+                "dataset_candidates": dataset_candidates,
+                "documentation_candidates": documentation_candidates,
             },
-            ProposedAnnotationsTable,
+            CommandCandidatesTable,
             compute,
         )
 
@@ -228,16 +207,16 @@ def finalization_assets() -> list[AssetsDefinition]:
         partitions_def=DATASET_PARTITIONS,
         io_manager_key="dataset_io_manager",
         dagster_type=TABLE_TYPES[ProposedAnnotationsTable],
-        ins={"merged_proposed_annotations": table_input("merged_proposed_annotations", ProposedAnnotationsTable)},
+        ins={"proposed_annotations": table_input("proposed_annotations", ProposedAnnotationsTable)},
     )
     def deduplicated_annotations(
         context: AssetExecutionContext,
         config: TypedConfig,
-        merged_proposed_annotations: DataFrame[ProposedAnnotationsTable],
+        proposed_annotations: DataFrame[ProposedAnnotationsTable],
         dataset_io_manager: ResourceParam[DataFrameIOManager],
     ) -> Output[DataFrame[ProposedAnnotationsTable]]:
         def compute(evidence: Path) -> DataFrame[ProposedAnnotationsTable]:
-            frame = deduplicate_annotations(merged_proposed_annotations)
+            frame = deduplicate_annotations(proposed_annotations)
             (evidence / "duplicates.json").write_text(json.dumps(frame.attrs["duplicates"]), encoding="utf-8")
             return frame
 
@@ -245,7 +224,7 @@ def finalization_assets() -> list[AssetsDefinition]:
             context,
             dataset_io_manager,
             config,
-            {"annotations": merged_proposed_annotations},
+            {"annotations": proposed_annotations},
             ProposedAnnotationsTable,
             compute,
         )
@@ -277,4 +256,4 @@ def finalization_assets() -> list[AssetsDefinition]:
             lambda evidence: review_queue(deduplicated_annotations, category_rules, config),
         )
 
-    return [merged_proposed_annotations, deduplicated_annotations, human_review_queue]
+    return [merged_command_candidates, deduplicated_annotations, human_review_queue]

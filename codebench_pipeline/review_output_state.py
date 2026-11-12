@@ -31,7 +31,7 @@ def materialization_stale(home: Path, context: InputContext, value: pd.DataFrame
                 context.instance,
                 context.asset_partition_key,
                 value,
-                complete=stage not in {"merged_proposed_annotations", "reviewed_annotations"},
+                complete=stage != "merged_command_candidates",
             )
             return False
         if stage in SOURCE_GATED_STAGES:

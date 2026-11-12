@@ -22,9 +22,6 @@ SOURCE_GATED_STAGES: Final = frozenset(
         "source_documents",
         "document_adapters",
         "command_candidates",
-        "filtered_commands",
-        "labeling_documentation",
-        "proposed_annotations",
     }
 )
 

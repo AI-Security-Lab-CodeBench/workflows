@@ -12,6 +12,7 @@ from codebench_pipeline.category_rules import CategoryRules
 from codebench_pipeline.dataframe_io import DataFrameIOManager
 from codebench_pipeline.dataframe_schemas import frame_records
 from codebench_pipeline.dataset_asset_types import DATASET_PARTITIONS
+from codebench_pipeline.dataset_branches import HISTORICAL_PROCESSING_STAGES
 from codebench_pipeline.dataset_plan import INPUT_STAGES
 from codebench_pipeline.dataset_registry import DatasetRegistry
 from codebench_pipeline.runtime_instance import dataset_instance
@@ -51,7 +52,7 @@ def launch_ui(home: Path, port: int) -> None:
 
 
 def preview_asset(home: Path, dataset: str, stage: str, limit: int) -> dict[str, JsonValue]:
-    if stage not in INPUT_STAGES:
+    if stage not in INPUT_STAGES and stage not in HISTORICAL_PROCESSING_STAGES:
         raise ValueError(f"Unknown dataset stage: {stage}")
     if not 1 <= limit <= 1000:
         raise ValueError("Preview limit must be between 1 and 1000")

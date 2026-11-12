@@ -20,9 +20,10 @@ judgment. Optional reviewed local Python transformations require explicit trust
 and pinned module hashes. Collected content remains inert.
 `human_source_decisions` is historical, not an active source gate.
 
-The branches remain independently executable through extraction/filtering,
-semantic docs and `proposed_annotations`, with one isolated labeling invocation
-per eligible command. They converge at `merged_proposed_annotations`, followed
+The branches remain independently executable through extraction. They converge
+at `merged_command_candidates` before shared filtering, semantic documentation
+and `proposed_annotations`, with one isolated labeling invocation
+per eligible command, followed
 by conservative exact deduplication, the uncertain human queue and one
 `dataset_release`. `reviewed_annotations` is removed from the active graph;
 historical artifacts remain readable. Current rows must not receive manufactured

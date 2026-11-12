@@ -2,6 +2,8 @@ from typing import Protocol
 
 from dagster import AssetKey, AssetSpec
 
+from codebench_pipeline.dataset_branches import FINALIZATION_STAGES
+
 DESCRIPTIONS: dict[str, str] = {
     "category_rules": """
 **Input:** The category's inline taxonomy, version, policy, command families and language.
@@ -110,19 +112,20 @@ description, four confidences, rationale and citations. Each record uses a fresh
 Malformed responses fail with retained evidence; acceptance requires supported taxonomy and documentation.
 Confidence is self-reported, not proof of safety.
 """,
-    "merged_proposed_annotations": """
-**Input:** Current labeled outputs from available authorized collection branches and category rules.
+    "merged_command_candidates": """
+**Input:** Current raw command candidates from authorized collection branches.
 
 **Goal:** Combine authorized Existing datasets and Documentation crawl records into one category table.
 
-**Why:** Independent collection branches must converge before deduplication,
-uncertainty-based human review and release, without a second command-labeling pass.
+**Why:** Collection is independent, but filtering, semantic documentation and labeling
+must run once on the combined candidate table before deduplication and release.
 
-**Output:** `ProposedAnnotationsTable` retaining branch/source identities, original evidence
-and each record's semantic documentation.
+**Output:** `CommandCandidatesTable` with branch-qualified candidate and source IDs,
+an origins map preserving original identities, branch metadata and current input bindings.
 Unconfigured branches are distinct from configured branches with empty, waiting, failed or stale outputs.
 Only current authorized inputs are accepted; historical or unauthorized outputs cannot substitute for them.
-Final publication requires all configured branches to be current and complete.
+Only the merge may expose partial waiting inputs; shared processing and publication
+require all configured branches to be current and complete.
 """,
     "deduplicated_annotations": """
 **Input:** The unified merged labels with original evidence and category rules.
@@ -200,13 +203,7 @@ def describe_stage(spec: DescribedAsset) -> AssetSpec:
     group_name = "existing_datasets"
     if stage == "category_rules":
         group_name = "dataset_configuration"
-    elif len(spec.key.path) == 2 and stage in {
-        "merged_proposed_annotations",
-        "deduplicated_annotations",
-        "human_review_queue",
-        "human_review_decisions",
-        "dataset_release",
-    }:
+    elif len(spec.key.path) == 2 and stage in FINALIZATION_STAGES:
         group_name = "dataset_finalization"
     if len(spec.key.path) == 3 and spec.key.path[1] == "documentation":
         group_name = "documentation_crawl"

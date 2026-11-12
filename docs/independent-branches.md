@@ -1,7 +1,7 @@
 # Independent collection, unified dataset
 
-The current November 11, 2026 instruction requires automatic eligible-source
-collection in independent branches and uncertainty-only final human review.
+The current topology requires automatic eligible-source collection in independent
+branches, followed by unified post-extraction processing and uncertainty-only final human review.
 Earlier branch-specific releases, human corpus admission, independent per-command
 LLM review and all-row human review
 are superseded. Historical outputs and decisions remain evidence, not current
@@ -18,11 +18,11 @@ authorization for the combined dataset.
              full corpus collection  full corpus collection
              adapters                adapters
              extraction              extraction
-             filtering               filtering
-             semantic references     semantic references
-             proposed_annotations    proposed_annotations
                          \           /
-                    merged_proposed_annotations
+                    merged_command_candidates
+                    filtered_commands
+                    labeling_documentation
+                    proposed_annotations
                     exact normalized deduplication
                     uncertainty-only human review queue
                     real decisions if queue nonempty
@@ -42,7 +42,8 @@ for manifest syntax, trusted batch modules and reproducibility checks.
 removed from the active graph. Relabeling a corpus as documentation cannot bypass
 machine eligibility.
 
-Collection remains independent through labeling, with one isolated LLM invocation
+Collection remains independent through `command_candidates`. Candidates merge before
+shared filtering, semantic-reference collection and one isolated LLM invocation
 per eligible command. There is no independent command-review invocation or active
 `reviewed_annotations` stage. Historical review artifacts remain readable;
 don't manufacture `review_verdict` or `review_confidence` on current rows.
@@ -54,8 +55,12 @@ cannot be silently omitted from a purported complete release.
 
 ## Shared finalization
 
-The shared path retains branch-qualified record identities and original
-provenance. Deduplication runs after isolated labeling and merging,
+The shared path prefixes both candidate and source IDs with `dataset:` or
+`documentation:`. Its `origins` metadata preserves the original branch, candidate
+ID and source ID, and `branch_metadata` retains each input table's attributes.
+This prevents collisions in labeling, evidence lookup and source coverage.
+Shared outputs bind the exact current candidate digest from each configured branch.
+Deduplication runs after shared isolated labeling,
 before human review. It removes only proven exact normalized duplicates and
 retains a survivor mapping. Quoted content, shell semantics and meaningful
 context or label disagreements must not be collapsed. Fuzzy siblings,
@@ -106,3 +111,53 @@ Preserve the category `partition` query parameter in native links.
 
 Use the same `CODEBENCH_HOME` and `DAGSTER_HOME` for building and viewing.
 Historical branch publications remain historical, not current releases.
+
+`build_documentation` ends at `documentation/command_candidates` and performs no
+labeling. The registered `build_dataset` planner runs shared processing when every
+configured branch is current. A merge may expose a typed waiting placeholder for
+inspection, but shared processing cannot proceed with a waiting configured branch.
+An empty configured candidate table retains its digest and configured state;
+an unconfigured branch has an explicit unconfigured placeholder.
+
+Historical `merged_proposed_annotations` and `documentation/filtered_commands`,
+`documentation/labeling_documentation`, `documentation/proposed_annotations` remain
+readable through the data API and CLI `show`. They are absent from the active graph
+and cannot substitute for current candidate inputs. The topology migration changes
+label request identities and source IDs, so the first new build can require fresh
+labels and invalidates old completion authorization; no historical decisions are
+manufactured or rewritten.
+
+## Verification
+
+Run verification on the runtime host, not the Mac checkout. The following focused
+suite uses temporary synthetic homes, mocked label providers and actual Dagster
+materializations; it does not execute collected command strings:
+
+```sh
+PYTHONPATH=tests uv run python -B -m unittest \
+  test_dataset_graph test_unified_finalization test_independent_branches \
+  test_dataset_incremental test_confidence_publication test_dataset_viewer \
+  test_annotation_cache -v
+```
+
+Expected results: both branches end at candidates in the collection groups,
+shared processing starts at the merge, each eligible merged row is labeled once,
+colliding source IDs remain distinct, empty configured branches retain digests,
+waiting configured branches cannot authorize processing, and unchanged rows reuse
+labels and human decisions. Historical tables remain readable without a new run.
+
+For the focused real Dagster materialization scenarios alone:
+
+```sh
+PYTHONPATH=tests uv run python -B -m unittest \
+  test_independent_branches.IndependentBranchDatasetTests.test_both_configured_branches_prepare_without_source_human_completion \
+  test_independent_branches.IndependentBranchDatasetTests.test_configured_empty_branch_retains_its_digest_instead_of_becoming_unconfigured \
+  test_independent_branches.IndependentBranchDatasetTests.test_configured_waiting_branch_cannot_authorize_shared_processing -v
+```
+
+Then run `uv run python -B -m unittest discover -s tests -v`, `uv run basedpyright`
+and `uv run ruff check codebench_pipeline tests`. Native UI verification must show
+the selected category partition and the four named lineage groups. Inspect the
+merged candidates, shared labels, duplicate mapping and review state; repeat an
+unchanged registered build to confirm no new run. These are operator verification
+steps, not authorization to deploy or modify a live runtime.

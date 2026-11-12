@@ -2,8 +2,17 @@ from collections.abc import Sequence
 from typing import Literal
 
 Branch = Literal["dataset", "documentation"]
-FINALIZATION_STAGES = (
+HISTORICAL_PROCESSING_STAGES = (
     "merged_proposed_annotations",
+    "documentation/filtered_commands",
+    "documentation/labeling_documentation",
+    "documentation/proposed_annotations",
+)
+FINALIZATION_STAGES = (
+    "merged_command_candidates",
+    "filtered_commands",
+    "labeling_documentation",
+    "proposed_annotations",
     "deduplicated_annotations",
     "human_review_queue",
     "human_review_decisions",

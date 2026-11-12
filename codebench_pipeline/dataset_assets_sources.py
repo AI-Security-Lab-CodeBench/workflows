@@ -179,14 +179,24 @@ def source_assets(branch: Branch = "dataset") -> list[AssetsDefinition]:
             lambda evidence: extract_candidates(source_documents, document_adapters, config),
         )
 
+    return [
+        *([category_rules] if branch == "dataset" else []),
+        source_catalog,
+        source_documents,
+        document_adapters,
+        command_candidates,
+    ]
+
+
+def processing_assets() -> list[AssetsDefinition]:
     @asset(
-        key_prefix=key_prefix,
+        key_prefix=["datasets"],
         group_name="dataset_building",
         partitions_def=DATASET_PARTITIONS,
         io_manager_key="dataset_io_manager",
         dagster_type=TABLE_TYPES[FilteredCommandsTable],
         ins={
-            "command_candidates": table_input("command_candidates", CommandCandidatesTable, branch),
+            "command_candidates": table_input("merged_command_candidates", CommandCandidatesTable),
             "category_rules": rules_input(),
         },
     )
@@ -207,13 +217,13 @@ def source_assets(branch: Branch = "dataset") -> list[AssetsDefinition]:
         )
 
     @asset(
-        key_prefix=key_prefix,
+        key_prefix=["datasets"],
         group_name="dataset_building",
         partitions_def=DATASET_PARTITIONS,
         io_manager_key="dataset_io_manager",
         dagster_type=TABLE_TYPES[DocumentationTable],
         ins={
-            "filtered_commands": table_input("filtered_commands", FilteredCommandsTable, branch),
+            "filtered_commands": table_input("filtered_commands", FilteredCommandsTable),
             "category_rules": rules_input(),
         },
     )
@@ -233,12 +243,4 @@ def source_assets(branch: Branch = "dataset") -> list[AssetsDefinition]:
             lambda evidence: collect_documentation(filtered_commands, category_rules, config, evidence),
         )
 
-    return [
-        *([category_rules] if branch == "dataset" else []),
-        source_catalog,
-        source_documents,
-        document_adapters,
-        command_candidates,
-        filtered_commands,
-        labeling_documentation,
-    ]
+    return [filtered_commands, labeling_documentation]

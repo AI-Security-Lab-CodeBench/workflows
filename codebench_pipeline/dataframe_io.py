@@ -174,7 +174,7 @@ class DataFrameIOManager(ConfigurableIOManager):
                                     obj,
                                     complete=context.asset_key.path[-1]
                                     not in {
-                                        "merged_proposed_annotations",
+                                        "merged_command_candidates",
                                         "reviewed_annotations",
                                     },
                                 )
@@ -252,16 +252,16 @@ class DataFrameIOManager(ConfigurableIOManager):
 
     def load_input(self, context: InputContext) -> pd.DataFrame | CategoryRules:
         if (
-            context.asset_key.path[-1] == "proposed_annotations"
+            context.asset_key.path[-1] == "command_candidates"
             and self.review_home is not None
             and context.has_input_name
-            and context.name in {"dataset_annotations", "documentation_annotations"}
+            and context.name in {"dataset_candidates", "documentation_candidates"}
         ):
             from codebench_pipeline.data_views import DatasetDataService
-            from codebench_pipeline.dataset_finalization import available_proposals
+            from codebench_pipeline.dataset_finalization import available_candidates
 
             home = Path(self.review_home)
-            frames, _ = available_proposals(
+            frames, _ = available_candidates(
                 home, DatasetDataService(home, context.instance), context.asset_partition_key
             )
             return frames[asset_branch(context.asset_key.path)]

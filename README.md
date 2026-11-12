@@ -15,12 +15,13 @@ CAT-2 is a local multicategory example and is deliberately not shipped.
 - `bashguard/`: standalone Go Bash AST analysis and CEL policy evaluation,
   integrated from source commit `671172026a2c0f4f6ce420f5e7bef10f53fb0732`.
 
-Both collection branches use the same row flow:
+Both collection branches feed one shared processing flow:
 
 ```text
-Existing datasets: source collection -> extraction/filtering -> semantic docs -> proposed_annotations
-Documentation crawl: source collection -> extraction/filtering -> semantic docs -> proposed_annotations
-Both -> merged_proposed_annotations -> conservative exact dedup
+Existing datasets: source collection -> command_candidates
+Documentation crawl: source collection -> command_candidates
+Both -> merged_command_candidates -> filtered_commands -> labeling_documentation
+     -> proposed_annotations -> conservative exact dedup
      -> uncertain human queue -> one dataset_release
 ```
 

@@ -128,7 +128,10 @@ class IncrementalDatasetTests(unittest.TestCase):
         with redirect_stdout(io.StringIO()):
             changed = execute_registered_build(spec.dataset_id, self.home)
         finalization = {
-            "merged_proposed_annotations",
+            "merged_command_candidates",
+            "filtered_commands",
+            "labeling_documentation",
+            "proposed_annotations",
             "deduplicated_annotations",
             "human_review_queue",
         }
@@ -153,7 +156,6 @@ class IncrementalDatasetTests(unittest.TestCase):
         changed = self.build()
         expected = {
             "proposed_annotations",
-            "merged_proposed_annotations",
             "deduplicated_annotations",
             "human_review_queue",
         }
@@ -172,7 +174,6 @@ class IncrementalDatasetTests(unittest.TestCase):
                 "labeling_documentation",
                 "proposed_annotations",
                 "human_review_queue",
-                "merged_proposed_annotations",
                 "deduplicated_annotations",
             },
         )
@@ -199,7 +200,6 @@ class IncrementalDatasetTests(unittest.TestCase):
             set(self.build()),
             {
                 "proposed_annotations",
-                "merged_proposed_annotations",
                 "deduplicated_annotations",
                 "human_review_queue",
             },
@@ -235,7 +235,6 @@ class IncrementalDatasetTests(unittest.TestCase):
                 AssetKey(["datasets", stage])
                 for stage in (
                     "proposed_annotations",
-                    "merged_proposed_annotations",
                     "deduplicated_annotations",
                     "human_review_queue",
                 )
@@ -264,7 +263,6 @@ class IncrementalDatasetTests(unittest.TestCase):
             set(self.build()),
             {
                 "proposed_annotations",
-                "merged_proposed_annotations",
                 "deduplicated_annotations",
                 "human_review_queue",
             },

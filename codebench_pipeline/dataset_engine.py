@@ -111,10 +111,23 @@ def cached_table(
     schema: type[Schema],
     compute: Callable[[Path], DataFrame[Schema]],
 ) -> Output[DataFrame[Schema]]:
+    from codebench_pipeline.dataset_branches import FINALIZATION_STAGES
+    from codebench_pipeline.dataset_finalization import FINALIZATION_BINDING, authorize_finalization_output
     from codebench_pipeline.documentation_authorization import inventory_binding
     from codebench_pipeline.source_review_guard import SOURCE_GATED_STAGES, authorize_compute
 
     stage = context.asset_key.path[-1]
+    shared_inputs = [
+        value for value in inputs.values()
+        if isinstance(value, pd.DataFrame) and FINALIZATION_BINDING in value.attrs
+    ]
+    if stage in FINALIZATION_STAGES and stage != "merged_command_candidates":
+        if storage.review_home is None or not shared_inputs:
+            raise IntegrityError("Shared processing requires current merged collection inputs")
+        for value in shared_inputs:
+            authorize_finalization_output(
+                Path(storage.review_home), context.instance, context.partition_key, value, complete=True
+            )
     source_token = authorize_compute(context, storage, inputs) if stage in SOURCE_GATED_STAGES else None
     signature = stage_signature(stage, config, inputs)
     branch = asset_branch(context.asset_key.path)
@@ -127,6 +140,8 @@ def cached_table(
             evidence = Path(temporary)
             try:
                 frame = schema.validate(compute(evidence))
+                if shared_inputs:
+                    frame.attrs = {**shared_inputs[0].attrs, **frame.attrs}
                 if stage == "source_catalog":
                     frame.attrs["codebench_source_inventory"] = {
                         "branch": branch,

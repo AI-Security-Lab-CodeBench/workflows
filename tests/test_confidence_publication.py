@@ -277,7 +277,7 @@ class ConfidencePublicationTests(unittest.TestCase):
                 resolved = ReviewSnapshots(home, data).current(spec.dataset_id)
             self.assertCountEqual(
                 [call.args[1] for call in reads.call_args_list],
-                ["documentation/proposed_annotations"],
+                ["documentation/command_candidates"],
             )
             self.assertEqual(
                 set(resolved.manifest.references),
@@ -287,7 +287,7 @@ class ConfidencePublicationTests(unittest.TestCase):
             for stale in (True, False):
                 def changed_current(dataset_id: str, stage: str) -> StoredDatasetAsset:
                     stored = original_read(dataset_id, stage)
-                    if stage != "documentation/proposed_annotations":
+                    if stage != "documentation/command_candidates":
                         return stored
                     return (
                         replace(stored, publication_state="stale")
@@ -305,7 +305,7 @@ class ConfidencePublicationTests(unittest.TestCase):
                     ReviewSnapshots(home, data).current(spec.dataset_id)
                 self.assertEqual(changed.exception.code, "not_ready")
             self.assertNotIn("reviewed_annotations", resolved.manifest.references)
-            label_stage = "documentation/proposed_annotations"
+            label_stage = "proposed_annotations"
             metadata = TypeAdapter(dict[str, JsonValue]).validate_python(
                 resolved.manifest.evidence[label_stage]
             )

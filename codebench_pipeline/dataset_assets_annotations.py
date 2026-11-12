@@ -11,24 +11,21 @@ from codebench_pipeline.dataframe_schemas import (
     ProposedAnnotationsTable,
 )
 from codebench_pipeline.dataset_asset_types import DATASET_PARTITIONS, TABLE_TYPES, rules_input, table_input
-from codebench_pipeline.dataset_branches import Branch, asset_path
 from codebench_pipeline.dataset_config import AnnotationConfig
 from codebench_pipeline.dataset_engine import cached_table
 from codebench_pipeline.dataset_tables import proposed_annotations as label_table
 
 
-def annotation_assets(branch: Branch = "dataset") -> list[AssetsDefinition]:
-    key_prefix = asset_path("proposed_annotations", branch)[:-1]
-
+def annotation_assets() -> list[AssetsDefinition]:
     @asset(
-        key_prefix=key_prefix,
+        key_prefix=["datasets"],
         group_name="dataset_building",
         partitions_def=DATASET_PARTITIONS,
         io_manager_key="dataset_io_manager",
         dagster_type=TABLE_TYPES[ProposedAnnotationsTable],
         ins={
-            "filtered_commands": table_input("filtered_commands", FilteredCommandsTable, branch),
-            "labeling_documentation": table_input("labeling_documentation", DocumentationTable, branch),
+            "filtered_commands": table_input("filtered_commands", FilteredCommandsTable),
+            "labeling_documentation": table_input("labeling_documentation", DocumentationTable),
             "category_rules": rules_input(),
         },
     )
