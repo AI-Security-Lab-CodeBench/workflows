@@ -1,5 +1,5 @@
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
@@ -7,7 +7,7 @@ import pandas as pd
 from dagster import AssetKey, AssetRecordsFilter, Config, DagsterInstance, build_input_context
 
 from codebench_pipeline.category_rules import CategoryRules
-from codebench_pipeline.dataframe_io import DataFrameIOManager
+from codebench_pipeline.dataframe_io import AssetReference, DataFrameIOManager
 from codebench_pipeline.dataframe_schemas import ProposedAnnotationsTable, validated_frame
 from codebench_pipeline.dataset_asset_types import DATASET_PARTITIONS
 from codebench_pipeline.dataset_branches import FINALIZATION_STAGES, Branch, stage_branch, stage_name
@@ -92,6 +92,7 @@ class BuildPlan:
     blocked: tuple[str, ...] = ()
     source_revision: str | None = None
     unconfigured: tuple[Branch, ...] = ()
+    references: dict[str, AssetReference] = field(default_factory=dict)
 
     @property
     def asset_selection(self) -> list[AssetKey]:
@@ -108,6 +109,7 @@ def plan_dataset(
     waiting_for: Literal["sources"] | None = None
     blocked: list[str] = []
     source_revision: str | None = None
+    references: dict[str, AssetReference] = {}
     branches: tuple[Branch, ...] = ("dataset", "documentation")
     unconfigured: tuple[Branch, ...] = tuple(
         branch
@@ -171,12 +173,13 @@ def plan_dataset(
                 asset_partitions_def=DATASET_PARTITIONS,
                 instance=instance,
             ) as context:
-                persisted = manager.load_input(context)
+                persisted = manager.read_current(context)
         except FileNotFoundError:
             selected[stage] = "stored_output_missing"
             continue
         if stage != "category_rules":
-            values[stage] = persisted
+            values[stage] = persisted.value
+        references[stage] = persisted.reference
         unchanged.append(stage)
     return BuildPlan(
         tuple(selected),
@@ -186,4 +189,5 @@ def plan_dataset(
         tuple(blocked),
         source_revision,
         unconfigured,
+        references,
     )
