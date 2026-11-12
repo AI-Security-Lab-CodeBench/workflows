@@ -29,8 +29,11 @@ class Operation:
     utility: str
     words: tuple[str, ...]
     arguments: tuple[str, ...] = ()
+    recognized: bool = True
 
     def matches(self, utility: str, subcommand: str) -> bool:
+        if subcommand == "<default>":
+            return self.utility == utility and self.recognized and not self.words and not self.arguments
         parts = tuple(subcommand.split())
         if len(parts) == 1 and parts[0].startswith("-"):
             return self.utility == utility and any(
@@ -67,8 +70,8 @@ def command_operations(identifier: str, utility: str, command: str) -> list[Oper
             if words and words[0].rsplit("/", 1)[-1] == utility:
                 operations.append(Operation(identifier, utility, tuple(words[1:]), tuple(segment[1:])))
     except ValueError:
-        return [Operation(identifier, utility, ())]
-    return operations or [Operation(identifier, utility, ())]
+        return [Operation(identifier, utility, (), recognized=False)]
+    return operations or [Operation(identifier, utility, (), recognized=False)]
 
 
 def coverage(operations: list[Operation], snippets: list[SemanticSnippet]) -> list[dict[str, JsonValue]]:

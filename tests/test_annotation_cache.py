@@ -9,11 +9,13 @@ from pathlib import Path
 from threading import Event, Lock
 from unittest.mock import patch
 
+from business_fixture import write_business
 from pydantic import JsonValue, TypeAdapter
 from test_dataset_annotation import config, documentation, native_response
 from test_dataset_rules import make_candidate, make_label, make_review, make_rules
 
 from codebench_pipeline.annotation_cache import AnnotationContextError, reviewer_cache_lock
+from codebench_pipeline.business_config import load_business_rules
 from codebench_pipeline.dataset_annotation import annotate, invocation_path, review
 from codebench_pipeline.dataset_records import CandidateRecord
 from codebench_pipeline.models import SemanticSnippet
@@ -135,6 +137,42 @@ class AnnotationCacheTests(unittest.TestCase):
         )
         self.assertEqual(self.calls, [("label", ("one",)), ("review", ("one",))])
 
+    def test_business_edits_invalidate_labels_but_unselected_examples_and_neighbors_reuse_receipts(self) -> None:
+        business = write_business(self.root / "business")
+        candidate = make_candidate("one")
+        cache = self.root / "cache"
+        rules = load_business_rules(business)
+        annotate([candidate], documentation(), rules, config(), self.root / "first", cache=cache)
+        receipt = (invocation_path(self.root / "first", "label", "one") / "receipt.json").read_bytes()
+        examples_file = business.parent / "examples.json"
+        examples = json.loads(examples_file.read_text())
+        examples[1]["examples"][0]["expected"]["rationale"] = "Changed unrelated example judgment."
+        examples_file.write_text(json.dumps(examples))
+        annotate(
+            [candidate, make_candidate("neighbor")], documentation(), load_business_rules(business),
+            config(), self.root / "neighbor", cache=cache,
+        )
+        self.assertEqual(self.calls, [("label", ("one",)), ("label", ("neighbor",))])
+        reused = invocation_path(self.root / "neighbor", "label", "one")
+        self.assertEqual((reused / "receipt.json").read_bytes(), receipt)
+        self.assertTrue(json.loads((reused / "reuse.json").read_text())["cache_hit"])
+        for index, file in enumerate((business.parent / "base.md", business.parent / "instructions.md")):
+            file.write_text(file.read_text() + "\nEdited business instructions.")
+            annotate(
+                [candidate], documentation(), load_business_rules(business), config(),
+                self.root / f"policy-{index}", cache=cache,
+            )
+        examples[0]["examples"][0]["expected"]["rationale"] = "Changed selected example judgment."
+        examples_file.write_text(json.dumps(examples))
+        annotate(
+            [candidate], documentation(), load_business_rules(business), config(),
+            self.root / "selected", cache=cache,
+        )
+        self.assertEqual(
+            self.calls,
+            [("label", ("one",)), ("label", ("neighbor",))] + [("label", ("one",))] * 3,
+        )
+
     def test_reviewer_packets_limit_actual_request_count_and_serialized_context(self) -> None:
         candidates = [make_candidate(str(index)) for index in range(5)]
         labels = [make_label(candidate, make_rules()) for candidate in candidates]
@@ -193,15 +231,16 @@ class AnnotationCacheTests(unittest.TestCase):
                 self.assertEqual(self.calls, [("review", expected)])
 
     def test_context_limit_splits_packets_and_rejects_oversized_record_without_truncating(self) -> None:
+        rules = make_rules().model_copy(update={"base_prompt": "Fixture labeling instructions."})
         candidates = [
             make_candidate(str(index)).model_copy(update={"context": "x" * 8000}) for index in range(3)
         ]
-        labels = [make_label(candidate, make_rules()) for candidate in candidates]
+        labels = [make_label(candidate, rules) for candidate in candidates]
         review(
             candidates,
             documentation(),
             labels,
-            make_rules(),
+            rules,
             config(),
             self.root / "bounded",
             batch_size=64,
@@ -216,8 +255,8 @@ class AnnotationCacheTests(unittest.TestCase):
             review(
                 [oversized],
                 documentation(),
-                [make_label(oversized, make_rules())],
-                make_rules(),
+                [make_label(oversized, rules)],
+                rules,
                 config(),
                 self.root / "oversized",
                 maximum_context_characters=15000,

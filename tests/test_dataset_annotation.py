@@ -128,7 +128,8 @@ class DatasetAnnotationTests(unittest.TestCase):
                     self.assertEqual(record["candidate"]["source_url"], candidates[0].source_url)
                     self.assertEqual(record["candidate"]["source_position"], candidates[0].source_position)
                 self.assertEqual(
-                    json.loads(stored["system"].rsplit("\n", 1)[1]), rules.model_dump(mode="json")
+                    json.loads(stored["system"].rsplit("\n", 1)[1]),
+                    rules.model_dump(mode="json", exclude={"policy", "base_prompt", "examples"}),
                 )
                 if path.parent.parent.name == "label":
                     self.assertEqual(set(payload), {"candidate", "documentation", "allowed_risk_ids"})
@@ -248,31 +249,24 @@ class DatasetAnnotationTests(unittest.TestCase):
             with self.subTest(change=change), self.assertRaises(ValidationError):
                 LabelDecision.model_validate({**label, **change})
 
-    def test_missing_documentation_can_be_explained_but_not_accepted(self) -> None:
+    def test_missing_documentation_fails_before_any_model_call(self) -> None:
         rules, candidate = make_rules(), make_candidate()
-        value = make_label(candidate, rules).model_dump(mode="json", by_alias=True)
-        value.update(
-            decision="needs_review", rationale="No subcommand documentation supplied.", documentation_urls=[]
-        )
         with tempfile.TemporaryDirectory() as temporary:
-            with patch("codebench_pipeline.inference.subprocess.run", return_value=native_response(value)):
-                labeled = annotate([candidate], [], rules, config(), Path(temporary))
-            self.assertEqual(labeled[0].decision, "needs_review")
-            self.assertEqual(labeled[0].documentation_urls, [])
+            with patch("codebench_pipeline.inference.subprocess.run") as process:
+                with self.assertRaisesRegex(ValueError, candidate.candidate_id):
+                    annotate([candidate], [], rules, config(), Path(temporary))
+            process.assert_not_called()
 
-    def test_missing_documentation_schema_prevents_acceptance_and_invented_citations(self) -> None:
-        rules, candidate = make_rules(), make_candidate()
-        base = make_label(candidate, rules).model_dump(mode="json", by_alias=True)
-        for decision, urls in (("accept", []), ("needs_review", ["https://example.org/invented"])):
-            value = TypeAdapter(dict[str, JsonValue]).validate_python(
-                {**base, "decision": decision, "documentation_urls": urls}
-            )
-            with self.subTest(decision=decision), tempfile.TemporaryDirectory() as temporary:
-                with patch(
-                    "codebench_pipeline.inference.subprocess.run", return_value=native_response(value)
-                ):
-                    with self.assertRaises(InferenceError):
-                        annotate([candidate], [], rules, config(), Path(temporary))
+    def test_undocumented_later_candidate_prevents_partial_label_inference(self) -> None:
+        candidates = [
+            make_candidate("documented"),
+            make_candidate("undocumented").model_copy(update={"command": "probe erase example"}),
+        ]
+        with tempfile.TemporaryDirectory() as temporary:
+            with patch("codebench_pipeline.inference.subprocess.run") as process:
+                with self.assertRaisesRegex(ValueError, "undocumented"):
+                    annotate(candidates, documentation(), make_rules(), config(), Path(temporary))
+            process.assert_not_called()
 
     def test_independent_review_keeps_disagreement_and_rejects_wrong_identity(self) -> None:
         rules, candidate = make_rules(), make_candidate()

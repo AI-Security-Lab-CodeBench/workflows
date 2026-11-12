@@ -3,7 +3,8 @@ from typing import Literal, assert_never
 
 from pydantic import ConfigDict, Field, field_validator, model_validator
 
-from codebench_pipeline.category_rules import CategoryRules
+from codebench_pipeline.business_config import DEFAULT_BASE_PROMPT, load_business_rules, read_prompt
+from codebench_pipeline.category_rules import CategoryRules, Text
 from codebench_pipeline.dataset_branches import Branch
 from codebench_pipeline.dataset_documentation_config import DocumentationConfig as DocumentationConfig
 from codebench_pipeline.dataset_seed_config import (
@@ -106,7 +107,8 @@ class PublicationConfig(StrictStageConfig):
 class DatasetFileConfig(StrictStageConfig):
     dataset_id: Identifier
     revision: str = Field(min_length=1)
-    rules: CategoryRules
+    rules: CategoryRules | None = None
+    business_config: Text | None = None
     models: ModelRoles
     seeds: DatasetSeeds
     documentation_sources: DatasetSeeds | None = None
@@ -122,9 +124,12 @@ class DatasetFileConfig(StrictStageConfig):
 
     @model_validator(mode="after")
     def matching_sources(self) -> "DatasetFileConfig":
+        if (self.rules is None) == (self.business_config is None):
+            raise ValueError("Choose exactly one of rules or business_config")
         for seeds in (self.seeds, self.documentation_sources):
             if (
                 seeds is not None
+                and self.rules is not None
                 and seeds.search_request is not None
                 and not {group.risk for group in seeds.search_request.searches}
                 <= {risk.id for risk in self.rules.risks}
@@ -143,6 +148,7 @@ class DatasetBuildSpec(StrictStageConfig):
     dataset_id: Identifier
     revision: str
     rules: CategoryRules
+    business_config: Text | None = None
     catalog: CatalogConfig
     snapshots: SnapshotConfig = SnapshotConfig()
     documentation_catalog: CatalogConfig | None = None
@@ -155,6 +161,13 @@ class DatasetBuildSpec(StrictStageConfig):
     review: ReviewConfig | None = None
     publication: PublicationConfig
     storage: StorageConfig
+
+    @field_validator("business_config")
+    @classmethod
+    def absolute_business_reference(cls, value: str | None) -> str | None:
+        if value is not None and not Path(value).is_absolute():
+            raise ValueError("Registered business_config must be an absolute path")
+        return value
 
 
 def catalog_for_branch(spec: DatasetBuildSpec, branch: Branch) -> CatalogConfig:
@@ -180,6 +193,15 @@ def snapshots_for_branch(spec: DatasetBuildSpec, branch: Branch) -> SnapshotConf
 def load_build_config(path: Path, home: Path | None = None) -> DatasetBuildSpec:
     supplied = DatasetFileConfig.model_validate_json(path.read_bytes())
     parent = path.resolve().parent
+    business_config = (
+        str((parent / supplied.business_config).resolve())
+        if supplied.business_config is not None else None
+    )
+    rules = (
+        load_business_rules(Path(business_config))
+        if business_config is not None else supplied.rules
+    )
+    assert rules is not None
     documents = [
         resolve_source_paths(document, parent)
         for document in supplied.seeds.documents
@@ -198,7 +220,8 @@ def load_build_config(path: Path, home: Path | None = None) -> DatasetBuildSpec:
     return resolve_business_inputs(DatasetBuildSpec(
         dataset_id=supplied.dataset_id,
         revision=supplied.revision,
-        rules=supplied.rules,
+        rules=rules,
+        business_config=business_config,
         catalog=CatalogConfig(
             collection_revision=supplied.seeds.revision,
             mode=supplied.seeds.mode,
@@ -248,6 +271,7 @@ def load_build_config(path: Path, home: Path | None = None) -> DatasetBuildSpec:
 
 
 def resolve_business_inputs(spec: DatasetBuildSpec) -> DatasetBuildSpec:
+    spec = resolve_labeling_inputs(spec)
     updates: dict[str, CatalogConfig | SnapshotConfig | DocumentationConfig] = {}
     for catalog_name, snapshot_name in (
         ("catalog", "snapshots"), ("documentation_catalog", "documentation_snapshots")
@@ -275,3 +299,13 @@ def resolve_business_inputs(spec: DatasetBuildSpec) -> DatasetBuildSpec:
             )}
         )
     return spec.model_copy(update=updates)
+
+
+def resolve_labeling_inputs(spec: DatasetBuildSpec) -> DatasetBuildSpec:
+    """Refresh labeling only; keep runtime configuration and collection inputs intact."""
+    rules = (
+        load_business_rules(Path(spec.business_config), spec.rules.category_id)
+        if spec.business_config is not None
+        else spec.rules.model_copy(update={"base_prompt": read_prompt(DEFAULT_BASE_PROMPT)})
+    )
+    return spec.model_copy(update={"rules": rules})

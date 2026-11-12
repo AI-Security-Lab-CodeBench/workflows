@@ -40,6 +40,10 @@ def main() -> None:
         else:
             sub.add_argument("--config", type=Path, required=True)
         sub.add_argument("--home", type=Path, default=DEFAULT_HOME)
+    bind = subcommands.add_parser("bind-business", help="Attach labeling policy to a registered dataset.")
+    bind.add_argument("--dataset", required=True)
+    bind.add_argument("--business-config", type=Path, required=True)
+    bind.add_argument("--home", type=Path, default=DEFAULT_HOME)
     ui = subcommands.add_parser("ui", help="Open the UI using the same home as dataset builds.")
     ui.add_argument("--home", type=Path, default=DEFAULT_HOME)
     ui.add_argument("--port", type=int, default=3000)
@@ -52,6 +56,10 @@ def main() -> None:
     show.add_argument("--limit", type=int, default=5)
     args = parser.parse_args()
     home = Path(args.home).resolve()
+    if args.action == "bind-business":
+        spec = DatasetRegistry(home).bind_business(str(args.dataset), Path(args.business_config))
+        print(json.dumps({"dataset": spec.dataset_id, "business_config": spec.business_config}))
+        return
     if args.action == "ui":
         launch_ui(home, int(args.port))
         return

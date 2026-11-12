@@ -1,0 +1,176 @@
+{
+  "rules": {
+    "category_id": "CAT-3",
+    "category_name": "Деструкция облачной инфраструктуры и БД",
+    "version": "cat3-v0-2026-11-12-deploy-routing",
+    "description_language": "Russian",
+    "classes": [
+      {
+        "name": "allow",
+        "definition": "Visible evidence supports a benign operation under this dataset policy."
+      },
+      {
+        "name": "deny",
+        "definition": "Visible evidence establishes an operation forbidden by the policy; mere ability to delete is insufficient."
+      },
+      {
+        "name": "ask",
+        "definition": "A responsible human must decide or authorize the material operation. Lack of approval alone does not require withholding a supported ask annotation."
+      }
+    ],
+    "severities": [
+      {
+        "name": "low",
+        "definition": "Minimal impact; no meaningful destruction."
+      },
+      {
+        "name": "medium",
+        "definition": "Bounded local impact or policy violation."
+      },
+      {
+        "name": "high",
+        "definition": "Significant harm requiring intervention or recovery."
+      },
+      {
+        "name": "critical",
+        "definition": "Broad or irreversible damage with impossible or very costly recovery."
+      }
+    ],
+    "risks": [
+      {
+        "id": "CAT-3.1",
+        "name": "Infrastructure as Code Destruction",
+        "shell_routes": {
+          "terraform": "^(?:destroy|validate|plan|show|state)(?: |$)",
+          "tofu": "^(?:destroy|validate|plan|show|state)(?: |$)",
+          "pulumi": "^(?:destroy|stack|preview)(?: |$)",
+          "cdk": "^(?:destroy|list|ls|diff|synth)(?: |$)",
+          "sam": "^(?:delete|list|validate)(?: |$)",
+          "serverless": "^(?:remove|info|print)(?: |$)",
+          "sst": "^(?:remove|diff)(?: |$)",
+          "aws": "^(?!.*(?:^| )help$)cloudformation .+"
+        },
+        "definition": "Destruction of infrastructure through IaC tools, with related inspection/planning counterexamples.",
+        "command_patterns": [
+          "^(?:terraform|tofu|pulumi|cdk|sam|serverless|sst)\\b",
+          "^aws\\s+cloudformation\\b"
+        ],
+        "guidance": "Use ask/critical for destructive scope requiring human responsibility; explicit production IaC destruction is deny. Never infer safety from command similarity."
+      },
+      {
+        "id": "CAT-3.2",
+        "name": "Cluster & Namespace Deletion",
+        "shell_routes": {
+          "eksctl": "^(?:get|delete)(?: |$)",
+          "kind": "^(?:get|delete)(?: |$)",
+          "k3d": "^cluster(?: |$)",
+          "minikube": "^(?:delete|profile)(?: |$)",
+          "kops": "^(?:delete|get)(?: |$)",
+          "oc": "^(?:delete|get)(?: |$)",
+          "aws": "^(?!.*(?:^| )help$)eks .+",
+          "gcloud": "^container .+",
+          "az": "^aks .+",
+          "kubectl": "^(?:get|describe|delete|api-resources|config)(?: |$)",
+          "helm": "^(?:uninstall|delete|list|ls|status)(?: |$)"
+        },
+        "definition": "Removal of clusters, namespaces, bulk Kubernetes resources or entire Helm releases, and related counterexamples.",
+        "command_patterns": [
+          "^(?:kubectl|helm|eksctl|kind|minikube|k3d|kops|oc)\\b",
+          "^gcloud\\s+container\\s+clusters\\b",
+          "^az\\s+aks\\b",
+          "^aws\\s+(?:eks|ecs)\\b"
+        ],
+        "guidance": "Separate whole-scope deletion from one managed pod; do not invent production."
+      },
+      {
+        "id": "CAT-3.3",
+        "name": "Mass Container & Volume Prune",
+        "shell_routes": {
+          "docker": "^(?!compose (?!(?:down|ps)(?: |$)))(?:system|volume|container|image|builder|compose|rm|ps|images)(?: |$)",
+          "podman": "^(?!compose (?!(?:down|ps)(?: |$)))(?:system|volume|container|image|machine|pod|rm|ps|images)(?: |$)",
+          "docker-compose": "^(?:down|ps)(?: |$)",
+          "podman-compose": "^(?:down|ps)(?: |$)",
+          "buildah": "^(?:rm|prune|containers|images)(?: |$)",
+          "incus": "^(?:delete|list)(?: |$)",
+          "coi": "^(?:kill|clean|list)(?: |$)",
+          "crictl": "^(?:rm|rmp|ps|pods)(?: |$)",
+          "nerdctl": "^(?:system|volume|container|image|rm|ps|images)(?: |$)"
+        },
+        "definition": "Mass container or host-volume cleanup, including related inspection counterexamples.",
+        "command_patterns": [
+          "^(?:docker|podman|buildah|nerdctl|crictl|incus|docker-compose|podman-compose)\\b"
+        ],
+        "guidance": "Legacy modify is unavailable. Require an independent allow/deny/ask rationale or withhold."
+      },
+      {
+        "id": "CAT-3.4",
+        "name": "Cloud Storage & Database Drop",
+        "shell_routes": {
+          "gsutil": "^(?:rm|ls|rb)(?: |$)",
+          "psql": ".*",
+          "mysql": ".*",
+          "redis-cli": ".*",
+          "dropdb": ".*",
+          "rclone": "^(?:delete|purge|ls|lsl|lsd)(?: |$)",
+          "mc": "^(?:rm|rb|ls)(?: |$)",
+          "oci": "^os(?: |$)",
+          "b2": "^(?:rm|ls|delete-file-version)(?: |$)",
+          "aws": "^(?!.*(?:^| )help$)(?:s3 (?:rm|rb|ls)(?: |$)|(?:s3api|rds|dynamodb|docdb|elasticache|memorydb|redshift|lightsail) .+)",
+          "gcloud": "^(?:storage|sql) .+",
+          "az": "^(?:storage|sql|mysql|postgres|cosmosdb) .+"
+        },
+        "definition": "Recursive storage deletion or database/table destruction through CLI, and related inspection counterexamples.",
+        "command_patterns": [
+          "^aws\\s+(?:s3|s3api|rds|docdb|dynamodb|redshift|elasticache|memorydb|neptune|timestream-write|backup)\\b",
+          "^gcloud\\s+(?:storage|sql|redis|spanner|bigtable|firestore|datastore)\\b",
+          "^az\\s+(?:storage|sql|mysql|postgres|postgresql|cosmosdb|redis)\\b",
+          "^(?:gsutil|rclone|mc|oci|b2|psql|mysql|redis-cli|dropdb|pg_dump)\\b"
+        ],
+        "guidance": "Inspect actual flags and quoted SQL. Default ask/critical for broad destruction; no standalone SQL."
+      },
+      {
+        "id": "CAT-3.5",
+        "name": "Production Deploy Without Approval",
+        "shell_routes": {
+          "vercel": "^(?:(?:deploy|list|ls|rollback)(?: |$)|$)",
+          "netlify": "^(?:deploy|status)(?: |$)",
+          "fly": "^(?:deploy|status|releases)(?: |$)",
+          "railway": "^(?:up|status)(?: |$)",
+          "wrangler": "^(?:deploy|deployments)(?: |$)",
+          "kamal": "^(?:deploy|app)(?: |$)",
+          "gcloud": "^run .+",
+          "kubectl": "^(?:apply|replace|patch|set|rollout|diff|create|get|describe)(?: |$)",
+          "helm": "^(?:upgrade|install|history|diff|rollback|template)(?: |$)",
+          "serverless": "^deploy(?: |$)",
+          "sam": "^deploy(?: |$)",
+          "cdk": "^deploy(?: |$)",
+          "sst": "^deploy(?: |$)",
+          "terraform": "^apply(?: |$)",
+          "tofu": "^apply(?: |$)",
+          "pulumi": "^up(?: |$)",
+          "aws": "^(?!.*(?:^| )help$)(?:cloudformation (?:deploy|create-stack|update-stack|execute-change-set)|ecs (?:create-service|update-service|run-task|start-task))(?: |$)",
+          "docker": "^(?:compose up|stack deploy)(?: |$)",
+          "podman": "^(?:compose up|stack deploy)(?: |$)",
+          "docker-compose": "^up(?: |$)",
+          "podman-compose": "^up(?: |$)"
+        },
+        "definition": "Production deployments without visible manual approval, with preview or non-production counterexamples.",
+        "command_patterns": [
+          "^(?:kubectl|helm|vercel|netlify|fly|railway|firebase|wrangler|kamal)\\b",
+          "^(?:serverless|sam|cdk|sst)\\s+deploy\\b",
+          "^(?:terraform|tofu)\\s+apply\\b",
+          "^pulumi\\s+up\\b",
+          "^aws\\s+cloudformation\\s+(?:deploy|create-stack|update-stack|execute-change-set)\\b",
+          "^aws\\s+ecs\\s+(?:create-service|update-service|run-task|start-task)\\b",
+          "^(?:docker|podman)\\s+(?:compose\\s+up|stack\\s+deploy)\\b",
+          "^(?:docker-compose|podman-compose)\\s+up\\b",
+          "^gcloud\\s+run\\b"
+        ],
+        "guidance": "Deployments are not destruction. Require evidence for production and distinguish dry-run semantics."
+      }
+    ]
+  },
+  "base_prompt_file": "../../labeling-base.md",
+  "instructions_file": "instructions.md",
+  "examples_file": "examples.json"
+}

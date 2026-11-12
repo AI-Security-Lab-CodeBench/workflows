@@ -83,7 +83,13 @@ def implementation_inputs(stage: Stage) -> dict[str, str]:
     if stage == "export":
         paths += [package / "schemas.py", package / "reporting.py"]
     if stage in {"label_packets", "review_packets"}:
-        paths += [repo / "docs/labeling-policy.md"]
+        from scripts.category_config import business_paths
+
+        paths += list(business_paths())
+    if stage not in {"source_snapshot", "adapter", "semantic_evidence"}:
+        from scripts.category_config import DEFAULT_CATEGORY_CONFIG
+
+        paths += [repo / "scripts/category_config.py", DEFAULT_CATEGORY_CONFIG]
     if (repo / "uv.lock").exists():
         paths += [repo / "uv.lock", repo / "pyproject.toml"]
     return {str(path.relative_to(repo)): digest(path) for path in paths if path.exists()}

@@ -4,15 +4,25 @@ import re
 import shlex
 from pathlib import Path
 
+from category_config import load_labeling_prompt
 from command_filter import command_words
+from label_inputs import SEMANTICS_FIELDS as SEMANTICS_FIELDS
+from label_inputs import load_inputs as load_inputs
+from label_inputs import validate_semantics
 from label_io import digest, indexed, read_json, require, timestamp
-from label_inputs import SEMANTICS_FIELDS, load_inputs, validate_semantics
-
 from validate_dataset import (
-    CANDIDATE_FIELDS, CATEGORY, FIELDS, RISKS, SOURCE_FIELDS, DatasetError,
-    contains_secret, load_jsonl, present, string_list, web_url,
+    CANDIDATE_FIELDS,
+    CATEGORY,
+    RISKS,
+    SOURCE_FIELDS,
+    present,
+    string_list,
+    web_url,
 )
-
+from validate_dataset import FIELDS as FIELDS
+from validate_dataset import DatasetError as DatasetError
+from validate_dataset import contains_secret as contains_secret
+from validate_dataset import load_jsonl as load_jsonl
 
 CONFIDENCES = tuple(f"{field}_confidence" for field in ("category", "risk", "severity", "class"))
 LABEL_FIELDS = (
@@ -22,7 +32,6 @@ LABEL_FIELDS = (
 FACT_FIELDS = tuple(field for field in CANDIDATE_FIELDS if field not in {
     "row", "status", "label_rationale", "role", "scenario_id", "paired_candidate_ids",
 })
-POLICY_PATH = Path(__file__).resolve().parent.parent / "docs/labeling-policy.md"
 
 
 def utility_matches(candidate, proposed):
@@ -88,7 +97,9 @@ def make_packet(stage, ids, payload, system_prompt=None, schema=None):
     schema = response_schema(stage, ids, urls) if schema is None else schema
     packet = {"stage": stage, "candidate_ids": ids, "input": payload,
               "response_schema": schema,
-              "system_prompt": system_prompt if system_prompt is not None else POLICY_PATH.read_text(encoding="utf-8"),
+              "system_prompt": system_prompt if system_prompt is not None else load_labeling_prompt(
+                  [item["row"]["command"] for item in payload["candidates"]] if stage == "label" else []
+              ),
               "prompt": instruction + "\nReturn exactly one result for each TARGET_CANDIDATE_ID below. "
                         "Assess each record independently; linking and deduplication are deferred. "
                         "Give a rationale of at most 400 characters. For a withheld label, name the "

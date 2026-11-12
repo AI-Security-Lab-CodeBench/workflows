@@ -36,6 +36,7 @@ def code_versions() -> dict[str, str]:
         package / "documentation_authorization.py",
         package / "typed_config.py",
         package / "category_rules.py",
+        package / "business_config.py",
         package / "model_config.py",
         package / "inference.py",
         package / "models.py",

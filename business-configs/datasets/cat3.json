@@ -1,0 +1,43 @@
+{
+  "dataset_id": "cloud_infrastructure_commands",
+  "revision": "manifest-inputs-20261112-v2",
+  "models": {
+    "labeler": {
+      "provider": "native",
+      "model": "chatgpt-subscription/gpt-6-luna",
+      "timeout_seconds": 900
+    }
+  },
+  "seeds": {
+    "mode": "provided_sources",
+    "revision": "full-corpora-v1",
+    "manifest": "../inputs/cat3/datasets.json"
+  },
+  "documentation_sources": {
+    "mode": "provided_sources",
+    "revision": "full-documents-v1",
+    "manifest": "../inputs/cat3/documentation-sources.json"
+  },
+  "snapshot_maximum_bytes": 10485760,
+  "adapters": "provided",
+  "adapter_sample_characters": 8000,
+  "extraction": {
+    "context_characters": 100
+  },
+  "filtering": {
+    "maximum_command_characters": 32768,
+    "quarantine_dynamic_shell": true
+  },
+  "documentation": {
+    "mode": "provided_snippets",
+    "revision": "full-semantics-v1",
+    "manifest": "../inputs/cat3/semantics.json",
+    "maximum_bytes": 10485760
+  },
+  "publication": {
+    "limit_per_risk": 250
+  },
+  "storage": null,
+  "labeling_workers": 4,
+  "business_config": "../categories/cat3/category.json"
+}

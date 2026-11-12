@@ -7,7 +7,7 @@ from codebench_pipeline.data_views import DatasetDataService
 from codebench_pipeline.dataset_branches import FINALIZATION_STAGES, Branch, stage_branch
 from codebench_pipeline.dataset_plan import plan_dataset
 from codebench_pipeline.dataset_registry import DatasetRegistry
-from codebench_pipeline.definitions import build_definitions
+from codebench_pipeline.definitions import build_definitions, dataset_run_config
 from codebench_pipeline.human_review_store import HumanReviewStore
 from codebench_pipeline.release_runner import ReleaseRunner
 from codebench_pipeline.review_snapshots import ReviewSnapshots
@@ -67,7 +67,10 @@ def run_registered(dataset_id: str, home: Path) -> BuildOutcome:
         if plan.selected:
             job = build_definitions(home).resolve_job_def("build_dataset")
             result = job.execute_in_process(
-                instance=instance, partition_key=spec.dataset_id, asset_selection=plan.asset_selection
+                instance=instance,
+                partition_key=spec.dataset_id,
+                asset_selection=plan.asset_selection,
+                run_config=dataset_run_config(spec, home),
             )
             if not result.success:
                 raise RuntimeError(f"Dataset job failed: {result.run_id}")

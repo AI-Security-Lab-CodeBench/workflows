@@ -80,10 +80,10 @@ binds the unmodified original candidate (including omitted fields) for drift
 detection without exposing those verdicts.
 
 Each fresh invocation receives `packet["system_prompt"]` as its actual system
-message and `packet["prompt"]` as user input. The versioned
-[`labeling-policy.md`](labeling-policy.md) incorporates the user's Google
-guideline and local contracts, with the user's current-stage overrides; the
-packet hash binds its exact text. All applicable rules are inline. Agents are
+message and `packet["prompt"]` as user input. The editable sources are the generic
+base and category policy under `business-configs/`; see
+[`labeling-policy.md`](labeling-policy.md) for their editing workflow. The
+packet hash binds the compiled instruction text. All applicable rules are inline. Agents are
 not expected to load a file or follow a URL to discover instructions. Independent
 review inherits the exact policy snapshot used for its label packet.
 

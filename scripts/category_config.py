@@ -8,7 +8,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Final, TypeAlias
 
-DEFAULT_CATEGORY_CONFIG: Final = Path(__file__).resolve().parents[1] / "configs/datasets/cat3.json"
+DEFAULT_CATEGORY_CONFIG: Final = (
+    Path(__file__).resolve().parents[1] / "business-configs/categories/cat3/category.json"
+)
 JsonValue: TypeAlias = str | int | float | bool | None | list["JsonValue"] | dict[str, "JsonValue"]
 
 
@@ -63,11 +65,59 @@ class CategoryConfigError(ValueError):
     pass
 
 
-def load_taxonomy(path: Path = DEFAULT_CATEGORY_CONFIG) -> Taxonomy:
-    """Read category-owned rules from the same initial JSON used by dataset builds."""
+def category_document(path: Path) -> tuple[Path, dict[str, JsonValue]]:
     document: JsonValue = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(document, dict):
         raise CategoryConfigError("Expected an initial category configuration")
+    reference = document.get("business_config")
+    if reference is not None:
+        if document.get("rules") is not None or not isinstance(reference, str) or not reference.strip():
+            raise CategoryConfigError("Choose exactly one of rules or business_config")
+        return category_document((path.parent / reference).resolve())
+    return path, document
+
+
+def business_paths(path: Path = DEFAULT_CATEGORY_CONFIG) -> tuple[Path, ...]:
+    path, document = category_document(path)
+    paths = [path]
+    for field in ("base_prompt_file", "instructions_file", "examples_file"):
+        reference = document.get(field)
+        if not isinstance(reference, str) or not reference.strip():
+            raise CategoryConfigError(f"Missing business file reference: {field}")
+        paths.append((path.parent / reference).resolve())
+    return tuple(paths)
+
+
+def load_labeling_prompt(commands: list[str], path: Path = DEFAULT_CATEGORY_CONFIG) -> str:
+    path, document = category_document(path)
+    _, base, instructions, examples_path = business_paths(path)
+    texts = [file.read_text(encoding="utf-8") for file in (base, instructions)]
+    if any(not text.strip() for text in texts):
+        raise CategoryConfigError("Empty labeling instructions")
+    taxonomy = load_taxonomy(path)
+    allowed = {
+        risk.id for risk in taxonomy.risks
+        if any(re.search(pattern, command) for pattern in risk.patterns for command in commands)
+    }
+    examples: JsonValue = json.loads(examples_path.read_text(encoding="utf-8"))
+    if not isinstance(examples, list):
+        raise CategoryConfigError("Expected example families")
+    selected = []
+    for family in examples:
+        if not isinstance(family, dict) or not isinstance(family.get("risk_id"), str):
+            raise CategoryConfigError("Invalid example family")
+        if family["risk_id"] in allowed:
+            selected.append(family)
+    return "\n\n".join([
+        *texts,
+        json.dumps(document["rules"], ensure_ascii=False, allow_nan=False),
+        json.dumps({"examples": selected}, ensure_ascii=False, allow_nan=False),
+    ])
+
+
+def load_taxonomy(path: Path = DEFAULT_CATEGORY_CONFIG) -> Taxonomy:
+    """Read category-owned taxonomy without opening collection source manifests."""
+    _, document = category_document(path)
     rules = document.get("rules")
     if not isinstance(rules, dict):
         raise CategoryConfigError("Missing category rules")

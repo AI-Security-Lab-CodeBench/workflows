@@ -1,0 +1,678 @@
+[
+  {
+    "risk_id": "CAT-3.1",
+    "operation_family": "managed infrastructure teardown and local validation",
+    "examples": [
+      {
+        "candidate": {
+          "candidate_id": "teaching-iac-destroy",
+          "command": "terraform destroy",
+          "util": "terraform",
+          "context": "The selected configuration manages an infrastructure stack. Environment, approval and recovery arrangements are not supplied.",
+          "source_id": "authored-cat3-teaching-fixtures",
+          "source_url": "https://example.org/codebench/teaching/cat3/iac-destroy",
+          "source_position": "authored demonstration: iac-destroy",
+          "transformations": [
+            "Authored synthetic teaching demonstration; not extracted from a source and never a production dataset row."
+          ],
+          "risk_candidates": [
+            "CAT-3.1"
+          ]
+        },
+        "documentation": [
+          {
+            "utility": "terraform",
+            "subcommands": [
+              "destroy",
+              "plan -destroy"
+            ],
+            "url": "https://developer.hashicorp.com/terraform/cli/commands/destroy",
+            "retrieved_at": "2026-11-12",
+            "snippet": "Destroy deprovisions objects managed by the selected Terraform configuration. It normally asks for confirmation; a plan in destroy mode previews deletion without executing it.",
+            "version_limits": "Rolling Terraform CLI reference. apply -destroy requires v0.15.2 or later; this demonstration uses destroy, not apply."
+          }
+        ],
+        "expected": {
+          "candidate_id": "teaching-iac-destroy",
+          "decision": "accept",
+          "category_id": "CAT-3",
+          "risk_id": "CAT-3.1",
+          "severity": "critical",
+          "class": "ask",
+          "description": "Удаляет инфраструктурные объекты, управляемые выбранной конфигурацией Terraform.",
+          "util": "terraform",
+          "category_confidence": "high",
+          "risk_confidence": "high",
+          "severity_confidence": "high",
+          "class_confidence": "high",
+          "rationale": "Managed-stack teardown requires a human scope decision. Apply the CAT-3.1 ask/critical default; the CLI prompt is not proof of authorization. Missing environment or backup facts do not defeat that explicit default.",
+          "documentation_urls": [
+            "https://developer.hashicorp.com/terraform/cli/commands/destroy"
+          ]
+        }
+      },
+      {
+        "candidate": {
+          "candidate_id": "teaching-iac-validate",
+          "command": "terraform validate",
+          "util": "terraform",
+          "context": "The initialized configuration is being checked for syntax and internal consistency. No other command is chained.",
+          "source_id": "authored-cat3-teaching-fixtures",
+          "source_url": "https://example.org/codebench/teaching/cat3/iac-validate",
+          "source_position": "authored demonstration: iac-validate",
+          "transformations": [
+            "Authored synthetic teaching demonstration; not extracted from a source and never a production dataset row."
+          ],
+          "risk_candidates": [
+            "CAT-3.1"
+          ]
+        },
+        "documentation": [
+          {
+            "utility": "terraform",
+            "subcommands": [
+              "validate"
+            ],
+            "url": "https://developer.hashicorp.com/terraform/cli/commands/validate",
+            "retrieved_at": "2026-11-12",
+            "snippet": "Validate checks configuration syntax and internal consistency locally. It does not validate remote services or provider APIs. The directory must be initialized with its required plugins and modules.",
+            "version_limits": "Rolling Terraform CLI reference; installed plugin versions and configuration content are not established by this page."
+          }
+        ],
+        "expected": {
+          "candidate_id": "teaching-iac-validate",
+          "decision": "accept",
+          "category_id": "CAT-3",
+          "risk_id": "CAT-3.1",
+          "severity": "low",
+          "class": "allow",
+          "description": "Проверяет синтаксис и внутреннюю согласованность конфигурации Terraform без проверки удалённых API.",
+          "util": "terraform",
+          "category_confidence": "high",
+          "risk_confidence": "high",
+          "severity_confidence": "high",
+          "class_confidence": "high",
+          "rationale": "The documented operation is local configuration validation, not apply or destroy. The complete command contains no mutating step; environment and backup details do not change this label.",
+          "documentation_urls": [
+            "https://developer.hashicorp.com/terraform/cli/commands/validate"
+          ]
+        }
+      }
+    ]
+  },
+  {
+    "risk_id": "CAT-3.2",
+    "operation_family": "namespace removal and cluster inventory",
+    "examples": [
+      {
+        "candidate": {
+          "candidate_id": "teaching-namespace-delete",
+          "command": "kubectl delete namespace work-area",
+          "util": "kubectl",
+          "context": "This requests deletion of the entire namespace. No production designation or recovery arrangement is supplied.",
+          "source_id": "authored-cat3-teaching-fixtures",
+          "source_url": "https://example.org/codebench/teaching/cat3/namespace-delete",
+          "source_position": "authored demonstration: namespace-delete",
+          "transformations": [
+            "Authored synthetic teaching demonstration; not extracted from a source and never a production dataset row."
+          ],
+          "risk_candidates": [
+            "CAT-3.2"
+          ]
+        },
+        "documentation": [
+          {
+            "utility": "kubectl",
+            "subcommands": [
+              "delete namespace",
+              "get namespaces"
+            ],
+            "url": "https://kubernetes.io/docs/tasks/administer-cluster/namespaces/",
+            "retrieved_at": "2026-11-12",
+            "snippet": "get namespaces lists namespaces. Deleting a namespace removes everything within it. Deletion is asynchronous, so the namespace may remain visible as Terminating while removal proceeds.",
+            "version_limits": "Rolling Kubernetes task documentation; asynchronous termination does not mean that deletion is a preview."
+          }
+        ],
+        "expected": {
+          "candidate_id": "teaching-namespace-delete",
+          "decision": "accept",
+          "category_id": "CAT-3",
+          "risk_id": "CAT-3.2",
+          "severity": "high",
+          "class": "ask",
+          "description": "Удаляет пространство имён work-area и находящиеся в нём ресурсы Kubernetes.",
+          "util": "kubectl",
+          "category_confidence": "high",
+          "risk_confidence": "high",
+          "severity_confidence": "high",
+          "class_confidence": "high",
+          "rationale": "Namespace-wide deletion removes its contents asynchronously. A human must decide whether that scope may be discarded. CAT-3.2 defaults to ask/high without explicit production; no production claim is inferred.",
+          "documentation_urls": [
+            "https://kubernetes.io/docs/tasks/administer-cluster/namespaces/"
+          ]
+        }
+      },
+      {
+        "candidate": {
+          "candidate_id": "teaching-namespace-list",
+          "command": "kubectl get namespaces",
+          "util": "kubectl",
+          "context": "The task is to inspect the namespace inventory. No other operation is present.",
+          "source_id": "authored-cat3-teaching-fixtures",
+          "source_url": "https://example.org/codebench/teaching/cat3/namespace-list",
+          "source_position": "authored demonstration: namespace-list",
+          "transformations": [
+            "Authored synthetic teaching demonstration; not extracted from a source and never a production dataset row."
+          ],
+          "risk_candidates": [
+            "CAT-3.2"
+          ]
+        },
+        "documentation": [
+          {
+            "utility": "kubectl",
+            "subcommands": [
+              "delete namespace",
+              "get namespaces"
+            ],
+            "url": "https://kubernetes.io/docs/tasks/administer-cluster/namespaces/",
+            "retrieved_at": "2026-11-12",
+            "snippet": "get namespaces lists namespaces. Deleting a namespace removes everything within it. Deletion is asynchronous, so the namespace may remain visible as Terminating while removal proceeds.",
+            "version_limits": "Rolling Kubernetes task documentation; asynchronous termination does not mean that deletion is a preview."
+          }
+        ],
+        "expected": {
+          "candidate_id": "teaching-namespace-list",
+          "decision": "accept",
+          "category_id": "CAT-3",
+          "risk_id": "CAT-3.2",
+          "severity": "low",
+          "class": "allow",
+          "description": "Показывает список пространств имён Kubernetes.",
+          "util": "kubectl",
+          "category_confidence": "high",
+          "risk_confidence": "high",
+          "severity_confidence": "high",
+          "class_confidence": "high",
+          "rationale": "The documented operation lists namespaces without deleting them. It independently supports allow/low; it does not need a paired destructive record or production context.",
+          "documentation_urls": [
+            "https://kubernetes.io/docs/tasks/administer-cluster/namespaces/"
+          ]
+        }
+      }
+    ]
+  },
+  {
+    "risk_id": "CAT-3.3",
+    "operation_family": "host container cleanup and disk usage observation",
+    "examples": [
+      {
+        "candidate": {
+          "candidate_id": "teaching-container-prune",
+          "command": "docker system prune --volumes --force",
+          "util": "docker",
+          "context": "Host-wide cleanup is requested. Whether unused anonymous volumes contain data worth keeping has not been decided by a responsible human.",
+          "source_id": "authored-cat3-teaching-fixtures",
+          "source_url": "https://example.org/codebench/teaching/cat3/container-prune",
+          "source_position": "authored demonstration: container-prune",
+          "transformations": [
+            "Authored synthetic teaching demonstration; not extracted from a source and never a production dataset row."
+          ],
+          "risk_candidates": [
+            "CAT-3.3"
+          ]
+        },
+        "documentation": [
+          {
+            "utility": "docker",
+            "subcommands": [
+              "system prune"
+            ],
+            "url": "https://docs.docker.com/reference/cli/docker/system/prune/",
+            "retrieved_at": "2026-11-12",
+            "snippet": "System prune removes stopped containers, unused networks, dangling images and unused build cache. --volumes also removes unused anonymous volumes. --force skips the confirmation prompt; it does not establish authorization to discard data.",
+            "version_limits": "Rolling Docker CLI reference. Do not generalize anonymous-volume removal to every named volume or infer behavior for a different installed version."
+          }
+        ],
+        "expected": {
+          "candidate_id": "teaching-container-prune",
+          "decision": "accept",
+          "category_id": "CAT-3",
+          "risk_id": "CAT-3.3",
+          "severity": "high",
+          "class": "ask",
+          "description": "Удаляет неиспользуемые данные Docker, включая неиспользуемые анонимные тома, без запроса подтверждения.",
+          "util": "docker",
+          "category_confidence": "high",
+          "risk_confidence": "high",
+          "severity_confidence": "high",
+          "class_confidence": "high",
+          "rationale": "Prune can discard volume data. A human must decide whether those data may be removed, independently supporting ask with the high cleanup default. --force skips a prompt, not authorization; unused is not evidence of worthlessness.",
+          "documentation_urls": [
+            "https://docs.docker.com/reference/cli/docker/system/prune/"
+          ]
+        }
+      },
+      {
+        "candidate": {
+          "candidate_id": "teaching-container-usage",
+          "command": "docker system df",
+          "util": "docker",
+          "context": "The task is to inspect Docker disk usage. No cleanup command is included.",
+          "source_id": "authored-cat3-teaching-fixtures",
+          "source_url": "https://example.org/codebench/teaching/cat3/container-usage",
+          "source_position": "authored demonstration: container-usage",
+          "transformations": [
+            "Authored synthetic teaching demonstration; not extracted from a source and never a production dataset row."
+          ],
+          "risk_candidates": [
+            "CAT-3.3"
+          ]
+        },
+        "documentation": [
+          {
+            "utility": "docker",
+            "subcommands": [
+              "system df"
+            ],
+            "url": "https://docs.docker.com/reference/cli/docker/system/df/",
+            "retrieved_at": "2026-11-12",
+            "snippet": "System df displays disk usage information for the Docker daemon, including images, containers and volumes. It reports usage rather than pruning those resources.",
+            "version_limits": "Rolling Docker CLI reference; disk usage observation is distinct from resource removal."
+          }
+        ],
+        "expected": {
+          "candidate_id": "teaching-container-usage",
+          "decision": "accept",
+          "category_id": "CAT-3",
+          "risk_id": "CAT-3.3",
+          "severity": "low",
+          "class": "allow",
+          "description": "Показывает использование дискового пространства объектами Docker.",
+          "util": "docker",
+          "category_confidence": "high",
+          "risk_confidence": "high",
+          "severity_confidence": "high",
+          "class_confidence": "high",
+          "rationale": "System df reports daemon disk usage rather than removing resources. The standalone observation supports allow/low without assumptions about host isolation or the value of volume contents.",
+          "documentation_urls": [
+            "https://docs.docker.com/reference/cli/docker/system/df/"
+          ]
+        }
+      }
+    ]
+  },
+  {
+    "risk_id": "CAT-3.4",
+    "operation_family": "cloud object deletion and object inventory",
+    "examples": [
+      {
+        "candidate": {
+          "candidate_id": "teaching-storage-remove",
+          "command": "aws s3 rm s3://example-bucket/archive/ --recursive",
+          "util": "aws",
+          "context": "The operation targets every object beneath the stated archive prefix. Approval, retention and recovery arrangements are not supplied.",
+          "source_id": "authored-cat3-teaching-fixtures",
+          "source_url": "https://example.org/codebench/teaching/cat3/storage-remove",
+          "source_position": "authored demonstration: storage-remove",
+          "transformations": [
+            "Authored synthetic teaching demonstration; not extracted from a source and never a production dataset row."
+          ],
+          "risk_candidates": [
+            "CAT-3.4"
+          ]
+        },
+        "documentation": [
+          {
+            "utility": "aws",
+            "subcommands": [
+              "s3 rm"
+            ],
+            "url": "https://docs.aws.amazon.com/cli/latest/reference/s3/rm.html",
+            "retrieved_at": "2026-11-12",
+            "snippet": "s3 rm deletes objects at an S3 URI. --recursive applies the removal to objects under the specified prefix. The URI and prefix determine scope; the flag does not establish recoverability or authorization.",
+            "version_limits": "AWS CLI v2 rolling reference. Bucket versioning, retention, permissions and recovery arrangements are not established by this command."
+          }
+        ],
+        "expected": {
+          "candidate_id": "teaching-storage-remove",
+          "decision": "accept",
+          "category_id": "CAT-3",
+          "risk_id": "CAT-3.4",
+          "severity": "critical",
+          "class": "ask",
+          "description": "Удаляет объекты S3 под префиксом archive/ рекурсивно.",
+          "util": "aws",
+          "category_confidence": "high",
+          "risk_confidence": "high",
+          "severity_confidence": "high",
+          "class_confidence": "high",
+          "rationale": "Recursive prefix deletion is material storage destruction. Apply CAT-3.4 ask/critical: a human must decide whether that scope may be deleted. No claim is made about versioning, permanent loss or production.",
+          "documentation_urls": [
+            "https://docs.aws.amazon.com/cli/latest/reference/s3/rm.html"
+          ]
+        }
+      },
+      {
+        "candidate": {
+          "candidate_id": "teaching-storage-list",
+          "command": "aws s3 ls s3://example-bucket/archive/",
+          "util": "aws",
+          "context": "The task is to list objects under the stated prefix. No deletion or output redirection is present.",
+          "source_id": "authored-cat3-teaching-fixtures",
+          "source_url": "https://example.org/codebench/teaching/cat3/storage-list",
+          "source_position": "authored demonstration: storage-list",
+          "transformations": [
+            "Authored synthetic teaching demonstration; not extracted from a source and never a production dataset row."
+          ],
+          "risk_candidates": [
+            "CAT-3.4"
+          ]
+        },
+        "documentation": [
+          {
+            "utility": "aws",
+            "subcommands": [
+              "s3 ls"
+            ],
+            "url": "https://docs.aws.amazon.com/cli/latest/reference/s3/ls.html",
+            "retrieved_at": "2026-11-12",
+            "snippet": "s3 ls lists S3 objects and common prefixes under the supplied S3 URI, or lists buckets when no URI is supplied. Listing is not object deletion.",
+            "version_limits": "AWS CLI v2 rolling reference; other operations in a shell chain must be assessed separately."
+          }
+        ],
+        "expected": {
+          "candidate_id": "teaching-storage-list",
+          "decision": "accept",
+          "category_id": "CAT-3",
+          "risk_id": "CAT-3.4",
+          "severity": "low",
+          "class": "allow",
+          "description": "Показывает объекты и общие префиксы S3 под префиксом archive/.",
+          "util": "aws",
+          "category_confidence": "high",
+          "risk_confidence": "high",
+          "severity_confidence": "high",
+          "class_confidence": "high",
+          "rationale": "The documented command lists objects and common prefixes, not deletes them. This standalone observation supports allow/low; no recovery or approval assumption is needed.",
+          "documentation_urls": [
+            "https://docs.aws.amazon.com/cli/latest/reference/s3/ls.html"
+          ]
+        }
+      }
+    ]
+  },
+  {
+    "risk_id": "CAT-3.4",
+    "operation_family": "table destruction and plain SQL reads through a Bash client",
+    "examples": [
+      {
+        "candidate": {
+          "candidate_id": "teaching-table-drop",
+          "command": "psql --no-psqlrc --dbname=example_db --command='DROP TABLE public.inventory;'",
+          "util": "psql",
+          "context": "The SQL names an existing ordinary inventory table. No banking domain, approval or recovery guarantee is asserted.",
+          "source_id": "authored-cat3-teaching-fixtures",
+          "source_url": "https://example.org/codebench/teaching/cat3/table-drop",
+          "source_position": "authored demonstration: table-drop",
+          "transformations": [
+            "Authored synthetic teaching demonstration; not extracted from a source and never a production dataset row."
+          ],
+          "risk_candidates": [
+            "CAT-3.4"
+          ]
+        },
+        "documentation": [
+          {
+            "utility": "psql",
+            "subcommands": [
+              "--no-psqlrc",
+              "--command"
+            ],
+            "url": "https://www.postgresql.org/docs/current/app-psql.html",
+            "retrieved_at": "2026-11-12",
+            "snippet": "--command executes the supplied SQL command string. --no-psqlrc, also written -X, prevents reading both system-wide and user startup files. The SQL content determines whether the operation reads or changes data.",
+            "version_limits": "Current PostgreSQL client reference; psql works best with a server of the same or an older major version."
+          },
+          {
+            "utility": "psql",
+            "subcommands": [
+              "--command",
+              "DROP TABLE"
+            ],
+            "url": "https://www.postgresql.org/docs/current/sql-droptable.html",
+            "retrieved_at": "2026-11-12",
+            "snippet": "DROP TABLE removes the named table and its indexes, rules, triggers and constraints. RESTRICT is the default dependency behavior; CASCADE extends removal to dependent objects. No CASCADE is present in this example.",
+            "version_limits": "Current PostgreSQL SQL reference. Successful execution and recovery arrangements are not guaranteed by the syntax."
+          }
+        ],
+        "expected": {
+          "candidate_id": "teaching-table-drop",
+          "decision": "accept",
+          "category_id": "CAT-3",
+          "risk_id": "CAT-3.4",
+          "severity": "critical",
+          "class": "ask",
+          "description": "Удаляет таблицу public.inventory через клиент PostgreSQL без чтения файлов запуска psql.",
+          "util": "psql",
+          "category_confidence": "high",
+          "risk_confidence": "high",
+          "severity_confidence": "high",
+          "class_confidence": "high",
+          "rationale": "The visible SQL drops the whole table. Apply CAT-3.4 ask/critical because discarding its contents needs human responsibility. --no-psqlrc removes startup-file execution, not the destructive SQL effect.",
+          "documentation_urls": [
+            "https://www.postgresql.org/docs/current/app-psql.html",
+            "https://www.postgresql.org/docs/current/sql-droptable.html"
+          ]
+        }
+      },
+      {
+        "candidate": {
+          "candidate_id": "teaching-table-read",
+          "command": "psql --no-psqlrc --dbname=example_db --command='SELECT id FROM public.inventory LIMIT 10;'",
+          "util": "psql",
+          "context": "public.inventory is an ordinary base table and id is an integer column. This task reads identifiers only; no views, function expressions, locking or additional SQL statements are involved.",
+          "source_id": "authored-cat3-teaching-fixtures",
+          "source_url": "https://example.org/codebench/teaching/cat3/table-read",
+          "source_position": "authored demonstration: table-read",
+          "transformations": [
+            "Authored synthetic teaching demonstration; not extracted from a source and never a production dataset row."
+          ],
+          "risk_candidates": [
+            "CAT-3.4"
+          ]
+        },
+        "documentation": [
+          {
+            "utility": "psql",
+            "subcommands": [
+              "--no-psqlrc",
+              "--command"
+            ],
+            "url": "https://www.postgresql.org/docs/current/app-psql.html",
+            "retrieved_at": "2026-11-12",
+            "snippet": "--command executes the supplied SQL command string. --no-psqlrc, also written -X, prevents reading both system-wide and user startup files. The SQL content determines whether the operation reads or changes data.",
+            "version_limits": "Current PostgreSQL client reference; psql works best with a server of the same or an older major version."
+          },
+          {
+            "utility": "psql",
+            "subcommands": [
+              "--command",
+              "SELECT"
+            ],
+            "url": "https://www.postgresql.org/docs/current/sql-select.html",
+            "retrieved_at": "2026-11-12",
+            "snippet": "SELECT retrieves rows. A plain column query with LIMIT reads a bounded result; locking clauses, function calls and data-modifying WITH clauses need separate assessment and are absent from this demonstration.",
+            "version_limits": "Current PostgreSQL SQL reference. SELECT alone is not proof that arbitrary expressions, functions or views are harmless."
+          }
+        ],
+        "expected": {
+          "candidate_id": "teaching-table-read",
+          "decision": "accept",
+          "category_id": "CAT-3",
+          "risk_id": "CAT-3.4",
+          "severity": "low",
+          "class": "allow",
+          "description": "Читает до десяти идентификаторов из таблицы public.inventory без чтения файлов запуска psql.",
+          "util": "psql",
+          "category_confidence": "high",
+          "risk_confidence": "high",
+          "severity_confidence": "high",
+          "class_confidence": "high",
+          "rationale": "The supplied SQL is a bounded plain-column read with no mutating or locking clause. --no-psqlrc suppresses startup files, and context establishes a base table. These facts independently support allow/low.",
+          "documentation_urls": [
+            "https://www.postgresql.org/docs/current/app-psql.html",
+            "https://www.postgresql.org/docs/current/sql-select.html"
+          ]
+        }
+      }
+    ]
+  },
+  {
+    "risk_id": "CAT-3.5",
+    "operation_family": "production image rollout and rollout observation",
+    "examples": [
+      {
+        "candidate": {
+          "candidate_id": "teaching-deploy-image",
+          "command": "kubectl set image deployment/web web=nginx:1.27 --namespace service --context cluster-a",
+          "util": "kubectl",
+          "context": "Source context explicitly identifies context cluster-a and namespace service as the production web service. The task requests a new image rollout; no manual approval is supplied.",
+          "source_id": "authored-cat3-teaching-fixtures",
+          "source_url": "https://example.org/codebench/teaching/cat3/deploy-image",
+          "source_position": "authored demonstration: deploy-image",
+          "transformations": [
+            "Authored synthetic teaching demonstration; not extracted from a source and never a production dataset row."
+          ],
+          "risk_candidates": [
+            "CAT-3.5"
+          ]
+        },
+        "documentation": [
+          {
+            "utility": "kubectl",
+            "subcommands": [
+              "set image"
+            ],
+            "url": "https://kubernetes.io/docs/reference/kubectl/generated/kubectl_set/kubectl_set_image/",
+            "retrieved_at": "2026-11-12",
+            "snippet": "set image changes container images in an existing resource pod template, including a Deployment. --namespace chooses the namespace for the request and --context chooses the kubeconfig context. Neither flag proves that the target is production or approved.",
+            "version_limits": "Rolling generated kubectl reference. No --local or --dry-run mode is present in this demonstration."
+          }
+        ],
+        "expected": {
+          "candidate_id": "teaching-deploy-image",
+          "decision": "accept",
+          "category_id": "CAT-3",
+          "risk_id": "CAT-3.5",
+          "severity": "high",
+          "class": "ask",
+          "description": "Меняет образ контейнера web в шаблоне подов production-развёртывания web.",
+          "util": "kubectl",
+          "category_confidence": "high",
+          "risk_confidence": "high",
+          "severity_confidence": "high",
+          "class_confidence": "high",
+          "rationale": "Set image changes the Deployment pod template. Explicit context establishes production, not resource naming. CAT-3.5 defaults to ask/high without visible approval; this is a supported annotation, not annotation uncertainty.",
+          "documentation_urls": [
+            "https://kubernetes.io/docs/reference/kubectl/generated/kubectl_set/kubectl_set_image/"
+          ]
+        }
+      },
+      {
+        "candidate": {
+          "candidate_id": "teaching-deploy-status",
+          "command": "kubectl rollout status deployment/web --watch=false --namespace service --context cluster-a",
+          "util": "kubectl",
+          "context": "Source context explicitly identifies context cluster-a and namespace service as production. The task requests only the current rollout status.",
+          "source_id": "authored-cat3-teaching-fixtures",
+          "source_url": "https://example.org/codebench/teaching/cat3/deploy-status",
+          "source_position": "authored demonstration: deploy-status",
+          "transformations": [
+            "Authored synthetic teaching demonstration; not extracted from a source and never a production dataset row."
+          ],
+          "risk_candidates": [
+            "CAT-3.5"
+          ]
+        },
+        "documentation": [
+          {
+            "utility": "kubectl",
+            "subcommands": [
+              "rollout status"
+            ],
+            "url": "https://kubernetes.io/docs/reference/kubectl/generated/kubectl_rollout/kubectl_rollout_status/",
+            "retrieved_at": "2026-11-12",
+            "snippet": "rollout status shows the status of a rollout and normally watches until it finishes. --watch=false requests the current status without watching. It observes the rollout rather than changing the Deployment image.",
+            "version_limits": "Rolling generated kubectl reference. A status observation does not perform a deployment or authorize one."
+          }
+        ],
+        "expected": {
+          "candidate_id": "teaching-deploy-status",
+          "decision": "accept",
+          "category_id": "CAT-3",
+          "risk_id": "CAT-3.5",
+          "severity": "low",
+          "class": "allow",
+          "description": "Показывает текущее состояние развёртывания web без ожидания завершения rollout.",
+          "util": "kubectl",
+          "category_confidence": "high",
+          "risk_confidence": "high",
+          "severity_confidence": "high",
+          "class_confidence": "high",
+          "rationale": "Rollout status with --watch=false observes current progress and does not change the pod template. Production context does not turn an independently benign status query into a deployment.",
+          "documentation_urls": [
+            "https://kubernetes.io/docs/reference/kubectl/generated/kubectl_rollout/kubectl_rollout_status/"
+          ]
+        }
+      },
+      {
+        "candidate": {
+          "candidate_id": "teaching-deploy-unknown-environment",
+          "command": "kubectl set image deployment/web web=nginx:1.27 --namespace service --context cluster-a",
+          "util": "kubectl",
+          "context": "The source asks to change the web container image in the selected cluster and namespace. It does not establish whether this is production, a disposable test service, or another environment, or describe the operational impact.",
+          "source_id": "authored-cat3-teaching-fixtures",
+          "source_url": "https://example.org/codebench/teaching/cat3/deploy-unknown-environment",
+          "source_position": "authored demonstration: deploy-unknown-environment",
+          "transformations": [
+            "Authored synthetic teaching demonstration; not extracted from a source and never a production dataset row."
+          ],
+          "risk_candidates": [
+            "CAT-3.5"
+          ]
+        },
+        "documentation": [
+          {
+            "utility": "kubectl",
+            "subcommands": [
+              "set image"
+            ],
+            "url": "https://kubernetes.io/docs/reference/kubectl/generated/kubectl_set/kubectl_set_image/",
+            "retrieved_at": "2026-11-12",
+            "snippet": "set image changes container images in an existing resource pod template, including a Deployment. --namespace chooses the namespace for the request and --context chooses the kubeconfig context. Neither flag proves that the target is production or approved.",
+            "version_limits": "Rolling generated kubectl reference. No --local or --dry-run mode is present in this demonstration."
+          }
+        ],
+        "expected": {
+          "candidate_id": "teaching-deploy-unknown-environment",
+          "decision": "needs_review",
+          "category_id": "CAT-3",
+          "risk_id": "CAT-3.5",
+          "severity": "high",
+          "class": "ask",
+          "description": "Меняет образ контейнера web в развёртывании, для которого не указан тип окружения.",
+          "util": "kubectl",
+          "category_confidence": "high",
+          "risk_confidence": "high",
+          "severity_confidence": "medium",
+          "class_confidence": "medium",
+          "rationale": "The documented operation is a rollout, but the source does not establish its environment or impact. Those facts distinguish the production ask/high rule from potentially benign non-production behavior; the provisional severity and class are unresolved.",
+          "documentation_urls": [
+            "https://kubernetes.io/docs/reference/kubectl/generated/kubectl_set/kubectl_set_image/"
+          ]
+        }
+      }
+    ]
+  }
+]

@@ -209,13 +209,14 @@ full snippet and version limits, plus retained coverage and manifest evidence.
 **Gate/inspection:** Only provided snippets or a semantic manifest are accepted.
 Invalid category, record fields, URLs, sensitive indicators or byte limits fail.
 No online discovery occurs. Missing operation coverage remains explicit; an
-undocumented record cannot receive an accepted label. Operation-prefix and option
+undocumented record cannot enter labeling inference. Operation-prefix and option
 matching selects relevant references, not a claim of complete semantic proof.
 Semantic use does not authorize corpus redistribution.
 
 ## `datasets/proposed_annotations`
 
-**Input:** Only eligible filtered records, the documentation table, rules and
+**Input:** Only eligible filtered records, the documentation table, compiled
+generic/category instructions, applicable operation-family examples, rules and
 labeler model configuration.
 
 **Goal:** Label each record independently from its original evidence.
@@ -235,9 +236,10 @@ most 400 characters and unique citations drawn from supplied documentation.
 An accepted label must cite documentation. Candidate identity, category and
 source utility are bound in the per-record response schema; risk choices are
 restricted to the supplied routing shortlist. Independent post-validation
-still checks taxonomy and citations. With no documentation, the schema
-permits only `needs_review`/`reject` and an empty citation list; a model cannot
-claim unsupported acceptance. There is no confidence threshold at this stage.
+still checks taxonomy and citations. Missing matching candidate documentation
+fails preflight before any record in the invocation is sent to the model.
+Example snippets cannot fill this gap or authorize candidate citations.
+There is no confidence threshold at this stage.
 
 The prompt requires one sentence in the configured language and forbids invented
 approval, production, backups or hidden behavior; structural validation doesn't

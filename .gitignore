@@ -19,6 +19,8 @@ node_modules/
 /data
 /research
 /inputs
+/business-configs/inputs/
+/business-configs/**/cat2*
 /review
 /evidence
 /commands.csv

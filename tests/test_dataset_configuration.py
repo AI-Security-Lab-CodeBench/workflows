@@ -9,6 +9,7 @@ from configuration_fixture import FixtureCategory, example_config, source_bytes,
 from dagster import Config
 from pydantic import JsonValue, ValidationError
 
+from codebench_pipeline.business_config import DEFAULT_BUSINESS_CONFIG, load_business_rules
 from codebench_pipeline.dataframe_schemas import SourceCatalogTable, validated_frame
 from codebench_pipeline.dataset_catalog import catalog_row, provided_documents
 from codebench_pipeline.dataset_config import (
@@ -39,8 +40,7 @@ def write_config(root: Path, config: DatasetFileConfig) -> Path:
 
 class DatasetConfigurationTests(unittest.TestCase):
     def test_deployment_routes_admit_deployments_without_reclassifying_deletions(self) -> None:
-        path = Path(__file__).resolve().parents[1] / "configs" / "datasets" / "cat3.json"
-        rules = DatasetFileConfig.model_validate_json(path.read_bytes()).rules
+        rules = load_business_rules(DEFAULT_BUSINESS_CONFIG)
         for command, deployment in (
             ("serverless deploy", True),
             ("serverless remove", False),

@@ -99,6 +99,8 @@ def invocation_version(
                     "annotation_cache.py",
                     "dataset_annotation.py",
                     "dataset_records.py",
+                    "business_config.py",
+                    "category_rules.py",
                     "model_config.py",
                     "inference.py",
                     "agents.py",

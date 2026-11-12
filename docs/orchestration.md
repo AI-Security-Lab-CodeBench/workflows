@@ -106,7 +106,7 @@ its storage base directory must be `<chosen home>/dagster`. Do not click
 
 ```sh
 uv sync --frozen --python 3.12
-uv run python -m codebench_pipeline.dataset_cli build --config configs/datasets/cat3.json --home .codebench-datasets
+uv run python -m codebench_pipeline.dataset_cli build --config business-configs/datasets/cat3.json --home .codebench-datasets
 uv run python -m codebench_pipeline.dataset_cli ui --home .codebench-datasets
 ```
 
@@ -202,16 +202,20 @@ and safe-counterpart pairing remain deferred.
 
 ## Versioned configuration
 
-Each `configs/datasets/*.json` supplies inline category rules, model settings,
-processing settings and storage, plus inline sources or external manifests.
+Each `business-configs/datasets/*.json` supplies model settings, processing settings
+and storage, plus inline sources or external manifests. The shipped configuration
+uses `business_config` to reference category-owned files. Inline `rules` remain
+available for self-contained configurations and synthetic fixtures; do not supply
+both forms.
 `seeds.manifest` and `documentation_sources.manifest` are category-bound
 source lists. `documentation.manifest` supplies semantic snippets. Paths resolve
 relative to the referencing file. Unknown fields and invalid scalar types fail.
 Registered versions and immutable historical outputs remain retained.
 
-The inline `rules` define category ID/name/version, complete policy,
-risk definitions and command-family patterns, class definitions, severities and
-description language. Patterns determine routing, never safety. The current v0
+The category file defines category ID/name/version, risk definitions and
+command-family patterns, class definitions, severities and description language.
+It references the generic base prompt, category instructions and family examples.
+Patterns determine routing, never safety. The current v0
 contract permits allow/deny/ask and low/medium/high/critical. Another category uses
 another single configuration file without changing Python. CAT-2 remains a local
 multicategory example and is excluded from this repository.
@@ -219,10 +223,26 @@ multicategory example and is excluded from this repository.
 Use a distinct `dataset_id` for each category. Its registry, asset storage and
 materialization history are partition-isolated. Top-level `revision` records
 configuration history; changing it alone does not rerun acquisition. The separate
-`seeds.revision` requests source collection refresh. Old split configuration files
-remain preserved as historical examples, but the default loader no longer uses them.
-When migrating an existing home, register the consolidated configuration for every
-category before enabling the sensor. Previous registry versions and artifacts remain.
+`seeds.revision` requests source collection refresh. Historical registered
+specifications and materialized instruction snapshots remain immutable.
+
+For an existing home, bind the category business configuration instead of
+registering the shipped dataset template over its individual runtime settings:
+
+```sh
+uv run python -m codebench_pipeline.dataset_cli bind-business \
+  --dataset cloud_infrastructure_commands \
+  --business-config business-configs/categories/cat3/category.json \
+  --home .codebench-datasets
+uv run python -m codebench_pipeline.dataset_cli build \
+  --dataset cloud_infrastructure_commands --home .codebench-datasets
+```
+
+Registered builds refresh the bound policy files while retaining model, worker,
+storage and source settings. Editing the dataset template itself does not replace
+an existing registration. Policy or applicable example changes invalidate their
+inference inputs and stale review authorization; unchanged inputs reuse receipts.
+Missing or malformed files fail rather than reusing stale policy.
 
 Only `models.labeler` is required. Legacy selector, adapter and reviewer settings
 are unused by the active graph. The labeler can use native authentication or an
@@ -257,13 +277,18 @@ evidence. Failed attempts are visible as Dagster asset observations.
 
 Before building, use `skills/codebench-source-preparation/SKILL.md` to discover,
 inspect and enumerate complete sources locally. The shipped CAT-3 config expects
-`inputs/cat3/datasets.json`, `documentation-sources.json` and `semantics.json`.
+`business-configs/inputs/cat3/datasets.json`, `documentation-sources.json` and
+`semantics.json`.
 These ignored inputs and their preparation inventory are not included in Git.
 
 Both source manifests have `version: 1`, `category_id`, `revision`, `sources`
 and `evidence`. The semantic manifest uses `snippets` instead of `sources`.
 Source records include provenance, license, format and a local path or exact URL.
 Remote URLs require SHA-256 or explicit Git blob SHA-1; full bodies are validated.
+Semantic references use actual operation paths or option names. The explicit
+`<default>` operation tag documents an exact no-argument invocation; it does not
+match arbitrary subcommands or option-selected behavior. Missing candidate
+documentation blocks inference before any labeling call.
 The active modes are only `provided_sources`, `provided_snippets` and provided
 adapters. Online search requests are rejected, not silently ignored.
 

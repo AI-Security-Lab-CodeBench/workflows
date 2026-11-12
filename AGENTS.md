@@ -16,8 +16,11 @@ and authored tests, not binaries or benchmark outputs.
 
 ## Authority and evidence
 
-Follow the current user request first. CAT-3 configuration and
-`docs/labeling-policy.md` carry the operational policy. If local `strategy/` files
+Follow the current user request first. `business-configs/labeling-base.md` carries
+generic labeling instructions; `business-configs/categories/<category>/` carries
+category taxonomy, policy and illustrative examples. These are the editable
+policy sources; `docs/labeling-policy.md` is an editing guide, not another prompt.
+If local `strategy/` files
 are present, read them as human-owned guidance; never edit, regenerate, format or
 stage them. Historical collection notes are local and are not publication inputs.
 
@@ -120,6 +123,9 @@ existing data before replacing it; never overwrite concurrent work.
 - Label each record independently from source context and relevant subcommand
   documentation in one LLM invocation. Local source preparation is separate
   from command labeling and never supplies a fifth command confidence.
+  Require actual candidate documentation before inference. Few-shot documentation
+  belongs to its example and cannot authorize citations for the candidate.
+  Select small operation-family demonstrations, not per-command exception lists.
   Preserve all four label confidences, concise rationales, model
   identity, prompt/input hashes, timestamps and evidence pointers.
 - Source assessment and labeling are not human approval. Never submit real human decisions under
