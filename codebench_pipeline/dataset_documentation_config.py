@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Literal, assert_never
+from typing import Literal
 
 from pydantic import ConfigDict, Field, model_validator
 
@@ -12,7 +12,8 @@ from codebench_pipeline.typed_config import TypedConfig
 class DocumentationConfig(TypedConfig):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
-    mode: Literal["provided_snippets", "keenable"] = "provided_snippets"
+    mode: Literal["provided_snippets"] = "provided_snippets"
+    manifest: str | None = None
     snippets: list[DocumentationSeed] = Field(default_factory=list)
     search_request: SearchSeeds | None = None
     revision: str = Field(default="1", min_length=1)
@@ -21,13 +22,6 @@ class DocumentationConfig(TypedConfig):
 
     @model_validator(mode="after")
     def matching_inputs(self) -> DocumentationConfig:
-        match self.mode:
-            case "provided_snippets":
-                if self.search_request is not None:
-                    raise ValueError("Provided documentation forbids a search request")
-                return self
-            case "keenable":
-                if self.search_request is None or self.snippets:
-                    raise ValueError("Live documentation requires search, without provided snippets")
-                return self
-        assert_never(self.mode)
+        if self.search_request is not None:
+            raise ValueError("Documentation search belongs to the local agent; supply a manifest")
+        return self

@@ -3,7 +3,7 @@ from pathlib import Path
 
 from pydantic import TypeAdapter
 
-from codebench_pipeline.dataset_config import DatasetBuildSpec
+from codebench_pipeline.dataset_config import DatasetBuildSpec, resolve_business_inputs
 from codebench_pipeline.human_review_store import HumanReviewStore
 from codebench_pipeline.models import Identifier
 from codebench_pipeline.storage import IntegrityError, exclusive, fingerprint
@@ -33,7 +33,7 @@ class DatasetRegistry:
         spec = DatasetBuildSpec.model_validate_json((directory / f"{version}.json").read_bytes())
         if spec.dataset_id != key:
             raise IntegrityError("Dataset registry identity mismatch")
-        return spec
+        return resolve_business_inputs(spec)
 
     def keys(self) -> list[str]:
         return sorted(path.parent.name for path in self.root.glob("*/current"))

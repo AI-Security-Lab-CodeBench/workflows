@@ -4,20 +4,18 @@ from pathlib import Path
 from unittest.mock import patch
 
 from configuration_fixture import write_fixture
-from pydantic import ValidationError
+from pydantic import TypeAdapter, ValidationError
 
 from codebench_pipeline.dataframe_schemas import SourceCatalogTable, frame_records, validated_frame
 from codebench_pipeline.dataset_catalog import build_catalog, catalog_row, provided_documents
 from codebench_pipeline.dataset_config import (
     CatalogConfig,
-    SnapshotConfig,
     catalog_for_branch,
     load_build_config,
 )
-from codebench_pipeline.dataset_documents import snapshot_documents
-from codebench_pipeline.dataset_seed_config import RiskSearchSeeds, SearchSeeds
-from codebench_pipeline.dataset_source_models import SourceChoice, SourceSelection
-from codebench_pipeline.discovery_models import DiscoveryOutput, InspectedPage, SourceProposal
+from codebench_pipeline.dataset_seed_config import SourceSeed
+from codebench_pipeline.dataset_source_models import SourceChoice
+from codebench_pipeline.discovery_models import SourceProposal
 from codebench_pipeline.human_review import DecisionChange, HumanReviewError
 from codebench_pipeline.human_review_store import HumanReviewStore
 from codebench_pipeline.review_tables import ReviewTable
@@ -78,79 +76,27 @@ class SourceAgentAssessmentTests(unittest.TestCase):
                         confidence,
                     )
 
-    def test_provided_catalog_retains_agent_assessment_for_every_decision(self) -> None:
+    def test_catalog_retains_manifest_provenance_without_source_model_selection(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             spec = load_build_config(write_fixture(Path(temporary)), Path(temporary))
-            source_config = catalog_for_branch(spec, "documentation")
-            identifier = source_config.documents[0].source_id
-            for decision, confidence in (
-                ("selected", "high"),
-                ("needs_review", "medium"),
-                ("exclude", "low"),
-            ):
-                with self.subTest(decision=decision):
-                    selection = SourceSelection.model_validate(
-                        {
-                            "sources": [
-                                {
-                                    "source_id": identifier,
-                                    "decision": decision,
-                                    "analysis": f"Agent inspected the sample for {decision}.",
-                                    "confidence": confidence,
-                                    "rationale": f"Agent recommendation: {decision}.",
-                                }
-                            ]
-                        }
-                    )
-                    with patch("codebench_pipeline.dataset_catalog.infer_typed", return_value=selection):
-                        catalog = build_catalog(source_config, spec.rules, Path(temporary))
-                    self.assertEqual(
-                        [
-                            frame_records(catalog)[0][field]
-                            for field in ("analysis", "confidence", "rationale")
-                        ],
-                        [
-                            selection.sources[0].analysis,
-                            confidence,
-                            selection.sources[0].rationale,
-                        ],
-                    )
+            supplied = catalog_for_branch(spec, "documentation")
+            source = supplied.documents[0].model_copy(update={
+                "provenance_evidence_json": '{"readme_url":"https://example.org/readme","assessment":"local agent"}'
+            })
+            config = supplied.model_copy(update={"documents": [source]})
+            with patch("codebench_pipeline.inference.subprocess.run", side_effect=AssertionError("No source model")):
+                catalog = build_catalog(config, spec.rules, Path(temporary))
+            self.assertEqual(frame_records(catalog)[0]["source_id"], source.source_id)
+            self.assertEqual(frame_records(catalog)[0]["confidence"], "not_applicable")
+            retained = TypeAdapter(list[SourceSeed]).validate_json(catalog.attrs["source_inputs_json"])
+            self.assertEqual(retained[0].provenance_evidence_json, source.provenance_evidence_json)
 
-    def test_discovered_assessment_survives_catalog_but_not_document_conversion(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            spec = load_build_config(write_fixture(root), root)
-            proposal = source_proposal()
-            output = DiscoveryOutput(
-                sources=[proposal],
-                adapter_requests=[],
-                inspected=[
-                    InspectedPage(
-                        url=proposal.url,
-                        risk=proposal.risk,
-                        retrieved_at="2026-11-11T00:00:00Z",
-                        evidence_path=root / "inspected.json",
-                        text="Maintainer examples\ngit status\n",
-                    )
-                ],
-                failures=[],
-            )
-            config = CatalogConfig(
-                mode="keenable",
-                search_request=SearchSeeds(
-                    searches=[RiskSearchSeeds(risk="CAT-99.1", queries=["Git command examples"])]
-                ),
-                model=spec.catalog.model,
-            )
-            with patch("codebench_pipeline.dataset_catalog.discover", return_value=output):
-                catalog = build_catalog(config, spec.rules, root)
-            self.assertEqual(
-                [frame_records(catalog)[0][field] for field in ("analysis", "confidence", "rationale")],
-                [proposal.analysis, proposal.confidence, proposal.rationale],
-            )
-            documents = snapshot_documents(catalog, SnapshotConfig())
-            self.assertEqual(documents.loc[0, "content"], output.inspected[0].text)
-            self.assertTrue({"analysis", "confidence", "rationale"}.isdisjoint(documents.columns))
+    def test_search_results_are_not_an_active_pipeline_catalog_configuration(self) -> None:
+        with self.assertRaises(ValidationError):
+            CatalogConfig.model_validate({
+                "mode": "keenable",
+                "search_request": {"searches": [{"risk": "CAT-99.1", "queries": ["command sources"]}]},
+            })
 
     def test_legacy_source_authorization_preserves_historical_decision_and_completion_contract(self) -> None:
         with tempfile.TemporaryDirectory() as temporary, dataset_instance(Path(temporary)) as instance:

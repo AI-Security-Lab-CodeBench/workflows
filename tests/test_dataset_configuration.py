@@ -4,9 +4,8 @@ import hashlib
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
 
-from configuration_fixture import example_config, source_bytes, write_fixture
+from configuration_fixture import FixtureCategory, example_config, source_bytes, write_fixture
 from dagster import Config
 from pydantic import JsonValue, ValidationError
 
@@ -39,6 +38,20 @@ def write_config(root: Path, config: DatasetFileConfig) -> Path:
 
 
 class DatasetConfigurationTests(unittest.TestCase):
+    def test_deployment_routes_admit_deployments_without_reclassifying_deletions(self) -> None:
+        path = Path(__file__).resolve().parents[1] / "configs" / "datasets" / "cat3.json"
+        rules = DatasetFileConfig.model_validate_json(path.read_bytes()).rules
+        for command, deployment in (
+            ("serverless deploy", True),
+            ("serverless remove", False),
+            ("aws cloudformation deploy --stack-name example", True),
+            ("aws cloudformation delete-stack --stack-name example", False),
+            ("docker compose up", True),
+            ("docker compose down --volumes", False),
+        ):
+            with self.subTest(command=command):
+                self.assertEqual("CAT-3.5" in rules.matching_risks(command), deployment)
+
     def test_example_documentation_inventories_are_independent_of_empty_dataset_inventories(self) -> None:
         for category in ("CAT-99", "CAT-98"):
             with self.subTest(category=category), tempfile.TemporaryDirectory() as temporary:
@@ -57,6 +70,7 @@ class DatasetConfigurationTests(unittest.TestCase):
                 for supplied, resolved in zip(
                     config.documentation_sources.documents, catalog.documents, strict=True
                 ):
+                    assert supplied.local_path is not None
                     self.assertEqual(resolved.local_path, str((path.parent / supplied.local_path).resolve()))
                     self.assertEqual(
                         resolved.model_dump(exclude={"local_path"}),
@@ -77,29 +91,10 @@ class DatasetConfigurationTests(unittest.TestCase):
         self.assertEqual(snapshots_for_branch(spec, "documentation").documents, [])
         self.assertEqual(DatasetSeeds(mode="provided_sources").documents, [])
 
-    def test_documentation_search_revision_does_not_configure_dataset_inventory(self) -> None:
-        config = example_config()
-        search = SearchSeeds(
-            searches=[RiskSearchSeeds(risk="CAT-99.1", queries=["Git maintainer command examples"])]
-        )
-        config = config.model_copy(
-            update={
-                "documentation_sources": DatasetSeeds(
-                    revision="docs-search-2", mode="keenable", search_request=search
-                )
-            }
-        )
-        with tempfile.TemporaryDirectory() as temporary:
-            spec = load_build_config(write_config(Path(temporary), config))
-        catalog = catalog_for_branch(spec, "documentation")
-        self.assertEqual((catalog.mode, catalog.collection_revision), ("keenable", "docs-search-2"))
-        self.assertEqual(catalog.search_request, search)
-        self.assertEqual(catalog.documents, [])
-        self.assertEqual(snapshots_for_branch(spec, "documentation").documents, [])
-        self.assertEqual(catalog_for_branch(spec, "dataset").mode, "provided_sources")
-        self.assertEqual(catalog_for_branch(spec, "dataset").documents, [])
-        self.assertEqual(catalog_for_branch(spec, "dataset").collection_revision, config.seeds.revision)
-        self.assertEqual(spec.documentation.snippets, config.documentation.snippets)
+    def test_online_documentation_source_search_is_rejected_as_pipeline_input(self) -> None:
+        search = SearchSeeds(searches=[RiskSearchSeeds(risk="CAT-99.1", queries=["Git examples"])])
+        with self.assertRaises(ValidationError):
+            DatasetSeeds.model_validate({"mode": "keenable", "search_request": search.model_dump()})
 
     def test_documentation_inventory_rejects_corpora_and_undocumented_origins(self) -> None:
         config = example_config()
@@ -139,38 +134,22 @@ class DatasetConfigurationTests(unittest.TestCase):
                     )
                     self.assertEqual(dataset.seeds.documents[0].source_type, source_type)
 
-    def test_live_acquisition_uses_the_inspected_capture_not_a_later_remote_page(self) -> None:
+    def test_bounded_inspection_capture_cannot_substitute_for_a_source_manifest(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             spec = load_build_config(write_fixture(Path(temporary)), Path(temporary))
             document = provided_documents(catalog_for_branch(spec, "documentation").documents)[0]
-            captured = document.local_path.read_text()
-            row = catalog_row(
-                document,
-                SourceChoice(
-                    source_id=document.source_id,
-                    decision="selected",
-                    rationale="Inspected source",
-                    analysis="Relevant command examples occur in the inspected source.",
-                    confidence="high",
-                ),
-                captured[:100],
-            )
-            row["captured_content"] = captured
+            row = catalog_row(document, None, "bounded inspection")
+            row["captured_content"] = "git status"
             catalog = validated_frame([row], SourceCatalogTable)
-            with patch(
-                "urllib.request.OpenerDirector.open", side_effect=AssertionError("Unexpected refetch")
-            ):
-                acquired = snapshot_documents(catalog, SnapshotConfig())
-                self.assertEqual(acquired.iloc[0]["content"], captured)
-                catalog.loc[0, "captured_content"] = captured + "changed after review"
-                with self.assertRaises(IntegrityError):
-                    snapshot_documents(catalog, SnapshotConfig())
+            with self.assertRaises(IntegrityError):
+                snapshot_documents(catalog, SnapshotConfig())
 
     def test_single_config_and_raw_bytes_supply_both_categories(self) -> None:
-        for category, filename, command in (
+        cases: tuple[tuple[FixtureCategory, str, str], ...] = (
             ("CAT-99", "git-status.md", "git status"),
             ("CAT-98", "terraform-destroy.md", "terraform destroy -auto-approve"),
-        ):
+        )
+        for category, filename, command in cases:
             with self.subTest(category=category), tempfile.TemporaryDirectory() as temporary:
                 root = Path(temporary)
                 original = example_config(category)
@@ -247,6 +226,7 @@ class DatasetConfigurationTests(unittest.TestCase):
 
     def test_registry_revision_and_reviewer_do_not_change_acquisition_configuration(self) -> None:
         original = example_config()
+        assert original.models.reviewer is not None
         changed = original.model_copy(
             update={
                 "revision": "new-registry-version",
@@ -271,41 +251,15 @@ class DatasetConfigurationTests(unittest.TestCase):
         self.assertEqual(first.snapshots, second.snapshots)
         self.assertEqual(first.documentation_catalog, second.documentation_catalog)
         self.assertEqual(first.documentation_snapshots, second.documentation_snapshots)
-        self.assertNotEqual(first.review, second.review)
+        self.assertIsNone(first.review)
+        self.assertIsNone(second.review)
         self.assertEqual(third.catalog.collection_revision, "refresh-2")
         self.assertEqual(third.catalog.documents, second.catalog.documents)
 
-    def test_keenable_search_seeds_convert_without_external_request_file(self) -> None:
-        config = example_config()
-        search = SearchSeeds(
-            searches=[
-                RiskSearchSeeds(
-                    risk="CAT-99.1",
-                    queries=["Maintainer Git documentation with status and reset examples"],
-                )
-            ],
-            results_per_query=2,
-            pages_per_risk=3,
-            max_chars=4000,
-            timeout_seconds=25,
-        )
-        config = config.model_copy(
-            update={"seeds": DatasetSeeds(revision="discovery-1", mode="keenable", search_request=search)}
-        )
-        with tempfile.TemporaryDirectory() as temporary:
-            spec = load_build_config(write_config(Path(temporary), config))
-        self.assertIsNotNone(spec.catalog.search_request)
-        if spec.catalog.search_request is None:
-            self.fail("Search seeds were not retained")
-        request = spec.catalog.search_request.to_search_request(spec.catalog.model.model)
-        self.assertEqual(request.searches[0].risk, "CAT-99.1")
-        self.assertEqual(request.searches[0].queries, search.searches[0].queries)
-        self.assertEqual(
-            (request.results_per_query, request.pages_per_risk, request.max_chars, request.timeout_seconds),
-            (2, 3, 4000, 25),
-        )
-        self.assertEqual(request.model, config.models.selector.model)
-        self.assertEqual(spec.snapshots.documents, [])
+    def test_online_dataset_discovery_is_rejected_even_with_valid_search_settings(self) -> None:
+        search = SearchSeeds(searches=[RiskSearchSeeds(risk="CAT-99.1", queries=["Git examples"])])
+        with self.assertRaises(ValidationError):
+            DatasetSeeds(mode="provided_sources", search_request=search)
 
     def test_incompatible_modes_duplicate_ids_and_unknown_fields_are_rejected(self) -> None:
         config = example_config()

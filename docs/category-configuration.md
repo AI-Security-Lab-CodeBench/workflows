@@ -8,7 +8,7 @@ Risk IDs follow `CAT-N.M`, must use their category prefix, and must be unique;
 canonical CSV values include both the configured ID and name.
 
 The current dataset pipeline carries this rules snapshot through filtering,
-annotation, independent review and export. `command_patterns` routes candidates;
+single-invocation per-command annotation and release. `command_patterns` routes candidates;
 the complete policy, definitions and guidance are part of the isolated model
 instruction. Patterns never assign a safety class or severity.
 

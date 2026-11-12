@@ -5,12 +5,16 @@ from collections.abc import Callable, Generator, Iterable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
+from threading import Lock
+from typing import Final
 
 from pydantic import BaseModel, ConfigDict
 
 from codebench_pipeline.model_config import ModelConfig
 from codebench_pipeline.object_store import ObjectStore, StorageConfig, sha256
 from codebench_pipeline.storage import IntegrityError, digest, exclusive, fingerprint
+
+ARTIFACT_WRITES: Final = Lock()
 
 
 @dataclass(slots=True)
@@ -167,7 +171,8 @@ def save_cached_invocation(
         if path.is_file():
             payload = path.read_bytes()
             content = sha256(payload)
-            store.write(f"artifacts/{content}", payload)
+            with ARTIFACT_WRITES:
+                store.write(f"artifacts/{content}", payload)
             artifacts[path.relative_to(out).as_posix()] = content
     stored = CachedInvocation(response=result.model_dump_json(), artifacts=artifacts)
     store.write(key, stored.model_dump_json().encode())

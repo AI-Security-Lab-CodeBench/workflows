@@ -14,19 +14,21 @@ from codebench_pipeline.dataframe_io import DataFrameIOManager, frame_bytes
 from codebench_pipeline.dataframe_schemas import (
     DocumentationTable,
     ProposedAnnotationsTable,
-    ReviewedAnnotationsTable,
     ReviewQueueTable,
     frame_records,
+    model_records,
     validated_frame,
 )
+from codebench_pipeline.dataset_annotation import relevant_documentation
 from codebench_pipeline.dataset_asset_types import DATASET_PARTITIONS, TABLE_TYPES, rules_input, table_input
 from codebench_pipeline.dataset_branches import FINALIZATION_STAGES, Branch, stage_branch, stage_name
-from codebench_pipeline.dataset_config import PublicationConfig, ReviewConfig
+from codebench_pipeline.dataset_config import PublicationConfig
 from codebench_pipeline.dataset_engine import cached_table
 from codebench_pipeline.dataset_plan import plan_dataset, unavailable_annotations
+from codebench_pipeline.dataset_records import CandidateRecord
 from codebench_pipeline.dataset_tables import review_queue
-from codebench_pipeline.dataset_tables import reviewed_annotations as review_table
 from codebench_pipeline.human_review import HumanReviewError
+from codebench_pipeline.models import SemanticSnippet
 from codebench_pipeline.object_store import sha256
 from codebench_pipeline.stage_configuration import stage_configs
 from codebench_pipeline.typed_config import TypedConfig
@@ -111,8 +113,8 @@ def normalized_command(command: str) -> str:
 
 
 def deduplicate_annotations(
-    annotations: DataFrame[ReviewedAnnotationsTable],
-) -> DataFrame[ReviewedAnnotationsTable]:
+    annotations: DataFrame[ProposedAnnotationsTable],
+) -> DataFrame[ProposedAnnotationsTable]:
     retained: list[dict[str, JsonValue]] = []
     survivors: dict[str, str] = {}
     duplicates: list[JsonValue] = []
@@ -141,7 +143,7 @@ def deduplicate_annotations(
         else:
             retained.append(row)
             survivors[key] = identifier
-    result = validated_frame(retained, ReviewedAnnotationsTable)
+    result = validated_frame(retained, ProposedAnnotationsTable)
     result.attrs = {**annotations.attrs, "duplicates": duplicates}
     return result
 
@@ -199,12 +201,11 @@ def finalization_assets() -> list[AssetsDefinition]:
                 )
                 if not isinstance(stored.value, pd.DataFrame):
                     raise HumanReviewError("conflict", "Labeling documentation must be a table")
-                for row in frame_records(frame):
-                    citations = TypeAdapter(list[str]).validate_python(row["documentation_urls"])
-                    documents[f"{branch}:{row['candidate_id']}"] = [
-                        doc
-                        for doc in frame_records(DocumentationTable.validate(stored.value))
-                        if doc["utility"] == row["util"] or doc["url"] in citations
+                semantic = model_records(DocumentationTable.validate(stored.value), SemanticSnippet)
+                for candidate in model_records(frame, CandidateRecord):
+                    documents[f"{branch}:{candidate.candidate_id}"] = [
+                        doc.model_dump(mode="json")
+                        for doc in relevant_documentation(candidate, semantic)
                     ]
             merged.attrs["row_documentation"] = documents
             return merged
@@ -226,55 +227,17 @@ def finalization_assets() -> list[AssetsDefinition]:
         group_name="dataset_building",
         partitions_def=DATASET_PARTITIONS,
         io_manager_key="dataset_io_manager",
-        dagster_type=TABLE_TYPES[ReviewedAnnotationsTable],
-        ins={
-            "merged_proposed_annotations": table_input(
-                "merged_proposed_annotations", ProposedAnnotationsTable
-            ),
-            "category_rules": rules_input(),
-        },
-    )
-    def reviewed_annotations(
-        context: AssetExecutionContext,
-        config: ReviewConfig,
-        merged_proposed_annotations: DataFrame[ProposedAnnotationsTable],
-        category_rules: CategoryRules,
-        dataset_io_manager: ResourceParam[DataFrameIOManager],
-    ) -> Output[DataFrame[ReviewedAnnotationsTable]]:
-        return cached_table(
-            context,
-            dataset_io_manager,
-            config,
-            {"annotations": merged_proposed_annotations, "category_rules": category_rules},
-            ReviewedAnnotationsTable,
-            lambda evidence: review_table(
-                merged_proposed_annotations,
-                validated_frame([], DocumentationTable),
-                category_rules,
-                config,
-                evidence,
-                cache=Path(dataset_io_manager.review_home) / "row-inference" / context.partition_key
-                if dataset_io_manager.review_home is not None
-                else None,
-            ),
-        )
-
-    @asset(
-        key_prefix=["datasets"],
-        group_name="dataset_building",
-        partitions_def=DATASET_PARTITIONS,
-        io_manager_key="dataset_io_manager",
-        dagster_type=TABLE_TYPES[ReviewedAnnotationsTable],
-        ins={"reviewed_annotations": table_input("reviewed_annotations", ReviewedAnnotationsTable)},
+        dagster_type=TABLE_TYPES[ProposedAnnotationsTable],
+        ins={"merged_proposed_annotations": table_input("merged_proposed_annotations", ProposedAnnotationsTable)},
     )
     def deduplicated_annotations(
         context: AssetExecutionContext,
         config: TypedConfig,
-        reviewed_annotations: DataFrame[ReviewedAnnotationsTable],
+        merged_proposed_annotations: DataFrame[ProposedAnnotationsTable],
         dataset_io_manager: ResourceParam[DataFrameIOManager],
-    ) -> Output[DataFrame[ReviewedAnnotationsTable]]:
-        def compute(evidence: Path) -> DataFrame[ReviewedAnnotationsTable]:
-            frame = deduplicate_annotations(reviewed_annotations)
+    ) -> Output[DataFrame[ProposedAnnotationsTable]]:
+        def compute(evidence: Path) -> DataFrame[ProposedAnnotationsTable]:
+            frame = deduplicate_annotations(merged_proposed_annotations)
             (evidence / "duplicates.json").write_text(json.dumps(frame.attrs["duplicates"]), encoding="utf-8")
             return frame
 
@@ -282,8 +245,8 @@ def finalization_assets() -> list[AssetsDefinition]:
             context,
             dataset_io_manager,
             config,
-            {"annotations": reviewed_annotations},
-            ReviewedAnnotationsTable,
+            {"annotations": merged_proposed_annotations},
+            ProposedAnnotationsTable,
             compute,
         )
 
@@ -294,14 +257,14 @@ def finalization_assets() -> list[AssetsDefinition]:
         io_manager_key="dataset_io_manager",
         dagster_type=TABLE_TYPES[ReviewQueueTable],
         ins={
-            "deduplicated_annotations": table_input("deduplicated_annotations", ReviewedAnnotationsTable),
+            "deduplicated_annotations": table_input("deduplicated_annotations", ProposedAnnotationsTable),
             "category_rules": rules_input(),
         },
     )
     def human_review_queue(
         context: AssetExecutionContext,
         config: PublicationConfig,
-        deduplicated_annotations: DataFrame[ReviewedAnnotationsTable],
+        deduplicated_annotations: DataFrame[ProposedAnnotationsTable],
         category_rules: CategoryRules,
         dataset_io_manager: ResourceParam[DataFrameIOManager],
     ) -> Output[DataFrame[ReviewQueueTable]]:
@@ -309,9 +272,9 @@ def finalization_assets() -> list[AssetsDefinition]:
             context,
             dataset_io_manager,
             config,
-            {"reviewed_annotations": deduplicated_annotations, "category_rules": category_rules},
+            {"annotations": deduplicated_annotations, "category_rules": category_rules},
             ReviewQueueTable,
             lambda evidence: review_queue(deduplicated_annotations, category_rules, config),
         )
 
-    return [merged_proposed_annotations, reviewed_annotations, deduplicated_annotations, human_review_queue]
+    return [merged_proposed_annotations, deduplicated_annotations, human_review_queue]

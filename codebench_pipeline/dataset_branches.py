@@ -4,7 +4,6 @@ from typing import Literal
 Branch = Literal["dataset", "documentation"]
 FINALIZATION_STAGES = (
     "merged_proposed_annotations",
-    "reviewed_annotations",
     "deduplicated_annotations",
     "human_review_queue",
     "human_review_decisions",

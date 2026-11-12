@@ -173,7 +173,6 @@ class DatasetExportTests(unittest.TestCase):
             report = publish_dataset(
                 candidates,
                 [make_label(c, rules) for c in candidates],
-                [make_review(c) for c in candidates],
                 rules,
                 root,
                 10,
@@ -201,12 +200,10 @@ class DatasetExportTests(unittest.TestCase):
         )
         labels = [make_label(c, rules) for c in candidates]
         labels[3] = labels[3].model_copy(update={"decision": "needs_review", "rationale": "Missing flags."})
-        reviews = [make_review(c) for c in candidates]
-        reviews[4] = reviews[4].model_copy(update={"verdict": "needs_review", "rationale": "Check version."})
+        labels[4] = labels[4].model_copy(update={"decision": "reject", "rationale": "Check version."})
         prepared = prepare_dataset(
             candidates,
             labels,
-            reviews,
             rules,
             1,
             approved_ids=frozenset(candidate.candidate_id for candidate in candidates),
@@ -215,9 +212,9 @@ class DatasetExportTests(unittest.TestCase):
         pending = list(csv.DictReader(io.StringIO(prepared.files["review/pending.csv"])))
         self.assertEqual([row["candidate_id"] for row in pending], ["1", "3", "4"])
         self.assertEqual(pending[1]["label_rationale"], "Missing flags.")
-        self.assertEqual(pending[1]["review_verdict"], "approve")
+        self.assertEqual(pending[1]["label_decision"], "needs_review")
         self.assertEqual(pending[1]["evidence_record"], "4")
-        self.assertEqual(pending[2]["review_rationale"], "Check version.")
+        self.assertEqual(pending[2]["label_rationale"], "Check version.")
         self.assertEqual(
             {row["risk"] for row in prepared.commands},
             {risk.canonical for risk in rules.risks},
@@ -225,24 +222,22 @@ class DatasetExportTests(unittest.TestCase):
 
     def test_identity_mismatches_fail_before_export(self) -> None:
         rules, candidate = make_rules(), make_candidate()
-        label, decision = make_label(candidate, rules), make_review(candidate)
-        for candidates, labels, reviews in (
-            ([candidate, candidate], [label], [decision]),
-            ([candidate], [label, label], [decision]),
-            ([candidate], [label], [decision, decision]),
-            ([candidate], [], [decision]),
-            ([candidate], [label], []),
-            ([candidate], [label], [decision.model_copy(update={"candidate_id": "extra"})]),
+        label = make_label(candidate, rules)
+        for candidates, labels in (
+            ([candidate, candidate], [label]),
+            ([candidate], [label, label]),
+            ([candidate], []),
+            ([candidate], [label.model_copy(update={"candidate_id": "extra"})]),
         ):
-            with self.subTest(identities=(candidates, labels, reviews)), tempfile.TemporaryDirectory() as tmp:
+            with self.subTest(identities=(candidates, labels)), tempfile.TemporaryDirectory() as tmp:
                 with self.assertRaises(ValueError):
-                    publish_dataset(candidates, labels, reviews, rules, Path(tmp), 10)
+                    publish_dataset(candidates, labels, rules, Path(tmp), 10)
                 self.assertEqual(list(Path(tmp).iterdir()), [])
 
     def test_empty_release_reports_each_risk_deficit_and_preserves_existing_output(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            report = publish_dataset([], [], [], make_rules(), root, 7)
+            report = publish_dataset([], [], make_rules(), root, 7)
             self.assertEqual(read_csv(root / "commands.csv"), [])
             self.assertEqual(report["records"], 0)
             self.assertEqual(
@@ -250,7 +245,7 @@ class DatasetExportTests(unittest.TestCase):
             )
             before = (root / "commands.csv").read_bytes()
             with self.assertRaises(FileExistsError):
-                publish_dataset([], [], [], make_rules(), root, 7)
+                publish_dataset([], [], make_rules(), root, 7)
             self.assertEqual((root / "commands.csv").read_bytes(), before)
 
     def test_polars_schema_uses_supplied_taxonomy(self) -> None:
@@ -259,7 +254,6 @@ class DatasetExportTests(unittest.TestCase):
         prepared = prepare_dataset(
             [candidate],
             [make_label(candidate, rules)],
-            [make_review(candidate)],
             rules,
             1,
             approved_ids=frozenset({candidate.candidate_id}),

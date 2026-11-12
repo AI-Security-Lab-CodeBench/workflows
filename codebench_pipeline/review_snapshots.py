@@ -12,7 +12,7 @@ from codebench_pipeline.category_rules import CategoryRules
 from codebench_pipeline.data_view_models import DatasetViewError
 from codebench_pipeline.data_views import DatasetDataService
 from codebench_pipeline.dataframe_io import AssetReference, DataFrameIOManager
-from codebench_pipeline.dataframe_schemas import ReviewedAnnotationsTable, frame_records
+from codebench_pipeline.dataframe_schemas import ProposedAnnotationsTable, frame_records
 from codebench_pipeline.dataset_branches import FINALIZATION_STAGES, Branch
 from codebench_pipeline.dataset_config import PublicationConfig
 from codebench_pipeline.dataset_export import Publication
@@ -42,7 +42,6 @@ REVIEW_POLICY_FILES: Final = (
     "source_review_guard.py",
     "review_policy.py",
     "publication_authorization.py",
-    "automatic_release.py",
     "documentation_authorization.py",
     "dataset_branches.py",
     "dataset_finalization.py",
@@ -78,7 +77,7 @@ class ReviewManifest(ReviewModel):
 class ResolvedReview:
     manifest: ReviewManifest
     snapshot: ReviewSnapshot
-    reviewed: DataFrame[ReviewedAnnotationsTable]
+    reviewed: DataFrame[ProposedAnnotationsTable]
     rules: CategoryRules
     prepared: Publication
 
@@ -123,9 +122,9 @@ class ReviewSnapshots:
         assets = {stage: self.data.read_current(dataset_id, stage) for stage in input_stages}
         match assets["deduplicated_annotations"].value:
             case pd.DataFrame() as value:
-                reviewed = ReviewedAnnotationsTable.validate(value)
+                reviewed = ProposedAnnotationsTable.validate(value)
             case CategoryRules():
-                raise IntegrityError("Reviewed annotations are not a table")
+                raise IntegrityError("Annotations are not a table")
             case _:
                 assert_never(assets["deduplicated_annotations"].value)
         match assets["category_rules"].value:
@@ -163,7 +162,6 @@ class ReviewSnapshots:
                     ),
                     "rules": rules.model_dump_json(),
                     "label_model": spec.annotation.model.model_dump_json(),
-                    "review_model": spec.review.model.model_dump_json(),
                     "policy": {
                         name: implementation[name]
                         for name in (

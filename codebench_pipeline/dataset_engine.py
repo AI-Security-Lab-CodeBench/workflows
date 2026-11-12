@@ -15,8 +15,9 @@ from pydantic import JsonValue, TypeAdapter
 from codebench_pipeline.category_rules import CategoryRules
 from codebench_pipeline.dataframe_io import DataFrameIOManager, frame_bytes
 from codebench_pipeline.dataset_branches import asset_branch, stage_name
-from codebench_pipeline.dataset_catalog import provided_documents, source_scope
-from codebench_pipeline.dataset_config import CatalogConfig, SnapshotConfig
+from codebench_pipeline.dataset_catalog import source_scope
+from codebench_pipeline.dataset_config import CatalogConfig, DocumentationConfig, SnapshotConfig
+from codebench_pipeline.source_transforms import transformation_bytes
 from codebench_pipeline.storage import IntegrityError, digest, fingerprint
 
 Schema = TypeVar("Schema", bound=pa.DataFrameModel)
@@ -27,9 +28,8 @@ def code_versions() -> dict[str, str]:
     paths = [
         *package.glob("dataset_*.py"),
         *package.glob("dataframe_*.py"),
-        *package.glob("source_review*.py"),
+        *package.glob("source_*.py"),
         *package.glob("discovery*.py"),
-        package / "automatic_release.py",
         package / "annotation_cache.py",
         package / "publication_authorization.py",
         package / "review_policy.py",
@@ -78,9 +78,28 @@ def stage_signature(stage: str, config: Config, inputs: Mapping[str, pd.DataFram
         else:
             values[name] = hashlib.sha256(frame_bytes(value)).hexdigest()
     if isinstance(config, (CatalogConfig, SnapshotConfig)):
-        values["sources"] = {
-            doc.source_id: digest(doc.local_path) for doc in provided_documents(config.documents)
+        transforms = {
+            (source.transform.module_path, source.transform.sha256): source.transform
+            for source in config.documents if source.transform is not None
         }
+        values["transformation_code"] = {
+            f"{path}:{expected}": hashlib.sha256(
+                transformation_bytes(transform)
+            ).hexdigest()
+            for (path, expected), transform in transforms.items()
+        }
+        values["sources"] = {
+            source.source_id: digest(Path(source.local_path))
+            if source.local_path is not None
+            else {
+                "url": source.url,
+                "sha256": source.sha256,
+                "git_blob_sha1": source.git_blob_sha1,
+            }
+            for source in config.documents
+        }
+    if isinstance(config, (CatalogConfig, DocumentationConfig)) and config.manifest is not None:
+        values["manifest_sha256"] = digest(Path(config.manifest))
     return fingerprint(values)
 
 

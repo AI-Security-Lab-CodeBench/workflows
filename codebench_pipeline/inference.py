@@ -47,6 +47,13 @@ def _output(value: str | bytes | None) -> str:
 
 
 def _native(system: str, user: str, config: ModelConfig, out: Path, receipt: dict[str, JsonValue]) -> str:
+    native_features = {
+        "PI_OPENAI_WEB_SEARCH": "0",
+        "PI_ANTHROPIC_WEB_SEARCH": "0",
+        "PI_OPENAI_IMAGE_GEN": "0",
+        "PI_WEBFETCH": "0",
+    }
+    receipt["native_feature_overrides"] = {name: value for name, value in native_features.items()}
     with tempfile.TemporaryDirectory(prefix="codebench-typed-infer-") as temporary:
         command = [
             os.environ.get("CODEBENCH_OMO_EXECUTABLE", "omo"),
@@ -78,12 +85,13 @@ def _native(system: str, user: str, config: ModelConfig, out: Path, receipt: dic
                 text=True,
                 capture_output=True,
                 cwd=temporary,
-                env=dict(
-                    os.environ,
-                    TMPDIR=temporary,
-                    NODE_COMPILE_CACHE=str(Path(temporary) / "node-cache"),
-                    BUN_RUNTIME_TRANSPILER_CACHE_PATH=str(Path(temporary) / "bun-cache"),
-                ),
+                env={
+                    **os.environ,
+                    **native_features,
+                    "TMPDIR": temporary,
+                    "NODE_COMPILE_CACHE": str(Path(temporary) / "node-cache"),
+                    "BUN_RUNTIME_TRANSPILER_CACHE_PATH": str(Path(temporary) / "bun-cache"),
+                },
                 timeout=config.timeout_seconds,
                 check=False,
             )

@@ -21,12 +21,14 @@ def _inference(
     branch_prefix: str = "",
     unified_id: str | None = None,
 ) -> dict[str, JsonValue]:
-    """Read only this candidate's retained label and independent review artifacts."""
+    """Read this candidate's labels and any retained historical review artifacts."""
     result: dict[str, JsonValue] = {}
     store = ObjectStore(manifest.storage)
     for stage, invocation in (("proposed_annotations", "label"), ("reviewed_annotations", "review")):
         shared_review = invocation == "review" and "merged_proposed_annotations" in manifest.references
         evidence_stage = stage if shared_review else f"{branch_prefix}{stage}"
+        if invocation == "review" and evidence_stage not in manifest.references:
+            continue
         identity = unified_id if shared_review and unified_id is not None else candidate_id
         candidate_hash = sha256(identity.encode("utf-8")).hexdigest()
         metadata = TypeAdapter(dict[str, JsonValue]).validate_python(manifest.evidence[evidence_stage])
@@ -88,12 +90,19 @@ def review_evidence(
     ]
     duplicates = TypeAdapter(list[dict[str, JsonValue]]).validate_python(frame.attrs.get("duplicates", []))
     duplicate_evidence: list[JsonValue] = []
-    merged_stage = (
-        "reviewed_annotations"
-        if "merged_proposed_annotations" in manifest.references
-        else "merged_reviewed_annotations"
+    merged_stage = next(
+        (
+            stage
+            for stage in (
+                "reviewed_annotations",
+                "merged_proposed_annotations",
+                "merged_reviewed_annotations",
+            )
+            if stage in manifest.references
+        ),
+        None,
     )
-    if merged_stage in manifest.references:
+    if merged_stage is not None and duplicates:
         merged = snapshots.frame(manifest, merged_stage)
         duplicate_ids = {
             str(item["duplicate_id"]) for item in duplicates if item["survivor_id"] == candidate_id

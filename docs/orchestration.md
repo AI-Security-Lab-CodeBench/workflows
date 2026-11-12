@@ -7,7 +7,7 @@ Dataset/corpus and original-documentation branches share category rules and
 processing code, with separate provenance and eligibility bindings. `build_dataset`
 supports selective planning across both; neither waits for human source admission.
 `build_documentation` runs only documentation collection. Both branches converge
-after labeling into one merged dataset, bounded incremental agentic review,
+after labeling into one merged dataset,
 conservative exact deduplication, uncertainty-only human review and one `release_dataset` job.
 Configured branches must be current and authorized before final publication.
 Model training is not part of this namespace or job.
@@ -63,8 +63,7 @@ In the browser:
    contains uncertain rows, open **Review**, select the category and enter a
    reviewer name. Save each record as approved, rejected or pending, with notes.
    Approvals concern dataset inclusion, never command execution. A row enters this
-   queue when any of category, risk, severity, class or independent reviewer
-   confidence is `medium` or `low`. All five `high` means low uncertainty; eligible
+   queue when any of category, risk, severity or class confidence is `medium` or `low`. All four `high` means low uncertainty; eligible
    rows are admitted without a decision and marked `human_reviewed=false`.
    Every queued record needs a terminal
    decision, and human approval cannot bypass machine gates. Included uncertain
@@ -79,7 +78,7 @@ In the browser:
    decision to publish a replacement dataset. Prior outputs remain inspectable
    as stale history, but cannot feed downstream builds.
 6. Inspect `human_review_queue` for unified human decisions,
-   `merged_proposed_annotations` and `reviewed_annotations` for shared model review,
+   `merged_proposed_annotations` for unified model labels,
    and `deduplicated_annotations` for exact duplicate elimination,
    `filtered_commands` for quarantined extraction candidates, and `source_catalog`
    for source exclusions. These are different outputs, not missing release rows.
@@ -157,14 +156,13 @@ See [branch contracts and migration](independent-branches.md).
 4. `document_adapters`: per-source declarative parsing mappings.
 5. `command_candidates`: extracted records, context and positions.
 6. `filtered_commands`: all candidates with eligibility or quarantine reasons.
-7. `labeling_documentation`: supplied or live-crawled semantics for eligible operations.
+7. `labeling_documentation`: prepared manifest semantics for eligible operations.
 8. `proposed_annotations`: independent labels, confidence and rationale.
 9. `merged_proposed_annotations`: current branch labels and evidence, including withheld and rejected labels.
-10. `reviewed_annotations`: shared bounded agentic review with per-record reuse.
-11. `deduplicated_annotations`: conservative exact normalized survivors with an audit mapping.
-12. `human_review_queue`: only medium-or-higher uncertainty annotations, with machine exclusion reasons.
-13. `human_review_decisions`: real, version-bound terminal queue decisions; no invented rows for automatic admission.
-14. `dataset_release`: the single current release, with per-row `human_reviewed` after the nine command columns.
+10. `deduplicated_annotations`: conservative exact normalized survivors with an audit mapping.
+11. `human_review_queue`: only medium-or-higher uncertainty annotations, with machine exclusion reasons.
+12. `human_review_decisions`: real, version-bound terminal queue decisions; no invented rows for automatic admission.
+13. `dataset_release`: the single current release, with per-row `human_reviewed` after the nine command columns.
 
 The authoritative publication pointer is the SQLite review ledger, committed
 after immutable Parquet, CSV and audit sidecars are written. A manual release
@@ -175,8 +173,8 @@ instead of requiring human completion. Stale revisions, missing records and chan
 decisions fail explicitly. Eligibility and required approval precede the per-risk cap.
 Historical raw outputs remain inspectable but are not retroactively human-approved.
 
-Model review caches validated results and receipts by each record's relevant input,
-independently of batch membership. Adding or changing a row reviews only missing
+Labeling caches validated results and receipts by each record's relevant input,
+independently of batch membership. Adding or changing a row labels only missing
 or invalidated rows. Human batches similarly carry terminal decisions only when
 the row evidence/policy fingerprint, eligibility and selection bounds match.
 Carried decisions retain their reviewer and audit origin. A changed snapshot is
@@ -203,15 +201,12 @@ and safe-counterpart pairing remain deferred.
 
 ## Versioned configuration
 
-Each `configs/datasets/*.json` is the complete initial configuration for one category:
-inline `rules`, `seeds`, `documentation.snippets`, model roles, stage settings and
-storage. Seeds are inspected source references or bounded search queries, not
-synthetic commands or random-number seeds. Referenced raw document bytes may live
-outside the JSON; their paths resolve relative to it. No additional rules,
-source-manifest, search-request or semantics configuration file is required.
-Unknown fields and wrong scalar types fail.
-Each stage has its own strict Dagster configuration. Registered versions are retained
-under `dataset-specifications`; changing a file does not erase an old version.
+Each `configs/datasets/*.json` supplies inline category rules, model settings,
+processing settings and storage, plus inline sources or external manifests.
+`seeds.manifest` and `documentation_sources.manifest` are category-bound
+source lists. `documentation.manifest` supplies semantic snippets. Paths resolve
+relative to the referencing file. Unknown fields and invalid scalar types fail.
+Registered versions and immutable historical outputs remain retained.
 
 The inline `rules` define category ID/name/version, complete policy,
 risk definitions and command-family patterns, class definitions, severities and
@@ -228,9 +223,9 @@ remain preserved as historical examples, but the default loader no longer uses t
 When migrating an existing home, register the consolidated configuration for every
 category before enabling the sensor. Previous registry versions and artifacts remain.
 
-Each configuration explicitly supplies four model roles: `selector`, `adapter`,
-`labeler`, `reviewer`. Each role can independently use native authentication or
-an OpenAI-compatible endpoint. For example, one role can be:
+Only `models.labeler` is required. Legacy selector, adapter and reviewer settings
+are unused by the active graph. The labeler can use native authentication or an
+OpenAI-compatible endpoint, for example:
 
 ```json
 {
@@ -250,41 +245,37 @@ Credentials are environment references, not stored values. There is no automatic
 provider fallback or response repair. Native mode uses supported `omo` authentication
 and a fresh no-tools/no-session invocation per record. Native sampling/token controls
 use CLI defaults, recorded honestly in receipts; API generation controls are explicit.
+The native child also sets `PI_OPENAI_WEB_SEARCH`, `PI_ANTHROPIC_WEB_SEARCH`,
+`PI_OPENAI_IMAGE_GEN` and `PI_WEBFETCH` to `0`, overriding inherited provider-native
+features without changing user settings or credentials. Receipts retain these
+overrides; provider-native tool blocks remain rejected, not stripped from an answer.
 Malformed JSON, unsupported taxonomy and overlong rationales fail closed with retained
 evidence. Failed attempts are visible as Dagster asset observations.
 
 ## Sources and examples
 
-The shipped configurations explicitly use `provided_sources`: actual inspected,
-revision-pinned tldr documents, not a fresh internet search. Selection, snapshotting,
-adapter inference, extraction, labeling and review all still run in the configured
-chain. Inline source seeds bind hashes, original URLs, licensing and attribution.
-The capture bytes remain local and ignored. See the [local input setup](../README.md#local-source-inputs);
-the checked-in CAT-3 source configuration retains their provenance metadata.
+Before building, use `skills/codebench-source-preparation/SKILL.md` to discover,
+inspect and enumerate complete sources locally. The shipped CAT-3 config expects
+`inputs/cat3/datasets.json`, `documentation-sources.json` and `semantics.json`.
+These ignored inputs and their preparation inventory are not included in Git.
 
-For live discovery set `seeds.mode` to `keenable`, supply `seeds.search_request`,
-and leave `seeds.documents` empty. The inline search request contains risk-specific
-search groups, `results_per_query` and `pages_per_risk`; the configured
-selector role controls the actual inference invocation. Risk IDs must belong to
-the category. The public keyless Keenable MCP endpoint is the default. Override the transport using
-`CODEBENCH_KEENABLE_COMMAND` / `CODEBENCH_KEENABLE_ARGS` or
-`CODEBENCH_KEENABLE_URL`. Optional environment/header maps use
-`CODEBENCH_KEENABLE_ENV` / `CODEBENCH_KEENABLE_HEADERS`.
-Search snippets remain separate from inspected pages. Native model authentication
-is independent of the MCP transport. Each risk search can include `inspection_urls`
-for known command and license pages; these are fetched first within the same
-`pages_per_risk` budget.
+Both source manifests have `version: 1`, `category_id`, `revision`, `sources`
+and `evidence`. The semantic manifest uses `snippets` instead of `sources`.
+Source records include provenance, license, format and a local path or exact URL.
+Remote URLs require SHA-256 or explicit Git blob SHA-1; full bodies are validated.
+The active modes are only `provided_sources`, `provided_snippets` and provided
+adapters. Online search requests are rejected, not silently ignored.
 
-For semantic documentation crawling, set `documentation.mode` to `keenable`,
-leave `documentation.snippets` empty and supply `documentation.search_request`
-with the same bounded search structure. The selector model is used unless a
-documentation model is explicitly configured. The stage depends on filtered
-commands and category rules, retains fetched pages and inference receipts, and
-reports missing operation coverage. Non-verbatim excerpts are withheld; unresolved
-licensing is tracked separately from semantic suitability, without granting
-corpus reuse or evidence redistribution. Explicit prohibitions remain excluded.
-An empty result cannot support an accepted label. The default
-`provided_snippets` mode remains offline.
+Reviewed Python functions/classes may be referenced by `transform` with local
+`module_path`, `sha256`, `entrypoint`, `kind`, `trusted: true`,
+`options_json` and `batch_size`. They consume source batches and return canonical
+rows with original positions. Only explicitly trusted, matching module bytes are
+imported; collected strings remain inert. See `transforms/` for reusable examples.
+
+Run validation, then build with `--config` into an empty home. Retain source counts,
+exclusions, download receipts and label receipts. Repeat unchanged to prove reuse;
+replay immutable inference receipts explicitly when comparing deterministic labeled
+outputs. Fresh LLM calls are not promised to be byte-identical.
 
 ## Parquet storage, including MinIO
 
@@ -334,13 +325,12 @@ stage; a cache hit is not misreported as a skipped materialization.
 | Changed configuration | Selected stages after an initial build |
 | --- | --- |
 | Nothing, or only top-level revision | None |
-| Reviewer settings | Affected review outputs and shared finalization |
-| Labeler settings | Affected labeling/review outputs and shared finalization |
-| Policy, description language, or rule version | Rules, labeling, review and shared finalization |
-| Documentation snippets | Documentation, labeling, review and shared finalization |
+| Labeler settings | Affected labeling outputs and shared finalization |
+| Policy, description language, or rule version | Rules, labeling and shared finalization |
+| Documentation snippets | Documentation, labeling and shared finalization |
 | Publication cap | Shared review preparation and release authorization |
-| Extraction settings | Extraction, filtering, labeling, review and shared finalization |
-| Source/search seeds | Source catalog and dependent acquisition/processing stages |
+| Extraction settings | Extraction, filtering, labeling and shared finalization |
+| Source manifests | Source catalog and dependent acquisition/processing stages |
 
 Rule changes use stage-specific projections: changing only labeling policy does
 not invalidate source selection or filtering. Changing command-family patterns
@@ -352,8 +342,8 @@ Every successful stage retains effective config, exact code snapshots and infere
 receipts with prompt/input hashes, response, observed model and timestamps. Failed
 attempts also retain receipts. Storage corruption fails instead of being repaired.
 The current table parser supports text, Markdown, JSON, JSONL and CSV; declarative
-adapters cannot execute generated code. Complex multiline shell forms require
-additional parser support and should not be assumed equivalent to simple examples.
+adapters are declarative. Reviewed hash-pinned Python batch transformations handle
+source-specific formats; collected command strings remain inert.
 
 The small examples verify orchestration; they do not meet the 250-record-per-risk
 collection target. The current cap is per dataset partition, not a cross-category

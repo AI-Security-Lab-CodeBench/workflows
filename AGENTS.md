@@ -33,15 +33,25 @@ existing data before replacing it; never overwrite concurrent work.
 - Maintain independently executable **Existing datasets** and **Documentation
   crawl** collection branches. Show each as a named surrounding group in Dagster
   lineage, with a separately named shared finalization group.
-- Crawl or load every eligible configured source automatically in both branches.
-  Enforce provenance, license/reuse terms and content eligibility before acquisition.
-  `human_source_decisions` is not part of the active graph; source confidence
-  neither requires human admission nor overrides machine eligibility.
+- The local agent discovers and assesses sources outside Dagster, reading actual
+  README/license/origin evidence and enumerating complete declared scopes.
+  Follow `skills/codebench-source-preparation/SKILL.md`; preserve evidence and
+  unresolved exclusions in local inventories. Dagster accepts category-bound
+  manifests and retrieves every admitted file with pinned integrity checks.
+  No source search, selector model or adapter model runs inside the pipeline.
+  `human_source_decisions` is not part of the active graph.
+- Source manifests may reference reviewed local Python batch transformations
+  with explicit trust and pinned module hashes. Only those modules are imported;
+  collected commands and downloaded scripts remain inert. Preserve source
+  positions and actual transformations; core code owns canonical validation.
 - Each branch extracts raw candidates, filters, gathers semantic documentation
-  and labels records in isolated invocations. Preserve raw extraction and
-  transformation/exclusion evidence.
+  and labels each eligible command in one isolated LLM invocation, producing
+  `proposed_annotations`. Preserve raw extraction and transformation/exclusion evidence.
 - Converge authorized, current labeled branch outputs into **one** category
-  dataset, then perform independent agentic review in the unified tail.
+  dataset at `merged_proposed_annotations`, then apply conservative exact deduplication.
+  There is no independent per-command LLM reviewer stage. `reviewed_annotations`
+  is historical and remains readable; never manufacture `review_verdict` or
+  `review_confidence` for current rows.
   Preserve branch/source identities and all original evidence.
   An unconfigured branch is distinct from an empty or blocked configured branch.
   Never silently substitute stale or unauthorized data.
@@ -53,12 +63,13 @@ existing data before replacing it; never overwrite concurrent work.
   deduplication are not part of this stage.
 - After exact deduplication, send only medium-or-higher uncertainty rows to the
   shared final human queue. Any `medium` or `low` among the four label confidences
-  (category, risk, severity, class) or independent reviewer confidence requires
-  review. All five `high` means low uncertainty and automatic admission only if
+  (category, risk, severity, class) requires
+  review. All four `high` means low uncertainty and automatic admission only if
   machine eligible. Machine-ineligible rows remain inspectable and cannot be
   admitted by human approval.
 - Use **one final dataset release**. An empty uncertainty queue lets the build
-  release automatically, with `human_reviewed=false` and no fabricated decisions.
+  complete automatically under a policy actor with zero human decisions and
+  release with `human_reviewed=false`.
   A nonempty queue makes that same release wait for real terminal decisions and
   explicit completion. Low-uncertainty rows need no decision; actually approved
   uncertain rows carry `human_reviewed=true`.
@@ -83,13 +94,13 @@ existing data before replacing it; never overwrite concurrent work.
 - Unchanged inputs reuse persisted outputs without repeating inference or asking
   for equivalent approval. Preserve immutable historical outputs and decisions
   while clearly distinguishing their currentness.
-- Reuse review at record granularity, not merely whole-table granularity.
+- Reuse labeling and human decisions at record granularity, not merely whole-table granularity.
   Adding or changing a neighboring record must not repeat an unchanged record's
-  LLM review or erase its human decision. Bind reuse to that record's complete
+  LLM labeling or erase its human decision. Bind reuse to that record's complete
   relevant evidence, label, semantic documentation and review policy; never reuse
   a decision when those inputs changed.
-- Bound LLM review packets by record count and context size. Execute only missing
-  or invalidated record reviews, independently of packet membership and ordering.
+- Bound each command's labeling context and invoke the LLM once per eligible row.
+  Execute only missing or invalidated labels, independently of ordering.
   Preserve original inference receipts and explicit human-decision carry-forward
   provenance. A new release snapshot with a nonempty uncertainty queue still
   requires explicit completion; an empty queue is revalidated automatically.
@@ -105,10 +116,11 @@ existing data before replacing it; never overwrite concurrent work.
 ## Data and review contracts
 
 - Label each record independently from source context and relevant subcommand
-  documentation. A different isolated invocation performs agentic review.
-  Preserve disagreements, confidence dimensions, concise rationales, model
+  documentation in one LLM invocation. Local source preparation is separate
+  from command labeling and never supplies a fifth command confidence.
+  Preserve all four label confidences, concise rationales, model
   identity, prompt/input hashes, timestamps and evidence pointers.
-- Agentic review is not human approval. Never submit real human decisions under
+- Source assessment and labeling are not human approval. Never submit real human decisions under
   an agent identity to advance the collection. QA decisions belong only to
   explicitly synthetic fixtures in an isolated QA home.
 - `allow`, `deny`, `ask` are the v0 classes; severity is independent. Do not invent

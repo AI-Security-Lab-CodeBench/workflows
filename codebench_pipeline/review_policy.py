@@ -1,7 +1,7 @@
-from codebench_pipeline.dataset_records import LabelDecision, ReviewDecision
+from codebench_pipeline.dataset_records import LabelDecision
 
 
-def requires_human_review(label: LabelDecision, review: ReviewDecision) -> bool:
+def requires_human_review(label: LabelDecision) -> bool:
     return any(
         confidence != "high"
         for confidence in (
@@ -9,6 +9,5 @@ def requires_human_review(label: LabelDecision, review: ReviewDecision) -> bool:
             label.risk_confidence,
             label.severity_confidence,
             label.class_confidence,
-            review.confidence,
         )
     )

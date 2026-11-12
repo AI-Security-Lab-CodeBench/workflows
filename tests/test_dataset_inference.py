@@ -110,13 +110,14 @@ def read_json(path: Path) -> JsonValue:
 
 
 class ModelConfigTests(unittest.TestCase):
-    def test_roles_are_required_strict_dagster_configs(self) -> None:
+    def test_labeler_is_required_and_legacy_roles_remain_strict_dagster_configs(self) -> None:
         native = ModelConfig(provider="native", model="fixture/small")
         roles = ModelRoles(selector=native, adapter=native, labeler=native, reviewer=native)
         self.assertIsInstance(roles, Config)
         self.assertIsInstance(roles.selector, Config)
+        self.assertEqual(ModelRoles(labeler=native).labeler, native)
         with self.assertRaises(ValidationError):
-            _ = ModelRoles.model_validate({"selector": native, "adapter": native, "labeler": native})
+            _ = ModelRoles.model_validate({"selector": native, "adapter": native, "reviewer": native})
         with self.assertRaises(ValidationError):
             _ = ModelRoles.model_validate({**roles.model_dump(), "unknown": True})
         with self.assertRaises(ValidationError):
@@ -174,6 +175,7 @@ class DatasetInferenceTests(unittest.TestCase):
                 ("reviewer", roles.reviewer, 2, second),
             ):
                 with self.subTest(role=name):
+                    assert config is not None
                     out = Path(temporary) / name
                     result = infer_typed(Answer, "policy", "inert input", config, out)
                     self.assertEqual(result.count, expected)
@@ -355,9 +357,18 @@ class DatasetInferenceTests(unittest.TestCase):
             self.assertTrue(server.requests.empty())
 
     def test_native_timeout_uses_config_without_mutating_environment(self) -> None:
+        native_features = (
+            "PI_OPENAI_WEB_SEARCH",
+            "PI_ANTHROPIC_WEB_SEARCH",
+            "PI_OPENAI_IMAGE_GEN",
+            "PI_WEBFETCH",
+        )
         with (
             tempfile.TemporaryDirectory() as temporary,
-            patch.dict(os.environ, {"CODEBENCH_AGENT_TIMEOUT": "999"}),
+            patch.dict(
+                os.environ,
+                {"CODEBENCH_AGENT_TIMEOUT": "999", **{name: "1" for name in native_features}},
+            ),
         ):
             config = ModelConfig(provider="native", model="fixture/small", timeout_seconds=0.25)
             out = Path(temporary) / "out"
@@ -369,6 +380,9 @@ class DatasetInferenceTests(unittest.TestCase):
                     _ = infer_typed(Answer, "policy", "input", config, out)
             self.assertEqual(process.call_args.kwargs["timeout"], 0.25)
             self.assertEqual(os.environ["CODEBENCH_AGENT_TIMEOUT"], "999")
+            for name in native_features:
+                self.assertEqual(process.call_args.kwargs["env"][name], "0")
+                self.assertEqual(os.environ[name], "1")
             self.assertFalse(Path(process.call_args.kwargs["cwd"]).exists())
             self.assertEqual((out / "stdout.jsonl").read_text(), "partial")
             self.assertEqual((out / "stderr.txt").read_text(), "timeout")
@@ -394,7 +408,14 @@ class DatasetInferenceTests(unittest.TestCase):
 
     def test_native_validates_exact_json_and_keeps_process_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            for index, content in enumerate(('{"count":7}', '```json\n{"count":7}\n```')):
+            for index, content in enumerate(('{"count":7}', '```json\n{"count":7}\n```', '{"count":7}')):
+                blocks: list[JsonValue] = [{"type": "text", "text": content}]
+                if index == 2:
+                    blocks.insert(0, {
+                        "type": "providerNative",
+                        "subtype": "web_search_call",
+                        "raw": {"type": "web_search_call", "status": "completed"},
+                    })
                 events = json.dumps(
                     {
                         "type": "message_end",
@@ -403,7 +424,7 @@ class DatasetInferenceTests(unittest.TestCase):
                             "provider": "fixture",
                             "model": "small",
                             "stopReason": "stop",
-                            "content": [{"type": "text", "text": content}],
+                            "content": blocks,
                         },
                     }
                 )
@@ -421,4 +442,4 @@ class DatasetInferenceTests(unittest.TestCase):
                 self.assertEqual((out / "stdout.jsonl").read_text(), events)
                 receipt = read_json(out / "receipt.json")
                 assert isinstance(receipt, dict)
-                self.assertEqual(receipt["actual_model"], "fixture/small")
+                self.assertEqual(receipt["actual_model"], "fixture/small" if index < 2 else None)

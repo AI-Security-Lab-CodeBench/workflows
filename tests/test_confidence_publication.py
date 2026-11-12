@@ -4,20 +4,21 @@ import json
 import tempfile
 import unittest
 from contextlib import ExitStack, redirect_stdout
+from hashlib import sha256
 from pathlib import Path
 from unittest.mock import patch
 
 from configuration_fixture import write_fixture
-from pydantic import BaseModel
+from pydantic import BaseModel, JsonValue, TypeAdapter
 from test_dataset_incremental import provider_response
-from test_dataset_rules import make_candidate, make_label, make_review, make_rules
+from test_dataset_rules import make_candidate, make_label, make_rules
 
 from codebench_pipeline.data_view_models import DatasetQueryRequest, TableResponse
 from codebench_pipeline.data_views import DatasetDataService
 from codebench_pipeline.dataset_cli import execute_build, execute_registered_build
 from codebench_pipeline.dataset_config import load_build_config
 from codebench_pipeline.dataset_export import prepare_dataset
-from codebench_pipeline.dataset_records import LabelDecision, ReviewDecision
+from codebench_pipeline.dataset_records import LabelDecision
 from codebench_pipeline.human_review import DecisionChange
 from codebench_pipeline.human_review_store import HumanReviewStore
 from codebench_pipeline.model_config import ModelConfig
@@ -30,6 +31,7 @@ from codebench_pipeline.review_api_models import (
     RetractionRequest,
 )
 from codebench_pipeline.review_service import ReviewService
+from codebench_pipeline.review_snapshots import ReviewSnapshots
 from codebench_pipeline.runtime_instance import dataset_instance
 
 
@@ -42,28 +44,11 @@ def mixed_confidence_response(
         return result.model_copy(
             update={
                 "category_confidence": "medium"
-                if "-auto-approve" in payload["candidate"]["command"]
+                if any(
+                    flag in payload["candidate"]["command"]
+                    for flag in ("-auto-approve", "-compact-warnings")
+                )
                 else "high"
-            }
-        )
-    if isinstance(result, ReviewDecision):
-        return result.model_copy(
-            update={"confidence": "low" if "-compact-warnings" in payload["candidate"]["command"] else "high"}
-        )
-    if "records" in payload:
-        return schema.model_validate(
-            {
-                "reviews": [
-                    {
-                        "candidate_id": record["candidate"]["candidate_id"],
-                        "verdict": "approve",
-                        "confidence": "low"
-                        if "-compact-warnings" in record["candidate"]["command"]
-                        else "high",
-                        "rationale": "Independent fixture review.",
-                    }
-                    for record in payload["records"]
-                ]
             }
         )
     return result
@@ -87,17 +72,12 @@ class ConfidencePublicationTests(unittest.TestCase):
             "risk_confidence",
             "severity_confidence",
             "class_confidence",
-            "review",
         ):
             for confidence in ("low", "medium", "high"):
                 with self.subTest(field=field, confidence=confidence):
                     label = make_label(candidate, rules)
-                    review = make_review(candidate)
-                    if field == "review":
-                        review = review.model_copy(update={"confidence": confidence})
-                    else:
-                        label = label.model_copy(update={field: confidence})
-                    pending = prepare_dataset([candidate], [label], [review], rules, 250)
+                    label = label.model_copy(update={field: confidence})
+                    pending = prepare_dataset([candidate], [label], rules, 250)
                     if confidence == "high":
                         self.assertEqual(
                             [(row["command"], row["human_reviewed"]) for row in pending.commands],
@@ -110,7 +90,6 @@ class ConfidencePublicationTests(unittest.TestCase):
                     accepted = prepare_dataset(
                         [candidate],
                         [label],
-                        [review],
                         rules,
                         250,
                         approved_ids=frozenset({candidate.candidate_id}),
@@ -125,14 +104,33 @@ class ConfidencePublicationTests(unittest.TestCase):
         candidate = make_candidate()
         publication = prepare_dataset(
             [candidate],
-            [make_label(candidate, rules)],
-            [make_review(candidate).model_copy(update={"verdict": "reject"})],
+            [make_label(candidate, rules).model_copy(update={"decision": "reject"})],
             rules,
             250,
         )
         self.assertEqual(publication.commands, [])
         self.assertEqual(publication.human_review_ids, ())
         self.assertEqual(publication.eligible_ids, ())
+
+    def test_human_approval_cannot_admit_machine_ineligible_uncertain_labels(self) -> None:
+        rules = make_rules()
+        candidate = make_candidate()
+        for decision in ("reject", "needs_review"):
+            with self.subTest(decision=decision):
+                label = make_label(candidate, rules).model_copy(
+                    update={"decision": decision, "class_confidence": "medium"}
+                )
+                publication = prepare_dataset(
+                    [candidate],
+                    [label],
+                    rules,
+                    250,
+                    approved_ids=frozenset({candidate.candidate_id}),
+                )
+                self.assertEqual(publication.human_review_ids, (candidate.candidate_id,))
+                self.assertEqual(publication.eligible_ids, ())
+                self.assertEqual(publication.commands, [])
+                self.assertEqual(publication.pending[0]["human_reviewed"], "false")
 
     def test_only_uncertain_rows_wait_for_human_review_and_retraction_stales_release(self) -> None:
         with ExitStack() as stack:
@@ -145,7 +143,7 @@ class ConfidencePublicationTests(unittest.TestCase):
             config["storage"] = {"local_root": str(home / "tables")}
             path = home / "config.json"
             path.write_text(json.dumps(config))
-            for module in ("dataset_catalog", "dataset_documents", "dataset_annotation"):
+            for module in ("dataset_annotation",):
                 stack.enter_context(
                     patch(f"codebench_pipeline.{module}.infer_typed", side_effect=mixed_confidence_response)
                 )
@@ -256,7 +254,7 @@ class ConfidencePublicationTests(unittest.TestCase):
         with ExitStack() as stack:
             home = Path(stack.enter_context(tempfile.TemporaryDirectory()))
             config = write_fixture(home)
-            for module in ("dataset_catalog", "dataset_documents", "dataset_annotation"):
+            for module in ("dataset_annotation",):
                 stack.enter_context(
                     patch(f"codebench_pipeline.{module}.infer_typed", side_effect=high_confidence_response)
                 )
@@ -273,6 +271,36 @@ class ConfidencePublicationTests(unittest.TestCase):
             self.assertEqual(
                 {(row.values["command"], row.values["human_reviewed"]) for row in released.page.rows},
                 {("git status", "false"), ("git status --show-stash", "false")},
+            )
+            resolved = ReviewSnapshots(home, data).current(spec.dataset_id)
+            self.assertNotIn("reviewed_annotations", resolved.manifest.references)
+            label_stage = "documentation/proposed_annotations"
+            metadata = TypeAdapter(dict[str, JsonValue]).validate_python(
+                resolved.manifest.evidence[label_stage]
+            )
+            receipts = TypeAdapter(dict[str, str]).validate_python(metadata["receipts"])
+            labeled = data.query(label_stage, query)
+            assert isinstance(labeled, TableResponse)
+            identities = [
+                TypeAdapter(str).validate_python(row.values["candidate_id"]) for row in labeled.page.rows
+            ]
+            self.assertEqual(
+                set(receipts),
+                {
+                    "label-packets.json",
+                    *(
+                        f"label/{sha256(identity.encode()).hexdigest()}/reuse.json"
+                        for identity in identities
+                    ),
+                },
+            )
+            exported = [
+                json.loads(line)
+                for line in resolved.prepared.files["review/reviewed.jsonl"].splitlines()
+            ]
+            self.assertEqual(
+                [set(row) & {"review", "review_confidence", "review_verdict"} for row in exported],
+                [set(), set()],
             )
             with HumanReviewStore(home).reader() as transaction:
                 batch = transaction.get_current_batch(spec.dataset_id, "annotations")

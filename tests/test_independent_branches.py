@@ -30,7 +30,7 @@ class IndependentBranchDatasetTests(unittest.TestCase):
         self.addCleanup(self.stack.close)
         self.home = Path(self.stack.enter_context(tempfile.TemporaryDirectory()))
         self.spec = load_build_config(write_fixture(self.home), self.home)
-        for module in ("dataset_catalog", "dataset_documents", "dataset_annotation"):
+        for module in ("dataset_annotation",):
             self.stack.enter_context(
                 patch(f"codebench_pipeline.{module}.infer_typed", side_effect=provider_response)
             )
@@ -57,7 +57,7 @@ class IndependentBranchDatasetTests(unittest.TestCase):
             self.assertTrue(result.success)
             data = DatasetDataService(self.home, instance)
             reviewed = data.query(
-                "reviewed_annotations", DatasetQueryRequest(dataset_id=self.spec.dataset_id)
+                "merged_proposed_annotations", DatasetQueryRequest(dataset_id=self.spec.dataset_id)
             )
             assert isinstance(reviewed, TableResponse)
             self.assertGreater(reviewed.page.total_rows, 0)
@@ -79,7 +79,7 @@ class IndependentBranchDatasetTests(unittest.TestCase):
         self.assertEqual(outcome.branches["documentation"].status, "awaiting_human_review")
         self.assertEqual(outcome.branches["documentation"].review_stage, "annotations")
         self.assertIn("documentation/proposed_annotations", outcome.materialized_stages)
-        self.assertIn("reviewed_annotations", outcome.materialized_stages)
+        self.assertIn("deduplicated_annotations", outcome.materialized_stages)
         self.assertIn("human_review_queue", outcome.materialized_stages)
         self.assertIn("source_documents", outcome.materialized_stages)
         self.assertNotIn("human_source_decisions", outcome.materialized_stages)
@@ -117,7 +117,6 @@ class IndependentBranchDatasetTests(unittest.TestCase):
             {
                 "category_rules",
                 "merged_proposed_annotations",
-                "reviewed_annotations",
                 "deduplicated_annotations",
                 "human_review_queue",
                 "human_review_decisions",
@@ -215,7 +214,6 @@ class IndependentBranchDatasetTests(unittest.TestCase):
             set(outcome.materialized_stages),
             {
                 "merged_proposed_annotations",
-                "reviewed_annotations",
                 "deduplicated_annotations",
                 "human_review_queue",
             },

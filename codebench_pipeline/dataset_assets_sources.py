@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from dagster import (
     AssetExecutionContext,
     AssetsDefinition,
@@ -118,7 +120,13 @@ def source_assets(branch: Branch = "dataset") -> list[AssetsDefinition]:
             config,
             {"source_catalog": source_catalog},
             SourceDocumentsTable,
-            lambda evidence: snapshot_documents(source_catalog, config),
+            lambda evidence: snapshot_documents(
+                source_catalog,
+                config,
+                cache=Path(dataset_io_manager.review_home) / "source-downloads"
+                if dataset_io_manager.review_home is not None else None,
+                evidence=evidence / "retrieval",
+            ),
         )
 
     @asset(

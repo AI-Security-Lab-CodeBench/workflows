@@ -72,11 +72,11 @@ class ModelConfig(TypedConfig):
 
 
 class ModelRoles(TypedConfig):
-    """All four stages must explicitly select their own model configuration."""
+    """The active pipeline labels commands; optional roles preserve older specifications."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    selector: ModelConfig
-    adapter: ModelConfig
     labeler: ModelConfig
-    reviewer: ModelConfig
+    selector: ModelConfig | None = None
+    adapter: ModelConfig | None = None
+    reviewer: ModelConfig | None = None

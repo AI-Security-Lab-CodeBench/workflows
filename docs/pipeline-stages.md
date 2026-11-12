@@ -17,14 +17,13 @@ add constraints that column schemas alone don't express.
 All source commands, context, snippets and model responses are inert, untrusted
 data. No stage executes a collected command. Source selection decides which
 documents to process. Filtering decides which extracted records can enter
-inference. Labeling and separate agentic review assess individual records.
+inference. One isolated labeling invocation assesses each eligible record.
 Both branches automatically crawl or load eligible sources, enforcing provenance,
 license/reuse terms, content eligibility and inspected-source bindings. Agent
 proposals aren't human approval. Final human review covers only rows with any
-`medium` or `low` among the four label confidences or independent reviewer
-confidence. All five `high` means low uncertainty and automatic admission only
+`medium` or `low` among the four label confidences. All four `high` means low uncertainty and automatic admission only
 if machine eligible. Conservative exact normalized
-deduplication runs on the combined agent-reviewed dataset before human review.
+deduplication runs on the combined labeled dataset before human review.
 Fuzzy linking and safe-counterpart pairing remain deferred.
 
 The sections below describe common stage behavior and the dataset paths.
@@ -32,7 +31,7 @@ Documentation instantiates collection stages through `proposed_annotations` at
 `datasets/documentation/<stage>`, except shared `category_rules`.
 `human_source_decisions` is removed from the active graph; neither branch waits
 on human source admission.
-Both branches converge before shared agentic review, deduplication, final human
+Both branches converge before shared deduplication, final human
 review and release.
 See [independent branch contracts](independent-branches.md) for configuration
 and source-binding rules.
@@ -61,36 +60,22 @@ for model judgment, not a complete executable policy validator.
 
 ## `datasets/source_catalog`
 
-**Input:** Category scope and `CatalogConfig`, using either provided source
-seeds plus local samples or bounded risk-specific Keenable searches and fetched
-inspection text. The selector role makes structured source decisions.
+**Input:** Category scope and a category-bound source manifest, or inline sources.
 
-**Goal:** Record which sources are selected, need review or are excluded.
+**Goal:** Validate the declared inventory for complete acquisition.
 
-**Why:** Document eligibility, origin and reuse must be considered before
-extracting commands. A dangerous command isn't a reason to exclude its source;
-relevant inspection commands and counterexamples also belong in scope.
+**Why:** Source discovery and README/license/origin assessment belong to the local
+agent, outside Dagster. The preparation inventory retains scope and exclusions.
 
-**Output:** `SourceCatalogTable`, one row per returned source, with identity,
-URL, licensing, attribution, revision, retrieval time, parsing hints, sample,
-decision, analysis, rationale and low/medium/high confidence. Search/fetch and
-selector evidence is retained separately. Source confidence doesn't trigger human
-admission or override machine eligibility; eligible sources advance automatically.
-The live catalog isn't an inventory of every search hit.
+**Output:** `SourceCatalogTable` with source identity, URL, license, revision,
+format and provenance. Manifest-backed confidence is `not_applicable`.
+Complete source metadata is retained in the `source_inputs_json` table attribute;
+the JSON string avoids repeated deep copies of a large nested inventory during
+schema validation without dropping evidence.
 
-**Gate/inspection:** Provided seeds must declare accessible, permitted sources
-with commands present; corpus metadata requires inspected human provenance.
-Known agent, synthetic and SFT source types fail that boundary. Local hashes
-are checked, samples are limited to 8,000 characters and checked for sensitive
-patterns, and selector identities must match the complete supplied inventory.
-These declarations don't constitute an independent license audit.
-
-Live selection must refer to inspected pages and verbatim evidence. Its gate
-excludes prohibited reuse and agent/SFT/synthetic origins; incomplete origin,
-license, command or revision evidence withholds a proposal as `needs_review`.
-`proposed` becomes `selected` in this asset. Search snippets aren't inspected
-page evidence. Discovery failures are retained; failures with no inspected pages
-fail the asset. Inspect catalog decisions and discovery receipts, not just counts.
+**Gate/inspection:** Invalid category, duplicate identities, unsupported provenance,
+prohibited reuse or agent/SFT corpus sources fail validation. No search or selector
+model runs. Inspect the retained manifest and its referenced preparation evidence.
 
 ## Historical `datasets/human_source_decisions`
 
@@ -101,48 +86,41 @@ eligible sources without a human decision or completion token.
 
 ## `datasets/source_documents`
 
-This stage depends on the catalog's machine eligibility, not human admission. Live discovery
-uses the exact retained inspected capture, not a later refetch that could differ
-from what was inspected. Provided files must still match their recorded hashes.
+**Input:** The validated catalog and manifest sources, size limits and worker count.
 
-**Input:** The catalog and snapshot configuration, including local source seeds
-when using provided sources, plus a maximum acquisition size.
+**Goal:** Retrieve every admitted file in full and persist its actual byte hash.
 
-**Goal:** Automatically persist every eligible source's text and actual byte hash.
+**Why:** Bounded page samples cannot substitute for complete source bodies.
 
-**Why:** Extraction needs stable, inspected source text rather than search
-snippets. Live discovery captures are bounded by the configured fetch limit;
-they are not a claim to contain the complete remote document.
+**Output:** `SourceDocumentsTable` with inert text, SHA-256 and attribution;
+per-source receipts distinguish verified cache reuse from new downloads.
+Source metadata and prior transformations remain in serialized JSON attributes,
+validated and decoded by extraction after persisted-table reload.
 
-**Output:** `SourceDocumentsTable`, containing selected sources only, with
-`content`, SHA-256 and attribution/provenance columns. Excluded and
-`needs_review` sources remain visible upstream in the catalog.
-
-**Gate/inspection:** Local files and retained live captures must match their
-catalog hashes. Live sources require nonempty captured text and its hash; this
-stage does not refetch a possibly changed page. Oversized bodies, invalid UTF-8
-and detected sensitive content fail acquisition rather than becoming
-command-review rows. Attribution and retrieval time remain bound to the capture.
+**Gate/inspection:** Local or exact remote bytes must match declared SHA-256 or
+Git blob SHA-1. Redirects, oversized, empty, non-UTF8 or sensitive bodies fail.
+A failed file prevents a successful partial snapshot. Verified successful bodies
+remain cached for recovery. Catalog IDs absent from the manifest are rejected.
+Transport connection/DNS/timeout failures get at most three attempts per missing
+file, with each failure retained. HTTP status failures and integrity/content
+failures are not retried. Exhausted transport attempts still fail the stage.
 
 ## `datasets/document_adapters`
 
-**Input:** Source documents and adapter settings: explicit provided mappings or
-the adapter model with a bounded content sample.
+**Input:** Full documents and their manifest-declared format/field mappings.
 
-**Goal:** Choose how each document exposes command-bearing text and context.
+**Goal:** Bind each document to its deterministic decoder.
 
-**Why:** Markdown pages and structured dataset records require different
-decoding before command extraction.
+**Why:** Source-specific formats must not be guessed by a model during a build.
 
-**Output:** `DocumentAdaptersTable`, one row per document: `source_id`, `format`,
-`text_field`, `context_field` and rationale. Inferred mappings have model receipts;
-provided mappings copy the document's declared format and fields.
+**Output:** `DocumentAdaptersTable` with source ID, format and field mapping.
 
-**Gate/inspection:** Only `text`, `markdown`, `json`, `jsonl` and `csv` are
-supported. Mappings are declarative, never generated executable parsers.
-`text_field` supports a dot-separated dictionary path or `$` for the record
-itself. `context_field` is a single dictionary key. A schema-valid mapping can
-still be wrong for later records; extraction checks actual fields and types.
+**Gate/inspection:** Supported formats are text, Markdown, JSON, JSONL and CSV.
+Extraction validates actual values. Optional reviewed local Python batch modules
+use `SourceRow`, `TransformContext` and `CanonicalSourceRow`; a function or
+class entrypoint requires explicit trust and an exact module SHA-256. Hash failure
+prevents import. Returned canonical rows are validated, with positions and
+transformation hashes preserved. Downloaded commands are never executable code.
 
 ## `datasets/command_candidates`
 
@@ -194,42 +172,26 @@ Only the first reason is recorded. Multiple matched risks remain available to
 the labeler. Regex matching and quote checks aren't semantic validation.
 
 Quarantined rows stay here and never enter labeling automatically. They also
-don't enter `human_review_queue`, whose input is reviewed annotations, not this
+don't enter `human_review_queue`, whose input is deduplicated labels, not this
 table. Inspect this asset separately to account for extraction/filter losses.
 
 ## `datasets/labeling_documentation`
 
-**Input:** Eligible filtered commands, category rules, and documentation settings.
+**Input:** Eligible operations, category rules and prepared semantic references.
 
-**Goal:** Collect utility/subcommand semantics and make them visible to both
-inference stages.
+**Goal:** Expose original behavior evidence for the single labeling invocation.
 
-**Why:** Labels need evidence about actual behavior, flags and version limits
-rather than guesses based on command names.
+**Why:** Command names do not establish effects, flags or version applicability.
 
-**Output:** `DocumentationTable`: utility, subcommands, URL, retrieval time,
-snippet and version limits.
+**Output:** `DocumentationTable` with utility, operation tags, URL, retrieval time,
+full snippet and version limits, plus retained coverage and manifest evidence.
 
-**Gate/inspection:** Configuration and snippet models check required fields,
-HTTP(S) URLs and sensitive patterns. `provided_snippets` stays offline.
-`keenable` searches and inspects real pages, validates provenance and exact
-excerpt grounding, and retains acquisition receipts and coverage gaps.
-Semantic selection is independent of dataset-source licensing admission.
-Unknown licensing or a mismatched license-evidence URL does not discard a
-grounded behavior reference. Receipts mark `use_scope: semantic_reference_only`
-and retain separate `reuse_review` decisions with original license metadata.
-This does not authorize incorporation into a corpus or redistribution of the
-evidence bundle. Explicit prohibited reuse and ungrounded/agent-generated
-sources remain excluded. Dataset-source acquisition still applies its strict
-license gate, including when given a documentation-discovery result.
-`inspection_urls` can prioritize command, README and license references within
-the same per-risk page budget; they are not uninspected evidence.
-
-Missing or ungrounded evidence is withheld, not manufactured. Partial coverage
-is recorded as partial. Coverage is conservative command-prefix matching, not a
-proof of complete behavioral semantics. Both inference stages receive the table;
-the independent reviewer must assess relevance and version limitations for every
-row, and final human review does so for uncertain rows.
+**Gate/inspection:** Only provided snippets or a semantic manifest are accepted.
+Invalid category, record fields, URLs, sensitive indicators or byte limits fail.
+No online discovery occurs. Missing operation coverage remains explicit; an
+undocumented record cannot receive an accepted label. Operation-prefix and option
+matching selects relevant references, not a claim of complete semantic proof.
+Semantic use does not authorize corpus redistribution.
 
 ## `datasets/proposed_annotations`
 
@@ -250,8 +212,10 @@ gets a fresh isolated no-tools invocation with retained request/response receipt
 the configured category, a risk supported by both routing and current patterns,
 allowed class/severity, low/medium/high confidences, a nonblank rationale of at
 most 400 characters and unique citations drawn from supplied documentation.
-An accepted label must cite documentation. Exact candidate identity is also
-bound in the per-record response schema. With no documentation, the schema
+An accepted label must cite documentation. Candidate identity, category and
+source utility are bound in the per-record response schema; risk choices are
+restricted to the supplied routing shortlist. Independent post-validation
+still checks taxonomy and citations. With no documentation, the schema
 permits only `needs_review`/`reject` and an empty citation list; a model cannot
 claim unsupported acceptance. There is no confidence threshold at this stage.
 
@@ -261,31 +225,11 @@ prove those requirements or citation relevance. Confidence is self-reported,
 not calibrated proof. Invalid responses fail the stage, not a fabricated
 `needs_review` label; earlier invocation evidence remains available.
 
-## `datasets/reviewed_annotations`
+## Historical `datasets/reviewed_annotations`
 
-**Input:** Unified proposed annotations, including rejected and withheld labels,
-plus each row's original evidence, applicable documentation, rules and reviewer settings.
-
-**Goal:** Independently check the proposed judgments while preserving disagreement.
-
-**Why:** A valid label structure doesn't establish that its judgments are supported.
-
-**Output:** `ReviewedAnnotationsTable`, preserving each proposal and adding
-`review_verdict` (`approve`, `needs_review`, `reject`), `review_rationale` and
-low/medium/high `review_confidence`. All four classifier confidence fields use
-that same enum; numeric values are rejected, not converted.
-Review uses separate isolated, bounded context packets; it doesn't rewrite labels.
-Validated results and original receipts are cached per row's relevant review input.
-New packet membership, row ordering or neighboring changes do not repeat an
-unchanged row's inference. Oversized context must fail explicitly rather than
-silently discarding evidence.
-
-**Gate/inspection:** Labels are revalidated before review. Review identities must
-match and rationales must be nonblank and at most 400 characters. The reviewer
-sees the proposed label as well as evidence and is asked to check all choices
-and confidences. Separate invocation doesn't require a different model ID or
-prove unbiased review. Malformed output fails the stage with retained evidence.
-Agentic approval isn't human authorization.
+This asset is absent from the active graph. Historical review artifacts remain
+readable, but current rows receive no fabricated review verdict or confidence.
+The single labeling pass flows directly into merged annotations.
 
 ## `datasets/merged_proposed_annotations`
 
@@ -299,21 +243,21 @@ collection branch and category configuration.
 **Output:** A typed proposed-annotation table retaining branch-qualified identities,
 original evidence, row-specific semantic documentation and branch completeness.
 
-**Gate/inspection:** Available authorized rows can advance through agentic review
+**Gate/inspection:** Available authorized rows can advance through shared finalization
 while another branch waits; a blocked configured branch prevents final publication.
 An unconfigured branch contributes no records. No prior publication is silently
 substituted for current branch output.
 
 ## `datasets/deduplicated_annotations`
 
-**Input:** The merged agent-reviewed table.
+**Input:** The merged labeled table.
 
 **Goal:** Remove only proven exact normalized duplicates before human review.
 
 **Why:** Humans should review one representative of an exact duplicate, with
 all original evidence still traceable.
 
-**Output:** A typed reviewed-annotation table and duplicate-to-survivor evidence.
+**Output:** A typed proposed-annotation table and duplicate-to-survivor evidence.
 
 **Gate/inspection:** Preserve shell semantics, quoted payloads and meaningful
 context/label differences. Ambiguous similarities remain separate. No fuzzy
@@ -339,15 +283,14 @@ Category and risk use canonical code-plus-name values. `source` is the candidate
 source ID and `seed` is `-`; the current candidate contract doesn't support
 synthetic prompt/model provenance.
 
-**Gate/inspection:** Publication checks complete matching candidate/label/review
+**Gate/inspection:** Publication checks complete matching candidate/label
 identities and revalidates labels. This single asset publishes machine-eligible
 all-high rows without human decisions, marked `human_reviewed=false`, plus
 machine-eligible uncertain rows actually approved by a human, marked
 `human_reviewed=true`. If the queue is nonempty, release waits for real terminal
 decisions and explicit completion of the current snapshot. An empty queue lets
 the build release automatically without a fabricated reviewer, decision or
-human completion token. Accepted labels and approving independent
-reviews remain mandatory; human inclusion cannot repair an unsupported label.
+human completion token. Accepted labels remain mandatory; human inclusion cannot repair an unsupported label.
 Eligibility and required human approval precede the cap in input order.
 Final validation checks nonblank fields,
 column order and allowed taxonomy/class/severity values. No random sampling or
@@ -375,12 +318,11 @@ It precedes `human_review_decisions` and `dataset_release`.
 **Why:** Uncertain judgments need human decisions without adding all-high rows to
 the queue. Full-table evidence and cap exclusions remain inspectable separately.
 
-**Output:** `ReviewQueueTable`, preserving candidate, label and review columns
+**Output:** `ReviewQueueTable`, preserving candidate and label columns
 plus `exclusion_reason`. Machine-eligible rows have an empty reason; other rows
-retain the actual label/review exclusion. Caps do not exclude rows from human review.
+retain the actual label exclusion. Caps do not exclude rows from human review.
 
-**Gate/inspection:** Any `medium` or `low` among category, risk, severity, class or
-independent reviewer confidence puts a row in this queue. All five `high` removes
+**Gate/inspection:** Any `medium` or `low` among category, risk, severity or class confidence puts a row in this queue. All four `high` removes
 it from the queue, not from machine eligibility checks. Missing/invalid confidence
 fails validation. Uncertain machine-ineligible rows cannot receive inclusion
 approval; all-high ineligible rows remain inspectable in the full deduplicated

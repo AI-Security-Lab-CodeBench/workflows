@@ -33,7 +33,7 @@ def launch_ui(home: Path, port: int) -> None:
     environment = viewer_environment(home)
     print(f"Dataset home: {environment['CODEBENCH_HOME']}", flush=True)
     print(f"Dagster history: {environment['DAGSTER_HOME']}", flush=True)
-    print(f"View data: http://127.0.0.1:{port}/assets/datasets/reviewed_annotations?view=data", flush=True)
+    print(f"View data: http://127.0.0.1:{port}/assets/datasets/deduplicated_annotations?view=data", flush=True)
     subprocess.run(
         [
             sys.executable,

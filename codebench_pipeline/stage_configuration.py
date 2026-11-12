@@ -11,7 +11,6 @@ def stage_configs(spec: DatasetBuildSpec) -> dict[str, Config]:
     configurations: dict[str, Config] = {
         "category_rules": CategoryRulesConfig.model_validate_json(spec.rules.model_dump_json()),
         "merged_proposed_annotations": TypedConfig(),
-        "reviewed_annotations": spec.review,
         "deduplicated_annotations": TypedConfig(),
         "human_review_queue": spec.publication,
         "human_review_decisions": HumanReviewConfig(),

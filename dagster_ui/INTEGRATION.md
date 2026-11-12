@@ -74,13 +74,21 @@ browser reload restores server decisions and the saved reviewer.
 ## Reusable review stages
 
 The active dataset workflow registers one final `annotations` uncertainty review,
-not a human source-admission stage. Both collection branches crawl or load eligible
-sources automatically under provenance, license and content checks.
+not a human source-admission stage. An LLM assesses each source dataset from actual
+README/card and license bodies and origin evidence, retains receipts and holds
+unresolved eligibility. Both collection branches automatically enumerate and load
+complete eligible configured corpora, not bounded inspected-page snapshots.
+Each eligible command gets one isolated labeling invocation after extraction,
+filtering and semantic docs. Branch `proposed_annotations` converge at
+`merged_proposed_annotations`, then conservative exact deduplication precedes the
+human queue. `reviewed_annotations` is removed from the active graph; historical
+artifacts remain readable. Don't manufacture `review_verdict` or `review_confidence`
+for current rows.
 `human_source_decisions` is removed from the active graph. Generic stage support
 below remains reusable; historical source-selection examples aren't active gates.
 
 The final queue contains rows with any `medium` or `low` among category, risk,
-severity, class and independent reviewer confidence. All five `high` means low
+severity and class confidence. All four `high` means low
 uncertainty and automatic admission only if machine eligible, without a decision.
 Ineligible evidence remains inspectable and approval cannot admit it. A nonempty
 queue blocks the single `dataset_release` until real terminal decisions and
@@ -98,7 +106,7 @@ uncertain rows have `human_reviewed=true`. Caps apply after eligibility and appr
   "stages": [{
     "stage_id": "annotations",
     "title": "Dataset inclusion",
-    "asset_keys": [["datasets", "reviewed_annotations"], ["datasets", "human_review_queue"]],
+    "asset_keys": [["datasets", "deduplicated_annotations"], ["datasets", "human_review_queue"]],
     "completion_label": "Complete review and publish",
     "min_approvals": 0,
     "max_approvals": null
@@ -211,10 +219,10 @@ its string-keyed lookup around the upstream closed tab union.
 Lead execution and browser QA scenarios:
 
 1. Confirm both branches collect eligible sources without a source Review gate.
-   Inspect provenance/license/content exclusions. With all five confidences high,
+   Inspect provenance/license/content exclusions. With all four label confidences high,
    verify an empty final queue automatically produces the single release with
    `human_reviewed=false` and no fabricated human decisions. With any one of the
-   five medium/low, verify that row enters the shared queue and blocks release
+   four medium/low, verify that row enters the shared queue and blocks release
    until real decisions and completion. Mixed releases keep low-uncertainty rows
    decision-free and mark only actually approved uncertain rows `human_reviewed=true`.
    Confirm approval can't admit machine-ineligible rows and caps apply afterward.

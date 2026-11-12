@@ -20,7 +20,7 @@ from codebench_pipeline.dataframe_io import DataFrameIOManager
 from codebench_pipeline.dataset_asset_types import DATASET_PARTITIONS
 from codebench_pipeline.dataset_assets_annotations import annotation_assets
 from codebench_pipeline.dataset_assets_sources import source_assets
-from codebench_pipeline.dataset_branches import FINALIZATION_STAGES, Branch, stage_branch
+from codebench_pipeline.dataset_branches import Branch, stage_branch
 from codebench_pipeline.dataset_config import DatasetBuildSpec, catalog_for_branch
 from codebench_pipeline.dataset_engine import code_versions, stage_signature
 from codebench_pipeline.dataset_finalization import finalization_assets
@@ -46,7 +46,7 @@ def dataset_run_config(spec: DatasetBuildSpec, home: Path, branch: Branch | None
                 branch is None
                 or name == "category_rules"
                 or stage_branch(name) == branch
-                or name in FINALIZATION_STAGES[:2]
+                or name == "merged_proposed_annotations"
             )
         },
         resources={"dataset_io_manager": DataFrameIOManager(storage=spec.storage, review_home=str(home))},
@@ -120,14 +120,14 @@ def build_definitions(home: Path) -> Definitions:
     )
     documentation_job = UnresolvedAssetJobDefinition(
         name="build_documentation",
-        description="Automatically prepare eligible documentation through independent labeling and agent review.",
+        description="Automatically prepare eligible documentation through per-command labeling.",
         selection=AssetSelection.assets(
             *(
                 AssetKey(["datasets", *name.split("/")])
                 for name in PREPARATION_STAGES
                 if name == "category_rules"
                 or stage_branch(name) == "documentation"
-                or name in FINALIZATION_STAGES[:2]
+                or name == "merged_proposed_annotations"
             )
         ),
         partitions_def=DATASET_PARTITIONS,

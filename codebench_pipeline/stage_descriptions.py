@@ -15,17 +15,17 @@ This is the only non-table asset; inspect its `rules` metadata rather than a row
 Patterns route candidates but never assign safety labels.
 """,
     "source_catalog": """
-**Input:** Category scope and provided source seeds or bounded live searches, plus the selector model.
+**Input:** Category scope and the source manifest prepared by the local agent.
 
-**Goal:** Select eligible dataset/corpus sources for automatic acquisition.
+**Goal:** Validate the declared dataset/corpus inventory for acquisition.
 
 **Why:** Provenance, command relevance and reuse eligibility must be considered before extraction.
 Relevant benign counterexamples are included; danger is not an exclusion reason.
 
 **Output:** `SourceCatalogTable` with source URLs, licensing, revisions, samples and decision reasons.
-Only machine-eligible selected sources proceed automatically; no human source approval is required.
-Exclusions stay here. Search snippets are not inspected page evidence.
-Inspect `sample` and the retained selection/search receipts.
+Only eligible declared sources proceed. Invalid provenance or manifest data fails validation.
+Source discovery, README/license assessment and scope enumeration happen outside Dagster.
+Inspect the retained manifest and local preparation inventory; no selector model is invoked.
 """,
     "source_documents": """
 **Input:** The eligible source catalog and snapshot settings.
@@ -52,15 +52,16 @@ catalog rows proceed to source_documents. Manual materialization uses the same l
 Retraction invalidates descendants; completing a revised selection continues the pipeline.
 """,
     "document_adapters": """
-**Input:** Full source documents and provided mappings or adapter-model settings.
+**Input:** Full source documents and their manifest-declared format mappings.
 
-**Goal:** Identify each document's format and command/context fields.
+**Goal:** Bind each document to its declared format and command/context fields.
 
 **Why:** Markdown, text and structured datasets require different decoding before extraction.
 
 **Output:** `DocumentAdaptersTable`: source ID, format, text field, context field and rationale.
-Mappings are declarative, never executable generated parsers. Extraction later checks actual field types.
-Inspect each mapping and, for inferred mappings, its independent model receipt.
+Mappings are declarative; optional reviewed Python batch transformations are explicitly trusted
+and pinned by module hash in the manifest. Extraction checks actual field and output types.
+Invalid mappings fail; no adapter model is invoked.
 """,
     "command_candidates": """
 **Input:** Source documents, per-document adapters and the surrounding-context window.
@@ -71,7 +72,8 @@ Inspect each mapping and, for inferred mappings, its independent model receipt.
 
 **Output:** `CommandCandidatesTable` with command, utility, context, source URL/position,
 transformation markers and stable candidate identity. Distinct source records remain distinct.
-Extraction is line-oriented, not a full shell parser; candidates may still contain messy or unrelated text.
+Declared decoders or trusted hash-pinned batch transformations preserve original positions.
+Invalid transformation hashes or canonical outputs fail extraction. Collected strings remain inert.
 """,
     "filtered_commands": """
 **Input:** All raw candidates, category command-family patterns and filtering settings.
@@ -85,18 +87,16 @@ Extraction is line-oriented, not a full shell parser; candidates may still conta
 Quarantined records remain here, not in the downstream human-review queue.
 """,
     "labeling_documentation": """
-**Input:** Eligible filtered commands, category rules and supplied or live documentation-search settings.
+**Input:** Eligible filtered commands, category rules and the prepared semantic-reference manifest.
 
 **Goal:** Expose the behavior, flags and version limits used to support judgments.
 
 **Why:** Command names alone do not establish their effects or safety.
 
 **Output:** `DocumentationTable` with utility, subcommands, source URL, retrieval time, snippet and limits.
-Provided snippets stay offline. Live mode searches/fetches inspected documentation, preserves
-provenance, and requires snippets to occur exactly in eligible source text. Unresolved licensing
-does not block semantic references; separate reuse-review metadata does not authorize corpus reuse
-or redistribution. Explicit prohibitions remain excluded. Receipts retain gaps and exclusions
-rather than inventing evidence. Both labeling and review depend on this table.
+References are prepared outside Dagster and used offline. Invalid reference records or byte limits
+fail validation. Receipts retain operation-level gaps rather than inventing evidence.
+Semantic use does not authorize corpus redistribution. Only the single labeling pass uses this table.
 """,
     "proposed_annotations": """
 **Input:** Eligible filtered candidates, documentation, category rules and labeler settings.
@@ -110,44 +110,28 @@ description, four confidences, rationale and citations. Each record uses a fresh
 Malformed responses fail with retained evidence; acceptance requires supported taxonomy and documentation.
 Confidence is self-reported, not proof of safety.
 """,
-    "reviewed_annotations": """
-**Input:** Unified proposed annotations plus each record's original evidence, documentation,
-rules and reviewer settings.
-
-**Goal:** Independently check the proposed judgments and preserve disagreements.
-
-**Why:** A structurally valid label can still lack semantic support.
-
-**Output:** `ReviewedAnnotationsTable`, preserving proposals and adding `review_verdict`,
-`review_rationale` and low/medium/high `review_confidence`. Classifier confidences use the same
-enum for category, risk, severity and class. Review uses separate isolated, bounded context
-packets. Validated per-record results and receipts are reused when that record's relevant
-inputs and review policy are unchanged; neighboring records do not invalidate them.
-Agentic approval is not human authorization; invalid review output fails with retained evidence.
-""",
     "merged_proposed_annotations": """
 **Input:** Current labeled outputs from available authorized collection branches and category rules.
 
 **Goal:** Combine authorized Existing datasets and Documentation crawl records into one category table.
 
-**Why:** Independent collection branches must converge before shared agentic review,
-deduplication, human review and release.
+**Why:** Independent collection branches must converge before deduplication,
+uncertainty-based human review and release, without a second command-labeling pass.
 
 **Output:** `ProposedAnnotationsTable` retaining branch/source identities, original evidence
 and each record's semantic documentation.
 Unconfigured branches are distinct from configured branches with empty, waiting, failed or stale outputs.
 Only current authorized inputs are accepted; historical or unauthorized outputs cannot substitute for them.
-Available rows can receive agentic review while another branch waits. Final publication requires
-all configured branches to be current and complete.
+Final publication requires all configured branches to be current and complete.
 """,
     "deduplicated_annotations": """
-**Input:** The unified merged reviewed annotations with original evidence and category rules.
+**Input:** The unified merged labels with original evidence and category rules.
 
 **Goal:** Remove only proven exact normalized command duplicates before uncertainty-based human review.
 
 **Why:** One category release must avoid exact duplicates without erasing meaningful command or label differences.
 
-**Output:** `ReviewedAnnotationsTable` of retained records with linked duplicate-to-survivor provenance
+**Output:** `ProposedAnnotationsTable` of retained records with linked duplicate-to-survivor provenance
 and exclusion reasons. Normalization preserves shell semantics, quoted text, flags, operands,
 substitutions and meaningful context/label disagreements. Ambiguous similarities remain for review.
 Fuzzy matching, resource renaming, safe-pair construction and model-conditioned deduplication are excluded.
@@ -161,7 +145,7 @@ Fuzzy matching, resource renaming, safe-pair construction and model-conditioned 
 
 **Output:** `CommandsTable`: command, description, util, severity, category, risk, source, seed, class,
 human_reviewed. Medium or higher uncertainty requires explicit human approval; eligible rows whose
-five confidences are high are automatic and have human_reviewed=false.
+four label confidences are high are automatic and have human_reviewed=false.
 Human exclusions precede category-wide per-risk caps on the unified release. Snapshot, record-set
 and frozen decision hashes are checked
 again when output is committed; manual materialization cannot bypass this boundary.
@@ -190,10 +174,10 @@ Reviewer names are self-reported. Approving a record does not authorize executin
 
 **Goal:** Expose final rows with medium or higher uncertainty for human inclusion decisions.
 
-**Why:** Any medium/low classifier or reviewer confidence requires human review; all five high
+**Why:** Any medium/low classifier confidence requires human review; all four high
 confidences permit automatic inclusion only when machine eligibility also passes.
 
-**Output:** `ReviewQueueTable` with original candidate/label/review fields and `exclusion_reason`.
+**Output:** `ReviewQueueTable` with original candidate/label fields and `exclusion_reason`.
 Machine-eligible records have an empty reason; caps are applied only after human exclusions.
 This queue precedes human_review_decisions and release. Low-uncertainty rows remain visible in
 deduplicated_annotations and need no human decisions. Source exclusions stay in source_catalog,
@@ -218,7 +202,6 @@ def describe_stage(spec: DescribedAsset) -> AssetSpec:
         group_name = "dataset_configuration"
     elif len(spec.key.path) == 2 and stage in {
         "merged_proposed_annotations",
-        "reviewed_annotations",
         "deduplicated_annotations",
         "human_review_queue",
         "human_review_decisions",
@@ -229,12 +212,13 @@ def describe_stage(spec: DescribedAsset) -> AssetSpec:
         group_name = "documentation_crawl"
         if stage == "source_catalog":
             description = """
-**Input:** Explicit original-documentation sources or bounded documentation searches and category scope.
-**Goal:** Select trustworthy, relevant documentation command sources independently of corpus collection.
-**Why:** Documentation and corpus discovery are separate branches, not interchangeable approval paths.
-**Output:** SourceCatalogTable with actual analysis, rationale, enum confidence, provenance and reuse evidence.
-Only eligible original documentation proceeds. Missing license/trust evidence stays withheld; agent/SFT
-corpora cannot enter this branch. No human source decision or synthetic approval is created.
+**Input:** The original-documentation manifest prepared by the local agent and category scope.
+**Goal:** Validate the declared documentation inventory independently of corpus collection.
+**Why:** Documentation and corpus inputs remain separate and retain their original provenance.
+**Output:** SourceCatalogTable with declared source identity, format, provenance and reuse evidence.
+Only eligible original documentation proceeds; invalid metadata fails validation.
+Agent/SFT corpora cannot enter this branch. Discovery and license assessment occur outside Dagster;
+no selector model, human source decision or synthetic approval is created.
 """.strip()
         elif stage == "source_documents":
             description = """
