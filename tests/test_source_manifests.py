@@ -17,7 +17,7 @@ from codebench_pipeline.dataset_config import DatasetBuildSpec, SnapshotConfig, 
 from codebench_pipeline.dataset_documents import document_adapters, snapshot_documents
 from codebench_pipeline.dataset_extract import extract_candidates, filter_candidates
 from codebench_pipeline.dataset_registry import DatasetRegistry
-from codebench_pipeline.dataset_seed_config import SourceSeed
+from codebench_pipeline.dataset_seed_config import DocumentationSeed, SourceSeed
 from codebench_pipeline.source_manifests import (
     DocumentationManifest,
     SourceManifest,
@@ -88,6 +88,40 @@ class SourceManifestTests(unittest.TestCase):
             os.utime(path, ns=(original.st_atime_ns, original.st_mtime_ns))
             self.assertEqual(manifest_sources(path, "CAT-99")[0].source_id, changed.source_id)
             self.assertEqual(validate.call_count, 2)
+
+    def test_live_registry_does_not_copy_superseded_manifests_but_history_retains_them(self) -> None:
+        sources = self.root / "live-sources.json"
+        current_source = self.source.model_copy(update={"source_id": "current-source"})
+        sources.write_text(SourceManifest(
+            category_id="CAT-99", revision="current", sources=[current_source]
+        ).model_dump_json())
+        semantics = self.root / "live-semantics.json"
+        current_snippet = self.spec.documentation.snippets[0].model_copy(
+            update={"snippet": "Current documented operation."}
+        )
+        semantics.write_text(DocumentationManifest(
+            category_id="CAT-99", revision="current", snippets=[current_snippet]
+        ).model_dump_json())
+        assert self.spec.documentation_catalog is not None
+        stored = self.spec.model_copy(update={
+            "documentation_catalog": self.spec.documentation_catalog.model_copy(
+                update={"manifest": str(sources)}
+            ),
+            "documentation": self.spec.documentation.model_copy(update={"manifest": str(semantics)}),
+        })
+        registry = DatasetRegistry(self.root)
+        registry.register(stored)
+        with (
+            patch.object(SourceSeed, "__deepcopy__", side_effect=AssertionError("Superseded source copied")),
+            patch.object(DocumentationSeed, "__deepcopy__", side_effect=AssertionError("Superseded docs copied")),
+        ):
+            current = registry.get(stored.dataset_id)
+        assert current.documentation_catalog is not None
+        self.assertEqual(current.documentation_catalog.documents[0].source_id, "current-source")
+        self.assertEqual(current.documentation.snippets[0].snippet, "Current documented operation.")
+        historical = registry.get_snapshot(stored.dataset_id)
+        self.assertEqual(historical.documentation_catalog, stored.documentation_catalog)
+        self.assertEqual(historical.documentation, stored.documentation)
 
     def test_documentation_manifest_cache_does_not_share_subcommands(self) -> None:
         path = self.root / "cached-semantics.json"

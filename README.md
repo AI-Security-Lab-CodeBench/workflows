@@ -10,7 +10,7 @@ CAT-2 is a local multicategory example and is deliberately not shipped.
 - `codebench_pipeline/`: typed Dagster collection, labeling, review and publication.
 - `dagster_ui/`: native Dagster Data/Review panels and a pinned frontend builder.
 - `scripts/`: reusable inert extraction, filtering, annotation and CSV tools.
-- `configs/`: CAT-3 category, dataset, source-metadata and semantic-reference settings.
+- `business-configs/`: human-editable base prompt, category policy, examples and dataset settings.
 - `tests/`: self-contained regression tests using authored synthetic fixtures.
 - `bashguard/`: standalone Go Bash AST analysis and CEL policy evaluation,
   integrated from source commit `671172026a2c0f4f6ce420f5e7bef10f53fb0732`.
@@ -60,9 +60,9 @@ Prepare the ignored business inputs described below before validating or registe
 
 ```sh
 uv run python -m codebench_pipeline.dataset_cli validate \
-  --config configs/datasets/cat3.json
+  --config business-configs/datasets/cat3.json
 uv run python -m codebench_pipeline.dataset_cli register \
-  --config configs/datasets/cat3.json --home .codebench-datasets
+  --config business-configs/datasets/cat3.json --home .codebench-datasets
 ```
 
 Validation and registration do not run inference or collect commands. A fresh
@@ -92,7 +92,7 @@ bundle, the server also accepts `--bundle /path/to/dagster_ui/build`.
 ## Local source inputs
 
 Use `skills/codebench-source-preparation/SKILL.md` with the requested category.
-The shipped CAT-3 config expects three ignored files under `inputs/cat3/`:
+The shipped CAT-3 config expects three ignored files under `business-configs/inputs/cat3/`:
 
 - `datasets.json`: source manifest for existing corpora.
 - `documentation-sources.json`: source manifest for original documentation.

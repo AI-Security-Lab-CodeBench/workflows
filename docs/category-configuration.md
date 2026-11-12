@@ -1,7 +1,9 @@
 # Category-owned taxonomy
 
-Each dataset's initial JSON instruction owns its complete taxonomy in `rules`.
-Edit `configs/datasets/cat3.json`, rather than Python enums. Other categories can
+Each category's business configuration owns its taxonomy and labeling policy.
+Edit `business-configs/categories/cat3/category.json`, rather than Python enums.
+The generic base prompt is `business-configs/labeling-base.md`; category instructions
+and examples are separate files beside `category.json`. Other categories can
 use independent local configuration files, but CAT-2 is an excluded local example,
 not a shipped category. Categories need not share subrisk names, counts, numbering or utilities.
 Risk IDs follow `CAT-N.M`, must use their category prefix, and must be unique;
@@ -15,15 +17,15 @@ instruction. Patterns never assign a safety class or severity.
 ## Standalone tooling and historical CAT-3
 
 The standalone scripts default explicitly to the shipped
-`configs/datasets/cat3.json`. Their legacy `CATEGORY` and `RISKS` exports are
-derived from this file, not separate taxonomies. Historical labeling packets and
+business configuration. Their legacy `CATEGORY` and `RISKS` exports are
+derived from the same category source, not separate taxonomies. Historical labeling packets and
 export commands retain their CAT-3 workflow, now backed by this configuration.
 Use the current dataset pipeline for another category's full annotation workflow.
 
 `command_filter.py`, `prefilter.py`, `postfilter.py`,
 `prepare_review_candidates.py` and `validate_dataset.py` accept
 `--category-config PATH` for category-specific extraction and validation.
-Supply the same initial configuration throughout these steps.
+Supply the same category business configuration throughout these steps.
 Their Python routing APIs accept a `Taxonomy` loaded with
 `category_config.load_taxonomy(path)`.
 

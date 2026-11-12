@@ -56,20 +56,25 @@ class SeverityRule(RuleConfig):
     definition: Text
 
 
-class CategoryRules(StrictModel):
+class CompiledExamples(RuleConfig):
+    risk_id: Text
+    operation_family: Text
+    examples_json: Text
+
+
+class CategoryTaxonomy(StrictModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
     category_id: Annotated[str, Field(pattern=r"^CAT-[1-9]\d*$")]
     category_name: Text
     version: Text
-    policy: Text
     risks: Annotated[list[RiskRule], Field(min_length=1)]
     classes: Annotated[list[ClassRule], Field(min_length=1)]
     severities: Annotated[list[SeverityRule], Field(min_length=1)]
     description_language: Text
 
     @model_validator(mode="after")
-    def valid_taxonomy(self) -> CategoryRules:
+    def valid_taxonomy(self) -> CategoryTaxonomy:
         for values in (
             [risk.id for risk in self.risks],
             [risk.name for risk in self.risks],
@@ -94,6 +99,12 @@ class CategoryRules(StrictModel):
             for risk in self.risks
             if any(re.search(pattern, command) for pattern in risk.command_patterns)
         ]
+
+
+class CategoryRules(CategoryTaxonomy):
+    policy: Text
+    base_prompt: str = ""
+    examples: list[CompiledExamples] = Field(default_factory=list)
 
 
 class CategoryRulesConfig(CategoryRules, TypedConfig):

@@ -183,6 +183,11 @@ def build_definitions(home: Path) -> Definitions:
                     run_key=f"{key}:{version}",
                     partition_key=key,
                     asset_selection=plan.asset_selection,
+                    run_config=dataset_run_config(spec, home).to_config_dict(),
+                    tags={
+                        "dataset/category": spec.rules.category_id,
+                        "dataset/revision": spec.revision,
+                    },
                 )
             )
         return SensorResult(

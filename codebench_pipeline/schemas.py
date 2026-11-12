@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import csv
-import json
 from pathlib import Path
 from typing import Annotated, Final, Literal, TypeVar
 
@@ -10,13 +9,12 @@ import polars as pl
 from pandera.polars import PolarsData
 from pydantic import ConfigDict, Field, JsonValue, TypeAdapter, model_validator
 
+from codebench_pipeline.business_config import DEFAULT_BUSINESS_CONFIG, load_business_rules
 from codebench_pipeline.category_rules import CategoryRules
 from codebench_pipeline.models import Digest, FrozenModel, Stage
 
 FIELDS: Final = ("command", "description", "util", "severity", "category", "risk", "source", "seed", "class")
-DEFAULT_RULES: Final = CategoryRules.model_validate(
-    json.loads((Path(__file__).resolve().parents[1] / "configs/datasets/cat3.json").read_bytes())["rules"]
-)
+DEFAULT_RULES: Final = load_business_rules(DEFAULT_BUSINESS_CONFIG)
 CATEGORY: Final = DEFAULT_RULES.canonical
 RISKS: Final = tuple(risk.canonical for risk in DEFAULT_RULES.risks)
 CONFIDENCES: Final = tuple(f"{field}_confidence" for field in ("category", "risk", "severity", "class"))

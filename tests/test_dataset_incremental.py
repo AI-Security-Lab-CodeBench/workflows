@@ -16,7 +16,7 @@ from codebench_pipeline.dataset_config import load_build_config
 from codebench_pipeline.dataset_records import LabelDecision
 from codebench_pipeline.dataset_registry import DatasetRegistry
 from codebench_pipeline.dataset_source_models import SourceSelection
-from codebench_pipeline.definitions import build_definitions
+from codebench_pipeline.definitions import build_definitions, dataset_run_config
 from codebench_pipeline.model_config import ModelConfig
 from codebench_pipeline.models import AdapterSpec
 from codebench_pipeline.runtime_instance import dataset_instance
@@ -229,6 +229,13 @@ class IncrementalDatasetTests(unittest.TestCase):
                 requests = list(sensor.evaluate_tick(ctx).run_requests or [])
         self.assertEqual(len(requests), 1)
         self.assertEqual(requests[0].partition_key, self.configuration["dataset_id"])
+        resolved = DatasetRegistry(self.home).get(self.configuration["dataset_id"])
+        pinned = dataset_run_config(resolved, self.home).to_config_dict()
+        self.assertEqual(requests[0].run_config, pinned)
+        DatasetRegistry(self.home).register(
+            resolved.model_copy(update={"rules": resolved.rules.model_copy(update={"policy": "Edited policy."})})
+        )
+        self.assertEqual(requests[0].run_config, pinned)
         self.assertEqual(
             set(requests[0].asset_selection or []),
             {

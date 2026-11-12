@@ -116,6 +116,33 @@ class DatasetDocumentationTests(unittest.TestCase):
             receipt = json.loads((root / "documentation-receipt.json").read_text())
             self.assertEqual([row["status"] for row in receipt["coverage"]], ["covered", "gap"])
 
+    def test_default_reference_is_accepted_and_covers_only_an_exact_bare_invocation(self) -> None:
+        supplied = DocumentationSeed.model_validate({
+            **seed().model_dump(),
+            "subcommands": ["<default>"],
+        })
+        manifest = DocumentationManifest(category_id="CAT-8", revision="root-reference", snippets=[supplied])
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            path = root / "documentation.json"
+            path.write_text(manifest.model_dump_json())
+            snippets = manifest_documentation(path, "CAT-8")
+            table = collect_documentation(
+                commands(
+                    "probe", "probe inspect", "probe -h", "probe --context example",
+                    "probe --", 'probe ""', "probe <default>", "other", "probe 'unterminated",
+                ),
+                make_rules(),
+                DocumentationConfig(manifest=str(path), snippets=snippets),
+                root / "evidence",
+            )
+            self.assertEqual(frame_records(table), [supplied.model_dump(mode="json")])
+            receipt = json.loads((root / "evidence/documentation-receipt.json").read_text())
+            self.assertEqual(
+                [row["status"] for row in receipt["coverage"]],
+                ["covered", "gap", "gap", "gap", "gap", "gap", "gap", "gap", "gap"],
+            )
+
     def test_byte_limits_count_utf8_and_leave_a_failure_receipt(self) -> None:
         supplied = seed().model_copy(update={"snippet": "\u00e9\u00e9"})
         with tempfile.TemporaryDirectory() as temporary:
