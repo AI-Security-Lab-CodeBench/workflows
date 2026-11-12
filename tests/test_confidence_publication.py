@@ -4,6 +4,7 @@ import json
 import tempfile
 import unittest
 from contextlib import ExitStack, redirect_stdout
+from dataclasses import replace
 from hashlib import sha256
 from pathlib import Path
 from unittest.mock import patch
@@ -13,8 +14,8 @@ from pydantic import BaseModel, JsonValue, TypeAdapter
 from test_dataset_incremental import provider_response
 from test_dataset_rules import make_candidate, make_label, make_rules
 
-from codebench_pipeline.data_view_models import DatasetQueryRequest, TableResponse
-from codebench_pipeline.data_views import DatasetDataService
+from codebench_pipeline.data_view_models import DatasetQueryRequest, DatasetViewError, TableResponse
+from codebench_pipeline.data_views import DatasetDataService, StoredDatasetAsset
 from codebench_pipeline.dataset_cli import execute_build, execute_registered_build
 from codebench_pipeline.dataset_config import load_build_config
 from codebench_pipeline.dataset_export import prepare_dataset
@@ -272,7 +273,37 @@ class ConfidencePublicationTests(unittest.TestCase):
                 {(row.values["command"], row.values["human_reviewed"]) for row in released.page.rows},
                 {("git status", "false"), ("git status --show-stash", "false")},
             )
-            resolved = ReviewSnapshots(home, data).current(spec.dataset_id)
+            with patch.object(data, "read_current", wraps=data.read_current) as reads:
+                resolved = ReviewSnapshots(home, data).current(spec.dataset_id)
+            self.assertCountEqual(
+                [call.args[1] for call in reads.call_args_list],
+                ["documentation/proposed_annotations"],
+            )
+            self.assertEqual(
+                set(resolved.manifest.references),
+                set(built) - {"human_review_decisions", "dataset_release"},
+            )
+            original_read = data.read_current
+            for stale in (True, False):
+                def changed_current(dataset_id: str, stage: str) -> StoredDatasetAsset:
+                    stored = original_read(dataset_id, stage)
+                    if stage != "documentation/proposed_annotations":
+                        return stored
+                    return (
+                        replace(stored, publication_state="stale")
+                        if stale
+                        else replace(
+                            stored, reference=stored.reference.model_copy(update={"digest": "0" * 64})
+                        )
+                    )
+
+                with (
+                    self.subTest(stale=stale),
+                    patch.object(data, "read_current", side_effect=changed_current),
+                    self.assertRaises(DatasetViewError) as changed,
+                ):
+                    ReviewSnapshots(home, data).current(spec.dataset_id)
+                self.assertEqual(changed.exception.code, "not_ready")
             self.assertNotIn("reviewed_annotations", resolved.manifest.references)
             label_stage = "documentation/proposed_annotations"
             metadata = TypeAdapter(dict[str, JsonValue]).validate_python(

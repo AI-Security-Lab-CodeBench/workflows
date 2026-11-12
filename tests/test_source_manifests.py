@@ -1,6 +1,7 @@
 import hashlib
 import io
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -12,12 +13,17 @@ from configuration_fixture import write_fixture
 from codebench_pipeline.dataframe_io import frame_bytes, read_frame
 from codebench_pipeline.dataframe_schemas import SourceDocumentsTable
 from codebench_pipeline.dataset_catalog import build_catalog
-from codebench_pipeline.dataset_config import SnapshotConfig, load_build_config
+from codebench_pipeline.dataset_config import DatasetBuildSpec, SnapshotConfig, load_build_config
 from codebench_pipeline.dataset_documents import document_adapters, snapshot_documents
 from codebench_pipeline.dataset_extract import extract_candidates, filter_candidates
 from codebench_pipeline.dataset_registry import DatasetRegistry
 from codebench_pipeline.dataset_seed_config import SourceSeed
-from codebench_pipeline.source_manifests import SourceManifest
+from codebench_pipeline.source_manifests import (
+    DocumentationManifest,
+    SourceManifest,
+    manifest_documentation,
+    manifest_sources,
+)
 from codebench_pipeline.source_retrieval import retrieve_source
 from codebench_pipeline.source_transform_contract import SourceTransformConfig
 from codebench_pipeline.storage import IntegrityError
@@ -48,6 +54,100 @@ class SourceManifestTests(unittest.TestCase):
             "local_path": None,
             "sha256": hashlib.sha256(body).hexdigest(),
         })
+
+    def test_registry_reuses_validation_without_sharing_mutable_values(self) -> None:
+        registry = DatasetRegistry(self.root)
+        registry.register(self.spec)
+        with patch.object(
+            DatasetBuildSpec, "model_validate_json", wraps=DatasetBuildSpec.model_validate_json
+        ) as validate:
+            first = registry.get(self.spec.dataset_id)
+            first.rules.risks.clear()
+            assert first.documentation_catalog is not None
+            first.documentation_catalog.documents[0].transformations.append("caller-only")
+            second = DatasetRegistry(self.root).get(self.spec.dataset_id)
+        self.assertEqual(validate.call_count, 1)
+        self.assertEqual(second.rules.risks, self.spec.rules.risks)
+        assert second.documentation_catalog is not None
+        self.assertEqual(second.documentation_catalog.documents[0].transformations, [])
+
+    def test_source_manifest_cache_tracks_bytes_not_timestamps(self) -> None:
+        path = self.root / "cached-sources.json"
+        manifest = SourceManifest(category_id="CAT-99", revision="first", sources=[self.source])
+        path.write_text(manifest.model_dump_json())
+        original = path.stat()
+        with patch.object(
+            SourceManifest, "model_validate_json", wraps=SourceManifest.model_validate_json
+        ) as validate:
+            first = manifest_sources(path, "CAT-99")
+            first[0].transformations.append("caller-only")
+            self.assertEqual(manifest_sources(path, "CAT-99")[0].transformations, [])
+            self.assertEqual(validate.call_count, 1)
+            changed = self.source.model_copy(update={"source_id": self.source.source_id[:-1] + "x"})
+            path.write_text(manifest.model_copy(update={"sources": [changed]}).model_dump_json())
+            os.utime(path, ns=(original.st_atime_ns, original.st_mtime_ns))
+            self.assertEqual(manifest_sources(path, "CAT-99")[0].source_id, changed.source_id)
+            self.assertEqual(validate.call_count, 2)
+
+    def test_documentation_manifest_cache_does_not_share_subcommands(self) -> None:
+        path = self.root / "cached-semantics.json"
+        manifest = DocumentationManifest(
+            category_id="CAT-99", revision=self.root.name, snippets=self.spec.documentation.snippets
+        )
+        path.write_text(manifest.model_dump_json())
+        with patch.object(
+            DocumentationManifest, "model_validate_json", wraps=DocumentationManifest.model_validate_json
+        ) as validate:
+            first = manifest_documentation(path, "CAT-99")
+            first[0].subcommands.clear()
+            second = manifest_documentation(path, "CAT-99")
+        self.assertEqual(validate.call_count, 1)
+        self.assertEqual(second[0].subcommands, self.spec.documentation.snippets[0].subcommands)
+        path.write_text(manifest.model_copy(update={"category_id": "CAT-98"}).model_dump_json())
+        with self.assertRaises(IntegrityError):
+            manifest_documentation(path, "CAT-99")
+
+    def test_cached_manifest_resolves_changed_symlink_targets(self) -> None:
+        assert self.source.local_path is not None
+        original = Path(self.source.local_path)
+        alternate = self.root / "alternate.md"
+        alternate.write_bytes(original.read_bytes())
+        link = self.root / "capture.md"
+        link.symlink_to(original)
+        path = self.root / "linked-sources.json"
+        path.write_text(SourceManifest(
+            category_id="CAT-99",
+            revision="first",
+            sources=[self.source.model_copy(update={"local_path": "capture.md"})],
+        ).model_dump_json())
+        first = manifest_sources(path, "CAT-99")
+        link.unlink()
+        link.symlink_to(alternate)
+        second = manifest_sources(path, "CAT-99")
+        self.assertEqual(first[0].local_path, str(original.resolve()))
+        self.assertEqual(second[0].local_path, str(alternate.resolve()))
+
+    def test_cached_registry_still_rejects_changed_transformation_bytes(self) -> None:
+        module = self.root / "trusted.py"
+        module.write_text("def transform(rows, context):\n    return []\n")
+        transform = SourceTransformConfig(
+            module_path=str(module),
+            sha256=hashlib.sha256(module.read_bytes()).hexdigest(),
+            entrypoint="transform",
+            trusted=True,
+        )
+        assert self.spec.documentation_catalog is not None
+        spec = self.spec.model_copy(update={
+            "documentation_catalog": self.spec.documentation_catalog.model_copy(update={
+                "documents": [self.source.model_copy(update={"transform": transform})],
+            }),
+        })
+        registry = DatasetRegistry(self.root)
+        registry.register(spec)
+        registry.get(spec.dataset_id)
+        module.write_text("raise RuntimeError('changed module')\n")
+        with self.assertRaises(IntegrityError):
+            registry.get(spec.dataset_id)
 
     def test_retrieval_keeps_full_body_beyond_inspection_limits_and_reuses_verified_bytes(self) -> None:
         body = b"# reference\n" + b"ordinary source text\n" * 4000 + b"`git status --show-stash`\n"

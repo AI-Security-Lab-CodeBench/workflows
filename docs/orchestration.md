@@ -338,6 +338,23 @@ can affect both. Unselected categories receive no materializations.
 Implementation and dependency changes conservatively invalidate stage caches;
 changing a category does not require changing either.
 
+Validated registry and manifest parsing uses bounded, process-local caches keyed
+by exact file bytes, not timestamps. Lookups still read current files, resolve
+paths and verify trusted transformation hashes. Returned mutable collections are
+isolated from cached values. Manifest-backed registrations hydrate their current
+inputs instead of repeatedly copying superseded embedded source lists.
+
+Review snapshot capture retains the complete reference and evidence inventory
+from one validated preparation plan. It verifies each configured branch's current
+source authorization and binds the merged annotations to those branch references.
+It reads the annotation and taxonomy values by their validated references and
+rejects references or materialization digests that change during capture. Unused
+table bodies are not repeatedly loaded and authorized merely to recover references.
+Annotation schema checks and publication preparation operate on table values
+without the evidence metadata attached, avoiding repeated whole-evidence copies
+during column validation. Snapshot fingerprints still include each record's
+semantic evidence, and the returned review frame retains its original metadata.
+
 Every successful stage retains effective config, exact code snapshots and inference
 receipts with prompt/input hashes, response, observed model and timestamps. Failed
 attempts also retain receipts. Storage corruption fails instead of being repaired.

@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Final, Literal, assert_never
 
 import pandas as pd
-from dagster import AssetKey, AssetRecordsFilter
+from dagster import AssetKey, AssetRecordsFilter, build_input_context
 from pandera.typing import DataFrame
 from pydantic import Field, JsonValue, TypeAdapter
 
@@ -13,9 +13,11 @@ from codebench_pipeline.data_view_models import DatasetViewError
 from codebench_pipeline.data_views import DatasetDataService
 from codebench_pipeline.dataframe_io import AssetReference, DataFrameIOManager
 from codebench_pipeline.dataframe_schemas import ProposedAnnotationsTable, frame_records
-from codebench_pipeline.dataset_branches import FINALIZATION_STAGES, Branch
+from codebench_pipeline.dataset_asset_types import DATASET_PARTITIONS
+from codebench_pipeline.dataset_branches import FINALIZATION_STAGES, Branch, stage_name
 from codebench_pipeline.dataset_config import PublicationConfig
 from codebench_pipeline.dataset_export import Publication
+from codebench_pipeline.dataset_finalization import FINALIZATION_BINDING
 from codebench_pipeline.dataset_plan import PREPARATION_STAGES, plan_dataset
 from codebench_pipeline.dataset_tables import publication
 from codebench_pipeline.human_review import ReviewModel, ReviewSnapshot
@@ -119,22 +121,48 @@ class ReviewSnapshots:
         )
         if plan.selected or plan.blocked:
             raise DatasetViewError("not_ready", "Preparation is incomplete or changed")
-        assets = {stage: self.data.read_current(dataset_id, stage) for stage in input_stages}
-        match assets["deduplicated_annotations"].value:
+        manager = DataFrameIOManager(storage=spec.storage)
+        binding: dict[str, JsonValue] = {}
+        branches: tuple[Branch, ...] = ("dataset", "documentation")
+        for branch in branches:
+            if branch in plan.unconfigured:
+                binding[branch] = {"state": "unconfigured"}
+                continue
+            stage = stage_name("proposed_annotations", branch)
+            stored = self.data.read_current(dataset_id, stage)
+            if stored.publication_state == "stale" or stored.reference != plan.references[stage]:
+                raise DatasetViewError("not_ready", "Collection inputs changed during snapshot capture")
+            binding[branch] = {"state": "configured", "digest": stored.reference.digest}
+        match manager.read_version(plan.references["deduplicated_annotations"]):
             case pd.DataFrame() as value:
-                reviewed = ProposedAnnotationsTable.validate(value)
+                if value.attrs.get(FINALIZATION_BINDING) != binding:
+                    raise DatasetViewError("not_ready", "Annotations belong to different collection inputs")
+                annotation_metadata = value.attrs
+                reviewed = ProposedAnnotationsTable.validate(pd.DataFrame(value))
             case CategoryRules():
                 raise IntegrityError("Annotations are not a table")
-            case _:
-                assert_never(assets["deduplicated_annotations"].value)
-        match assets["category_rules"].value:
+            case other:
+                assert_never(other)
+        match manager.read_version(plan.references["category_rules"]):
             case CategoryRules() as rules:
                 if rules != spec.rules:
                     raise DatasetViewError("not_ready", "Stored rules differ from registered rules")
             case pd.DataFrame():
                 raise IntegrityError("Category rules are not a taxonomy")
-            case _:
-                assert_never(assets["category_rules"].value)
+            case other:
+                assert_never(other)
+        references: dict[str, AssetReference] = {}
+        for stage in input_stages:
+            with build_input_context(
+                asset_key=AssetKey(["datasets", *stage.split("/")]),
+                partition_key=dataset_id,
+                asset_partitions_def=DATASET_PARTITIONS,
+                instance=self.data.instance,
+            ) as context:
+                reference = manager.current_reference(context)
+            if reference != plan.references[stage]:
+                raise DatasetViewError("not_ready", "Preparation changed during snapshot capture")
+            references[stage] = reference
         evidence: dict[str, JsonValue] = {}
         for stage in input_stages:
             if stage == "category_rules":
@@ -148,6 +176,8 @@ class ReviewSnapshots:
             materialization = records[0].asset_materialization
             if materialization is None:
                 raise IntegrityError("Preparation evidence has no materialization")
+            if materialization.metadata["codebench/content_digest"].value != references[stage].digest:
+                raise DatasetViewError("not_ready", "Preparation evidence changed during snapshot capture")
             evidence[stage] = TypeAdapter(JsonValue).validate_python(
                 materialization.metadata["evidence"].value
             )
@@ -158,7 +188,7 @@ class ReviewSnapshots:
                 {
                     "record": row,
                     "documentation": TypeAdapter(JsonValue).validate_python(
-                        reviewed.attrs["row_documentation"][str(row["candidate_id"])]
+                        annotation_metadata["row_documentation"][str(row["candidate_id"])]
                     ),
                     "rules": rules.model_dump_json(),
                     "label_model": spec.annotation.model.model_dump_json(),
@@ -181,7 +211,7 @@ class ReviewSnapshots:
             branch=self.branch,
             storage=spec.storage,
             publication=spec.publication,
-            references={stage: asset.reference for stage, asset in assets.items()},
+            references=references,
             evidence=evidence,
             implementation=implementation,
             record_fingerprints=record_fingerprints,
@@ -189,6 +219,7 @@ class ReviewSnapshots:
         payload = manifest.payload()
         snapshot_id = sha256(payload)
         prepared = publication(reviewed, rules, spec.publication)
+        reviewed.attrs = annotation_metadata
         snapshot = ReviewSnapshot(
             dataset_id=dataset_id,
             review_stage="annotations",
