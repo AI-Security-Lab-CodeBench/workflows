@@ -18,6 +18,7 @@ node_modules/
 /.codebench*
 /data
 /research
+/inputs
 /review
 /evidence
 /commands.csv

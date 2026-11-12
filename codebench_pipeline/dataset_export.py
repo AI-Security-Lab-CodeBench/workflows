@@ -15,7 +15,6 @@ from codebench_pipeline.dataset_publication import json_text
 from codebench_pipeline.dataset_records import (
     CandidateRecord,
     LabelDecision,
-    ReviewDecision,
     index_records,
     validate_label,
 )
@@ -27,7 +26,6 @@ from codebench_pipeline.review_policy import requires_human_review
 def prepare_dataset(
     candidates: list[CandidateRecord],
     labels: list[LabelDecision],
-    reviews: list[ReviewDecision],
     rules: CategoryRules,
     limit_per_risk: int,
     *,
@@ -36,14 +34,13 @@ def prepare_dataset(
     if type(limit_per_risk) is not int or limit_per_risk < 0:
         raise ValueError("Per-risk limit must be a nonnegative integer")
     indexed = index_records(candidates)
-    proposed, checked = index_records(labels), index_records(reviews)
-    if indexed.keys() != proposed.keys() or indexed.keys() != checked.keys():
-        raise ValueError("Missing or extra label/review identities")
+    proposed = index_records(labels)
+    if indexed.keys() != proposed.keys():
+        raise ValueError("Missing or extra label identities")
     risks = {risk.id: risk.canonical for risk in rules.risks}
     for candidate in candidates:
         label = LabelDecision.model_validate(proposed[candidate.candidate_id].model_dump(by_alias=True))
         validate_label(candidate, label, rules)
-        ReviewDecision.model_validate(checked[candidate.candidate_id].model_dump())
     counts: Counter[str] = Counter()
     rows: list[dict[str, str]] = []
     accepted: list[dict[str, str]] = []
@@ -55,13 +52,13 @@ def prepare_dataset(
     eligible_ids: list[str] = []
     human_review_ids: list[str] = []
     for candidate in candidates:
-        label, decision = proposed[candidate.candidate_id], checked[candidate.candidate_id]
-        uncertain = requires_human_review(label, decision)
+        label = proposed[candidate.candidate_id]
+        uncertain = requires_human_review(label)
         if uncertain:
             human_review_ids.append(candidate.candidate_id)
         reason = ""
-        if label.decision != "accept" or decision.verdict != "approve":
-            reason = f"label={label.decision}; review={decision.verdict}"
+        if label.decision != "accept":
+            reason = f"label={label.decision}"
         else:
             eligible_ids.append(candidate.candidate_id)
         if not reason and uncertain:
@@ -88,7 +85,6 @@ def prepare_dataset(
             "csv_record": None if reason else len(rows) + 1,
             "candidate": candidate.model_dump(mode="json"),
             "label": label.model_dump(mode="json", by_alias=True),
-            "review": decision.model_dump(mode="json"),
             "exclusion_reason": reason,
             "source_id": candidate.source_id,
             "source_url": candidate.source_url,
@@ -112,11 +108,8 @@ def prepare_dataset(
             "risk_confidence": str(label.risk_confidence),
             "severity_confidence": str(label.severity_confidence),
             "class_confidence": str(label.class_confidence),
-            "review_confidence": decision.confidence,
             "label_decision": label.decision,
-            "review_verdict": decision.verdict,
             "label_rationale": label.rationale,
-            "review_rationale": decision.rationale,
             "exclusion_reason": reason,
             "evidence_jsonl": "review/reviewed.jsonl",
             "evidence_record": str(len(all_evidence)),
@@ -192,13 +185,13 @@ def prepare_dataset(
         "commands.csv has the nine command columns plus human_reviewed ('true' or 'false'). "
         "Source is the exact supplied source_id; seed is '-'. "
         "provenance.jsonl maps one-based CSV data records to exact source URLs, positions, "
-        "transformations, documentation and separate label/review decisions. "
+        "transformations, documentation and label decisions. "
         "review/commands.csv is the flat accepted review table; review/pending.csv contains withheld "
         "and capped records; review/reviewed.csv and reviewed.jsonl retain all decisions.\n\n"
-        "Labeling and review use separate isolated invocations; receipts remain in caller output directories. "
-        "Agentic review is not human approval. Confidences are low/medium/high self-reported judgments, "
+        "Each command is labeled independently; receipts remain in caller output directories. "
+        "Confidences are low/medium/high self-reported judgments, "
         "not calibrated probabilities. Medium or higher uncertainty requires human review; "
-        "all five confidences must be high for automatic inclusion. "
+        "all four label confidences must be high for automatic inclusion. "
         "human_reviewed marks actual human-approved inclusions only. "
         "Category policy is preserved in rules.json.\n\n"
         "## Coverage and limitations\n\n"
@@ -236,12 +229,11 @@ def prepare_dataset(
 def publish_dataset(
     candidates: list[CandidateRecord],
     labels: list[LabelDecision],
-    reviews: list[ReviewDecision],
     rules: CategoryRules,
     out: Path,
     limit_per_risk: int,
 ) -> dict[str, JsonValue]:
-    publication = prepare_dataset(candidates, labels, reviews, rules, limit_per_risk)
+    publication = prepare_dataset(candidates, labels, rules, limit_per_risk)
     for name in publication.files:
         if (out / name).exists():
             raise FileExistsError(out / name)

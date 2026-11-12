@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import shutil
+from collections import deque
 from collections.abc import Iterable, Iterator, Mapping
+from concurrent.futures import Future, ThreadPoolExecutor
 from enum import StrEnum
 from pathlib import Path
 from typing import Literal
@@ -20,6 +23,7 @@ from codebench_pipeline.annotation_cache import (
     save_cached_invocation,
 )
 from codebench_pipeline.category_rules import CategoryRules
+from codebench_pipeline.dataset_documentation_models import command_operations
 from codebench_pipeline.dataset_records import (
     CandidateRecord,
     LabelDecision,
@@ -36,6 +40,26 @@ from codebench_pipeline.models import SemanticSnippet
 def candidate_schema[Model: BaseModel](model: type[Model], candidate_id: str) -> type[Model]:
     identity = StrEnum("CandidateIdentity", {"expected": candidate_id})
     return create_model(f"Bound{model.__name__}", __base__=model, candidate_id=(identity, ...))
+
+
+def label_schema(candidate: CandidateRecord, rules: CategoryRules) -> type[LabelDecision]:
+    category = StrEnum("CategoryIdentity", {"expected": rules.category_id})
+    utility = StrEnum("SourceUtility", {"expected": candidate.util})
+    risks = routing(candidate, rules)
+    risk_schema: dict[str, JsonValue] = {"enum": [risk for risk in risks]}
+    return create_model(
+        "RoutedLabelDecision",
+        __base__=candidate_schema(LabelDecision, candidate.candidate_id),
+        category_id=(category, ...),
+        risk_id=(
+            str,
+            Field(
+                pattern="^(?:" + "|".join(re.escape(risk) for risk in risks) + ")$",
+                json_schema_extra=risk_schema,
+            ),
+        ),
+        util=(utility, ...),
+    )
 
 
 def request(
@@ -74,8 +98,15 @@ def invocation_path(out: Path, stage: str, candidate_id: str) -> Path:
 
 
 def relevant_documentation(candidate: CandidateRecord, docs: list[SemanticSnippet]) -> list[SemanticSnippet]:
+    operations = command_operations(candidate.candidate_id, candidate.util, candidate.command)
     return sorted(
-        (doc for doc in docs if doc.utility == candidate.util),
+        (
+            doc for doc in docs
+            if any(
+                operation.matches(doc.utility, subcommand)
+                for operation in operations for subcommand in doc.subcommands
+            )
+        ),
         key=lambda doc: doc.model_dump_json(),
     )
 
@@ -119,7 +150,7 @@ def annotation_requests(
             + json.dumps(payload, ensure_ascii=False, allow_nan=False)
         )
         schema = (
-            candidate_schema(LabelDecision, candidate.candidate_id)
+            label_schema(candidate, rules)
             if proposed is None
             else candidate_schema(ReviewDecision, candidate.candidate_id)
         )
@@ -147,6 +178,7 @@ def annotate(
     *,
     cache: Path | None = None,
     maximum_context_characters: int = 131072,
+    workers: int = 1,
 ) -> list[LabelDecision]:
     index_records(candidates)
     for candidate in candidates:
@@ -154,44 +186,56 @@ def annotate(
     labels: list[LabelDecision] = []
     indexed = index_records(candidates)
     packets: list[JsonValue] = []
-    for packet in bounded_packets(
-        annotation_requests(candidates, docs, rules, model), 1, maximum_context_characters
-    ):
-        packets.append(
-            {
-                "candidate_ids": [row.candidate_id for row in packet],
-                "characters": sum(row.characters for row in packet),
-            }
-        )
-        for row in packet:
-            candidate = indexed[row.candidate_id]
-            supplied = relevant_documentation(candidate, docs)
-            schema = candidate_schema(LabelDecision, candidate.candidate_id)
-            if not supplied:
-                schema = create_model(
-                    "UndocumentedLabel",
-                    __base__=schema,
-                    decision=(Literal["needs_review", "reject"], ...),
-                    documentation_urls=(list[str], Field(max_length=0)),
-                )
-            path = invocation_path(out, "label", candidate.candidate_id)
-
-            def compute_label() -> LabelDecision:
-                result = infer_typed(schema, row.system, row.prompt, model, path)
-                validate_label(candidate, result, rules, {doc.url for doc in supplied})
-                return result
-
-            label = cached_invocation(
-                schema,
-                row,
-                model,
-                path,
-                cache,
-                compute_label,
+    def requests() -> Iterator[RowRequest]:
+        for packet in bounded_packets(
+            annotation_requests(candidates, docs, rules, model), 1, maximum_context_characters
+        ):
+            packets.append(
+                {
+                    "candidate_ids": [row.candidate_id for row in packet],
+                    "characters": sum(row.characters for row in packet),
+                }
             )
-            label = LabelDecision.model_validate(label.model_dump(by_alias=True))
-            validate_label(candidate, label, rules, {doc.url for doc in supplied})
-            labels.append(label)
+            yield from packet
+
+    def label_row(row: RowRequest) -> LabelDecision:
+        candidate = indexed[row.candidate_id]
+        supplied = relevant_documentation(candidate, docs)
+        schema = label_schema(candidate, rules)
+        if not supplied:
+            schema = create_model(
+                "UndocumentedLabel",
+                __base__=schema,
+                decision=(Literal["needs_review", "reject"], ...),
+                documentation_urls=(list[str], Field(max_length=0)),
+            )
+        path = invocation_path(out, "label", candidate.candidate_id)
+
+        def compute_label() -> LabelDecision:
+            result = infer_typed(schema, row.system, row.prompt, model, path)
+            validate_label(candidate, result, rules, {doc.url for doc in supplied})
+            return result
+
+        label = cached_invocation(schema, row, model, path, cache, compute_label)
+        label = LabelDecision.model_validate(label.model_dump(by_alias=True))
+        validate_label(candidate, label, rules, {doc.url for doc in supplied})
+        return label
+
+    if workers == 1:
+        labels = [label_row(row) for row in requests()]
+    else:
+        iterator = iter(requests())
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            pending: deque[Future[LabelDecision]] = deque()
+            for _ in range(workers):
+                row = next(iterator, None)
+                if row is not None:
+                    pending.append(executor.submit(label_row, row))
+            while pending:
+                labels.append(pending.popleft().result())
+                row = next(iterator, None)
+                if row is not None:
+                    pending.append(executor.submit(label_row, row))
     out.mkdir(parents=True, exist_ok=True)
     (out / "label-packets.json").write_text(json.dumps(packets), encoding="utf-8")
     return labels

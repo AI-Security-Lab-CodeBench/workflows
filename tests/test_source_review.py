@@ -10,7 +10,6 @@ import pandas as pd
 from configuration_fixture import write_fixture
 from dagster import AssetKey, AssetRecordsFilter
 from pandera.typing import DataFrame
-from pydantic import BaseModel
 from test_dataset_incremental import provider_response
 
 from codebench_pipeline.data_view_models import DatasetQueryRequest, TableResponse
@@ -21,7 +20,6 @@ from codebench_pipeline.dataset_config import SnapshotConfig, load_build_config
 from codebench_pipeline.dataset_documents import snapshot_documents
 from codebench_pipeline.dataset_plan import INPUT_STAGES, plan_dataset
 from codebench_pipeline.dataset_registry import DatasetRegistry
-from codebench_pipeline.dataset_source_models import SourceSelection
 from codebench_pipeline.definitions import build_definitions
 from codebench_pipeline.documentation_authorization import (
     frame_inventory_authorization,
@@ -29,7 +27,6 @@ from codebench_pipeline.documentation_authorization import (
     inventory_binding,
 )
 from codebench_pipeline.human_review import DecisionChange, HumanReviewError
-from codebench_pipeline.model_config import ModelConfig
 from codebench_pipeline.review_api_models import CompletionRequest, DecisionRequest, RetractionRequest
 from codebench_pipeline.review_workflow import ReviewWorkflow
 from codebench_pipeline.runtime_instance import dataset_instance
@@ -53,7 +50,7 @@ class SourceReviewTests(unittest.TestCase):
         config["storage"] = {"local_root": str(self.home / "tables")}
         self.config = self.home / "config.json"
         self.config.write_text(json.dumps(config))
-        for module in ("dataset_catalog", "dataset_documents", "dataset_annotation"):
+        for module in ("dataset_annotation",):
             self.stack.enter_context(
                 patch(f"codebench_pipeline.{module}.infer_typed", side_effect=provider_response)
             )
@@ -116,40 +113,18 @@ class SourceReviewTests(unittest.TestCase):
         self.assertEqual(frame_inventory_authorization(stored.value, "dataset"), after)
         self.assertIsNone(stored.publication_state)
 
-    def test_only_machine_selected_sources_load_regardless_of_source_confidence(self) -> None:
-        def select(
-            schema: type[BaseModel], system: str, prompt: str, model: ModelConfig, out: Path
-        ) -> BaseModel:
-            result = provider_response(schema, system, prompt, model, out)
-            if isinstance(result, SourceSelection):
-                return SourceSelection(
-                    sources=[
-                        source.model_copy(
-                            update={
-                                "confidence": "low",
-                                "decision": "needs_review"
-                                if source.source_id == "second-source-fixture"
-                                else "selected",
-                            }
-                        )
-                        for source in result.sources
-                    ]
-                )
-            return result
-
-        DatasetRegistry(self.home).register(
-            self.spec.model_copy(
-                update={"catalog": self.spec.catalog.model_copy(update={"collection_revision": "selection"})}
-            )
-        )
-        with (
-            patch("codebench_pipeline.dataset_catalog.infer_typed", side_effect=select),
-            redirect_stdout(io.StringIO()),
-        ):
+    def test_declared_source_list_controls_acquisition_without_source_inference(self) -> None:
+        selected = self.spec.catalog.documents[:1]
+        DatasetRegistry(self.home).register(self.spec.model_copy(update={
+            "catalog": self.spec.catalog.model_copy(update={
+                "documents": selected, "collection_revision": "manifest-selection"
+            })
+        }))
+        with redirect_stdout(io.StringIO()):
             execute_registered_build(self.spec.dataset_id, self.home)
         self.assertEqual(
             [row.values["source_id"] for row in self.documents().page.rows],
-            [self.spec.catalog.documents[0].source_id],
+            [selected[0].source_id],
         )
 
     def test_source_review_retraction_does_not_invalidate_inventory_outputs(self) -> None:
@@ -207,9 +182,13 @@ class SourceReviewTests(unittest.TestCase):
         DatasetRegistry(self.home).register(updated)
 
         def changed_inventory(
-            catalog: DataFrame[SourceCatalogTable], config: SnapshotConfig
+            catalog: DataFrame[SourceCatalogTable],
+            config: SnapshotConfig,
+            *,
+            cache: Path | None = None,
+            evidence: Path | None = None,
         ) -> DataFrame[SourceDocumentsTable]:
-            frame = snapshot_documents(catalog, config)
+            frame = snapshot_documents(catalog, config, cache=cache, evidence=evidence)
             DatasetRegistry(self.home).register(
                 updated.model_copy(
                     update={

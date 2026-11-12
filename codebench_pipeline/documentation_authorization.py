@@ -34,7 +34,7 @@ def inventory_authorization(
 ) -> tuple[DataFrame[SourceCatalogTable], SourceInventoryAuthorization]:
     spec = DatasetRegistry(home).get(dataset_id)
     config = catalog_for_branch(spec, branch)
-    if not config.documents and config.search_request is None:
+    if not config.documents and config.manifest is None:
         raise HumanReviewError("pending", "No source inventory is configured")
     expected = stage_signature("source_catalog", config, {"category_rules": spec.rules})
     key = AssetKey(asset_path("source_catalog", branch))
@@ -42,7 +42,7 @@ def inventory_authorization(
         AssetRecordsFilter(asset_key=key, asset_partitions=[dataset_id]), limit=1
     ).records
     if not records or records[0].asset_materialization is None:
-        raise HumanReviewError("pending", "Discover sources before processing them")
+        raise HumanReviewError("pending", "Materialize the source manifest catalog before processing it")
     if records[0].asset_materialization.metadata["input_fingerprint"].value != expected:
         raise HumanReviewError("stale", "Source inventory changed")
     manager = DataFrameIOManager(storage=spec.storage)

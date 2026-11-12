@@ -13,7 +13,7 @@ from pydantic import BaseModel
 
 from codebench_pipeline.dataset_cli import execute_build, execute_registered_build
 from codebench_pipeline.dataset_config import load_build_config
-from codebench_pipeline.dataset_records import LabelDecision, ReviewDecision
+from codebench_pipeline.dataset_records import LabelDecision
 from codebench_pipeline.dataset_registry import DatasetRegistry
 from codebench_pipeline.dataset_source_models import SourceSelection
 from codebench_pipeline.definitions import build_definitions
@@ -43,29 +43,8 @@ def provider_response(
         )
     if schema is AdapterSpec:
         return AdapterSpec(format="markdown", rationale="Markdown example source.")
-    if "records" in payload:
-        return schema.model_validate(
-            {
-                "reviews": [
-                    {
-                        "candidate_id": record["candidate"]["candidate_id"],
-                        "verdict": "approve",
-                        "rationale": "Documented inspection.",
-                        "confidence": "high",
-                    }
-                    for record in payload["records"]
-                ]
-            }
-        )
-    candidate = payload["candidate"]
-    if issubclass(schema, ReviewDecision):
-        return ReviewDecision(
-            candidate_id=candidate["candidate_id"],
-            verdict="approve",
-            rationale="Documented inspection.",
-            confidence="high",
-        )
     if issubclass(schema, LabelDecision):
+        candidate = payload["candidate"]
         risk = payload["allowed_risk_ids"][0]
         return LabelDecision.model_validate(
             {
@@ -102,7 +81,7 @@ class IncrementalDatasetTests(unittest.TestCase):
             seed["local_path"] = str((original.parent / seed["local_path"]).resolve())
         self.configuration["storage"] = {"local_root": str(self.home / "tables")}
         self.path = self.home / "category.json"
-        for module in ("dataset_catalog", "dataset_documents", "dataset_annotation"):
+        for module in ("dataset_annotation",):
             self.stack.enter_context(
                 patch(f"codebench_pipeline.{module}.infer_typed", side_effect=provider_response)
             )
@@ -150,7 +129,6 @@ class IncrementalDatasetTests(unittest.TestCase):
             changed = execute_registered_build(spec.dataset_id, self.home)
         finalization = {
             "merged_proposed_annotations",
-            "reviewed_annotations",
             "deduplicated_annotations",
             "human_review_queue",
         }
@@ -168,13 +146,14 @@ class IncrementalDatasetTests(unittest.TestCase):
         with redirect_stdout(io.StringIO()):
             self.assertEqual(execute_registered_build(spec.dataset_id, self.home), {})
 
-    def test_reviewer_change_materializes_only_review_and_queue(self) -> None:
+    def test_labeler_change_materializes_only_labels_and_finalization(self) -> None:
         before = self.materializations(self.configuration["dataset_id"])
-        self.configuration["models"]["reviewer"]["timeout_seconds"] += 1
-        self.configuration["revision"] = "review-settings-update"
+        self.configuration["models"]["labeler"]["timeout_seconds"] += 1
+        self.configuration["revision"] = "label-settings-update"
         changed = self.build()
         expected = {
-            "reviewed_annotations",
+            "proposed_annotations",
+            "merged_proposed_annotations",
             "deduplicated_annotations",
             "human_review_queue",
         }
@@ -192,7 +171,6 @@ class IncrementalDatasetTests(unittest.TestCase):
                 "category_rules",
                 "labeling_documentation",
                 "proposed_annotations",
-                "reviewed_annotations",
                 "human_review_queue",
                 "merged_proposed_annotations",
                 "deduplicated_annotations",
@@ -207,9 +185,9 @@ class IncrementalDatasetTests(unittest.TestCase):
         receipt = json.loads((self.home / f"build-{run.run_id}.json").read_text())
         self.assertEqual(receipt["status"], "awaiting_human_review")
 
-    def test_failed_review_retries_only_unfinished_dependent_stages(self) -> None:
+    def test_failed_labeling_retries_only_unfinished_dependent_stages(self) -> None:
         before = self.materializations(self.configuration["dataset_id"])
-        self.configuration["models"]["reviewer"]["timeout_seconds"] += 1
+        self.configuration["models"]["labeler"]["timeout_seconds"] += 1
         with patch(
             "codebench_pipeline.dataset_annotation.infer_typed",
             side_effect=RuntimeError("Provider rejected this request"),
@@ -220,13 +198,14 @@ class IncrementalDatasetTests(unittest.TestCase):
         self.assertEqual(
             set(self.build()),
             {
-                "reviewed_annotations",
+                "proposed_annotations",
+                "merged_proposed_annotations",
                 "deduplicated_annotations",
                 "human_review_queue",
             },
         )
 
-    def test_sensor_skips_unchanged_categories_and_selects_only_changed_review(self) -> None:
+    def test_sensor_skips_unchanged_categories_and_selects_only_changed_labels(self) -> None:
         definitions = build_definitions(self.home)
         sensor = definitions.get_sensor_def("dataset_build_requests")
         with (
@@ -237,7 +216,7 @@ class IncrementalDatasetTests(unittest.TestCase):
                 instance=instance, repository_def=definitions.get_repository_def()
             ) as ctx:
                 self.assertEqual(list(sensor.evaluate_tick(ctx).run_requests or []), [])
-        self.configuration["models"]["reviewer"]["timeout_seconds"] += 1
+        self.configuration["models"]["labeler"]["timeout_seconds"] += 1
         self.path.write_text(json.dumps(self.configuration), encoding="utf-8")
         DatasetRegistry(self.home).register(load_build_config(self.path, self.home))
         with (
@@ -255,7 +234,8 @@ class IncrementalDatasetTests(unittest.TestCase):
             {
                 AssetKey(["datasets", stage])
                 for stage in (
-                    "reviewed_annotations",
+                    "proposed_annotations",
+                    "merged_proposed_annotations",
                     "deduplicated_annotations",
                     "human_review_queue",
                 )
@@ -279,11 +259,12 @@ class IncrementalDatasetTests(unittest.TestCase):
         self.configuration["rules"]["category_id"] = "CAT-9"
         self.configuration["rules"]["risks"][0]["id"] = "CAT-9.1"
         self.assertEqual(set(self.build()), set(self.first))
-        self.configuration["models"]["reviewer"]["timeout_seconds"] += 1
+        self.configuration["models"]["labeler"]["timeout_seconds"] += 1
         self.assertEqual(
             set(self.build()),
             {
-                "reviewed_annotations",
+                "proposed_annotations",
+                "merged_proposed_annotations",
                 "deduplicated_annotations",
                 "human_review_queue",
             },

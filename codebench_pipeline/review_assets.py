@@ -19,7 +19,7 @@ from codebench_pipeline.dataframe_io import DataFrameIOManager
 from codebench_pipeline.dataframe_schemas import (
     CommandsTable,
     HumanReviewDecisionsTable,
-    ReviewedAnnotationsTable,
+    ProposedAnnotationsTable,
     ReviewQueueTable,
     validated_frame,
 )
@@ -102,7 +102,7 @@ def human_assets(branch: Branch = "dataset") -> list[AssetsDefinition]:
         io_manager_key="dataset_io_manager",
         dagster_type=TABLE_TYPES[CommandsTable],
         ins={
-            "reviewed_annotations": table_input("deduplicated_annotations", ReviewedAnnotationsTable),
+            "deduplicated_annotations": table_input("deduplicated_annotations", ProposedAnnotationsTable),
             "human_review_decisions": table_input(
                 "human_review_decisions", HumanReviewDecisionsTable, branch
             ),
@@ -112,7 +112,7 @@ def human_assets(branch: Branch = "dataset") -> list[AssetsDefinition]:
     def dataset_release(
         context: AssetExecutionContext,
         config: HumanReviewConfig,
-        reviewed_annotations: DataFrame[ReviewedAnnotationsTable],
+        deduplicated_annotations: DataFrame[ProposedAnnotationsTable],
         human_review_decisions: DataFrame[HumanReviewDecisionsTable],
         category_rules: CategoryRules,
         dataset_io_manager: ResourceParam[DataFrameIOManager],
@@ -120,7 +120,7 @@ def human_assets(branch: Branch = "dataset") -> list[AssetsDefinition]:
         approved = authorized_review(context, config, dataset_io_manager)
         require_decision_frame(human_review_decisions, approved.decisions)
         if (
-            not ReviewedAnnotationsTable.validate(reviewed_annotations).equals(approved.resolved.reviewed)
+            not ProposedAnnotationsTable.validate(deduplicated_annotations).equals(approved.resolved.reviewed)
             or category_rules != approved.resolved.rules
         ):
             raise HumanReviewError("stale", "Release inputs differ from the completed snapshot")

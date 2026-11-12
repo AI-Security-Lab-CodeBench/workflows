@@ -15,6 +15,12 @@ from codebench_pipeline.dataset_source_models import is_documentation_source
 from codebench_pipeline.model_config import ModelConfig, ModelRoles
 from codebench_pipeline.models import Identifier
 from codebench_pipeline.object_store import StorageConfig
+from codebench_pipeline.source_manifests import (
+    manifest_documentation,
+    manifest_sources,
+    resolve_source_paths,
+    validate_transformations,
+)
 from codebench_pipeline.typed_config import TypedConfig
 
 
@@ -23,8 +29,9 @@ class StrictStageConfig(TypedConfig):
 
 
 class CatalogInputs(StrictStageConfig):
-    mode: Literal["provided_sources", "keenable"]
+    mode: Literal["provided_sources"] = "provided_sources"
     documents: list[SourceSeed] = Field(default_factory=list)
+    manifest: str | None = None
     search_request: SearchSeeds | None = None
 
     @field_validator("documents")
@@ -34,27 +41,32 @@ class CatalogInputs(StrictStageConfig):
 
     @model_validator(mode="after")
     def matching_input(self) -> "CatalogInputs":
-        if self.mode == "provided_sources" and self.search_request is not None:
-            raise ValueError("Provided sources cannot include a search request")
-        if self.mode == "keenable" and (self.search_request is None or self.documents):
-            raise ValueError("Keenable discovery requires only a search request")
+        if self.search_request is not None:
+            raise ValueError("Source discovery belongs to the local agent; supply a source manifest")
         return self
 
 
 class DatasetSeeds(CatalogInputs):
-    """Source/search starting points, not synthetic command prompts or RNG seeds."""
+    """Category source inputs prepared by the local agent."""
 
     revision: str = Field(default="1", min_length=1)
+
+    @model_validator(mode="after")
+    def one_source_input(self) -> "DatasetSeeds":
+        if self.manifest is not None and self.documents:
+            raise ValueError("Choose either a source manifest or inline source records")
+        return self
 
 
 class CatalogConfig(CatalogInputs):
     collection_revision: str = Field(default="1", min_length=1)
-    model: ModelConfig
+    model: ModelConfig | None = None
 
 
 class SnapshotConfig(StrictStageConfig):
     maximum_bytes: int = Field(default=10_485_760, gt=0)
     documents: list[SourceSeed] = Field(default_factory=list)
+    workers: int = Field(default=8, ge=1, le=16)
 
     @field_validator("documents")
     @classmethod
@@ -63,8 +75,8 @@ class SnapshotConfig(StrictStageConfig):
 
 
 class AdapterConfig(StrictStageConfig):
-    model: ModelConfig
-    mode: Literal["infer", "provided"] = "infer"
+    model: ModelConfig | None = None
+    mode: Literal["provided"] = "provided"
     sample_characters: int = Field(default=8000, ge=100, le=50000)
 
 
@@ -80,6 +92,7 @@ class FilteringConfig(StrictStageConfig):
 class AnnotationConfig(StrictStageConfig):
     model: ModelConfig
     maximum_context_characters: int = Field(default=131072, ge=1024, le=1048576)
+    workers: int = Field(default=1, ge=1, le=8)
 
 
 class ReviewConfig(AnnotationConfig):
@@ -99,8 +112,9 @@ class DatasetFileConfig(StrictStageConfig):
     documentation_sources: DatasetSeeds | None = None
     documentation: DocumentationConfig
     snapshot_maximum_bytes: int = Field(default=10_485_760, gt=0)
-    adapters: Literal["infer", "provided"] = "infer"
+    adapters: Literal["provided"] = "provided"
     adapter_sample_characters: int = Field(default=8000, ge=100, le=50000)
+    labeling_workers: int = Field(default=1, ge=1, le=8)
     extraction: ExtractionConfig = ExtractionConfig()
     filtering: FilteringConfig = FilteringConfig()
     publication: PublicationConfig = PublicationConfig()
@@ -138,7 +152,7 @@ class DatasetBuildSpec(StrictStageConfig):
     filtering: FilteringConfig
     documentation: DocumentationConfig
     annotation: AnnotationConfig
-    review: ReviewConfig
+    review: ReviewConfig | None = None
     publication: PublicationConfig
     storage: StorageConfig
 
@@ -167,11 +181,11 @@ def load_build_config(path: Path, home: Path | None = None) -> DatasetBuildSpec:
     supplied = DatasetFileConfig.model_validate_json(path.read_bytes())
     parent = path.resolve().parent
     documents = [
-        document.model_copy(update={"local_path": str((parent / document.local_path).resolve())})
+        resolve_source_paths(document, parent)
         for document in supplied.seeds.documents
     ]
     documentation_documents = [
-        document.model_copy(update={"local_path": str((parent / document.local_path).resolve())})
+        resolve_source_paths(document, parent)
         for document in (
             supplied.documentation_sources.documents if supplied.documentation_sources is not None else []
         )
@@ -181,7 +195,7 @@ def load_build_config(path: Path, home: Path | None = None) -> DatasetBuildSpec:
     )
     if storage.backend == "local" and not Path(storage.local_root).is_absolute():
         storage = storage.model_copy(update={"local_root": str((parent / storage.local_root).resolve())})
-    return DatasetBuildSpec(
+    return resolve_business_inputs(DatasetBuildSpec(
         dataset_id=supplied.dataset_id,
         revision=supplied.revision,
         rules=supplied.rules,
@@ -189,6 +203,8 @@ def load_build_config(path: Path, home: Path | None = None) -> DatasetBuildSpec:
             collection_revision=supplied.seeds.revision,
             mode=supplied.seeds.mode,
             documents=documents,
+            manifest=str((parent / supplied.seeds.manifest).resolve())
+            if supplied.seeds.manifest is not None else None,
             search_request=supplied.seeds.search_request,
             model=supplied.models.selector,
         ),
@@ -201,6 +217,8 @@ def load_build_config(path: Path, home: Path | None = None) -> DatasetBuildSpec:
                 collection_revision=supplied.documentation_sources.revision,
                 mode=supplied.documentation_sources.mode,
                 documents=documentation_documents,
+                manifest=str((parent / supplied.documentation_sources.manifest).resolve())
+                if supplied.documentation_sources.manifest is not None else None,
                 search_request=supplied.documentation_sources.search_request,
                 model=supplied.models.selector,
             )
@@ -218,13 +236,42 @@ def load_build_config(path: Path, home: Path | None = None) -> DatasetBuildSpec:
         ),
         extraction=supplied.extraction,
         filtering=supplied.filtering,
-        documentation=(
-            supplied.documentation.model_copy(update={"model": supplied.models.selector})
-            if supplied.documentation.mode == "keenable" and supplied.documentation.model is None
-            else supplied.documentation
+        documentation=supplied.documentation.model_copy(
+            update={"manifest": str((parent / supplied.documentation.manifest).resolve())}
+            if supplied.documentation.manifest is not None else {}
         ),
-        annotation=AnnotationConfig(model=supplied.models.labeler),
-        review=ReviewConfig(model=supplied.models.reviewer),
+        annotation=AnnotationConfig(model=supplied.models.labeler, workers=supplied.labeling_workers),
+        review=None,
         publication=supplied.publication,
         storage=storage,
-    )
+    ))
+
+
+def resolve_business_inputs(spec: DatasetBuildSpec) -> DatasetBuildSpec:
+    updates: dict[str, CatalogConfig | SnapshotConfig | DocumentationConfig] = {}
+    for catalog_name, snapshot_name in (
+        ("catalog", "snapshots"), ("documentation_catalog", "documentation_snapshots")
+    ):
+        catalog = spec.catalog if catalog_name == "catalog" else spec.documentation_catalog
+        if catalog is None:
+            continue
+        documents = (
+            manifest_sources(Path(catalog.manifest), spec.rules.category_id)
+            if catalog.manifest is not None else catalog.documents
+        )
+        validate_transformations(documents)
+        if catalog_name == "documentation_catalog" and any(
+            not is_documentation_source(document.source_type, document.provenance_type)
+            for document in documents
+        ):
+            raise ValueError("Documentation manifest cannot contain dataset corpora")
+        updates[catalog_name] = catalog.model_copy(update={"documents": documents})
+        snapshots = spec.snapshots if snapshot_name == "snapshots" else spec.documentation_snapshots
+        updates[snapshot_name] = snapshots.model_copy(update={"documents": documents})
+    if spec.documentation.manifest is not None:
+        updates["documentation"] = spec.documentation.model_copy(
+            update={"snippets": manifest_documentation(
+                Path(spec.documentation.manifest), spec.rules.category_id
+            )}
+        )
+    return spec.model_copy(update=updates)

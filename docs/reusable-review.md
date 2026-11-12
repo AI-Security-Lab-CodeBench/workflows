@@ -40,13 +40,21 @@ run can be retried without repeating human decisions or inference. The synchrono
 `ReleaseRunner` remains available for in-process callers and regression checks.
 
 The command adapter supplies only uncertain records from the unified deduplicated
-dataset to human review. Any `medium` or `low` among category, risk, severity,
-class and independent reviewer confidence requires review. All five `high` means
+dataset to human review. Any `medium` or `low` among category, risk, severity and
+class confidence requires review. All four `high` means
 low uncertainty: machine-eligible rows need no decision. Machine-ineligible rows
 remain inspectable and cannot be admitted by approval.
 
-Both branches crawl or load eligible sources automatically, with provenance,
-license and content checks; `human_source_decisions` is removed from the active
+An LLM assesses each source dataset from actual README/card and license bodies
+and origin/provenance evidence, retains receipts and holds unresolved eligibility.
+This isn't a human gate. Both branches enumerate and load complete eligible
+configured corpora automatically, not bounded inspected-page snapshots.
+Each eligible command gets one isolated labeling invocation after extraction,
+filtering and semantic docs. Branch `proposed_annotations` merge before exact
+deduplication. `reviewed_annotations` is removed from the active graph; historical
+artifacts remain readable and current rows receive no manufactured
+`review_verdict` or `review_confidence`.
+`human_source_decisions` is removed from the active
 graph. They feed one final queue and one `dataset_release`. If the queue is empty,
 the build completes the empty batch under the explicit automatic-policy actor
 and releases without human decisions or a human completion signal. Otherwise

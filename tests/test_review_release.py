@@ -57,7 +57,7 @@ class ReviewReleaseTests(unittest.TestCase):
         config["publication"]["limit_per_risk"] = 1
         self.config = self.home / "config.json"
         self.config.write_text(json.dumps(config))
-        for module in ("dataset_catalog", "dataset_documents", "dataset_annotation"):
+        for module in ("dataset_annotation",):
             self.stack.enter_context(
                 patch(f"codebench_pipeline.{module}.infer_typed", side_effect=multi_citation_response)
             )

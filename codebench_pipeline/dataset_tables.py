@@ -2,7 +2,6 @@ from pathlib import Path
 
 import pandera.pandas as pa
 from pandera.typing import DataFrame
-from pydantic import JsonValue, TypeAdapter
 
 from codebench_pipeline.category_rules import CategoryRules
 from codebench_pipeline.dataframe_schemas import (
@@ -10,21 +9,19 @@ from codebench_pipeline.dataframe_schemas import (
     DocumentationTable,
     FilteredCommandsTable,
     ProposedAnnotationsTable,
-    ReviewedAnnotationsTable,
     ReviewQueueTable,
     frame_records,
     model_records,
     validated_frame,
 )
-from codebench_pipeline.dataset_annotation import annotate, review
+from codebench_pipeline.dataset_annotation import annotate
 from codebench_pipeline.dataset_config import (
     AnnotationConfig,
     DocumentationConfig,
     PublicationConfig,
-    ReviewConfig,
 )
 from codebench_pipeline.dataset_export import Publication, prepare_dataset
-from codebench_pipeline.dataset_records import CandidateRecord, LabelDecision, ReviewDecision
+from codebench_pipeline.dataset_records import CandidateRecord, LabelDecision
 from codebench_pipeline.models import SemanticSnippet
 
 
@@ -53,6 +50,7 @@ def proposed_annotations(
         evidence,
         cache=cache,
         maximum_context_characters=config.maximum_context_characters,
+        workers=config.workers,
     )
     originals = {candidate.candidate_id: candidate for candidate in candidates}
     rows = [
@@ -66,85 +64,27 @@ def proposed_annotations(
 
 
 @pa.check_types
-def reviewed_annotations(
-    annotations: DataFrame[ProposedAnnotationsTable],
-    documentation: DataFrame[DocumentationTable],
-    rules: CategoryRules,
-    config: ReviewConfig,
-    evidence: Path,
-    *,
-    cache: Path | None = None,
-) -> DataFrame[ReviewedAnnotationsTable]:
-    candidates = model_records(annotations, CandidateRecord)
-    labels = model_records(annotations, LabelDecision)
-    docs = model_records(documentation, SemanticSnippet)
-    row_docs = (
-        TypeAdapter(dict[str, list[SemanticSnippet]]).validate_python(annotations.attrs["row_documentation"])
-        if "row_documentation" in annotations.attrs
-        else None
-    )
-    decisions = review(
-        candidates,
-        docs,
-        labels,
-        rules,
-        config.model,
-        evidence,
-        cache=cache,
-        batch_size=config.batch_size,
-        maximum_context_characters=config.maximum_context_characters,
-        documentation_by_candidate=row_docs,
-    )
-    verdicts = {decision.candidate_id: decision for decision in decisions}
-    rows: list[dict[str, JsonValue]] = []
-    for row in frame_records(annotations):
-        decision = verdicts[str(row["candidate_id"])]
-        rows.append(
-            {
-                **row,
-                "review_verdict": decision.verdict,
-                "review_rationale": decision.rationale,
-                "review_confidence": decision.confidence,
-            }
-        )
-    result = validated_frame(rows, ReviewedAnnotationsTable)
-    result.attrs = dict(annotations.attrs)
-    return result
-
-
-@pa.check_types
 def publication(
-    reviewed: DataFrame[ReviewedAnnotationsTable],
+    annotations: DataFrame[ProposedAnnotationsTable],
     rules: CategoryRules,
     config: PublicationConfig,
     *,
     approved_ids: frozenset[str] | None = None,
 ) -> Publication:
-    candidates = model_records(reviewed, CandidateRecord)
-    labels = model_records(reviewed, LabelDecision)
-    reviews = [
-        ReviewDecision.model_validate(
-            {
-                "candidate_id": row["candidate_id"],
-                "verdict": row["review_verdict"],
-                "rationale": row["review_rationale"],
-                "confidence": row["review_confidence"],
-            }
-        )
-        for row in frame_records(reviewed)
-    ]
+    candidates = model_records(annotations, CandidateRecord)
+    labels = model_records(annotations, LabelDecision)
     return prepare_dataset(
-        candidates, labels, reviews, rules, config.limit_per_risk, approved_ids=approved_ids
+        candidates, labels, rules, config.limit_per_risk, approved_ids=approved_ids
     )
 
 
 @pa.check_types
 def released_commands(
-    reviewed: DataFrame[ReviewedAnnotationsTable],
+    annotations: DataFrame[ProposedAnnotationsTable],
     rules: CategoryRules,
     config: PublicationConfig,
 ) -> DataFrame[CommandsTable]:
-    prepared = publication(reviewed, rules, config)
+    prepared = publication(annotations, rules, config)
     return validated_frame(
         [{key: value for key, value in row.items()} for row in prepared.commands], CommandsTable
     )
@@ -152,11 +92,11 @@ def released_commands(
 
 @pa.check_types
 def review_queue(
-    reviewed: DataFrame[ReviewedAnnotationsTable],
+    annotations: DataFrame[ProposedAnnotationsTable],
     rules: CategoryRules,
     config: PublicationConfig,
 ) -> DataFrame[ReviewQueueTable]:
-    prepared = publication(reviewed, rules, config)
+    prepared = publication(annotations, rules, config)
     eligible = set(prepared.eligible_ids)
     reasons = {row["candidate_id"]: row["exclusion_reason"] for row in prepared.pending}
     rows = [
@@ -166,9 +106,9 @@ def review_queue(
             if str(row["candidate_id"]) in eligible
             else reasons[str(row["candidate_id"])],
         }
-        for row in frame_records(reviewed)
+        for row in frame_records(annotations)
         if str(row["candidate_id"]) in prepared.human_review_ids
     ]
     frame = validated_frame(rows, ReviewQueueTable)
-    frame.attrs = dict(reviewed.attrs)
+    frame.attrs = dict(annotations.attrs)
     return frame

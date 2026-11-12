@@ -69,6 +69,10 @@ class DatasetGraphTests(unittest.TestCase):
                 {AssetKey(["datasets", *name.split("/")]) for name in INPUT_STAGES},
             )
             self.assertEqual(
+                assets.get(AssetKey(["datasets", "deduplicated_annotations"])).parent_keys,
+                {AssetKey(["datasets", "merged_proposed_annotations"])},
+            )
+            self.assertEqual(
                 assets.get(AssetKey(["datasets", "source_documents"])).parent_keys,
                 {AssetKey(["datasets", "source_catalog"])},
             )
@@ -126,7 +130,6 @@ class DatasetGraphTests(unittest.TestCase):
                 (
                     "category_rules",
                     "merged_proposed_annotations",
-                    "reviewed_annotations",
                     "deduplicated_annotations",
                     "human_review_queue",
                 ),
@@ -167,7 +170,7 @@ class DatasetGraphTests(unittest.TestCase):
         with self.assertRaises(ValidationError):
             FilteringConfig.model_validate({"unknown_option": True})
 
-    def test_policy_and_reviewer_changes_preserve_unaffected_stage_signatures(self) -> None:
+    def test_policy_and_labeler_changes_preserve_unaffected_stage_signatures(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             spec = load_build_config(write_fixture(Path(temporary)), Path(temporary))
             changed = spec.rules.model_copy(update={"policy": spec.rules.policy + " Additional review rule."})
@@ -182,12 +185,12 @@ class DatasetGraphTests(unittest.TestCase):
                 stage_signature("proposed_annotations", spec.annotation, original_inputs),
                 stage_signature("proposed_annotations", spec.annotation, changed_inputs),
             )
-            reviewer = AnnotationConfig(
-                model=spec.review.model.model_copy(update={"model": "another/reviewer"})
+            labeler = AnnotationConfig(
+                model=spec.annotation.model.model_copy(update={"model": "another/labeler"})
             )
             self.assertNotEqual(
-                stage_signature("reviewed_annotations", spec.review, original_inputs),
-                stage_signature("reviewed_annotations", reviewer, original_inputs),
+                stage_signature("proposed_annotations", spec.annotation, original_inputs),
+                stage_signature("proposed_annotations", labeler, original_inputs),
             )
 
     def test_concurrent_first_initialization_preserves_both_partition_updates(self) -> None:

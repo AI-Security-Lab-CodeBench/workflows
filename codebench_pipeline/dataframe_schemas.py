@@ -33,7 +33,7 @@ class SourceCatalogTable(StrictTable):
     decision: Series[str] = pa.Field(isin=["selected", "needs_review", "exclude"])
     rationale: Series[str]
     analysis: Series[str]
-    confidence: Series[str] = pa.Field(isin=["low", "medium", "high"])
+    confidence: Series[str] = pa.Field(isin=["low", "medium", "high", "not_applicable"])
 
 
 class SourceDocumentsTable(StrictTable):
@@ -109,7 +109,7 @@ class ReviewedAnnotationsTable(ProposedAnnotationsTable):
     review_confidence: Series[str] = pa.Field(isin=["low", "medium", "high"])
 
 
-class ReviewQueueTable(ReviewedAnnotationsTable):
+class ReviewQueueTable(ProposedAnnotationsTable):
     exclusion_reason: Series[str]
 
 

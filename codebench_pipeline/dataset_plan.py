@@ -50,18 +50,14 @@ INPUT_STAGES.update(
             "dataset_annotations": "proposed_annotations",
             "documentation_annotations": "documentation/proposed_annotations",
         },
-        "reviewed_annotations": {
-            "annotations": "merged_proposed_annotations",
-            "category_rules": "category_rules",
-        },
-        "deduplicated_annotations": {"annotations": "reviewed_annotations"},
+        "deduplicated_annotations": {"annotations": "merged_proposed_annotations"},
         "human_review_queue": {
-            "reviewed_annotations": "deduplicated_annotations",
+            "annotations": "deduplicated_annotations",
             "category_rules": "category_rules",
         },
         "human_review_decisions": {"human_review_queue": "human_review_queue"},
         "dataset_release": {
-            "reviewed_annotations": "deduplicated_annotations",
+            "deduplicated_annotations": "deduplicated_annotations",
             "human_review_decisions": "human_review_decisions",
             "category_rules": "category_rules",
         },
@@ -118,7 +114,7 @@ def plan_dataset(
         for branch in branches
         if not (
             catalog_for_branch(spec, branch).documents
-            or catalog_for_branch(spec, branch).search_request is not None
+            or catalog_for_branch(spec, branch).manifest is not None
         )
     )
     for branch in unconfigured:

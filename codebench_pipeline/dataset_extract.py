@@ -21,7 +21,10 @@ from codebench_pipeline.dataframe_schemas import (
 )
 from codebench_pipeline.dataset_config import ExtractionConfig, FilteringConfig
 from codebench_pipeline.dataset_records import CandidateRecord
+from codebench_pipeline.dataset_seed_config import SourceSeed
 from codebench_pipeline.models import AdapterSpec
+from codebench_pipeline.source_transform_contract import CanonicalSourceRow, TransformContext
+from codebench_pipeline.source_transforms import source_rows, transformed_rows
 from codebench_pipeline.storage import IntegrityError
 
 
@@ -78,6 +81,36 @@ def text_commands(text: str) -> Iterator[tuple[str, int, int, list[str]]]:
         offset += len(line)
 
 
+def canonical_rows(
+    document: dict[str, JsonValue],
+    adapter: AdapterSpec,
+    source: SourceSeed | None,
+    context_characters: int,
+) -> Iterator[CanonicalSourceRow]:
+    content = str(document["content"])
+    if source is not None and source.transform is not None:
+        context = TransformContext(
+            source.source_id,
+            source.url,
+            str(document["sha256"]),
+            TypeAdapter(dict[str, JsonValue]).validate_json(source.transform.options_json),
+        )
+        for row in transformed_rows(source.transform, source_rows(content, adapter.format), context):
+            yield row.model_copy(update={"transformations": [
+                f"trusted_python:{source.transform.sha256}:{source.transform.entrypoint}",
+                *row.transformations,
+            ]})
+        return
+    for location, text, context in text_records(content, adapter):
+        for command, start, end, transformations in text_commands(text):
+            yield CanonicalSourceRow(
+                command=command,
+                context=context + "\n" + text[max(0, start - context_characters):end + context_characters],
+                source_position=f"{location}; characters {start}:{end}",
+                transformations=transformations,
+            )
+
+
 @pa.check_types
 def extract_candidates(
     documents: DataFrame[SourceDocumentsTable],
@@ -91,32 +124,41 @@ def extract_candidates(
         for row in frame_records(adapters)
     }
     records: list[dict[str, JsonValue]] = []
+    declared_transformations = TypeAdapter(dict[str, list[str]]).validate_json(
+        documents.attrs.get("source_transformations_json", "{}")
+    )
+    source_inputs = {
+        source.source_id: source
+        for source in TypeAdapter(list[SourceSeed]).validate_json(
+            documents.attrs.get("source_inputs_json", "[]")
+        )
+    }
     for document in frame_records(documents):
         identifier = str(document["source_id"])
-        for location, text, context in text_records(str(document["content"]), mappings[identifier]):
-            for command, start, end, transformations in text_commands(text):
-                try:
-                    words = shlex.split(command)
-                except ValueError:
-                    words = command.split(maxsplit=1)
-                if not words:
-                    continue
-                position = f"{location}; characters {start}:{end}"
-                key = hashlib.sha256((identifier + "\n" + position + "\n" + command).encode()).hexdigest()
-                candidate = CandidateRecord(
-                    candidate_id=key,
-                    command=command,
-                    util=words[0].rsplit("/", 1)[-1],
-                    context=context
-                    + "\n"
-                    + text[max(0, start - config.context_characters) : end + config.context_characters],
-                    source_id=identifier,
-                    source_url=str(document["source_url"]),
-                    source_position=position,
-                    transformations=transformations,
-                    risk_candidates=[],
-                )
-                records.append(candidate.model_dump(mode="json"))
+        for row in canonical_rows(
+            document, mappings[identifier], source_inputs.get(identifier), config.context_characters
+        ):
+            try:
+                words = shlex.split(row.command)
+            except ValueError:
+                words = row.command.split(maxsplit=1)
+            if not words:
+                continue
+            key = hashlib.sha256(
+                (identifier + "\n" + row.source_position + "\n" + row.command).encode()
+            ).hexdigest()
+            candidate = CandidateRecord(
+                candidate_id=key,
+                command=row.command,
+                util=words[0].rsplit("/", 1)[-1] or words[0],
+                context=row.context,
+                source_id=identifier,
+                source_url=str(document["source_url"]),
+                source_position=row.source_position,
+                transformations=[*declared_transformations.get(identifier, []), *row.transformations],
+                risk_candidates=[],
+            )
+            records.append(candidate.model_dump(mode="json"))
     return validated_frame(records, CommandCandidatesTable)
 
 
@@ -132,7 +174,10 @@ def filter_candidates(
             reason = "outside_configured_command_families"
         elif len(candidate.command) > config.maximum_command_characters or "\x00" in candidate.command:
             reason = "oversized_or_control_character"
-        elif re.search(r"\{\{|\}\}|(?:^|\s)\.\.\.(?:\s|$)|…", candidate.command):
+        elif re.search(
+            r"\{\{|\}\}|<[A-Za-z_][A-Za-z0-9_.|:/-]*>|(?:^|\s)\.\.\.(?:\s|$)|…",
+            candidate.command,
+        ):
             reason = "unresolved_template"
         elif config.quarantine_dynamic_shell and any(
             token in candidate.command for token in ("$(", "`", "<<")

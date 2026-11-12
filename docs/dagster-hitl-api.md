@@ -81,7 +81,7 @@ A table response is:
 {
   "kind":"table",
   "dataset_id":"example",
-  "stage":"reviewed_annotations",
+  "stage":"deduplicated_annotations",
   "snapshot_id":"64-lowercase-hex-digest",
   "page":{
     "columns":["candidate_id","command"],
@@ -111,13 +111,22 @@ completion label, minimum/maximum approvals, `can_continue`, `continuation_label
 and `additional_publication_stages`.
 `/reviews/{stage_id}` and its decision/complete/reopen/retract/continue/evidence
 subroutes use the same contracts below. There is no active `sources` ingestion
-gate or `human_source_decisions` asset. Both branches automatically acquire
-eligible sources under provenance, license and content checks. The `annotations`
+gate or `human_source_decisions` asset. The local agent discovers sources and
+prepares manifests from actual README/license/origin evidence outside Dagster.
+Both branches retrieve complete declared files with pinned integrity checks;
+neither searches for sources nor invokes source-selector or adapter models.
+
+After extraction/filtering and semantic docs, each eligible command receives one
+isolated labeling invocation at `proposed_annotations`. The branches merge at
+`merged_proposed_annotations`, then exact deduplication precedes the human queue.
+`reviewed_annotations` is removed from the active graph; historical artifacts remain
+readable without manufacturing `review_verdict` or `review_confidence` for current
+rows. The `annotations`
 stage gates publication only when its uncertainty queue is nonempty.
 
 The shared `annotations` stage reviews uncertain deduplicated records from both
-collection branches. All five `high` confidences means low uncertainty; any
-`medium` or `low` among category, risk, severity, class and independent reviewer
+collection branches. All four `high` label confidences means low uncertainty; any
+`medium` or `low` among category, risk, severity and class
 confidence requires human review. There is no active `documentation_annotations`
 or separate automatic release asset.
 Generic clients still reject undeclared cross-stage responses.
@@ -129,7 +138,7 @@ It returns:
 - `batch`: `ReviewBatch` from `codebench_pipeline/human_review.py`.
 - `counts`: `ReviewCounts`, with `pending`, `approve`, and `reject`.
 - `decisions`: the batch's `ReviewDecision` records.
-- `page`: the table page over reviewed annotations joined with display-only
+- `page`: the table page over uncertain deduplicated annotations joined with display-only
   `human_decision`, `human_reviewer`, and `human_notes` columns.
 - `publication`: the current authorized `PublicationReference`, or null.
 
@@ -139,14 +148,14 @@ an original ID column such as `model_id`, without a `candidate_id` table column.
 Snapshots and completion tokens carry `review_stage`; snapshots also bind
 `min_approvals` and `max_approvals`.
 The annotation batch snapshot includes only low/medium-confidence candidate IDs
-and their machine-eligible subset, using all five confidence dimensions.
+and their machine-eligible subset, using all four label confidence dimensions.
 Historical source batches remain evidence, not active ingestion authorization.
 All queued candidates require an explicit terminal
 decision, including ineligible rows.
 Human approval cannot override existing eligibility checks.
 
 `GET /review/{batch_id}/evidence/{candidate_id}?dataset_id=...` returns
-`{"fields":{...}}`: full candidate/label/review evidence, source context and
+`{"fields":{...}}`: full candidate/label/source-assessment evidence, source context and
 documentation resolved from that batch's immutable manifest. The UI renders
 these values as text. Source links permit only HTTP(S).
 

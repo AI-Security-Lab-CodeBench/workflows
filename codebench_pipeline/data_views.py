@@ -59,6 +59,7 @@ class DatasetDataService:
 
     def read_current(self, dataset_id: str, stage: str) -> StoredDatasetAsset:
         historical = {
+            "reviewed_annotations",
             "merged_reviewed_annotations",
             "documentation/reviewed_annotations",
             "automatic_dataset_release",

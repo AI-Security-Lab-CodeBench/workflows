@@ -21,8 +21,7 @@ REVIEW_FIELDS: Final = (
     *FIELDS,
     *"candidate_id csv_record context source_id source_url source_position transformations documentation_urls".split(),
     *CONFIDENCES,
-    "review_confidence",
-    *"label_decision review_verdict label_rationale review_rationale exclusion_reason".split(),
+    *"label_decision label_rationale exclusion_reason".split(),
     *"evidence_jsonl evidence_record".split(),
 )
 

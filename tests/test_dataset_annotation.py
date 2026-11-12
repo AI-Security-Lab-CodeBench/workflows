@@ -5,6 +5,7 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from threading import Barrier
 from unittest.mock import patch
 
 from pydantic import JsonValue, TypeAdapter, ValidationError
@@ -49,6 +50,46 @@ def config() -> ModelConfig:
 
 
 class DatasetAnnotationTests(unittest.TestCase):
+    def test_parallel_labels_preserve_input_order_and_single_record_packets(self) -> None:
+        rules = make_rules()
+        candidates = [make_candidate("one"), make_candidate("two")]
+        labels = {candidate.candidate_id: make_label(candidate, rules) for candidate in candidates}
+        simultaneous = Barrier(2, timeout=10)
+
+        def infer(
+            schema: type[LabelDecision], system: str, prompt: str, model: ModelConfig, out: Path
+        ) -> LabelDecision:
+            payload = TypeAdapter(dict[str, JsonValue]).validate_json(prompt.split("\n", 1)[1])
+            candidate = payload["candidate"]
+            assert isinstance(candidate, dict)
+            identity = candidate["candidate_id"]
+            assert isinstance(identity, str)
+            out.mkdir(parents=True)
+            (out / "shared.json").write_text('{"tools_enabled":false}', encoding="utf-8")
+            simultaneous.wait()
+            return schema.model_validate_json(labels[identity].model_dump_json(by_alias=True))
+
+        with tempfile.TemporaryDirectory() as temporary:
+            out = Path(temporary)
+            with patch("codebench_pipeline.dataset_annotation.infer_typed", side_effect=infer):
+                result = annotate(
+                    candidates, documentation(), rules, config(), out, cache=out / "cache", workers=2
+                )
+            self.assertEqual([label.candidate_id for label in result], ["one", "two"])
+            packets = json.loads((out / "label-packets.json").read_text())
+            self.assertEqual([packet["candidate_ids"] for packet in packets], [["one"], ["two"]])
+            with patch(
+                "codebench_pipeline.dataset_annotation.infer_typed",
+                side_effect=AssertionError("Validated labels must be reused"),
+            ):
+                reused = annotate(
+                    candidates, documentation(), rules, config(), out / "replay",
+                    cache=out / "cache", workers=2,
+                )
+            self.assertEqual(reused, result)
+            shared = list((out / "replay" / "label").glob("*/shared.json"))
+            self.assertEqual([path.read_text() for path in shared], ['{"tools_enabled":false}'] * 2)
+
     def test_each_label_and_review_persists_separate_inference_evidence(self) -> None:
         rules = make_rules()
         candidates = [make_candidate("one"), make_candidate("two")]
@@ -133,7 +174,11 @@ class DatasetAnnotationTests(unittest.TestCase):
                     "codebench_pipeline.inference.subprocess.run",
                     return_value=native_response(value),
                 ):
-                    expected_error = InferenceError if "candidate_id" in change else ValueError
+                    expected_error = (
+                        InferenceError
+                        if {"candidate_id", "category_id", "risk_id", "util"} & change.keys()
+                        else ValueError
+                    )
                     with self.assertRaises(expected_error):
                         annotate([candidate], documentation(), rules, config(), root)
                 captured = list(root.glob("label/*/stdout.jsonl"))
@@ -149,7 +194,7 @@ class DatasetAnnotationTests(unittest.TestCase):
         invalid["risk_id"] = "CAT-8.2"
         with tempfile.TemporaryDirectory() as temporary:
             with patch("codebench_pipeline.inference.subprocess.run", return_value=native_response(invalid)):
-                with self.assertRaises(ValueError):
+                with self.assertRaises(InferenceError):
                     annotate([candidate], documentation(), rules, config(), Path(temporary))
 
     def test_invalid_routing_and_duplicate_candidates_fail_before_inference(self) -> None:

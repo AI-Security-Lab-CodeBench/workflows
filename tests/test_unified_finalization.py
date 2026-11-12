@@ -2,11 +2,10 @@ import unittest
 
 from pandera.typing import DataFrame
 from pydantic import JsonValue
-from test_dataset_rules import make_candidate, make_label, make_review, make_rules
+from test_dataset_rules import make_candidate, make_label, make_rules
 
 from codebench_pipeline.dataframe_schemas import (
     ProposedAnnotationsTable,
-    ReviewedAnnotationsTable,
     validated_frame,
 )
 from codebench_pipeline.dataset_finalization import deduplicate_annotations, merge_proposals
@@ -15,19 +14,15 @@ from codebench_pipeline.dataset_finalization import deduplicate_annotations, mer
 def reviewed_row(identity: str, **changes: JsonValue) -> dict[str, JsonValue]:
     candidate = make_candidate(identity)
     label = make_label(candidate, make_rules())
-    review = make_review(candidate)
     return {
         **candidate.model_dump(mode="json"),
         **label.model_dump(mode="json", by_alias=True),
-        "review_verdict": review.verdict,
-        "review_rationale": review.rationale,
-        "review_confidence": review.confidence,
         **changes,
     }
 
 
-def annotations(*rows: dict[str, JsonValue]) -> DataFrame[ReviewedAnnotationsTable]:
-    return validated_frame(list(rows), ReviewedAnnotationsTable)
+def annotations(*rows: dict[str, JsonValue]) -> DataFrame[ProposedAnnotationsTable]:
+    return validated_frame(list(rows), ProposedAnnotationsTable)
 
 
 class UnifiedDeduplicationTests(unittest.TestCase):
@@ -77,7 +72,7 @@ class UnifiedDeduplicationTests(unittest.TestCase):
             {"class": "ask"},
             {"severity": "high"},
             {"decision": "needs_review"},
-            {"review_verdict": "reject"},
+            {"risk_confidence": "medium"},
             {"risk_id": "CAT-8.2"},
         )
         for difference in differences:

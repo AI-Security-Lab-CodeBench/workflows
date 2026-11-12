@@ -28,9 +28,14 @@ class Operation:
     candidate_id: str
     utility: str
     words: tuple[str, ...]
+    arguments: tuple[str, ...] = ()
 
     def matches(self, utility: str, subcommand: str) -> bool:
         parts = tuple(subcommand.split())
+        if len(parts) == 1 and parts[0].startswith("-"):
+            return self.utility == utility and any(
+                token.split("=", 1)[0] == parts[0] for token in self.arguments
+            )
         return bool(parts) and self.utility == utility and self.words[: len(parts)] == parts
 
 
@@ -41,27 +46,29 @@ def eligible_operations(commands: DataFrame[FilteredCommandsTable]) -> list[Oper
             continue
         utility = str(row["util"])
         identifier = str(row["candidate_id"])
-        try:
-            lexer = shlex.shlex(str(row["command"]), posix=True, punctuation_chars=";&|")
-            lexer.whitespace_split = True
-            lexer.commenters = ""
-            segments: list[list[str]] = [[]]
-            for token in lexer:
-                if token and all(char in ";&|" for char in token):
-                    segments.append([])
-                else:
-                    segments[-1].append(token)
-            matched = False
-            for segment in segments:
-                words = command_words(segment)
-                if words and words[0].rsplit("/", 1)[-1] == utility:
-                    operations.append(Operation(identifier, utility, tuple(words[1:])))
-                    matched = True
-            if not matched:
-                operations.append(Operation(identifier, utility, ()))
-        except ValueError:
-            operations.append(Operation(identifier, utility, ()))
+        operations.extend(command_operations(identifier, utility, str(row["command"])))
     return operations
+
+
+def command_operations(identifier: str, utility: str, command: str) -> list[Operation]:
+    operations: list[Operation] = []
+    try:
+        lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|")
+        lexer.whitespace_split = True
+        lexer.commenters = ""
+        segments: list[list[str]] = [[]]
+        for token in lexer:
+            if token and all(char in ";&|" for char in token):
+                segments.append([])
+            else:
+                segments[-1].append(token)
+        for segment in segments:
+            words = command_words(segment)
+            if words and words[0].rsplit("/", 1)[-1] == utility:
+                operations.append(Operation(identifier, utility, tuple(words[1:]), tuple(segment[1:])))
+    except ValueError:
+        return [Operation(identifier, utility, ())]
+    return operations or [Operation(identifier, utility, ())]
 
 
 def coverage(operations: list[Operation], snippets: list[SemanticSnippet]) -> list[dict[str, JsonValue]]:

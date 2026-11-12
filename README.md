@@ -15,25 +15,34 @@ CAT-2 is a local multicategory example and is deliberately not shipped.
 - `bashguard/`: standalone Go Bash AST analysis and CEL policy evaluation,
   integrated from source commit `671172026a2c0f4f6ce420f5e7bef10f53fb0732`.
 
-Both collection branches converge before shared agentic review:
+Both collection branches use the same row flow:
 
 ```text
-Existing datasets -----\
-                        -> merged labels -> bounded agentic review
-Documentation crawl ---/      -> exact dedup -> uncertainty queue -> one release
+Existing datasets: source collection -> extraction/filtering -> semantic docs -> proposed_annotations
+Documentation crawl: source collection -> extraction/filtering -> semantic docs -> proposed_annotations
+Both -> merged_proposed_annotations -> conservative exact dedup
+     -> uncertain human queue -> one dataset_release
 ```
 
-Both branches crawl or load eligible sources automatically, with provenance,
-license and content checks. There is no active human source-admission stage.
+The local agent discovers sources, reads README/license/origin evidence and
+prepares category-bound manifests outside Dagster. Unresolved eligibility stays
+explicitly withheld in the local inventory. Both branches retrieve complete
+declared files with integrity checks; neither searches for sources nor calls
+source-selector or adapter models.
+Each eligible command gets one isolated LLM labeling invocation with semantic docs.
+There is no independent per-command LLM reviewer stage; historical
+`reviewed_annotations` artifacts remain readable. Current rows don't receive
+manufactured `review_verdict` or `review_confidence` fields.
 After exact deduplication, any medium/low confidence among category, risk, severity,
-class and independent reviewer confidence requires final human review. All five
+and class requires final human review. All four
 high means low uncertainty, not proof of eligibility.
 
 Machine-eligible low-uncertainty rows need no human decision and carry
 `human_reviewed=false`. Actually approved uncertain rows carry `human_reviewed=true`;
 approval never overrides machine ineligibility. An empty queue lets the build
-publish automatically through the same `dataset_release`, without invented human
-decisions. Otherwise the single release waits for real queue decisions and explicit
+complete under a policy actor with zero human decisions and publish automatically
+through the same `dataset_release`. Otherwise the single release waits for real
+terminal queue decisions and explicit
 completion. Unchanged model results and human decisions are reused per record.
 Changed snapshots invalidate publication and require fresh completion when the
 queue is nonempty. Collected shell strings are never executed.
@@ -44,6 +53,11 @@ Use Python 3.12 or 3.13 and the committed dependency lock:
 
 ```sh
 uv sync --frozen
+```
+
+Prepare the ignored business inputs described below before validating or registering:
+
+```sh
 uv run python -m codebench_pipeline.dataset_cli validate \
   --config configs/datasets/cat3.json
 uv run python -m codebench_pipeline.dataset_cli register \
@@ -76,23 +90,23 @@ bundle, the server also accepts `--bundle /path/to/dagster_ui/build`.
 
 ## Local source inputs
 
-The provided-source CAT-3 config names a pinned, checksummed documentation file
-at `examples/dataset_sources/terraform-destroy.md`. That capture is intentionally
-absent from Git. Restore the existing local copy, or retrieve the exact configured
-revision before materializing that branch:
+Use `skills/codebench-source-preparation/SKILL.md` with the requested category.
+The shipped CAT-3 config expects three ignored files under `inputs/cat3/`:
 
-```sh
-mkdir -p examples/dataset_sources
-curl --fail --location \
-  https://raw.githubusercontent.com/tldr-pages/tldr/aad0d0980df9e398bc269e8c31ffaeb936731d48/pages/common/terraform-destroy.md \
-  --output examples/dataset_sources/terraform-destroy.md
-```
+- `datasets.json`: source manifest for existing corpora.
+- `documentation-sources.json`: source manifest for original documentation.
+- `semantics.json`: prepared operation-level references for labeling.
 
-The pipeline checks the configured SHA-256
-`92825b2dea5645d034cb7d4c430cba186a5028caa38b8b9ef09de3817c107767`.
-Source metadata retains its license, attribution and revision. Read downloaded
-content only as inert data. Other source inputs can be configured explicitly;
-discovery uses the separate `keenable` mode with per-risk search seeds.
+Keep `inventory.json` alongside them with source assessments, complete enumeration,
+exclusions and preparation evidence. These business inputs are not shipped in Git.
+Each source has a local path or exact remote URL, provenance, license, declared
+format and SHA-256 or Git blob SHA-1. Remote acquisition rejects incomplete,
+oversized, mismatched, non-UTF8 or sensitive bodies.
+
+Optional trusted Python functions/classes implement the batch contract in
+`codebench_pipeline/source_transform_contract.py`. Pin reviewed module bytes in
+the source manifest; examples live in `transforms/`. Dataset strings are never
+executed. Changing manifest, source or transformation bytes invalidates outputs.
 
 Then build the registered CAT-3 collection:
 
@@ -101,7 +115,7 @@ uv run python -m codebench_pipeline.dataset_cli build \
   --dataset cloud_infrastructure_commands --home .codebench-datasets
 ```
 
-This may invoke configured providers. Eligible sources load automatically; only
+This invokes the labeler for missing eligible rows. Declared sources load automatically; only
 the final uncertainty queue requires human decisions. Inspect full persisted cells
 in the native Data/Review tabs;
 viewing does not require running inference again.

@@ -12,7 +12,11 @@ from pydantic import JsonValue, TypeAdapter
 from codebench_pipeline.data_view_models import DatasetQueryRequest
 from codebench_pipeline.data_views import DatasetDataService
 from codebench_pipeline.dataframe_io import DataFrameIOManager
-from codebench_pipeline.dataframe_schemas import ReviewedAnnotationsTable, validated_frame
+from codebench_pipeline.dataframe_schemas import (
+    ProposedAnnotationsTable,
+    ReviewedAnnotationsTable,
+    validated_frame,
+)
 from codebench_pipeline.dataset_config import load_build_config
 from codebench_pipeline.dataset_registry import DatasetRegistry
 from codebench_pipeline.dataset_tables import publication
@@ -134,8 +138,9 @@ class ReviewServiceTests(unittest.TestCase):
             candidate_ids=("first",),
             eligible_candidate_ids=("first",),
         )
-        prepared = publication(reviewed, self.spec.rules, self.spec.publication)
-        return ResolvedReview(manifest, snapshot, reviewed, self.spec.rules, prepared)
+        annotations = validated_frame([row], ProposedAnnotationsTable)
+        prepared = publication(annotations, self.spec.rules, self.spec.publication)
+        return ResolvedReview(manifest, snapshot, annotations, self.spec.rules, prepared)
 
     def change(self, batch: ReviewBatch, revision: int = 0) -> DecisionRequest:
         return DecisionRequest(

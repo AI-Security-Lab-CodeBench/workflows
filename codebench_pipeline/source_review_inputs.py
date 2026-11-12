@@ -87,7 +87,7 @@ class SourceReviewSource:
             evidence={"scope": source_scope(spec.rules), "catalog_digest": reference.digest},
             record_policy={
                 "scope": source_scope(spec.rules),
-                "model": spec.catalog.model.model_dump_json(),
+                "model": spec.catalog.model.model_dump_json() if spec.catalog.model is not None else None,
                 "implementation": {
                     name: digest(Path(__file__).parent / name)
                     for name in (
