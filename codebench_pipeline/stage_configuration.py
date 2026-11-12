@@ -10,7 +10,10 @@ from codebench_pipeline.typed_config import TypedConfig
 def stage_configs(spec: DatasetBuildSpec) -> dict[str, Config]:
     configurations: dict[str, Config] = {
         "category_rules": CategoryRulesConfig.model_validate_json(spec.rules.model_dump_json()),
-        "merged_proposed_annotations": TypedConfig(),
+        "merged_command_candidates": TypedConfig(),
+        "filtered_commands": spec.filtering,
+        "labeling_documentation": spec.documentation,
+        "proposed_annotations": spec.annotation,
         "deduplicated_annotations": TypedConfig(),
         "human_review_queue": spec.publication,
         "human_review_decisions": HumanReviewConfig(),
@@ -26,9 +29,6 @@ def stage_configs(spec: DatasetBuildSpec) -> dict[str, Config]:
                     "source_documents": snapshots_for_branch(spec, branch),
                     "document_adapters": spec.adapters,
                     "command_candidates": spec.extraction,
-                    "filtered_commands": spec.filtering,
-                    "labeling_documentation": spec.documentation,
-                    "proposed_annotations": spec.annotation,
                 }.items()
             }
         )

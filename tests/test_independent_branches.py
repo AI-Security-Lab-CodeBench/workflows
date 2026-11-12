@@ -1,6 +1,8 @@
+import json
 import tempfile
 import unittest
 from contextlib import ExitStack
+from hashlib import sha256
 from pathlib import Path
 from unittest.mock import patch
 
@@ -12,6 +14,12 @@ from codebench_pipeline.data_view_models import DatasetQueryRequest, TableRespon
 from codebench_pipeline.data_views import DatasetDataService
 from codebench_pipeline.dataset_catalog import build_catalog
 from codebench_pipeline.dataset_config import load_build_config
+from codebench_pipeline.dataset_finalization import (
+    FINALIZATION_BINDING,
+    authorize_finalization_output,
+    available_candidates,
+    merge_candidates,
+)
 from codebench_pipeline.dataset_registry import DatasetRegistry
 from codebench_pipeline.dataset_run import run_registered
 from codebench_pipeline.definitions import build_definitions
@@ -30,10 +38,9 @@ class IndependentBranchDatasetTests(unittest.TestCase):
         self.addCleanup(self.stack.close)
         self.home = Path(self.stack.enter_context(tempfile.TemporaryDirectory()))
         self.spec = load_build_config(write_fixture(self.home), self.home)
-        for module in ("dataset_annotation",):
-            self.stack.enter_context(
-                patch(f"codebench_pipeline.{module}.infer_typed", side_effect=provider_response)
-            )
+        self.labeler = self.stack.enter_context(
+            patch("codebench_pipeline.dataset_annotation.infer_typed", side_effect=provider_response)
+        )
 
     def test_runtime_corpus_metadata_cannot_bypass_admission_as_documentation(self) -> None:
         catalog = self.spec.documentation_catalog
@@ -57,10 +64,11 @@ class IndependentBranchDatasetTests(unittest.TestCase):
             self.assertTrue(result.success)
             data = DatasetDataService(self.home, instance)
             reviewed = data.query(
-                "merged_proposed_annotations", DatasetQueryRequest(dataset_id=self.spec.dataset_id)
+                "documentation/command_candidates", DatasetQueryRequest(dataset_id=self.spec.dataset_id)
             )
             assert isinstance(reviewed, TableResponse)
             self.assertGreater(reviewed.page.total_rows, 0)
+            self.assertEqual(self.labeler.call_count, 0)
         with HumanReviewStore(self.home).reader() as transaction:
             with self.assertRaises(HumanReviewError) as missing:
                 transaction.get_current_batch(self.spec.dataset_id, "sources")
@@ -78,18 +86,96 @@ class IndependentBranchDatasetTests(unittest.TestCase):
         self.assertEqual(outcome.branches["dataset"].status, "awaiting_human_review")
         self.assertEqual(outcome.branches["documentation"].status, "awaiting_human_review")
         self.assertEqual(outcome.branches["documentation"].review_stage, "annotations")
-        self.assertIn("documentation/proposed_annotations", outcome.materialized_stages)
+        self.assertIn("documentation/command_candidates", outcome.materialized_stages)
+        self.assertIn("merged_command_candidates", outcome.materialized_stages)
+        self.assertIn("proposed_annotations", outcome.materialized_stages)
+        self.assertNotIn("documentation/proposed_annotations", outcome.materialized_stages)
         self.assertIn("deduplicated_annotations", outcome.materialized_stages)
         self.assertIn("human_review_queue", outcome.materialized_stages)
         self.assertIn("source_documents", outcome.materialized_stages)
         self.assertNotIn("human_source_decisions", outcome.materialized_stages)
         self.assertEqual(outcome.branches["dataset"].blocked_stages, ())
         self.assertEqual(outcome.branches["documentation"].blocked_stages, ())
+        with dataset_instance(self.home) as instance:
+            data = DatasetDataService(self.home, instance)
+            filtered = data.read_current(spec.dataset_id, "filtered_commands").value
+            assert isinstance(filtered, pd.DataFrame)
+            eligible = filtered.loc[filtered["filter_decision"] == "eligible"]
+            inferred = [
+                json.loads(call.args[2][call.args[2].index("{"):])["candidate"]
+                for call in self.labeler.call_args_list
+            ]
+            self.assertCountEqual(
+                [row["candidate_id"] for row in inferred], eligible["candidate_id"].tolist()
+            )
+            source = spec.catalog.documents[0].source_id
+            self.assertEqual(
+                {row["source_id"] for row in inferred},
+                {f"dataset:{source}", f"documentation:{source}"},
+            )
         with HumanReviewStore(self.home).reader() as transaction:
             with self.assertRaises(HumanReviewError) as missing:
                 transaction.get_current_batch(spec.dataset_id, "sources")
             self.assertEqual(missing.exception.code, "not_found")
             self.assertEqual(transaction.get_current_batch(spec.dataset_id, "annotations").state, "open")
+
+    def test_configured_empty_branch_retains_its_digest_instead_of_becoming_unconfigured(self) -> None:
+        catalog = self.spec.documentation_catalog
+        assert catalog is not None
+        path = self.home / "empty-candidates.md"
+        payload = b"# No extracted commands\n"
+        path.write_bytes(payload)
+        source = catalog.documents[0].model_copy(
+            update={"local_path": str(path), "sha256": sha256(payload).hexdigest()}
+        )
+        spec = self.spec.model_copy(
+            update={
+                "catalog": catalog.model_copy(update={"documents": [source]}),
+                "snapshots": self.spec.documentation_snapshots.model_copy(update={"documents": [source]}),
+            }
+        )
+        DatasetRegistry(self.home).register(spec)
+        run_registered(spec.dataset_id, self.home)
+        with dataset_instance(self.home) as instance:
+            data = DatasetDataService(self.home, instance)
+            candidates = data.read_current(spec.dataset_id, "command_candidates")
+            merged = data.read_current(spec.dataset_id, "merged_command_candidates").value
+            assert isinstance(candidates.value, pd.DataFrame)
+            assert isinstance(merged, pd.DataFrame)
+            self.assertEqual(len(candidates.value), 0)
+            self.assertEqual(
+                merged.attrs[FINALIZATION_BINDING]["dataset"],
+                {"state": "configured", "digest": candidates.reference.digest},
+            )
+            self.assertEqual({identity.split(":")[0] for identity in merged["candidate_id"]}, {"documentation"})
+
+    def test_configured_waiting_branch_cannot_authorize_shared_processing(self) -> None:
+        spec = self.spec.model_copy(
+            update={
+                "catalog": self.spec.documentation_catalog,
+                "snapshots": self.spec.documentation_snapshots,
+            }
+        )
+        DatasetRegistry(self.home).register(spec)
+        with dataset_instance(self.home) as instance:
+            instance.add_dynamic_partitions("dataset_builds", [spec.dataset_id])
+            result = (
+                build_definitions(self.home)
+                .resolve_job_def("build_documentation")
+                .execute_in_process(instance=instance, partition_key=spec.dataset_id)
+            )
+            self.assertTrue(result.success)
+            frames, binding = available_candidates(
+                self.home, DatasetDataService(self.home, instance), spec.dataset_id
+            )
+            self.assertEqual(binding["dataset"], {"state": "waiting"})
+            self.assertEqual(frames["dataset"].attrs["branch_state"], "waiting")
+            merged = merge_candidates(frames["dataset"], frames["documentation"])
+            merged.attrs[FINALIZATION_BINDING] = binding
+            with self.assertRaises(HumanReviewError) as waiting:
+                authorize_finalization_output(self.home, instance, spec.dataset_id, merged, complete=True)
+            self.assertEqual(waiting.exception.code, "pending")
+            self.assertEqual(self.labeler.call_count, 0)
 
     def test_documentation_only_build_reports_unconfigured_dataset_and_reuses_outputs(self) -> None:
         DatasetRegistry(self.home).register(self.spec)
@@ -116,7 +202,10 @@ class IndependentBranchDatasetTests(unittest.TestCase):
             set(outcome.materialized_stages),
             {
                 "category_rules",
-                "merged_proposed_annotations",
+                "merged_command_candidates",
+                "filtered_commands",
+                "labeling_documentation",
+                "proposed_annotations",
                 "deduplicated_annotations",
                 "human_review_queue",
                 "human_review_decisions",
@@ -125,7 +214,7 @@ class IndependentBranchDatasetTests(unittest.TestCase):
         )
         with dataset_instance(self.home) as instance:
             data = DatasetDataService(self.home, instance)
-            merged = data.read_current(spec.dataset_id, "merged_proposed_annotations")
+            merged = data.read_current(spec.dataset_id, "merged_command_candidates")
             assert isinstance(merged.value, pd.DataFrame)
             self.assertEqual(len(merged.value), 0)
             self.assertEqual(
@@ -173,7 +262,16 @@ class IndependentBranchDatasetTests(unittest.TestCase):
             }
         )
         DatasetRegistry(self.home).register(changed)
+        self.labeler.reset_mock()
         run_registered(changed.dataset_id, self.home)
+        self.assertEqual(self.labeler.call_count, 2)
+        self.assertEqual(
+            {
+                json.loads(call.args[2][call.args[2].index("{"):])["candidate"]["source_id"]
+                for call in self.labeler.call_args_list
+            },
+            {"documentation:additional-fixture-source"},
+        )
         with dataset_instance(self.home) as instance:
             service = ReviewService(
                 self.home,
@@ -213,14 +311,17 @@ class IndependentBranchDatasetTests(unittest.TestCase):
         self.assertEqual(
             set(outcome.materialized_stages),
             {
-                "merged_proposed_annotations",
+                "merged_command_candidates",
+                "filtered_commands",
+                "labeling_documentation",
+                "proposed_annotations",
                 "deduplicated_annotations",
                 "human_review_queue",
             },
         )
         with dataset_instance(self.home) as instance:
             merged = DatasetDataService(self.home, instance).query(
-                "merged_proposed_annotations",
+                "merged_command_candidates",
                 DatasetQueryRequest(dataset_id=spec.dataset_id),
             )
             assert isinstance(merged, TableResponse)
@@ -251,7 +352,7 @@ class IndependentBranchDatasetTests(unittest.TestCase):
                 )
             )
             self.assertTrue(evidence.fields["duplicate_evidence"])
-            before = data.query("documentation/proposed_annotations", query)
+            before = data.query("documentation/command_candidates", query)
             assert isinstance(before, TableResponse)
             self.assertIsNone(before.publication_state)
             DatasetRegistry(self.home).register(
@@ -259,7 +360,7 @@ class IndependentBranchDatasetTests(unittest.TestCase):
                     update={"catalog": spec.catalog.model_copy(update={"collection_revision": "changed-dataset"})}
                 )
             )
-            after = data.query("documentation/proposed_annotations", query)
+            after = data.query("documentation/command_candidates", query)
             assert isinstance(after, TableResponse)
             self.assertIsNone(after.publication_state)
             self.assertEqual(after.snapshot_id, before.snapshot_id)
@@ -275,6 +376,6 @@ class IndependentBranchDatasetTests(unittest.TestCase):
                 }
             )
             DatasetRegistry(self.home).register(changed)
-            stale = data.query("documentation/proposed_annotations", query)
+            stale = data.query("documentation/command_candidates", query)
             assert isinstance(stale, TableResponse)
             self.assertEqual(stale.publication_state, "stale")

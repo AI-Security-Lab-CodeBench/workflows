@@ -93,6 +93,22 @@ class DatasetViewerTests(unittest.TestCase):
         self.assertEqual(result["kind"], "rules")
         self.assertEqual(result["data"], self.spec.rules.model_dump(mode="json"))
 
+    def test_retired_processing_tables_remain_readable_without_materialization(self) -> None:
+        with dataset_instance(self.home) as instance:
+            manager = DataFrameIOManager(storage=self.spec.storage)
+            with build_output_context(
+                asset_key=AssetKey(["datasets", "merged_proposed_annotations"]),
+                partition_key=self.spec.dataset_id,
+                asset_partitions_def=DATASET_PARTITIONS,
+                instance=instance,
+            ) as context:
+                manager.handle_output(context, self.frame)
+        historical = preview_asset(self.home, self.spec.dataset_id, "merged_proposed_annotations", 1)
+        self.assertEqual((historical["row_count"], historical["shown_rows"]), (2, 1))
+        self.assertEqual(historical["data"][0]["context"], self.long_context)
+        with dataset_instance(self.home) as instance:
+            self.assertEqual(instance.get_runs(), [])
+
     def test_missing_home_and_invalid_preview_parameters_fail_without_starting_work(self) -> None:
         missing = self.home / "not-built"
         with self.assertRaises(FileNotFoundError):

@@ -78,10 +78,10 @@ not a human source-admission stage. An LLM assesses each source dataset from act
 README/card and license bodies and origin evidence, retains receipts and holds
 unresolved eligibility. Both collection branches automatically enumerate and load
 complete eligible configured corpora, not bounded inspected-page snapshots.
-Each eligible command gets one isolated labeling invocation after extraction,
-filtering and semantic docs. Branch `proposed_annotations` converge at
-`merged_proposed_annotations`, then conservative exact deduplication precedes the
-human queue. `reviewed_annotations` is removed from the active graph; historical
+Branch extraction outputs converge at `merged_command_candidates` before shared
+filtering and semantic docs. Each eligible command then gets one isolated
+labeling invocation in `proposed_annotations`, followed by conservative exact
+deduplication before the human queue. `reviewed_annotations` is removed from the active graph; historical
 artifacts remain readable. Don't manufacture `review_verdict` or `review_confidence`
 for current rows.
 `human_source_decisions` is removed from the active graph. Generic stage support

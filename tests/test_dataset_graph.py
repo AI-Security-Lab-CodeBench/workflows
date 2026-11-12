@@ -70,7 +70,21 @@ class DatasetGraphTests(unittest.TestCase):
             )
             self.assertEqual(
                 assets.get(AssetKey(["datasets", "deduplicated_annotations"])).parent_keys,
-                {AssetKey(["datasets", "merged_proposed_annotations"])},
+                {AssetKey(["datasets", "proposed_annotations"])},
+            )
+            self.assertEqual(
+                assets.get(AssetKey(["datasets", "merged_command_candidates"])).parent_keys,
+                {
+                    AssetKey(["datasets", "command_candidates"]),
+                    AssetKey(["datasets", "documentation", "command_candidates"]),
+                },
+            )
+            self.assertEqual(
+                assets.get(AssetKey(["datasets", "filtered_commands"])).parent_keys,
+                {
+                    AssetKey(["datasets", "merged_command_candidates"]),
+                    AssetKey(["datasets", "category_rules"]),
+                },
             )
             self.assertEqual(
                 assets.get(AssetKey(["datasets", "source_documents"])).parent_keys,
@@ -86,7 +100,7 @@ class DatasetGraphTests(unittest.TestCase):
             )
             self.assertIn(
                 AssetKey(["datasets", "category_rules"]),
-                assets.get(AssetKey(["datasets", "documentation", "proposed_annotations"])).parent_keys,
+                assets.get(AssetKey(["datasets", "proposed_annotations"])).parent_keys,
             )
             self.assertIn("datasets__documentation__source_catalog", {node.name for node in job.nodes})
             self.assertNotIn("datasets__documentation__dataset_release", {node.name for node in job.nodes})
@@ -129,7 +143,10 @@ class DatasetGraphTests(unittest.TestCase):
                 plan.selected,
                 (
                     "category_rules",
-                    "merged_proposed_annotations",
+                    "merged_command_candidates",
+                    "filtered_commands",
+                    "labeling_documentation",
+                    "proposed_annotations",
                     "deduplicated_annotations",
                     "human_review_queue",
                 ),
@@ -157,9 +174,8 @@ class DatasetGraphTests(unittest.TestCase):
                 configurations["documentation/source_catalog"].model_dump()["collection_revision"],
                 "docs-only",
             )
-            self.assertIs(
-                configurations["proposed_annotations"], configurations["documentation/proposed_annotations"]
-            )
+            self.assertIs(configurations["proposed_annotations"], spec.annotation)
+            self.assertNotIn("documentation/proposed_annotations", configurations)
             run_config = dataset_run_config(spec, home).to_config_dict()
             self.assertIn("datasets__documentation__source_catalog", run_config["ops"])
             self.assertNotIn("datasets__documentation/source_catalog", run_config["ops"])

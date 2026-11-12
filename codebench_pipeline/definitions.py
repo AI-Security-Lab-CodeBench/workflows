@@ -19,8 +19,8 @@ from pydantic import JsonValue, TypeAdapter
 from codebench_pipeline.dataframe_io import DataFrameIOManager
 from codebench_pipeline.dataset_asset_types import DATASET_PARTITIONS
 from codebench_pipeline.dataset_assets_annotations import annotation_assets
-from codebench_pipeline.dataset_assets_sources import source_assets
-from codebench_pipeline.dataset_branches import Branch, stage_branch
+from codebench_pipeline.dataset_assets_sources import processing_assets, source_assets
+from codebench_pipeline.dataset_branches import FINALIZATION_STAGES, Branch, stage_branch
 from codebench_pipeline.dataset_config import DatasetBuildSpec, catalog_for_branch
 from codebench_pipeline.dataset_engine import code_versions, stage_signature
 from codebench_pipeline.dataset_finalization import finalization_assets
@@ -45,8 +45,7 @@ def dataset_run_config(spec: DatasetBuildSpec, home: Path, branch: Branch | None
             and (
                 branch is None
                 or name == "category_rules"
-                or stage_branch(name) == branch
-                or name == "merged_proposed_annotations"
+                or (name not in FINALIZATION_STAGES and stage_branch(name) == branch)
             )
         },
         resources={"dataset_io_manager": DataFrameIOManager(storage=spec.storage, review_home=str(home))},
@@ -78,10 +77,10 @@ def build_definitions(home: Path) -> Definitions:
         definition.map_asset_specs(describe_stage)
         for definition in [
             *source_assets(),
+            *processing_assets(),
             *annotation_assets(),
             *human_assets(),
             *source_assets("documentation"),
-            *annotation_assets("documentation"),
             *finalization_assets(),
         ]
     ]
@@ -120,14 +119,13 @@ def build_definitions(home: Path) -> Definitions:
     )
     documentation_job = UnresolvedAssetJobDefinition(
         name="build_documentation",
-        description="Automatically prepare eligible documentation through per-command labeling.",
+        description="Acquire and extract eligible documentation independently; registered builds process merged candidates.",
         selection=AssetSelection.assets(
             *(
                 AssetKey(["datasets", *name.split("/")])
                 for name in PREPARATION_STAGES
                 if name == "category_rules"
-                or stage_branch(name) == "documentation"
-                or name == "merged_proposed_annotations"
+                or (name not in FINALIZATION_STAGES and stage_branch(name) == "documentation")
             )
         ),
         partitions_def=DATASET_PARTITIONS,

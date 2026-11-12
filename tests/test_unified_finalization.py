@@ -5,10 +5,11 @@ from pydantic import JsonValue
 from test_dataset_rules import make_candidate, make_label, make_rules
 
 from codebench_pipeline.dataframe_schemas import (
+    CommandCandidatesTable,
     ProposedAnnotationsTable,
     validated_frame,
 )
-from codebench_pipeline.dataset_finalization import deduplicate_annotations, merge_proposals
+from codebench_pipeline.dataset_finalization import deduplicate_annotations, merge_candidates
 
 
 def reviewed_row(identity: str, **changes: JsonValue) -> dict[str, JsonValue]:
@@ -27,13 +28,17 @@ def annotations(*rows: dict[str, JsonValue]) -> DataFrame[ProposedAnnotationsTab
 
 class UnifiedDeduplicationTests(unittest.TestCase):
     def test_branch_collisions_retain_original_identity_and_duplicate_mapping(self) -> None:
-        merged = merge_proposals(
-            validated_frame([reviewed_row("one")], ProposedAnnotationsTable),
+        merged = merge_candidates(
+            validated_frame([make_candidate("one").model_dump(mode="json")], CommandCandidatesTable),
             validated_frame(
-                [reviewed_row("one", command="probe \t inspect  example")], ProposedAnnotationsTable
+                [make_candidate("one").model_dump(mode="json")], CommandCandidatesTable
             ),
         )
         self.assertEqual(merged["candidate_id"].tolist(), ["dataset:one", "documentation:one"])
+        self.assertEqual(
+            merged["source_id"].tolist(),
+            ["dataset:maintainer-reference", "documentation:maintainer-reference"],
+        )
         reviewed = annotations(
             reviewed_row("dataset:one"),
             reviewed_row("documentation:one", command="probe \t inspect  example"),

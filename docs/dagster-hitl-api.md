@@ -63,7 +63,7 @@ server configuration.
 ```
 
 Documentation tables use `POST /data/documentation/{stage}` and return a
-qualified `stage` value such as `documentation/proposed_annotations`. Collection
+qualified `stage` value such as `documentation/command_candidates`. Collection
 branches retain separate current references; finalization and publication are shared.
 
 The query contract is implemented in `codebench_pipeline/table_query.py`.
@@ -116,9 +116,10 @@ prepares manifests from actual README/license/origin evidence outside Dagster.
 Both branches retrieve complete declared files with pinned integrity checks;
 neither searches for sources nor invokes source-selector or adapter models.
 
-After extraction/filtering and semantic docs, each eligible command receives one
-isolated labeling invocation at `proposed_annotations`. The branches merge at
-`merged_proposed_annotations`, then exact deduplication precedes the human queue.
+The branches merge extracted rows at `merged_command_candidates`, before shared
+filtering and semantic documentation. Each eligible command then receives one
+isolated labeling invocation at shared `proposed_annotations`; exact deduplication
+precedes the human queue.
 `reviewed_annotations` is removed from the active graph; historical artifacts remain
 readable without manufacturing `review_verdict` or `review_confidence` for current
 rows. The `annotations`

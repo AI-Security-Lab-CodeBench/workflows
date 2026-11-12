@@ -128,7 +128,7 @@ class ReviewSnapshots:
             if branch in plan.unconfigured:
                 binding[branch] = {"state": "unconfigured"}
                 continue
-            stage = stage_name("proposed_annotations", branch)
+            stage = stage_name("command_candidates", branch)
             stored = self.data.read_current(dataset_id, stage)
             if stored.publication_state == "stale" or stored.reference != plan.references[stage]:
                 raise DatasetViewError("not_ready", "Collection inputs changed during snapshot capture")

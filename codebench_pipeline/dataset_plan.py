@@ -8,9 +8,10 @@ from dagster import AssetKey, AssetRecordsFilter, Config, DagsterInstance, build
 
 from codebench_pipeline.category_rules import CategoryRules
 from codebench_pipeline.dataframe_io import AssetReference, DataFrameIOManager
-from codebench_pipeline.dataframe_schemas import ProposedAnnotationsTable, validated_frame
+from codebench_pipeline.dataframe_schemas import CommandCandidatesTable, validated_frame
 from codebench_pipeline.dataset_asset_types import DATASET_PARTITIONS
 from codebench_pipeline.dataset_branches import FINALIZATION_STAGES, Branch, stage_branch, stage_name
+from codebench_pipeline.dataset_catalog import source_scope
 from codebench_pipeline.dataset_config import DatasetBuildSpec, catalog_for_branch
 from codebench_pipeline.dataset_engine import stage_signature
 from codebench_pipeline.storage import fingerprint
@@ -21,16 +22,6 @@ INPUT_STAGES: dict[str, dict[str, str]] = {
     "source_documents": {"source_catalog": "source_catalog"},
     "document_adapters": {"source_documents": "source_documents"},
     "command_candidates": {"source_documents": "source_documents", "adapters": "document_adapters"},
-    "filtered_commands": {
-        "command_candidates": "command_candidates",
-        "category_rules": "category_rules",
-    },
-    "labeling_documentation": {"commands": "filtered_commands", "category_rules": "category_rules"},
-    "proposed_annotations": {
-        "commands": "filtered_commands",
-        "documentation": "labeling_documentation",
-        "category_rules": "category_rules",
-    },
 }
 
 INPUT_STAGES.update(
@@ -46,11 +37,21 @@ INPUT_STAGES.update(
 
 INPUT_STAGES.update(
     {
-        "merged_proposed_annotations": {
-            "dataset_annotations": "proposed_annotations",
-            "documentation_annotations": "documentation/proposed_annotations",
+        "merged_command_candidates": {
+            "dataset_candidates": "command_candidates",
+            "documentation_candidates": "documentation/command_candidates",
         },
-        "deduplicated_annotations": {"annotations": "merged_proposed_annotations"},
+        "filtered_commands": {
+            "command_candidates": "merged_command_candidates",
+            "category_rules": "category_rules",
+        },
+        "labeling_documentation": {"commands": "filtered_commands", "category_rules": "category_rules"},
+        "proposed_annotations": {
+            "commands": "filtered_commands",
+            "documentation": "labeling_documentation",
+            "category_rules": "category_rules",
+        },
+        "deduplicated_annotations": {"annotations": "proposed_annotations"},
         "human_review_queue": {
             "annotations": "deduplicated_annotations",
             "category_rules": "category_rules",
@@ -67,17 +68,16 @@ RELEASE_STAGES = ("human_review_decisions", "dataset_release")
 PREPARATION_STAGES = tuple(stage for stage in INPUT_STAGES if stage not in RELEASE_STAGES)
 
 
-def unavailable_annotations(
+def unavailable_candidates(
     spec: DatasetBuildSpec, branch: Branch, state: Literal["waiting", "unconfigured"]
 ) -> pd.DataFrame:
-    empty = validated_frame([], ProposedAnnotationsTable)
+    empty = validated_frame([], CommandCandidatesTable)
     empty.attrs["branch_state"] = state
     empty.attrs["branch_configuration"] = fingerprint(
         {
             "catalog": catalog_for_branch(spec, branch).model_dump_json(),
-            "annotation": spec.annotation.model_dump_json(),
-            "documentation": spec.documentation.model_dump_json(),
-            "rules": spec.rules.model_dump_json(),
+            "extraction": spec.extraction.model_dump_json(),
+            "rules": source_scope(spec.rules),
         }
     )
     return empty
@@ -120,7 +120,7 @@ def plan_dataset(
         )
     )
     for branch in unconfigured:
-        values[stage_name("proposed_annotations", branch)] = unavailable_annotations(
+        values[stage_name("command_candidates", branch)] = unavailable_candidates(
             spec, branch, "unconfigured"
         )
     for stage, dependencies in INPUT_STAGES.items():
@@ -128,15 +128,15 @@ def plan_dataset(
             continue
         if stage not in ("category_rules", *FINALIZATION_STAGES) and stage_branch(stage) in unconfigured:
             continue
-        if stage == "deduplicated_annotations" and any(name not in FINALIZATION_STAGES for name in blocked):
+        if stage == "filtered_commands" and any(name not in FINALIZATION_STAGES for name in blocked):
             blocked.append(stage)
             continue
-        if stage != "merged_proposed_annotations" and any(
+        if stage != "merged_command_candidates" and any(
             parent in blocked for parent in dependencies.values()
         ):
             blocked.append(stage)
-            if stage.rsplit("/", 1)[-1] == "proposed_annotations":
-                values[stage] = unavailable_annotations(spec, stage_branch(stage), "waiting")
+            if stage.rsplit("/", 1)[-1] == "command_candidates":
+                values[stage] = unavailable_candidates(spec, stage_branch(stage), "waiting")
             continue
         key = AssetKey(["datasets", *stage.split("/")])
         records = instance.fetch_materializations(

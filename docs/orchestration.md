@@ -6,8 +6,9 @@ finalization groups.
 Dataset/corpus and original-documentation branches share category rules and
 processing code, with separate provenance and eligibility bindings. `build_dataset`
 supports selective planning across both; neither waits for human source admission.
-`build_documentation` runs only documentation collection. Both branches converge
-after labeling into one merged dataset,
+`build_documentation` runs only documentation collection through `command_candidates`.
+Both branches converge at `merged_command_candidates`, followed by shared
+filtering, semantic documentation, single per-command labeling,
 conservative exact deduplication, uncertainty-only human review and one `release_dataset` job.
 Configured branches must be current and authorized before final publication.
 Model training is not part of this namespace or job.
@@ -78,7 +79,7 @@ In the browser:
    decision to publish a replacement dataset. Prior outputs remain inspectable
    as stale history, but cannot feed downstream builds.
 6. Inspect `human_review_queue` for unified human decisions,
-   `merged_proposed_annotations` for unified model labels,
+   `merged_command_candidates` for combined extraction, `proposed_annotations` for unified model labels,
    and `deduplicated_annotations` for exact duplicate elimination,
    `filtered_commands` for quarantined extraction candidates, and `source_catalog`
    for source exclusions. These are different outputs, not missing release rows.
@@ -145,7 +146,7 @@ The [stage guide](pipeline-stages.md) adds detailed gates and limitations;
 maintaining these descriptions is mandatory in [the working rules](../AGENTS.md).
 
 The following are dataset/common stage names. Documentation instantiates the
-collection stages through `proposed_annotations` under `documentation/`, except
+collection stages through `command_candidates` under `documentation/`, except
 shared `category_rules`. `human_source_decisions` is historical, not an active stage.
 Finalization is shared, not duplicated.
 See [branch contracts and migration](independent-branches.md).
@@ -155,10 +156,10 @@ See [branch contracts and migration](independent-branches.md).
 3. `source_documents`: automatically acquired eligible sources' inert text and attribution.
 4. `document_adapters`: per-source declarative parsing mappings.
 5. `command_candidates`: extracted records, context and positions.
-6. `filtered_commands`: all candidates with eligibility or quarantine reasons.
-7. `labeling_documentation`: prepared manifest semantics for eligible operations.
-8. `proposed_annotations`: independent labels, confidence and rationale.
-9. `merged_proposed_annotations`: current branch labels and evidence, including withheld and rejected labels.
+6. `merged_command_candidates`: current branch candidates, namespaced identities and original provenance.
+7. `filtered_commands`: all merged candidates with eligibility or quarantine reasons.
+8. `labeling_documentation`: prepared manifest semantics for eligible operations.
+9. `proposed_annotations`: independent per-command labels, confidence and rationale.
 10. `deduplicated_annotations`: conservative exact normalized survivors with an audit mapping.
 11. `human_review_queue`: only medium-or-higher uncertainty annotations, with machine exclusion reasons.
 12. `human_review_decisions`: real, version-bound terminal queue decisions; no invented rows for automatic admission.
@@ -346,7 +347,7 @@ inputs instead of repeatedly copying superseded embedded source lists.
 
 Review snapshot capture retains the complete reference and evidence inventory
 from one validated preparation plan. It verifies each configured branch's current
-source authorization and binds the merged annotations to those branch references.
+source authorization and binds shared annotations to those branch candidate references.
 It reads the annotation and taxonomy values by their validated references and
 rejects references or materialization digests that change during capture. Unused
 table bodies are not repeatedly loaded and authorized merely to recover references.

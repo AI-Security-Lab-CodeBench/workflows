@@ -26,10 +26,11 @@ def _inference(
     store = ObjectStore(manifest.storage)
     for stage, invocation in (("proposed_annotations", "label"), ("reviewed_annotations", "review")):
         shared_review = invocation == "review" and "merged_proposed_annotations" in manifest.references
-        evidence_stage = stage if shared_review else f"{branch_prefix}{stage}"
+        shared_label = invocation == "label" and "merged_command_candidates" in manifest.references
+        evidence_stage = stage if shared_review or shared_label else f"{branch_prefix}{stage}"
         if invocation == "review" and evidence_stage not in manifest.references:
             continue
-        identity = unified_id if shared_review and unified_id is not None else candidate_id
+        identity = unified_id if (shared_review or shared_label) and unified_id is not None else candidate_id
         candidate_hash = sha256(identity.encode("utf-8")).hexdigest()
         metadata = TypeAdapter(dict[str, JsonValue]).validate_python(manifest.evidence[evidence_stage])
         receipts = TypeAdapter(dict[str, str]).validate_python(metadata["receipts"], strict=True)
@@ -74,17 +75,23 @@ def review_evidence(
     origin = TypeAdapter(dict[str, JsonValue]).validate_python(
         frame.attrs.get("origins", {}).get(candidate_id, {})
     )
+    shared_processing = "merged_command_candidates" in manifest.references
     branch_prefix = "documentation/" if origin.get("branch") == "documentation" else ""
     sources = [
         source
         for source in frame_records(snapshots.frame(manifest, f"{branch_prefix}source_documents"))
-        if source["source_id"] == row["source_id"]
+        if source["source_id"] == origin.get("source_id", row["source_id"])
     ]
     if len(sources) != 1:
         raise HumanReviewError("conflict", "Immutable review evidence lacks a unique source")
     documentation: list[JsonValue] = [
         doc
-        for doc in frame_records(snapshots.frame(manifest, f"{branch_prefix}labeling_documentation"))
+        for doc in frame_records(
+            snapshots.frame(
+                manifest,
+                "labeling_documentation" if shared_processing else f"{branch_prefix}labeling_documentation",
+            )
+        )
         if doc["utility"] == row["util"]
         or doc["url"] in TypeAdapter(list[str]).validate_python(row["documentation_urls"], strict=True)
     ]
@@ -95,7 +102,7 @@ def review_evidence(
             stage
             for stage in (
                 "reviewed_annotations",
-                "merged_proposed_annotations",
+                "proposed_annotations" if shared_processing else "merged_proposed_annotations",
                 "merged_reviewed_annotations",
             )
             if stage in manifest.references
@@ -121,7 +128,7 @@ def review_evidence(
                     "source_document": next(
                         source
                         for source in frame_records(snapshots.frame(manifest, f"{prefix}source_documents"))
-                        if source["source_id"] == duplicate["source_id"]
+                        if source["source_id"] == duplicate_origin["source_id"]
                     ),
                     "inference": _inference(manifest, duplicate_origin["candidate_id"], prefix, identifier),
                 }

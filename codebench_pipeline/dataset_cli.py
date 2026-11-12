@@ -2,6 +2,7 @@ import argparse
 import json
 from pathlib import Path
 
+from codebench_pipeline.dataset_branches import HISTORICAL_PROCESSING_STAGES
 from codebench_pipeline.dataset_config import load_build_config
 from codebench_pipeline.dataset_plan import INPUT_STAGES
 from codebench_pipeline.dataset_registry import DatasetRegistry
@@ -45,7 +46,9 @@ def main() -> None:
     show = subcommands.add_parser("show", help="Read a stored asset without running pipeline stages.")
     show.add_argument("--home", type=Path, default=DEFAULT_HOME)
     show.add_argument("--dataset", required=True)
-    show.add_argument("--stage", choices=tuple(INPUT_STAGES), default="dataset_release")
+    show.add_argument(
+        "--stage", choices=(*INPUT_STAGES, *HISTORICAL_PROCESSING_STAGES), default="dataset_release"
+    )
     show.add_argument("--limit", type=int, default=5)
     args = parser.parse_args()
     home = Path(args.home).resolve()

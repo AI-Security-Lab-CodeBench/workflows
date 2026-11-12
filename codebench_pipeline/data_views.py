@@ -16,6 +16,7 @@ from codebench_pipeline.data_view_models import (
 )
 from codebench_pipeline.dataframe_io import AssetReference, DataFrameIOManager
 from codebench_pipeline.dataset_asset_types import DATASET_PARTITIONS
+from codebench_pipeline.dataset_branches import HISTORICAL_PROCESSING_STAGES
 from codebench_pipeline.dataset_config import DatasetBuildSpec
 from codebench_pipeline.dataset_plan import INPUT_STAGES
 from codebench_pipeline.dataset_registry import DatasetRegistry
@@ -59,6 +60,7 @@ class DatasetDataService:
 
     def read_current(self, dataset_id: str, stage: str) -> StoredDatasetAsset:
         historical = {
+            *HISTORICAL_PROCESSING_STAGES,
             "reviewed_annotations",
             "merged_reviewed_annotations",
             "documentation/reviewed_annotations",
