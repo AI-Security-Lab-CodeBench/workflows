@@ -9,6 +9,8 @@ from pathlib import Path
 from typing import Literal, Protocol, assert_never
 
 import pandas as pd
+import pyarrow
+import pyarrow.parquet as parquet
 from dagster import (
     ConfigurableIOManager,
     InputContext,
@@ -64,17 +66,32 @@ def frame_bytes(frame: pd.DataFrame) -> bytes:
     if not frame.columns.is_unique:
         raise ValueError("DataFrames require unique column names")
     TypeAdapter(list[str]).validate_python(frame.columns.tolist(), strict=True)
-    table = frame.copy(deep=False)
+    table = pd.DataFrame(frame, copy=False)
+    attributes = frame.attrs
     categories: dict[str, dict[str, JsonValue]] = {}
-    for name in frame.select_dtypes(include="category").columns:
-        values = frame[name].cat
+    for name in table.select_dtypes(include="category").columns:
+        values = table[name].cat
         payload = pd.DataFrame(index=values.categories).to_parquet(engine="pyarrow")
         categories[name] = {"categories": base64.b64encode(payload).decode(), "ordered": values.ordered}
     if categories:
         if "_codebench_categories" in frame.attrs:
             raise ValueError("Reserved Parquet category metadata")
-        table.attrs = {**frame.attrs, "_codebench_categories": categories}
-    return table.to_parquet(engine="pyarrow")
+        attributes = {**attributes, "_codebench_categories": categories}
+    arrow = pyarrow.Table.from_pandas(table)
+    if attributes:
+        metadata = arrow.schema.metadata
+        pandas_metadata = TypeAdapter(dict[str, JsonValue]).validate_json(metadata[b"pandas"])
+        pandas_metadata["attributes"] = attributes
+        arrow = arrow.replace_schema_metadata(
+            {
+                **metadata,
+                b"pandas": json.dumps(pandas_metadata).encode(),
+                b"PANDAS_ATTRS": json.dumps(attributes).encode(),
+            }
+        )
+    with BytesIO() as output:
+        parquet.write_table(arrow, output, compression="snappy")
+        return output.getvalue()
 
 
 def read_frame(payload: bytes) -> pd.DataFrame:
