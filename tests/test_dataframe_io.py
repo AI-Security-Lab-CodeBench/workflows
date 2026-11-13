@@ -25,7 +25,7 @@ from pandas.testing import assert_frame_equal
 from pydantic import JsonValue, ValidationError
 from test_dataset_rules import make_rules
 
-from codebench_pipeline.dataframe_io import DataFrameIOManager, StorageConfig
+from codebench_pipeline.dataframe_io import DataFrameIOManager, StorageConfig, frame_bytes, read_frame
 from codebench_pipeline.object_store import sha256
 from codebench_pipeline.storage import IntegrityError
 
@@ -113,6 +113,7 @@ class DataFrameIOTests(unittest.TestCase):
             }
         )
         frame.index = pd.Index(["a", "b"], name="identity")
+        frame.attrs = {"provenance": {"source": "fixture", "positions": [2, 4]}}
         for number, expected in enumerate((frame, frame.head(0), pd.DataFrame())):
             with self.subTest(number=number):
                 context = build_output_context(asset_key=["table", str(number)])
@@ -122,6 +123,30 @@ class DataFrameIOTests(unittest.TestCase):
                 )
                 assert isinstance(loaded, pd.DataFrame)
                 assert_frame_equal(loaded, expected)
+                self.assertEqual(loaded.attrs, expected.attrs)
+
+    def test_parquet_serialization_preserves_provenance_without_deepcopy(self) -> None:
+        class CopyForbidden(dict[str, JsonValue]):
+            def __deepcopy__(self, memo: dict[int, JsonValue]) -> CopyForbidden:
+                raise AssertionError("Opaque provenance copied during column conversion")
+
+        frame = pd.DataFrame({"value": [1, 2]})
+        provenance = CopyForbidden({"source": "fixture", "positions": [2, 4]})
+        frame.attrs = {"provenance": provenance}
+
+        loaded = read_frame(frame_bytes(frame))
+
+        self.assertEqual(loaded.to_dict(orient="records"), [{"value": 1}, {"value": 2}])
+        self.assertEqual(loaded.attrs, {"provenance": {"source": "fixture", "positions": [2, 4]}})
+        self.assertIs(frame.attrs["provenance"], provenance)
+
+    def test_parquet_bytes_match_pandas_writer_with_nested_metadata(self) -> None:
+        for index in (pd.RangeIndex(2), pd.Index(["a", "b"], name="identity")):
+            with self.subTest(index=type(index).__name__):
+                frame = pd.DataFrame({"value": pd.array([1, None], dtype="Int64")}, index=index)
+                frame.attrs = {"provenance": {"source": "fixture", "positions": [2, 4], "missing": None}}
+
+                self.assertEqual(frame_bytes(frame), frame.to_parquet(engine="pyarrow"))
 
     def test_native_metadata_limits_rows_and_cells_without_truncating_storage(self) -> None:
         frame = pa.DataFrameSchema({"text": pa.Column(str)}).validate(
