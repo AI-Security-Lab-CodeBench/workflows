@@ -2,6 +2,8 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import assert_never
 
+import pandas as pd
+
 from codebench_pipeline.data_views import DatasetDataService
 from codebench_pipeline.dataset_branches import Branch, annotation_stage_id, automatic_stage_id
 from codebench_pipeline.human_review import (
@@ -27,8 +29,9 @@ class AnnotationReviewSource:
 
     def current(self, dataset_id: str) -> ReviewInput:
         resolved = self.snapshots.current(dataset_id)
-        uncertain = resolved.reviewed.loc[
-            resolved.reviewed["candidate_id"].isin(resolved.snapshot.candidate_ids)
+        reviewed = pd.DataFrame(resolved.reviewed, copy=False)
+        uncertain = reviewed.loc[
+            reviewed["candidate_id"].isin(resolved.snapshot.candidate_ids)
         ].copy()
         return ReviewInput(resolved.snapshot, uncertain, "candidate_id")
 

@@ -13,6 +13,7 @@ from dagster._core.workspace.context import BaseWorkspaceRequestContext
 from pandera.errors import SchemaError
 from pydantic import ValidationError
 
+from codebench_pipeline.dataframe_io import AssetSnapshot, DataFrameIOManager
 from codebench_pipeline.dataframe_schemas import CommandsTable
 from codebench_pipeline.dataset_config import AnnotationConfig, FilteringConfig, load_build_config
 from codebench_pipeline.dataset_engine import stage_signature
@@ -24,6 +25,27 @@ from codebench_pipeline.storage import digest
 
 
 class DatasetGraphTests(unittest.TestCase):
+    def test_verified_storage_inputs_preserve_stage_fingerprints(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary)
+            spec = load_build_config(write_fixture(home), home)
+            manager = DataFrameIOManager(storage=spec.storage)
+            frame = pd.DataFrame({"command": ["git status", "git diff"], "context": [None, "inspection"]})
+            frame.attrs["provenance"] = {"sources": [{"id": "fixture", "positions": [1, 2]}]}
+            for value in (frame, spec.rules):
+                reference = manager.persist_value(value)
+                stored = AssetSnapshot(reference, manager.read_version(reference))
+                for stage, config in (
+                    ("source_catalog", spec.catalog),
+                    ("filtered_commands", FilteringConfig()),
+                    ("proposed_annotations", spec.annotation),
+                ):
+                    with self.subTest(format=reference.format, stage=stage):
+                        self.assertEqual(
+                            stage_signature(stage, config, {"input": value}),
+                            stage_signature(stage, config, {"input": stored}),
+                        )
+
     def test_publication_policy_change_invalidates_only_the_publication_signature(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             spec = load_build_config(write_fixture(Path(temporary)), Path(temporary))

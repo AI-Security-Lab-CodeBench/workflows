@@ -7,7 +7,7 @@ import pandas as pd
 from dagster import AssetKey, AssetRecordsFilter, Config, DagsterInstance, build_input_context
 
 from codebench_pipeline.category_rules import CategoryRules
-from codebench_pipeline.dataframe_io import AssetReference, DataFrameIOManager
+from codebench_pipeline.dataframe_io import AssetReference, AssetSnapshot, DataFrameIOManager
 from codebench_pipeline.dataframe_schemas import CommandCandidatesTable, validated_frame
 from codebench_pipeline.dataset_asset_types import DATASET_PARTITIONS
 from codebench_pipeline.dataset_branches import FINALIZATION_STAGES, Branch, stage_branch, stage_name
@@ -104,7 +104,7 @@ def plan_dataset(
 ) -> BuildPlan:
     manager = DataFrameIOManager(storage=spec.storage)
     selected: dict[str, str] = {}
-    values: dict[str, pd.DataFrame | CategoryRules] = {"category_rules": spec.rules}
+    values: dict[str, pd.DataFrame | CategoryRules | AssetSnapshot] = {"category_rules": spec.rules}
     unchanged: list[str] = []
     waiting_for: Literal["sources"] | None = None
     blocked: list[str] = []
@@ -178,7 +178,7 @@ def plan_dataset(
             selected[stage] = "stored_output_missing"
             continue
         if stage != "category_rules":
-            values[stage] = persisted.value
+            values[stage] = persisted
         references[stage] = persisted.reference
         unchanged.append(stage)
     return BuildPlan(
