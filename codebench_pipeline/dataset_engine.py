@@ -13,7 +13,7 @@ from pandera.typing import DataFrame
 from pydantic import JsonValue, TypeAdapter
 
 from codebench_pipeline.category_rules import CategoryRules
-from codebench_pipeline.dataframe_io import DataFrameIOManager, frame_bytes
+from codebench_pipeline.dataframe_io import AssetSnapshot, DataFrameIOManager, frame_bytes
 from codebench_pipeline.dataset_branches import asset_branch, stage_name
 from codebench_pipeline.dataset_catalog import source_scope
 from codebench_pipeline.dataset_config import CatalogConfig, DocumentationConfig, SnapshotConfig
@@ -52,7 +52,10 @@ def code_versions() -> dict[str, str]:
     return {str(path.relative_to(package.parent)): digest(path) for path in paths if path.is_file()}
 
 
-def stage_signature(stage: str, config: Config, inputs: Mapping[str, pd.DataFrame | CategoryRules]) -> str:
+def stage_signature(
+    stage: str, config: Config, inputs: Mapping[str, pd.DataFrame | CategoryRules | AssetSnapshot]
+) -> str:
+    """Fingerprint inputs; snapshots must be unmodified, integrity-verified storage reads."""
     values: dict[str, JsonValue] = {
         "configuration": config.model_dump_json(),
         "implementation": {key: value for key, value in code_versions().items()},
@@ -64,6 +67,12 @@ def stage_signature(stage: str, config: Config, inputs: Mapping[str, pd.DataFram
             name: digest(Path(__file__).parent / name) for name in REVIEW_POLICY_FILES
         }
     for name, value in inputs.items():
+        if isinstance(value, AssetSnapshot):
+            if isinstance(value.value, CategoryRules):
+                value = value.value
+            else:
+                values[name] = value.reference.digest
+                continue
         if isinstance(value, CategoryRules):
             if stage == "source_catalog":
                 values[name] = source_scope(value)
