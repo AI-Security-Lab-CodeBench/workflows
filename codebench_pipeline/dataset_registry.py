@@ -30,7 +30,10 @@ class DatasetRegistry:
         directory = self.root / spec.dataset_id
         version = fingerprint(spec.model_dump_json())
         directory.mkdir(parents=True, exist_ok=True)
-        with HumanReviewStore(self.root.parent).transaction(), exclusive(directory / ".lock"):
+        with (
+            HumanReviewStore(self.root.parent).transaction(dataset_id=spec.dataset_id) as tx,
+            exclusive(directory / ".lock"),
+        ):
             if previous is not None:
                 current = self.get_snapshot(spec.dataset_id)
                 if current != previous:
@@ -39,8 +42,11 @@ class DatasetRegistry:
             if not target.exists():
                 target.write_text(spec.model_dump_json(indent=2), encoding="utf-8")
             temporary = directory / ".current"
+            pointer = directory / "current"
+            if not pointer.exists() or pointer.read_text(encoding="ascii") != version:
+                tx.invalidate(spec.dataset_id, "Registered dataset configuration changed")
             temporary.write_text(version, encoding="ascii")
-            os.replace(temporary, directory / "current")
+            os.replace(temporary, pointer)
         return spec.dataset_id
 
     def _stored_spec(self, dataset_id: str) -> DatasetBuildSpec:

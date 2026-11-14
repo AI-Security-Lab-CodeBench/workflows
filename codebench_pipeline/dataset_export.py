@@ -57,7 +57,7 @@ def prepare_dataset(
         if uncertain:
             human_review_ids.append(candidate.candidate_id)
         reason = ""
-        if label.decision != "accept":
+        if label.decision == "reject" or not label.documentation_urls:
             reason = f"label={label.decision}"
         else:
             eligible_ids.append(candidate.candidate_id)

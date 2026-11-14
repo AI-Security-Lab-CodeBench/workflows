@@ -104,6 +104,11 @@ its storage base directory must be `<chosen home>/dagster`. Do not click
 
 ## Run a complete dataset
 
+Set `CODEBENCH_REVIEW_DATABASE_URL` to the PostgreSQL review database in every
+build, webserver and daemon process. The resolved dataset home selects an isolated
+review namespace. Existing SQLite ledgers require explicit verified import;
+the runtime does not silently fall back to SQLite.
+
 ```sh
 uv sync --frozen --python 3.12
 uv run python -m codebench_pipeline.dataset_cli build --config business-configs/datasets/cat3.json --home .codebench-datasets
@@ -161,11 +166,13 @@ See [branch contracts and migration](independent-branches.md).
 8. `labeling_documentation`: prepared manifest semantics for eligible operations.
 9. `proposed_annotations`: independent per-command labels, confidence and rationale.
 10. `deduplicated_annotations`: conservative exact normalized survivors with an audit mapping.
-11. `human_review_queue`: only medium-or-higher uncertainty annotations, with machine exclusion reasons.
-12. `human_review_decisions`: real, version-bound terminal queue decisions; no invented rows for automatic admission.
-13. `dataset_release`: the single current release, with per-row `human_reviewed` after the nine command columns.
+11. `category_eligible_annotations`: excludes rejected, foreign-category and low-category-confidence labels.
+12. `human_review_queue`: only medium-or-higher uncertainty annotations, with machine exclusion reasons.
+13. `human_review_snapshot`: prepares PostgreSQL rows and reusable selected-value decisions once.
+14. `human_review_decisions`: real, version-bound terminal queue decisions; no invented rows for automatic admission.
+15. `dataset_release`: the single current release, with per-row `human_reviewed` after the nine command columns.
 
-The authoritative publication pointer is the SQLite review ledger, committed
+The authoritative publication pointer is the PostgreSQL review ledger, committed
 after immutable Parquet, CSV and audit sidecars are written. A manual release
 materialization uses the same admission gate. Decisions bind the exact evidence
 snapshot and a digest of the completed decision set when the queue is nonempty;
@@ -176,15 +183,17 @@ Historical raw outputs remain inspectable but are not retroactively human-approv
 
 Labeling caches validated results and receipts by each record's relevant input,
 independently of batch membership. Adding or changing a row labels only missing
-or invalidated rows. Human batches similarly carry terminal decisions only when
-the row evidence/policy fingerprint, eligibility and selection bounds match.
+or invalidated rows. Human decisions instead reuse original values in configured
+review columns, independent of candidate IDs, batch history and unselected evidence.
+Those same columns are the only editable values. Eligibility and validation
+remain separate from reuse; cached approvals that cannot apply remain blocked.
 Carried decisions retain their reviewer and audit origin. A changed snapshot is
 open until explicit completion if the uncertainty queue is nonempty. An empty
 queue is revalidated automatically; old completion tokens never carry forward.
 
-One local dataset home is the review authority, including when table objects are
-in S3. Config/current-reference writers share its transaction protocol; separate
-hosts with independent review databases are not a distributed review service.
+One canonical dataset home identifies a PostgreSQL review namespace, including
+when table objects are in S3. Config/current-reference writers share per-dataset
+transactions and invalidate prepared authority on changes.
 Reviewer identity is self-reported. The UI/API binds to loopback and rejects
 foreign-origin writes; it does not provide authenticated reviewer roles.
 
@@ -361,8 +370,22 @@ stage; a cache hit is not misreported as a skipped materialization.
 Rule changes use stage-specific projections: changing only labeling policy does
 not invalidate source selection or filtering. Changing command-family patterns
 can affect both. Unselected categories receive no materializations.
-Implementation and dependency changes conservatively invalidate stage caches;
-changing a category does not require changing either.
+Implementation signatures for collection, labeling, deduplication and category
+eligibility follow each stage's processing functions and their static dependencies.
+Adding or changing a downstream filter or review stage does not invalidate earlier
+processing. Shared serialization, execution machinery and dependency-lock changes
+remain conservative invalidation boundaries.
+
+Legacy globally fingerprinted materializations require verified compatibility,
+not a forced rebuild or replacement event. Before registering a
+`legacy-implementations/<recorded-fingerprint>.json` evidence map, use
+`dataset_engine.verified_legacy_table` to verify the original fingerprint against
+current inputs/configuration, retained implementation source hashes, unchanged
+processing semantics and the original materialization content digest. The planner
+and source authorization recheck the map and processing equivalence on reuse.
+Missing compatibility evidence selects recomputation; changed inputs or processing
+cannot reuse it. Original frames, source bindings and materialization event IDs
+remain unchanged. Newly computed cache receipts include their implementation maps.
 
 Validated registry and manifest parsing uses bounded, process-local caches keyed
 by exact file bytes, not timestamps. Lookups still read current files, resolve
@@ -373,13 +396,18 @@ inputs instead of repeatedly copying superseded embedded source lists.
 Review snapshot capture retains the complete reference and evidence inventory
 from one validated preparation plan. It verifies each configured branch's current
 source authorization and binds shared annotations to those branch candidate references.
+The plan retains verified catalog and candidate authorization tokens; snapshot
+capture compares them without rereading the same branch tables and configuration.
 It reads the annotation and taxonomy values by their validated references and
 rejects references or materialization digests that change during capture. Unused
 table bodies are not repeatedly loaded and authorized merely to recover references.
 Annotation schema checks and publication preparation operate on table values
 without the evidence metadata attached, avoiding repeated whole-evidence copies
-during column validation. Snapshot fingerprints still include each record's
-semantic evidence, and the returned review frame retains its original metadata.
+during column validation. Full snapshot authorization retains its semantic evidence,
+but reusable row identity includes only original selected-column values.
+Preparation runs at `human_review_snapshot`, never on Review page requests.
+Pages, individual items and next-pending navigation query PostgreSQL directly,
+returning bounded rows and page-local decisions rather than full tables.
 
 Every successful stage retains effective config, exact code snapshots and inference
 receipts with prompt/input hashes, response, observed model and timestamps. Failed

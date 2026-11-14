@@ -14,7 +14,9 @@ FINALIZATION_STAGES = (
     "labeling_documentation",
     "proposed_annotations",
     "deduplicated_annotations",
+    "category_eligible_annotations",
     "human_review_queue",
+    "human_review_snapshot",
     "human_review_decisions",
     "dataset_release",
 )

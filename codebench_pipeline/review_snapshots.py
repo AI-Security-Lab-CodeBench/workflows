@@ -21,10 +21,12 @@ from codebench_pipeline.dataset_finalization import FINALIZATION_BINDING
 from codebench_pipeline.dataset_plan import PREPARATION_STAGES, plan_dataset
 from codebench_pipeline.dataset_tables import publication
 from codebench_pipeline.human_review import ReviewModel, ReviewSnapshot
+from codebench_pipeline.human_review_store import HumanReviewStore
 from codebench_pipeline.models import Digest, Identifier
 from codebench_pipeline.object_store import ObjectStore, StorageConfig, sha256
+from codebench_pipeline.review_identity import review_identity
 from codebench_pipeline.stage_configuration import stage_configs
-from codebench_pipeline.storage import IntegrityError, digest, fingerprint
+from codebench_pipeline.storage import IntegrityError, digest
 
 REVIEW_POLICY_FILES: Final = (
     "human_review.py",
@@ -40,6 +42,11 @@ REVIEW_POLICY_FILES: Final = (
     "review_workflow.py",
     "review_stages.py",
     "review_service.py",
+    "review_identity.py",
+    "review_preparation.py",
+    "review_postgres_lifecycle.py",
+    "review_postgres_queries.py",
+    "review_postgres_values.py",
     "source_review_inputs.py",
     "source_review_guard.py",
     "review_policy.py",
@@ -51,6 +58,10 @@ REVIEW_POLICY_FILES: Final = (
     "dataset_tables.py",
     "dataset_annotation.py",
     "annotation_cache.py",
+    "category_eligibility.py",
+    "label_corrections.py",
+    "stage_cache_compatibility.py",
+    "stage_implementation.py",
 )
 
 
@@ -64,6 +75,7 @@ class ReviewManifest(ReviewModel):
     evidence: dict[str, JsonValue]
     implementation: dict[str, Digest]
     record_fingerprints: dict[str, Digest] = Field(default_factory=dict)
+    review_columns: tuple[str, ...] = ()
 
     def payload(self) -> bytes:
         return json.dumps(
@@ -103,8 +115,8 @@ class ReviewSnapshots:
         self.branch: Branch = branch
         self.store = manifest_store(home)
 
-    def current(self, dataset_id: str) -> ResolvedReview:
-        """Resolve while the caller holds the shared review transaction."""
+    def capture(self, dataset_id: str, review_columns: tuple[str, ...]) -> ResolvedReview:
+        """Capture verified immutable inputs during preparation, never during a page read."""
         spec = self.data.specification(dataset_id)
         plan = plan_dataset(spec, stage_configs(spec), self.data.instance, home=self.home)
         if self.branch != "dataset":
@@ -116,10 +128,11 @@ class ReviewSnapshots:
         input_stages = tuple(
             stage
             for stage in PREPARATION_STAGES
+            if stage != "human_review_snapshot"
             if stage in ("category_rules", *FINALIZATION_STAGES)
             or ("documentation" if stage.startswith("documentation/") else "dataset") not in plan.unconfigured
         )
-        if plan.selected or plan.blocked:
+        if set(plan.selected) - {"human_review_snapshot"} or plan.blocked:
             raise DatasetViewError("not_ready", "Preparation is incomplete or changed")
         manager = DataFrameIOManager(storage=spec.storage)
         binding: dict[str, JsonValue] = {}
@@ -129,11 +142,11 @@ class ReviewSnapshots:
                 binding[branch] = {"state": "unconfigured"}
                 continue
             stage = stage_name("command_candidates", branch)
-            stored = self.data.read_current(dataset_id, stage)
-            if stored.publication_state == "stale" or stored.reference != plan.references[stage]:
+            catalog = stage_name("source_catalog", branch)
+            if plan.source_authorizations[stage] != plan.source_authorizations[catalog]:
                 raise DatasetViewError("not_ready", "Collection inputs changed during snapshot capture")
-            binding[branch] = {"state": "configured", "digest": stored.reference.digest}
-        match manager.read_version(plan.references["deduplicated_annotations"]):
+            binding[branch] = {"state": "configured", "digest": plan.references[stage].digest}
+        match manager.read_version(plan.references["category_eligible_annotations"]):
             case pd.DataFrame() as value:
                 if value.attrs.get(FINALIZATION_BINDING) != binding:
                     raise DatasetViewError("not_ready", "Annotations belong to different collection inputs")
@@ -184,26 +197,7 @@ class ReviewSnapshots:
         package = Path(__file__).parent
         implementation = {name: digest(package / name) for name in REVIEW_POLICY_FILES}
         record_fingerprints = {
-            str(row["candidate_id"]): fingerprint(
-                {
-                    "record": row,
-                    "documentation": TypeAdapter(JsonValue).validate_python(
-                        annotation_metadata["row_documentation"][str(row["candidate_id"])]
-                    ),
-                    "rules": rules.model_dump_json(),
-                    "label_model": spec.annotation.model.model_dump_json(),
-                    "policy": {
-                        name: implementation[name]
-                        for name in (
-                            "human_review.py",
-                            "human_review_transactions.py",
-                            "review_policy.py",
-                            "dataset_export.py",
-                            "dataset_annotation.py",
-                        )
-                    },
-                }
-            )
+            str(row["candidate_id"]): review_identity(row, review_columns)
             for row in frame_records(reviewed)
         }
         manifest = ReviewManifest(
@@ -215,6 +209,7 @@ class ReviewSnapshots:
             evidence=evidence,
             implementation=implementation,
             record_fingerprints=record_fingerprints,
+            review_columns=review_columns,
         )
         payload = manifest.payload()
         snapshot_id = sha256(payload)
@@ -228,6 +223,7 @@ class ReviewSnapshots:
             record_fingerprints={
                 identifier: record_fingerprints[identifier] for identifier in prepared.human_review_ids
             },
+            review_columns=review_columns,
             eligible_candidate_ids=tuple(
                 identifier for identifier in prepared.eligible_ids if identifier in prepared.human_review_ids
             ),
@@ -239,6 +235,33 @@ class ReviewSnapshots:
                 raise IntegrityError("Review implementation changed during snapshot capture")
             self.store.write(f"implementation/{expected}/{name}", source)
         return ResolvedReview(manifest, snapshot, reviewed, rules, prepared)
+
+    def current(self, dataset_id: str) -> ResolvedReview:
+        with HumanReviewStore(self.home).reader() as tx:
+            snapshot = tx.get_current_batch(dataset_id, "annotations").snapshot
+        manifest = self.manifest(snapshot.snapshot_id)
+        manager = DataFrameIOManager(storage=manifest.storage)
+        reviewed = ProposedAnnotationsTable.validate(self.frame(manifest, "category_eligible_annotations"))
+        rules = manager.read_version(manifest.references["category_rules"])
+        if not isinstance(rules, CategoryRules):
+            raise IntegrityError("Prepared review rules are not a taxonomy")
+        return ResolvedReview(
+            manifest, snapshot, reviewed, rules, publication(reviewed, rules, manifest.publication)
+        )
+
+    def authoritative(self, dataset_id: str) -> ResolvedReview:
+        resolved = self.current(dataset_id)
+        spec = self.data.specification(dataset_id)
+        plan = plan_dataset(spec, stage_configs(spec), self.data.instance, home=self.home)
+        if plan.selected or plan.blocked:
+            raise DatasetViewError("not_ready", "Preparation changed after review")
+        if (
+            resolved.rules != spec.rules
+            or resolved.manifest.publication != spec.publication
+            or any(plan.references.get(stage) != reference for stage, reference in resolved.manifest.references.items())
+        ):
+            raise DatasetViewError("not_ready", "Publication inputs differ from prepared review")
+        return resolved
 
     def manifest(self, snapshot_id: str) -> ReviewManifest:
         return load_manifest(self.home, snapshot_id)

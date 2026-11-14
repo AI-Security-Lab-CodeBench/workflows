@@ -15,6 +15,7 @@ from codebench_pipeline.dataset_engine import stage_signature
 from codebench_pipeline.dataset_registry import DatasetRegistry
 from codebench_pipeline.human_review import HumanReviewError
 from codebench_pipeline.models import Digest, Identifier
+from codebench_pipeline.stage_cache_compatibility import legacy_signature_matches
 
 DOCUMENTATION_BINDING: Final = "codebench_documentation_sources"
 INVENTORY_BINDING: Final = "codebench_dataset_sources"
@@ -43,9 +44,12 @@ def inventory_authorization(
     ).records
     if not records or records[0].asset_materialization is None:
         raise HumanReviewError("pending", "Materialize the source manifest catalog before processing it")
-    if records[0].asset_materialization.metadata["input_fingerprint"].value != expected:
-        raise HumanReviewError("stale", "Source inventory changed")
     manager = DataFrameIOManager(storage=spec.storage)
+    recorded = str(records[0].asset_materialization.metadata["input_fingerprint"].value)
+    if recorded != expected and not legacy_signature_matches(
+        manager, "source_catalog", config, {"category_rules": spec.rules}, recorded
+    ):
+        raise HumanReviewError("stale", "Source inventory changed")
     with build_input_context(
         asset_key=key,
         partition_key=dataset_id,
@@ -59,7 +63,7 @@ def inventory_authorization(
     if not isinstance(value, pd.DataFrame):
         raise HumanReviewError("conflict", "Source catalog is not a table")
     return SourceCatalogTable.validate(value), SourceInventoryAuthorization(
-        dataset_id=dataset_id, branch=branch, catalog_digest=reference.digest, inventory_signature=expected
+        dataset_id=dataset_id, branch=branch, catalog_digest=reference.digest, inventory_signature=recorded
     )
 
 

@@ -18,12 +18,15 @@ from codebench_pipeline.dataset_branches import asset_branch, stage_name
 from codebench_pipeline.dataset_catalog import source_scope
 from codebench_pipeline.dataset_config import CatalogConfig, DocumentationConfig, SnapshotConfig
 from codebench_pipeline.source_transforms import transformation_bytes
+from codebench_pipeline.stage_implementation import STAGE_ROOTS, stage_versions, verify_processing
 from codebench_pipeline.storage import IntegrityError, digest, fingerprint
 
 Schema = TypeVar("Schema", bound=pa.DataFrameModel)
 
 
-def code_versions() -> dict[str, str]:
+def code_versions(stage: str | None = None) -> dict[str, str]:
+    if stage is not None and stage in STAGE_ROOTS:
+        return stage_versions(stage)
     package = Path(__file__).parent
     paths = [
         *package.glob("dataset_*.py"),
@@ -36,6 +39,10 @@ def code_versions() -> dict[str, str]:
         package / "documentation_authorization.py",
         package / "typed_config.py",
         package / "category_rules.py",
+        package / "category_eligibility.py",
+        package / "label_corrections.py",
+        package / "stage_implementation.py",
+        package / "stage_cache_compatibility.py",
         package / "business_config.py",
         package / "model_config.py",
         package / "inference.py",
@@ -56,9 +63,18 @@ def stage_signature(
     stage: str, config: Config, inputs: Mapping[str, pd.DataFrame | CategoryRules | AssetSnapshot]
 ) -> str:
     """Fingerprint inputs; snapshots must be unmodified, integrity-verified storage reads."""
+    return implementation_signature(stage, config, inputs, code_versions(stage))
+
+
+def implementation_signature(
+    stage: str,
+    config: Config,
+    inputs: Mapping[str, pd.DataFrame | CategoryRules | AssetSnapshot],
+    implementation: Mapping[str, str],
+) -> str:
     values: dict[str, JsonValue] = {
         "configuration": config.model_dump_json(),
-        "implementation": {key: value for key, value in code_versions().items()},
+        "implementation": dict(implementation),
     }
     if stage in {"human_review_queue", "automatic_dataset_release"}:
         from codebench_pipeline.review_snapshots import REVIEW_POLICY_FILES
@@ -111,6 +127,42 @@ def stage_signature(
     if isinstance(config, (CatalogConfig, DocumentationConfig)) and config.manifest is not None:
         values["manifest_sha256"] = digest(Path(config.manifest))
     return fingerprint(values)
+
+
+def verified_legacy_table(
+    storage: DataFrameIOManager,
+    key: str,
+    *,
+    stage: str,
+    config: Config,
+    inputs: Mapping[str, pd.DataFrame | CategoryRules | AssetSnapshot],
+    implementation: Mapping[str, str],
+    content_digest: str,
+) -> pd.DataFrame:
+    """Read an equivalent legacy cache without computing or publishing authorization."""
+    if stage not in STAGE_ROOTS:
+        raise IntegrityError(f"Legacy reuse is not supported for stage: {stage}")
+    signature = implementation_signature(stage, config, inputs, implementation)
+    if key.rsplit("/", 1)[-1] != signature or key.rsplit("/", 2)[-2] != stage:
+        raise IntegrityError("Legacy fingerprint does not match current inputs and configuration")
+
+    verify_processing(stage, implementation, storage.read_evidence)
+    if TypeAdapter(dict[str, JsonValue]).validate_json(
+        storage.read_evidence(f"{key}/evidence-index.json")
+    )["config"] != config.model_dump(mode="json"):
+        raise IntegrityError("Legacy evidence configuration differs from current configuration")
+    if TypeAdapter(JsonValue).validate_json(storage.read_evidence(f"{key}/stage-config.json")) != (
+        config.model_dump(mode="json")
+    ):
+        raise IntegrityError("Legacy stage configuration differs from current configuration")
+
+    def missing() -> pd.DataFrame:
+        raise IntegrityError("Verified legacy cache is missing; processing was not started")
+
+    frame, _ = storage.cached_frame(key, missing)
+    if hashlib.sha256(frame_bytes(frame)).hexdigest() != content_digest:
+        raise IntegrityError("Legacy cache differs from the recorded materialization output")
+    return frame
 
 
 def cached_table(
@@ -187,7 +239,13 @@ def cached_table(
             storage.write_evidence(
                 f"{key}/evidence-index.json",
                 json.dumps(
-                    {"attempt": attempt, "receipts": receipts, "config": config.model_dump(mode="json")},
+                    {
+                        "attempt": attempt,
+                        "receipts": receipts,
+                        "config": config.model_dump(mode="json"),
+                        "implementation": versions,
+                        "stage_implementation": code_versions(stage),
+                    },
                     ensure_ascii=False,
                 ).encode(),
             )

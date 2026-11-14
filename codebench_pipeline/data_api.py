@@ -19,6 +19,7 @@ from codebench_pipeline.review_api_models import (
     CompletionRequest,
     DecisionRequest,
     EvidenceTarget,
+    NextReviewRequest,
     PublicationTarget,
     RetractionRequest,
     ReviewBackend,
@@ -186,42 +187,43 @@ def make_dataset_api(
 
     async def view(request: Request) -> Response:
         query = await _body(request, DatasetQueryRequest)
-        await run_in_threadpool(data.specification, query.dataset_id)
         return _json(await run_in_threadpool(backend(request).view, query))
+
+    async def next_pending(request: Request) -> Response:
+        query = await _body(request, NextReviewRequest)
+        item = await run_in_threadpool(backend(request).next_pending, query)
+        return _json(item) if item is not None else JSONResponse(None)
+
+    async def item(request: Request) -> Response:
+        target = _target(request, EvidenceTarget)
+        return _json(await run_in_threadpool(backend(request).item, target))
 
     async def decide(request: Request) -> Response:
         change = await _body(request, DecisionRequest)
-        await run_in_threadpool(data.specification, change.dataset_id)
         return _json(await run_in_threadpool(backend(request).decide, change))
 
     async def complete(request: Request) -> Response:
         expected = await _body(request, CompletionRequest)
-        await run_in_threadpool(data.specification, expected.dataset_id)
         return _json(await run_in_threadpool(backend(request).complete, expected))
 
     async def reopen(request: Request) -> Response:
         expected = await _body(request, CompletionRequest)
-        await run_in_threadpool(data.specification, expected.dataset_id)
         return _json(await run_in_threadpool(backend(request).reopen, expected))
 
     async def retract(request: Request) -> Response:
         change = await _body(request, RetractionRequest)
-        await run_in_threadpool(data.specification, change.dataset_id)
         return _json(await run_in_threadpool(backend(request).retract, change))
 
     async def continue_review(request: Request) -> Response:
         expected = await _body(request, CompletionRequest)
-        await run_in_threadpool(data.specification, expected.dataset_id)
         return _json(await run_in_threadpool(backend(request).continue_review, expected))
 
     async def evidence(request: Request) -> Response:
         target = _target(request, EvidenceTarget)
-        await run_in_threadpool(data.specification, target.dataset_id)
         return _json(await run_in_threadpool(backend(request).evidence, target))
 
     async def download(request: Request) -> Response:
         target = _target(request, PublicationTarget)
-        await run_in_threadpool(data.specification, target.dataset_id)
         payload = await run_in_threadpool(review.download, target)
         return Response(
             payload,
@@ -235,6 +237,8 @@ def make_dataset_api(
             Route("/review-stages", review_stages, methods=["GET"]),
             Route("/data/{stage:path}", table, methods=["POST"]),
             Route("/review", view, methods=["POST"]),
+            Route("/review/next", next_pending, methods=["POST"]),
+            Route("/review/{batch_id}/item/{candidate_id}", item, methods=["GET"]),
             Route("/review/decision", decide, methods=["PUT"]),
             Route("/review/complete", complete, methods=["POST"]),
             Route("/review/reopen", reopen, methods=["POST"]),
@@ -242,6 +246,8 @@ def make_dataset_api(
             Route("/review/continue", continue_review, methods=["POST"]),
             Route("/review/{batch_id}/evidence/{candidate_id}", evidence, methods=["GET"]),
             Route("/reviews/{review_stage}", view, methods=["POST"]),
+            Route("/reviews/{review_stage}/next", next_pending, methods=["POST"]),
+            Route("/reviews/{review_stage}/{batch_id}/item/{candidate_id}", item, methods=["GET"]),
             Route("/reviews/{review_stage}/decision", decide, methods=["PUT"]),
             Route("/reviews/{review_stage}/complete", complete, methods=["POST"]),
             Route("/reviews/{review_stage}/reopen", reopen, methods=["POST"]),

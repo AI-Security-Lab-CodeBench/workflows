@@ -8,6 +8,7 @@ from codebench_pipeline.dataframe_schemas import HumanReviewDecisionsTable, vali
 from codebench_pipeline.human_review import CompletionToken, HumanReviewError, ReviewDecision
 
 REVIEW_BINDING: Final = "codebench_human_review"
+CORRECTIONS_BINDING: Final = "codebench_label_corrections"
 
 
 def decision_frame(
@@ -30,6 +31,16 @@ def decision_frame(
     ]
     frame = validated_frame(rows, HumanReviewDecisionsTable)
     frame.attrs[REVIEW_BINDING] = token.model_dump(mode="json")
+    corrections = {
+        row.candidate_id: row.edits or (
+            row.label_corrections.model_dump(mode="json", by_alias=True, exclude_none=True)
+            if row.label_corrections is not None else {}
+        )
+        for row in decisions
+        if row.edits or row.label_corrections is not None
+    }
+    if corrections:
+        frame.attrs[CORRECTIONS_BINDING] = corrections
     return frame
 
 
@@ -39,5 +50,9 @@ def require_decision_frame(frame: pd.DataFrame, expected: pd.DataFrame) -> None:
         expected_token = CompletionToken.model_validate(expected.attrs[REVIEW_BINDING])
     except ValidationError as error:
         raise HumanReviewError("stale", "Decision table has no valid completion binding") from error
-    if actual_token != expected_token or not frame.equals(expected):
+    if (
+        actual_token != expected_token
+        or not frame.equals(expected)
+        or frame.attrs.get(CORRECTIONS_BINDING) != expected.attrs.get(CORRECTIONS_BINDING)
+    ):
         raise HumanReviewError("stale", "Decision table differs from the completed review")

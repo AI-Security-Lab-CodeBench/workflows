@@ -12,6 +12,7 @@ from codebench_pipeline.dataframe_schemas import (
     HumanReviewDecisionsTable,
     ProposedAnnotationsTable,
     ReviewQueueTable,
+    ReviewSnapshotTable,
     SourceCatalogTable,
     SourceDocumentsTable,
 )
@@ -29,6 +30,7 @@ TABLE_TYPES: dict[type[pa.DataFrameModel], DagsterType] = {
         DocumentationTable,
         ProposedAnnotationsTable,
         ReviewQueueTable,
+        ReviewSnapshotTable,
         HumanReviewDecisionsTable,
         CommandsTable,
     )

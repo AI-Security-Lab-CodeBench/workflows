@@ -32,10 +32,8 @@ class ReleaseContinuation:
     def __call__(self, token: CompletionToken) -> CompletionEffect:
         with exclusive(self.home / "release-locks" / f"{token.dataset_id}.lock"):
             with HumanReviewStore(self.home).reader() as tx:
-                resolved = ReviewSnapshots(self.home, DatasetDataService(self.home, self.instance)).current(
-                    token.dataset_id
-                )
-                authorize_publication(resolved, token, tx)
+                batch = tx.get_current_batch(token.dataset_id, token.review_stage)
+                tx.authorize_completion(batch.snapshot, token)
                 previous = tx.last_publication(token.dataset_id)
                 if previous is not None and previous.authorization == token:
                     return CompletionEffect(publication=previous, run_id=previous.dagster_run_id)
@@ -46,7 +44,7 @@ class ReleaseContinuation:
             runs = self.instance.get_runs(filters=RunsFilter(job_name="release_dataset", tags=tags), limit=1)
             if runs and not runs[0].is_finished:
                 return CompletionEffect(run_id=runs[0].run_id)
-            spec = DatasetRegistry(self.home).get(token.dataset_id)
+            spec = DatasetRegistry(self.home).get_snapshot(token.dataset_id)
             params = {
                 "selector": {
                     "repositoryLocationName": "Dataset building",
@@ -98,7 +96,7 @@ class ReleaseRunner:
                     raise HumanReviewError("publication_failed", "Dagster publication failed") from error
         if not result.success:
             raise HumanReviewError("publication_failed", "Dagster publication failed")
-        with HumanReviewStore(self.home).transaction() as tx:
+        with HumanReviewStore(self.home).transaction(dataset_id=token.dataset_id) as tx:
             matches = [
                 reference
                 for reference in tx.list_publications(token.dataset_id)

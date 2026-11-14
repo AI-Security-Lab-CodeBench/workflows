@@ -31,6 +31,7 @@ def source_stage() -> ReviewStage:
         ),
         completion_label="Complete selection and continue",
         can_continue=True,
+        review_columns=("source_url", "license", "sha256", "decision"),
     )
 
 

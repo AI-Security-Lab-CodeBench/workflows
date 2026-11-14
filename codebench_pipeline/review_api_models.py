@@ -58,6 +58,8 @@ class DecisionResponse(ReviewStatus):
 
 class ReviewTableRow(TableRow):
     review_record_id: Text
+    occurrence_count: int = 1
+    blocked_reason: str | None = None
 
 
 class ReviewPage(QueryModel):
@@ -73,6 +75,17 @@ class ReviewViewResponse(ReviewStatus):
     decisions: tuple[ReviewDecision, ...]
     page: ReviewPage
     publication: PublicationReference | None
+    review_columns: tuple[str, ...] = ()
+
+
+class NextReviewRequest(DatasetQueryRequest):
+    after_id: Text | None = None
+
+
+class ReviewItemResponse(QueryModel):
+    row: ReviewTableRow
+    decision: ReviewDecision
+    review_columns: tuple[str, ...]
 
 
 class PublicationResponse(ReviewStatus):
@@ -87,6 +100,10 @@ class EvidenceResponse(QueryModel):
 
 class ReviewBackend(Protocol):
     def view(self, request: DatasetQueryRequest) -> ReviewViewResponse: ...
+
+    def next_pending(self, request: NextReviewRequest) -> ReviewItemResponse | None: ...
+
+    def item(self, target: EvidenceTarget) -> ReviewItemResponse: ...
 
     def decide(self, request: DecisionRequest) -> DecisionResponse: ...
 

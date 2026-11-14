@@ -176,7 +176,9 @@ class DataFrameIOManager(ConfigurableIOManager):
             if self.review_home is not None and context.asset_key.path[0] == "datasets":
                 from codebench_pipeline.source_review_guard import SOURCE_GATED_STAGES, authorize_output
 
-                with HumanReviewStore(Path(self.review_home)).transaction(timeout=10):
+                with HumanReviewStore(Path(self.review_home)).transaction(
+                    timeout=10, dataset_id=context.asset_partition_key
+                ) as tx:
                     from codebench_pipeline.dataset_branches import FINALIZATION_STAGES
 
                     if context.asset_key.path[-1] in FINALIZATION_STAGES:
@@ -207,6 +209,13 @@ class DataFrameIOManager(ConfigurableIOManager):
                                 raise IntegrityError("Source-dependent outputs must be tables")
                             case _:
                                 assert_never(obj)
+                    if context.asset_key.path[-1] != "human_review_snapshot":
+                        try:
+                            previous = self.current_reference(context)
+                        except FileNotFoundError:
+                            previous = None
+                        if previous != reference:
+                            tx.invalidate(context.asset_partition_key, "Upstream asset reference changed")
                     self.publish_reference(context, reference)
             else:
                 self.publish_reference(context, reference)

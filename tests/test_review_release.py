@@ -38,7 +38,11 @@ def multi_citation_response(
     if isinstance(response, LabelDecision):
         payload = json.loads(prompt[prompt.index("{") :])
         return response.model_copy(
-            update={"documentation_urls": [doc["url"] for doc in payload["documentation"]]}
+            update={
+                "documentation_urls": [doc["url"] for doc in payload["documentation"]],
+                "severity_confidence": "medium",
+                "class_confidence": "medium",
+            }
         )
     return response
 
@@ -82,7 +86,7 @@ class ReviewReleaseTests(unittest.TestCase):
         )
         self.assertFalse(premature.success)
         view = self.service.view(DatasetQueryRequest(dataset_id=self.spec.dataset_id))
-        identities = view.batch.snapshot.candidate_ids
+        identities = tuple(row.review_record_id for row in view.page.rows)
         self.assertGreaterEqual(len(identities), 2)
         expected_command = next(
             row.values["command"] for row in view.page.rows if row.values["candidate_id"] == identities[1]
@@ -100,6 +104,8 @@ class ReviewReleaseTests(unittest.TestCase):
                         decision="approve" if candidate_id == identities[1] else "reject",
                         reviewer="QA reviewer",
                         notes="QA exclusion" if candidate_id != identities[1] else "",
+                        edits={"severity": "critical", "class": "deny"}
+                        if candidate_id == identities[1] else {},
                     ),
                 )
             )
@@ -123,6 +129,12 @@ class ReviewReleaseTests(unittest.TestCase):
         rows = list(reader)
         self.assertEqual([row["command"] for row in rows], [expected_command])
         self.assertEqual([row["human_reviewed"] for row in rows], ["true"])
+        self.assertEqual([(row["severity"], row["class"]) for row in rows], [("critical", "deny")])
+        original = self.service.snapshots.current(self.spec.dataset_id).reviewed
+        self.assertEqual(
+            original.loc[original["candidate_id"] == identities[1], ["severity", "class"]].values.tolist(),
+            [["low", "allow"]],
+        )
         released = self.data.query("dataset_release", DatasetQueryRequest(dataset_id=self.spec.dataset_id))
         assert isinstance(released, TableResponse)
         self.assertEqual(released.publication_state, "published")
@@ -214,7 +226,7 @@ class ReviewReleaseTests(unittest.TestCase):
                         candidate_id=row.candidate_id,
                         expected_row_revision=row.row_revision,
                         decision="approve"
-                        if row.candidate_id in view.batch.snapshot.eligible_candidate_ids
+                        if next(item for item in view.page.rows if item.review_record_id == row.candidate_id).blocked_reason is None
                         else "reject",
                         reviewer="QA reviewer",
                     ),

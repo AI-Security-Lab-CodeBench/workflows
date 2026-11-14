@@ -15,7 +15,9 @@ def stage_configs(spec: DatasetBuildSpec) -> dict[str, Config]:
         "labeling_documentation": spec.documentation,
         "proposed_annotations": spec.annotation,
         "deduplicated_annotations": TypedConfig(),
+        "category_eligible_annotations": TypedConfig(),
         "human_review_queue": spec.publication,
+        "human_review_snapshot": spec.publication,
         "human_review_decisions": HumanReviewConfig(),
         "dataset_release": HumanReviewConfig(),
     }

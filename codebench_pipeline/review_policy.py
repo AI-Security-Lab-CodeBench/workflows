@@ -2,7 +2,7 @@ from codebench_pipeline.dataset_records import LabelDecision
 
 
 def requires_human_review(label: LabelDecision) -> bool:
-    return any(
+    return label.decision == "needs_review" or any(
         confidence != "high"
         for confidence in (
             label.category_confidence,

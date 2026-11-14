@@ -7,7 +7,8 @@ from pydantic import JsonValue, TypeAdapter
 
 from codebench_pipeline.category_rules import CategoryRules
 from codebench_pipeline.dataframe_io import DataFrameIOManager
-from codebench_pipeline.dataframe_schemas import frame_records
+from codebench_pipeline.dataframe_schemas import frame_records, model_records
+from codebench_pipeline.dataset_records import CandidateRecord, routing
 from codebench_pipeline.human_review import HumanReviewError, ReviewSnapshot
 from codebench_pipeline.object_store import ObjectStore
 from codebench_pipeline.review_api_models import EvidenceResponse
@@ -62,10 +63,10 @@ def review_evidence(
     manifest = snapshots.manifest(snapshot.snapshot_id)
     if manifest.dataset_id != snapshot.dataset_id:
         raise HumanReviewError("conflict", "Review manifest has a different dataset binding")
-    review_stage = (
-        "deduplicated_annotations"
-        if "deduplicated_annotations" in manifest.references
-        else "reviewed_annotations"
+    review_stage = next(
+        stage
+        for stage in ("category_eligible_annotations", "deduplicated_annotations", "reviewed_annotations")
+        if stage in manifest.references
     )
     frame = snapshots.frame(manifest, review_stage)
     reviewed = [row for row in frame_records(frame) if row["candidate_id"] == candidate_id]
@@ -139,6 +140,10 @@ def review_evidence(
     match taxonomy:
         case CategoryRules():
             rules = taxonomy.model_dump(mode="json")
+            correction_risks = routing(
+                model_records(frame.loc[frame["candidate_id"] == candidate_id], CandidateRecord)[0],
+                taxonomy,
+            )
         case pd.DataFrame():
             raise IntegrityError("Immutable taxonomy is not category rules")
         case _:
@@ -149,6 +154,7 @@ def review_evidence(
             "source_document": sources[0],
             "documentation": documentation,
             "taxonomy": rules,
+            "label_correction_risk_ids": correction_risks,
             "origin": origin,
             "duplicates": TypeAdapter(JsonValue).validate_python(frame.attrs.get("duplicates", [])),
             "duplicate_evidence": duplicate_evidence,

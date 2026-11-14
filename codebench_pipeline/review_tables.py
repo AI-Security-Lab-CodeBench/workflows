@@ -11,8 +11,9 @@ from codebench_pipeline.dataframe_schemas import frame_records
 from codebench_pipeline.human_review import HumanReviewError, ReviewModel, ReviewSnapshot
 from codebench_pipeline.object_store import ObjectStore, StorageConfig, sha256
 from codebench_pipeline.review_api_models import EvidenceResponse
+from codebench_pipeline.review_identity import review_identity
 from codebench_pipeline.review_stages import ReviewInput, ReviewStage
-from codebench_pipeline.storage import IntegrityError, fingerprint
+from codebench_pipeline.storage import IntegrityError
 
 
 @dataclass(frozen=True, slots=True)
@@ -37,6 +38,7 @@ class TableReviewManifest(ReviewModel):
     min_approvals: int
     max_approvals: int | None
     record_fingerprints: dict[str, str] = Field(default_factory=dict)
+    review_columns: tuple[str, ...] = ()
 
 
 class TableReviewSource:
@@ -64,17 +66,10 @@ class TableReviewSource:
             min_approvals=self.stage.min_approvals,
             max_approvals=self.stage.max_approvals,
             record_fingerprints={
-                str(row[table.id_column]): fingerprint(
-                    {
-                        "record": row,
-                        "policy": table.record_policy,
-                        "stage": self.stage.model_dump_json(),
-                    }
-                )
+                str(row[table.id_column]): review_identity(row, self.stage.review_columns)
                 for row in frame_records(table.frame)
-            }
-            if table.record_policy is not None
-            else {},
+            },
+            review_columns=self.stage.review_columns,
         )
         payload = json.dumps(
             manifest.model_dump(mode="json"), ensure_ascii=False, sort_keys=True, separators=(",", ":")
@@ -88,9 +83,10 @@ class TableReviewSource:
             min_approvals=self.stage.min_approvals,
             max_approvals=self.stage.max_approvals,
             record_fingerprints=manifest.record_fingerprints,
+            review_columns=self.stage.review_columns,
         )
         self.store.write(f"{snapshot.snapshot_id}.json", payload)
-        return ReviewInput(snapshot, table.frame, table.id_column)
+        return ReviewInput(snapshot, table.frame, table.id_column, evidence=table.evidence)
 
     def evidence(self, snapshot: ReviewSnapshot, candidate_id: str) -> EvidenceResponse:
         payload = self.store.read(f"{snapshot.snapshot_id}.json")

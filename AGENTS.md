@@ -66,12 +66,18 @@ existing data before replacing it; never overwrite concurrent work.
   similarities. Preserve duplicate-to-survivor provenance and exclusion reasons.
   Fuzzy similarity, resource renaming, safe-pair construction and model-conditioned
   deduplication are not part of this stage.
-- After exact deduplication, send only medium-or-higher uncertainty rows to the
-  shared final human queue. Any `medium` or `low` among the four label confidences
+- After exact deduplication, apply category eligibility before selecting
+  medium-or-higher uncertainty rows for the shared final human queue. Exclude
+  rejected labels, non-target categories and low category confidence, preserving
+  original rows and exclusion evidence. Retain medium/high category confidence.
+  Any `medium` or `low` among the retained rows' four label confidences
   (category, risk, severity, class) requires
   review. All four `high` means low uncertainty and automatic admission only if
   machine eligible. Machine-ineligible rows remain inspectable and cannot be
   admitted by human approval.
+  Supported `needs_review` labels require explicit human resolution. The Review
+  inspector permits taxonomy/routing-valid edits to configured review columns;
+  preserve model values separately and apply approved human corrections at release.
 - Use **one final dataset release**. An empty uncertainty queue lets the build
   complete automatically under a policy actor with zero human decisions and
   release with `human_reviewed=false`.
@@ -101,9 +107,17 @@ existing data before replacing it; never overwrite concurrent work.
   while clearly distinguishing their currentness.
 - Reuse labeling and human decisions at record granularity, not merely whole-table granularity.
   Adding or changing a neighboring record must not repeat an unchanged record's
-  LLM labeling or erase its human decision. Bind reuse to that record's complete
-  relevant evidence, label, semantic documentation and review policy; never reuse
-  a decision when those inputs changed.
+  LLM labeling or erase its human decision. Labeling reuse binds complete relevant
+  evidence, semantic documentation and labeling policy. Human decision identity
+  binds only original values in configured review columns, which are also the
+  only editable columns. Do not include candidate IDs, code, policy or unselected
+  evidence in human reuse keys. Preserve durable hash decisions across batches
+  and disappearance/reappearance; corrections never change the original key.
+  Validate current eligibility separately from reuse and release authorization.
+- Prepare human-review inputs once in PostgreSQL at materialization. Review reads
+  query persisted pages and must not traverse upstream graphs, reload live
+  configuration or recreate snapshots. Use per-dataset writer serialization,
+  optimistic revisions and durable waiting, not a sleeping compute worker.
 - Bound each command's labeling context and invoke the LLM once per eligible row.
   Execute only missing or invalidated labels, independently of ordering.
   Preserve original inference receipts and explicit human-decision carry-forward

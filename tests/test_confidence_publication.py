@@ -4,18 +4,20 @@ import json
 import tempfile
 import unittest
 from contextlib import ExitStack, redirect_stdout
-from dataclasses import replace
 from hashlib import sha256
 from pathlib import Path
 from unittest.mock import patch
 
 from configuration_fixture import write_fixture
+from dagster import AssetKey, build_input_context
 from pydantic import BaseModel, JsonValue, TypeAdapter
 from test_dataset_incremental import provider_response
 from test_dataset_rules import make_candidate, make_label, make_rules
 
 from codebench_pipeline.data_view_models import DatasetQueryRequest, DatasetViewError, TableResponse
-from codebench_pipeline.data_views import DatasetDataService, StoredDatasetAsset
+from codebench_pipeline.data_views import DatasetDataService
+from codebench_pipeline.dataframe_io import DataFrameIOManager
+from codebench_pipeline.dataset_asset_types import DATASET_PARTITIONS
 from codebench_pipeline.dataset_cli import execute_build, execute_registered_build
 from codebench_pipeline.dataset_config import load_build_config
 from codebench_pipeline.dataset_export import prepare_dataset
@@ -116,10 +118,14 @@ class ConfidencePublicationTests(unittest.TestCase):
     def test_human_approval_cannot_admit_machine_ineligible_uncertain_labels(self) -> None:
         rules = make_rules()
         candidate = make_candidate()
-        for decision in ("reject", "needs_review"):
-            with self.subTest(decision=decision):
+        for decision, documentation in (("reject", ["https://example.org/docs"]), ("needs_review", [])):
+            with self.subTest(decision=decision, documentation=documentation):
                 label = make_label(candidate, rules).model_copy(
-                    update={"decision": decision, "class_confidence": "medium"}
+                    update={
+                        "decision": decision,
+                        "class_confidence": "medium",
+                        "documentation_urls": documentation,
+                    }
                 )
                 publication = prepare_dataset(
                     [candidate],
@@ -132,6 +138,20 @@ class ConfidencePublicationTests(unittest.TestCase):
                 self.assertEqual(publication.eligible_ids, ())
                 self.assertEqual(publication.commands, [])
                 self.assertEqual(publication.pending[0]["human_reviewed"], "false")
+
+    def test_supported_needs_review_labels_require_explicit_human_resolution(self) -> None:
+        rules = make_rules()
+        candidate = make_candidate()
+        label = make_label(candidate, rules).model_copy(update={"decision": "needs_review"})
+        pending = prepare_dataset([candidate], [label], rules, 250)
+        self.assertEqual(pending.commands, [])
+        self.assertEqual(pending.human_review_ids, (candidate.candidate_id,))
+        self.assertEqual(pending.eligible_ids, (candidate.candidate_id,))
+        approved = prepare_dataset(
+            [candidate], [label], rules, 250, approved_ids=frozenset({candidate.candidate_id})
+        )
+        self.assertEqual([row["human_reviewed"] for row in approved.commands], ["true"])
+        self.assertEqual(label.decision, "needs_review")
 
     def test_only_uncertain_rows_wait_for_human_review_and_retraction_stales_release(self) -> None:
         with ExitStack() as stack:
@@ -273,37 +293,27 @@ class ConfidencePublicationTests(unittest.TestCase):
                 {(row.values["command"], row.values["human_reviewed"]) for row in released.page.rows},
                 {("git status", "false"), ("git status --show-stash", "false")},
             )
-            with patch.object(data, "read_current", wraps=data.read_current) as reads:
+            with patch.object(data, "read_current", side_effect=AssertionError("Unexpected upstream read")):
                 resolved = ReviewSnapshots(home, data).current(spec.dataset_id)
-            self.assertCountEqual(
-                [call.args[1] for call in reads.call_args_list],
-                ["documentation/command_candidates"],
-            )
             self.assertEqual(
                 set(resolved.manifest.references),
-                set(built) - {"human_review_decisions", "dataset_release"},
+                set(built) - {"human_review_snapshot", "human_review_decisions", "dataset_release"},
             )
-            original_read = data.read_current
-            for stale in (True, False):
-                def changed_current(dataset_id: str, stage: str) -> StoredDatasetAsset:
-                    stored = original_read(dataset_id, stage)
-                    if stage != "documentation/command_candidates":
-                        return stored
-                    return (
-                        replace(stored, publication_state="stale")
-                        if stale
-                        else replace(
-                            stored, reference=stored.reference.model_copy(update={"digest": "0" * 64})
-                        )
-                    )
-
-                with (
-                    self.subTest(stale=stale),
-                    patch.object(data, "read_current", side_effect=changed_current),
-                    self.assertRaises(DatasetViewError) as changed,
-                ):
-                    ReviewSnapshots(home, data).current(spec.dataset_id)
-                self.assertEqual(changed.exception.code, "not_ready")
+            reference = resolved.manifest.references["documentation/command_candidates"]
+            manager = DataFrameIOManager(storage=spec.storage)
+            with build_input_context(
+                asset_key=AssetKey(["datasets", "documentation", "command_candidates"]),
+                partition_key=spec.dataset_id,
+                asset_partitions_def=DATASET_PARTITIONS,
+                instance=instance,
+            ) as context:
+                manager.publish_reference(context, reference.model_copy(update={"digest": "0" * 64}))
+                try:
+                    with self.assertRaises(DatasetViewError) as changed:
+                        ReviewSnapshots(home, data).authoritative(spec.dataset_id)
+                    self.assertEqual(changed.exception.code, "not_ready")
+                finally:
+                    manager.publish_reference(context, reference)
             self.assertNotIn("reviewed_annotations", resolved.manifest.references)
             label_stage = "proposed_annotations"
             metadata = TypeAdapter(dict[str, JsonValue]).validate_python(

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
-import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
+
+from psycopg import OperationalError
+from psycopg.types.json import Jsonb
 
 from codebench_pipeline.human_review import (
     DecisionChange,
@@ -140,16 +142,23 @@ class HumanReviewStorageTests(unittest.TestCase):
                 tuple(entry.event for entry in tx.history(self.snapshot.dataset_id)), ("created",)
             )
 
-    def test_immediate_lock_is_held_and_connection_is_closed_after_context(self) -> None:
-        with self.store.transaction() as tx:
+    def test_dataset_lock_excludes_same_dataset_but_allows_other_datasets(self) -> None:
+        with self.store.transaction(dataset_id=self.snapshot.dataset_id) as tx:
             tx.ensure_current_batch(self.snapshot)
             with self.assertRaises(HumanReviewError) as locked:
-                with HumanReviewStore(self.home).transaction():
-                    self.fail("Competing write transaction acquired the lock")
+                with HumanReviewStore(self.home).transaction(dataset_id=self.snapshot.dataset_id):
+                    self.fail("Competing writer acquired the same dataset lock")
             self.assertEqual(locked.exception.code, "conflict")
-        with self.assertRaises(sqlite3.ProgrammingError):
+            other = self.snapshot.model_copy(update={"dataset_id": "independent"})
+            with HumanReviewStore(self.home).transaction(dataset_id=other.dataset_id) as independent:
+                batch = independent.ensure_current_batch(other)
+                self.assertEqual(independent.counts(batch.batch_id).pending, 1)
+            isolated_home = self.home / "isolated"
+            with HumanReviewStore(isolated_home).transaction(dataset_id=self.snapshot.dataset_id) as isolated:
+                isolated.ensure_current_batch(self.snapshot)
+        with self.assertRaises(OperationalError):
             tx.get_current_batch(self.snapshot.dataset_id)
-        with self.store.transaction() as next_tx:
+        with self.store.transaction(dataset_id=self.snapshot.dataset_id) as next_tx:
             self.assertEqual(next_tx.get_current_batch(self.snapshot.dataset_id).state, "open")
 
     def test_category_isolation_preserves_identical_candidate_ids(self) -> None:
@@ -177,10 +186,17 @@ class HumanReviewStorageTests(unittest.TestCase):
     def test_same_digest_cannot_rebind_membership_and_missing_identity_is_explicit(self) -> None:
         with self.store.transaction() as tx:
             batch = tx.ensure_current_batch(self.snapshot)
-            rebound = self.snapshot.model_copy(update={"eligible_candidate_ids": ()})
-            with self.assertRaises(HumanReviewError) as conflict:
-                tx.ensure_current_batch(rebound)
-            self.assertEqual(conflict.exception.code, "conflict")
+            changes = (
+                {"eligible_candidate_ids": ()},
+                {"review_columns": ("candidate_id",)},
+                {"record_fingerprints": {self.snapshot.candidate_ids[0]: "c" * 64}},
+            )
+            for fields in changes:
+                with self.subTest(fields=fields):
+                    rebound = self.snapshot.model_copy(update=fields)
+                    with self.assertRaises(HumanReviewError) as conflict:
+                        tx.ensure_current_batch(rebound)
+                    self.assertEqual(conflict.exception.code, "conflict")
             self.assertEqual(tx.ensure_current_batch(self.snapshot), batch)
             with self.assertRaises(HumanReviewError) as missing:
                 tx.get_current_batch("unknown-category")
@@ -203,10 +219,11 @@ class HumanReviewStorageTests(unittest.TestCase):
                     reviewer="human",
                 ),
             )
-        with sqlite3.connect(self.store.path) as connection:
-            connection.execute(
-                "DELETE FROM human_review_decisions WHERE batch_id = ? AND candidate_id = ?",
-                (batch.batch_id, "second"),
+        with self.store.transaction(dataset_id=snapshot.dataset_id) as tx:
+            tx.connection.execute(
+                """DELETE FROM review_items WHERE batch_id = %s AND record_hash = (
+                    SELECT record_hash FROM review_rows WHERE batch_id = %s AND candidate_id = %s)""",
+                (batch.batch_id, batch.batch_id, "second"),
             )
         with self.store.transaction() as tx:
             with self.assertRaises(HumanReviewError) as incomplete:
@@ -231,13 +248,12 @@ class HumanReviewStorageTests(unittest.TestCase):
             token = tx.complete(self.snapshot, tx.get_current_batch(self.snapshot.dataset_id), "human")
         for changed, code in (("pending", "pending"), ("approve", "stale")):
             with self.subTest(decision=changed):
-                with sqlite3.connect(self.store.path) as connection:
-                    connection.execute(
-                        "UPDATE human_review_decisions SET data = ? WHERE batch_id = ? AND candidate_id = ?",
+                with self.store.transaction(dataset_id=self.snapshot.dataset_id) as tx:
+                    tx.connection.execute(
+                        "UPDATE review_items SET data = %s WHERE batch_id = %s",
                         (
-                            row.model_copy(update={"decision": changed}).model_dump_json(),
+                            Jsonb(row.model_copy(update={"decision": changed}).model_dump(mode="json")),
                             batch.batch_id,
-                            row.candidate_id,
                         ),
                     )
                 with self.store.transaction() as tx:

@@ -1,190 +1,118 @@
 # Reusable human review
 
-Human review is a stage-scoped workflow, independent of command annotation,
-CSV export, or Dagster release jobs. Dataset inclusion is one adapter:
-`ReviewService` supplies annotation evidence and `ReleaseRunner`; the lifecycle
-lives in `ReviewWorkflow`.
+Human review accepts immutable rows and one configured list of `review_columns`.
+Those columns are both the deduplication identity and the only values a human
+may edit. PostgreSQL stores review inputs, reusable decisions, revisions and
+publication authorization. Set `CODEBENCH_REVIEW_DATABASE_URL` for the build,
+webserver, daemon and tests; there is no SQLite runtime fallback. Dataset homes
+have separate database namespaces, including temporary test homes.
+
+## Identity and edits
+
+The key is SHA-256 of canonical JSON containing the selected column names and
+their original typed values. Column order does not affect it. String whitespace,
+quoted command text, JSON types and nulls remain meaningful. Missing columns,
+duplicate column names and nonfinite numbers fail preparation.
+
+Candidate IDs, neighboring rows, provenance, model identity, documentation and
+implementation versions are not part of this key unless explicitly selected.
+Lookup is scoped to dataset home, dataset and review stage. Decisions survive
+renamed candidate IDs, reordered inputs and disappearance followed by return.
+
+An approved `edits` object overlays a copy of each matching original row.
+It does not change the lookup key: if original A is corrected to B, A returning
+reuses that correction, but a new original B does not inherit A's approval.
+Rejections are also reusable. Retraction persists a pending revision so an older
+approval cannot return from history.
+
+Duplicate occurrences share one review item and decision while retaining all
+original occurrences and provenance. Selection bounds count occurrences. A stage
+that needs to distinguish otherwise identical rows must include the distinguishing
+column in `review_columns`.
+
+The annotation default is `command`, `category_id`, `risk_id`, `severity`, `class`,
+configurable under `publication.review_columns`. Confidence determines which
+rows enter human review, not which selected fields can be edited. Approvals
+validate the corrected command and labels statically against captured rules.
+Commands are never executed. Human approval cannot override machine eligibility.
+A cached approval that cannot be applied to current occurrences remains blocked
+and inspectable rather than silently becoming a new review prompt.
+
+## Prepare once, read persisted state
+
+The `human_review_snapshot` Dagster asset consumes the uncertain queue, eligible
+annotations and rules. It captures immutable inputs and bulk-matches decision
+hashes in PostgreSQL. Its `ReviewSnapshotTable` output identifies the prepared
+snapshot and batch. Unresolved decisions persist as waiting state; no worker
+sleeps while humans review.
+
+Review page, item and next-pending requests query prepared database state. They
+do not invoke the planner, load live business configuration, decode upstream
+Parquet tables or create snapshots. Pagination, filtering and sorting happen
+in PostgreSQL. Responses contain page-local decisions and compact batch metadata,
+not every candidate ID. Full provenance is available separately from immutable
+evidence artifacts.
+
+Missing preparation requires running the preparation stage; opening the UI
+does not implicitly materialize it. Updating registered configuration or upstream
+references invalidates prepared authority. A subsequent build prepares current
+membership while reusing unchanged selected-column decisions.
 
 ## Integrate another stage
 
-1. Define a `ReviewStage` with a stable `stage_id`, title, native asset keys,
-   completion label, and approval bounds. A model-selection stage can require
-   `min_approvals=1, max_approvals=1`. Every other candidate must be explicitly
-   rejected before completion.
-2. Provide an authoritative reader returning `ReviewTable`: the actual DataFrame,
-   its stable string-ID column, evaluation/configuration revision, evidence, and
-   eligible IDs. The table need not contain command, risk, or annotation fields.
-   Do not generate data or run models inside this reader.
-3. Wrap it in `TableReviewSource(home, stage, reader)`, then construct
+1. Define `ReviewStage` with `stage_id`, `title`, native `asset_keys`,
+   `review_columns`, completion label and optional approval bounds.
+2. Supply a reader returning `ReviewTable`: actual rows, string ID column,
+   input revision, evidence and eligible IDs. The reader must not run inference.
+3. Construct `TableReviewSource(home, stage, reader)` and
    `ReviewWorkflow(home, stage, source)`.
-4. Pass `ReviewRegistration(stage, workflow)` through the `stages` argument of
-   `make_dataset_api`. The default annotation adapter remains registered.
-   The native UI discovers the asset-to-review mapping from `/review-stages`;
-   no frontend asset list, record-ID assumption, or publication button branch
-   needs editing.
-5. A downstream consumer accepts the returned completion token and calls
-   `workflow.approved_records(dataset_id, token)` to obtain only currently
-   authorized rows. A changed evaluation, selection policy, dataset, stage,
-   generation, decision set, or snapshot rejects the old token.
+4. Call `workflow.prepare(dataset_id)` explicitly at the upstream materialization
+   boundary, including after input changes.
+5. Register `ReviewRegistration(stage, workflow)` with `make_dataset_api`.
+6. After real completion, a consumer calls
+   `workflow.approved_records(dataset_id, token)` for corrected approved rows.
 
-The generic completion response contains the durable completion token and
-`publication: null`, `run_id: null`. It does not run a dataset release or pretend
-that a model was deployed. An optional completion publisher is used by the
-dataset-inclusion adapter.
+Generic stages have no command-specific field requirement. For model selection,
+`review_columns=("model_id", "score")` makes both values reviewable and editable.
+Use an application validation contract where additional domain constraints apply.
+The native inspector renders editors from the prepared columns and original types.
 
-In the native UI, dataset completion launches `release_dataset` asynchronously
-and returns its run ID with no publication yet. The publication link appears
-after the run commits and the view refreshes. **Continue publication** reuses an
-active run for the same completion or an already-current publication; a failed
-run can be retried without repeating human decisions or inference. The synchronous
-`ReleaseRunner` remains available for in-process callers and regression checks.
+## Completion and publication
 
-The command adapter supplies only uncertain records from the unified deduplicated
-dataset to human review. Any `medium` or `low` among category, risk, severity and
-class confidence requires review. All four `high` means
-low uncertainty: machine-eligible rows need no decision. Machine-ineligible rows
-remain inspectable and cannot be admitted by approval.
+A reusable decision is not a reusable release authorization. Completion binds
+the exact prepared membership, eligibility, validation contract, bounds, decision
+revisions and generation. A new nonempty snapshot requires explicit completion
+even when all decisions are reused. An empty uncertainty queue completes under
+the automatic-policy actor with zero human decisions.
 
-An LLM assesses each source dataset from actual README/card and license bodies
-and origin/provenance evidence, retains receipts and holds unresolved eligibility.
-This isn't a human gate. Both branches enumerate and load complete eligible
-configured corpora automatically, not bounded inspected-page snapshots.
-Each eligible command gets one isolated labeling invocation after extraction,
-filtering and semantic docs. Branch `proposed_annotations` merge before exact
-deduplication. `reviewed_annotations` is removed from the active graph; historical
-artifacts remain readable and current rows receive no manufactured
-`review_verdict` or `review_confidence`.
-`human_source_decisions` is removed from the active
-graph. They feed one final queue and one `dataset_release`. If the queue is empty,
-the build completes the empty batch under the explicit automatic-policy actor
-and releases without human decisions or a human completion signal. Otherwise
-the single release waits for real terminal queue decisions and explicit completion.
-See [confidence policy](confidence-review-policy.md) for the
-ten-column publication envelope and per-row `human_reviewed` marker.
+Writers serialize per dataset, with optimistic row and batch revision checks.
+Read-only repeatable-read transactions keep page, counts and status consistent.
+Registry and asset-reference writers use the same dataset authority lock.
+Release validates current inputs and authorization again at commit; it applies
+approved edits to copies, then applies eligibility and category-wide caps.
+Original annotations, decisions and historical downloads remain immutable.
 
-Adapters may declare `additional_publication_stages` for an independently
-authorized publication shown beside their own review batch. This is explicit
-descriptor metadata, not a frontend assumption that all reviews are annotations.
-The unified annotation adapter advertises no automatic companion.
+The native completion action launches `release_dataset` asynchronously and
+returns a run link. **Continue publication** reuses an active run or current
+publication, or retries a failed continuation without repeating human review.
+Historical source selection is not an acquisition prerequisite.
 
-For an operation that computes before committing an artifact, check authorization
-again at the commit boundary. For a nonempty uncertainty queue, hold
-`HumanReviewStore.transaction()` while resolving the current source and calling
-`transaction.authorize_completion(snapshot, token)`, then commit the output.
-For an empty queue, revalidate queue emptiness, machine eligibility and the current
-snapshot at commit without inventing a human token. Automatically admitted rows
-have `human_reviewed=false`; actually approved uncertain rows have
-`human_reviewed=true`. Writers of underlying current references/configuration must participate in
-that same transaction protocol. The workflow is a local authority, not a
-distributed locking service.
-
-## Snapshot and storage contracts
-
-`TableReviewSource` fingerprints the exact table bytes, revision, stage,
-eligibility, selection bounds, and evidence. It retains immutable evidence
-manifests so historical decisions can still be inspected after input changes.
-Its reader must supply sanitized evidence and authoritative source revisions.
-Applications needing different evidence storage can implement the small
-`ReviewSource` protocol directly.
-
-`ReviewSnapshot.record_fingerprints` binds each record's relevant evidence and
-policy separately from the whole snapshot. When supplied it must cover exactly
-the snapshot's candidate IDs. An empty mapping is the historical default and
-disables carry-forward. Producers must not use the complete surrounding table's
-digest as each row's fingerprint.
-
-When a snapshot changes, the ledger opens a new batch. A prior-current terminal
-decision carries only when the record ID, nonempty fingerprint, eligibility and
-selection bounds still match. The decision retains notes, reviewer, timestamps
-and row revision; `carried_from_batch_id` and a `carried` audit event link its
-origin. Pending/retracted decisions never revive older approvals. Completion
-tokens and continuation runs do not carry; the new snapshot needs explicit
-completion after its new or changed records are decided when its queue is nonempty.
-The dataset adapter revalidates an empty queue automatically without human action.
-
-Current batches are isolated by `(dataset_id, review_stage)`. Records keep their
-stable IDs even through filtering and sorting. The transport field
-`candidate_id` denotes that generic record ID; it is not restricted to command
-candidates. Review-page rows expose a separate top-level `review_record_id`,
-leaving original table columns intact.
-
-Existing single-stage SQLite ledgers migrate transactionally to the
-`annotations` scope. Prior decisions and history remain intact. Approval bounds
-are enforced at completion and authorization, not only by disabled UI controls.
-Reopening retains decisions but advances the generation and invalidates earlier
-completion tokens.
-
-Saved terminal decisions can be retracted individually. Retraction atomically
-reopens a completed batch when needed, advances its generation, returns only
-the chosen row to pending, and preserves neighboring decisions and history.
-The old completion no longer authorizes consumers. Explicit completion after
-editing materializes the revised decisions and corresponding dataset.
-
-WAL-backed read snapshots allow inspection without reserving the writer lock.
-Mutation paths still validate row/batch revisions; bounded lock waits do not
-turn stale writes into overwrites.
-
-## HTTP and native UI
+## HTTP
 
 - `GET /codebench/api/review-stages` discovers stage descriptors.
-- `POST /codebench/api/reviews/{stage_id}` queries its current review table.
-- `PUT .../decision` saves a revision-bound decision.
-- `POST .../complete` freezes a fully decided selection.
-- `POST .../reopen` explicitly reopens it.
-- `POST .../retract` retracts one saved row with its row revision and expected batch version.
-- `POST .../continue` retries a configured continuation for a completed stage.
-- `GET .../{batch_id}/evidence/{candidate_id}?dataset_id=...` reads immutable evidence.
+- `POST /codebench/api/reviews/{stage_id}` queries a prepared page.
+- `POST .../next` finds the next pending item under the current filter.
+- `GET .../{batch_id}/item/{candidate_id}?dataset_id=...` loads one item.
+- `PUT .../decision` saves `change.edits` and the revision-bound decision.
+- `POST .../complete`, `.../reopen`, `.../retract`, `.../continue` manage lifecycle.
+- `GET .../{batch_id}/evidence/{candidate_id}?dataset_id=...` reads original evidence.
 
-Existing `/review` routes retain their annotation meaning. Dataset-scoped
-transport uses the registered dataset identity. Review URLs preserve both
-`partition` and `review_stage`; drafts and responses cannot cross stages.
+The `/review` aliases retain annotation meaning. URLs and drafts remain scoped
+by dataset and stage. Self-reported reviewer names are audit labels, not
+authentication. Unsaved drafts stay in the browser; saved decisions live in
+PostgreSQL.
 
-`CompletionEffect` may return a publication, a native run ID, or neither.
-Descriptors advertise `can_continue` and a continuation label. Successful run
-IDs persist on the batch; an unchanged/no-op continuation preserves the previous
-link. Generic stages can launch continuations asynchronously through Dagster,
-so the browser doesn't wait for long work. Historical source-selection
-continuations aren't an active collection prerequisite.
-
-Stale and legacy-unreviewed materializations remain inspectable but are rejected
-as authorized pipeline inputs. Historical publication downloads remain
-explicitly historical. Completing a revised review creates a new publication
-without rewriting the previous CSV.
-
-The native UI shows selection requirements, completion without publication,
-stage-specific evidence, and explicit stale/conflict recovery. Self-reported
-reviewer identity is not authentication. Unsaved drafts live in the browser;
-saved decisions live in SQLite.
-
-## Existing pipeline data
-
-Rebuild a registered dataset without replacing its individual configuration:
-
-```sh
-uv run python -m codebench_pipeline.dataset_cli build \
-  --dataset cloud_infrastructure_commands --home .codebench-selective
-```
-
-This uses the registered source paths, model roles, policy and settings rather
-than registering an example config over them. Preparation rematerializes only
-the changed dependency closure and stops at human review only when the final
-uncertainty queue is nonempty. With an empty queue it automatically releases
-machine-eligible rows through the same terminal asset. Existing published
-artifacts remain historical evidence; they are not silently approved.
-
-Subrisk IDs, names, definitions, guidance and routing belong to each category's
-initial JSON instruction; see `category-configuration.md`.
-
-## Verification
-
-`tests/test_review_workflow.py` exercises model candidates with arbitrary
-`model_id` and score columns through the real generic service and HTTP routes.
-It checks one-choice completion without publication, downstream selected-row
-consumption, stage isolation, changed-evidence invalidation, immutable old
-evidence, and legacy ledger migration. Existing real-Dagster release tests
-exercise the annotation adapter and the independent publication gate.
-
-Per-row retraction, source selection, documentation integration and concurrency
-contracts are exercised by the service, reader, source-review and real-Dagster
-tests. Synthetic fixtures make these checks independent of excluded category
-configs and local source captures. Keep live review ledgers and QA evidence local.
+Legacy SQLite ledgers require explicit verified import. Preserve the original
+ledger and manifests; never use old completion tokens to authorize the new
+column contract. Unverifiable or conflicting historical decisions remain
+inspectable history instead of being guessed into reusable approvals.

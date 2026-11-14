@@ -8,6 +8,7 @@ from dagster import AssetExecutionContext, AssetsDefinition, DagsterInstance, Ou
 from pandera.typing import DataFrame
 from pydantic import JsonValue, TypeAdapter
 
+from codebench_pipeline.category_eligibility import category_eligible_annotations as filter_category
 from codebench_pipeline.category_rules import CategoryRules
 from codebench_pipeline.data_views import DatasetDataService
 from codebench_pipeline.dataframe_io import DataFrameIOManager, frame_bytes
@@ -234,16 +235,52 @@ def finalization_assets() -> list[AssetsDefinition]:
         group_name="dataset_building",
         partitions_def=DATASET_PARTITIONS,
         io_manager_key="dataset_io_manager",
-        dagster_type=TABLE_TYPES[ReviewQueueTable],
+        dagster_type=TABLE_TYPES[ProposedAnnotationsTable],
         ins={
             "deduplicated_annotations": table_input("deduplicated_annotations", ProposedAnnotationsTable),
+            "category_rules": rules_input(),
+        },
+    )
+    def category_eligible_annotations(
+        context: AssetExecutionContext,
+        config: TypedConfig,
+        deduplicated_annotations: DataFrame[ProposedAnnotationsTable],
+        category_rules: CategoryRules,
+        dataset_io_manager: ResourceParam[DataFrameIOManager],
+    ) -> Output[DataFrame[ProposedAnnotationsTable]]:
+        def compute(evidence: Path) -> DataFrame[ProposedAnnotationsTable]:
+            frame = filter_category(deduplicated_annotations, category_rules)
+            (evidence / "category-exclusions.json").write_text(
+                json.dumps(frame.attrs["category_exclusions"]), encoding="utf-8"
+            )
+            return frame
+
+        return cached_table(
+            context,
+            dataset_io_manager,
+            config,
+            {"annotations": deduplicated_annotations, "category_rules": category_rules},
+            ProposedAnnotationsTable,
+            compute,
+        )
+
+    @asset(
+        key_prefix=["datasets"],
+        group_name="dataset_building",
+        partitions_def=DATASET_PARTITIONS,
+        io_manager_key="dataset_io_manager",
+        dagster_type=TABLE_TYPES[ReviewQueueTable],
+        ins={
+            "category_eligible_annotations": table_input(
+                "category_eligible_annotations", ProposedAnnotationsTable
+            ),
             "category_rules": rules_input(),
         },
     )
     def human_review_queue(
         context: AssetExecutionContext,
         config: PublicationConfig,
-        deduplicated_annotations: DataFrame[ProposedAnnotationsTable],
+        category_eligible_annotations: DataFrame[ProposedAnnotationsTable],
         category_rules: CategoryRules,
         dataset_io_manager: ResourceParam[DataFrameIOManager],
     ) -> Output[DataFrame[ReviewQueueTable]]:
@@ -251,9 +288,14 @@ def finalization_assets() -> list[AssetsDefinition]:
             context,
             dataset_io_manager,
             config,
-            {"annotations": deduplicated_annotations, "category_rules": category_rules},
+            {"annotations": category_eligible_annotations, "category_rules": category_rules},
             ReviewQueueTable,
-            lambda evidence: review_queue(deduplicated_annotations, category_rules, config),
+            lambda evidence: review_queue(category_eligible_annotations, category_rules, config),
         )
 
-    return [merged_command_candidates, deduplicated_annotations, human_review_queue]
+    return [
+        merged_command_candidates,
+        deduplicated_annotations,
+        category_eligible_annotations,
+        human_review_queue,
+    ]

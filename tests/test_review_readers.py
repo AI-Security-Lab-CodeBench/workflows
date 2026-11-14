@@ -1,11 +1,12 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from test_human_review_lifecycle import LifecycleSource
 
 from codebench_pipeline.data_view_models import DatasetQueryRequest
-from codebench_pipeline.human_review import DecisionChange, ReviewSnapshot
+from codebench_pipeline.human_review import DecisionChange, HumanReviewError, ReviewSnapshot
 from codebench_pipeline.human_review_store import HumanReviewStore
 from codebench_pipeline.review_stages import ReviewStage
 from codebench_pipeline.review_workflow import ReviewWorkflow
@@ -17,10 +18,11 @@ class ReviewReaderTests(unittest.TestCase):
             home = Path(temporary)
             workflow = ReviewWorkflow(
                 home,
-                ReviewStage(stage_id="selection", title="Selection", asset_keys=(("input",),)),
+                ReviewStage(stage_id="selection", title="Selection", asset_keys=(("input",),), review_columns=("id",)),
                 LifecycleSource("selection"),
             )
             query = DatasetQueryRequest(dataset_id="CAT-3.1")
+            workflow.prepare(query.dataset_id)
             original = workflow.view(query)
             with HumanReviewStore(home).transaction() as writer:
                 writer.save_decision(
@@ -34,7 +36,8 @@ class ReviewReaderTests(unittest.TestCase):
                         reviewer="writer",
                     ),
                 )
-                viewed = workflow.view(query)
+                with patch.object(workflow.source, "current", side_effect=AssertionError("Unprepared read")):
+                    viewed = workflow.view(query)
                 self.assertEqual(viewed.counts.pending, 2)
                 self.assertEqual(viewed.batch, original.batch)
             self.assertEqual(workflow.view(query).counts.approve, 1)
@@ -69,3 +72,21 @@ class ReviewReaderTests(unittest.TestCase):
             with store.reader() as reader:
                 self.assertEqual(reader.counts(batch.batch_id).approve, 1)
                 self.assertEqual(reader.get_current_batch("records").batch_revision, 1)
+
+    def test_unprepared_read_does_not_resolve_or_initialize_a_ledger(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary)
+            source = LifecycleSource("selection")
+            workflow = ReviewWorkflow(
+                home,
+                ReviewStage(stage_id="selection", title="Selection", asset_keys=(("input",),), review_columns=("id",)),
+                source,
+            )
+            with patch.object(source, "current", side_effect=AssertionError("Read resolved upstream")):
+                with self.assertRaises(HumanReviewError) as missing:
+                    workflow.view(DatasetQueryRequest(dataset_id="CAT-3.1"))
+            self.assertEqual(missing.exception.code, "not_found")
+            with self.assertRaises(HumanReviewError) as uninitialized:
+                with workflow.store.reader():
+                    self.fail("An unprepared read created a ledger")
+            self.assertEqual(uninitialized.exception.code, "not_found")

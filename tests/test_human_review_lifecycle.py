@@ -23,6 +23,7 @@ from codebench_pipeline.review_api_models import (
     EvidenceResponse,
     RetractionRequest,
 )
+from codebench_pipeline.review_identity import review_identity
 from codebench_pipeline.review_stages import ReviewInput, ReviewStage
 from codebench_pipeline.review_workflow import ReviewWorkflow
 
@@ -35,6 +36,11 @@ class LifecycleSource:
             snapshot_id="a" * 64,
             candidate_ids=("first", "second"),
             eligible_candidate_ids=("first", "second"),
+            review_columns=("id",),
+            record_fingerprints={
+                identifier: review_identity({"id": identifier}, ("id",))
+                for identifier in ("first", "second")
+            },
         )
 
     def current(self, dataset_id: str) -> ReviewInput:
@@ -50,10 +56,12 @@ class ReviewLifecycleTests(unittest.TestCase):
         self.addCleanup(temporary.cleanup)
         self.home = Path(temporary.name)
         self.stage = ReviewStage(
-            stage_id="selection", title="Selection", asset_keys=(("input",),), can_continue=True
+            stage_id="selection", title="Selection", asset_keys=(("input",),), can_continue=True,
+            review_columns=("id",),
         )
         self.source = LifecycleSource(self.stage.stage_id)
         self.workflow = ReviewWorkflow(self.home, self.stage, self.source)
+        self.workflow.prepare("CAT-3.1")
         self.query = DatasetQueryRequest(dataset_id="CAT-3.1")
         batch = self.workflow.view(self.query).batch
         for candidate_id in ("first", "second"):
@@ -119,6 +127,7 @@ class ReviewLifecycleTests(unittest.TestCase):
     def test_open_row_retraction_does_not_reopen_or_change_other_stage(self) -> None:
         other_stage = self.stage.model_copy(update={"stage_id": "other"})
         other = ReviewWorkflow(self.home, other_stage, LifecycleSource("other"))
+        other.prepare("CAT-3.1")
         original_other = other.view(self.query)
         before = self.workflow.view(self.query)
         with self.assertRaises(HumanReviewError) as foreign:

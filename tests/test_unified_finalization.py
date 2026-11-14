@@ -4,12 +4,15 @@ from pandera.typing import DataFrame
 from pydantic import JsonValue
 from test_dataset_rules import make_candidate, make_label, make_rules
 
+from codebench_pipeline.category_eligibility import category_eligible_annotations
 from codebench_pipeline.dataframe_schemas import (
     CommandCandidatesTable,
     ProposedAnnotationsTable,
     validated_frame,
 )
+from codebench_pipeline.dataset_config import PublicationConfig
 from codebench_pipeline.dataset_finalization import deduplicate_annotations, merge_candidates
+from codebench_pipeline.dataset_tables import review_queue
 
 
 def reviewed_row(identity: str, **changes: JsonValue) -> dict[str, JsonValue]:
@@ -27,6 +30,48 @@ def annotations(*rows: dict[str, JsonValue]) -> DataFrame[ProposedAnnotationsTab
 
 
 class UnifiedDeduplicationTests(unittest.TestCase):
+    def test_category_filter_retains_supported_confidence_and_preserves_exclusions(self) -> None:
+        original = annotations(
+            reviewed_row("high"),
+            reviewed_row("medium", category_confidence="medium"),
+            reviewed_row("low", category_confidence="low"),
+            reviewed_row("irrelevant", decision="reject"),
+            reviewed_row("foreign", category_id="CAT-9"),
+            reviewed_row("uncertain", decision="needs_review", risk_confidence="low"),
+        )
+        original.attrs["duplicates"] = [{"duplicate_id": "duplicate", "survivor_id": "high"}]
+        retained = category_eligible_annotations(original, make_rules())
+        self.assertEqual(retained["candidate_id"].tolist(), ["high", "medium", "uncertain"])
+        self.assertEqual(
+            retained.attrs["category_exclusions"],
+            [
+                {"candidate_id": "low", "reasons": ["low_category_confidence"]},
+                {"candidate_id": "irrelevant", "reasons": ["label_rejected"]},
+                {"candidate_id": "foreign", "reasons": ["different_category"]},
+            ],
+        )
+        self.assertEqual(retained.attrs["duplicates"], original.attrs["duplicates"])
+        self.assertEqual(len(original), 6)
+        self.assertNotIn("category_exclusions", original.attrs)
+
+    def test_retained_medium_confidence_in_each_dimension_requires_human_review(self) -> None:
+        fields = ("category_confidence", "risk_confidence", "severity_confidence", "class_confidence")
+        original = annotations(
+            reviewed_row("automatic"),
+            *(reviewed_row(field, **{field: "medium"}) for field in fields),
+            reviewed_row("excluded", category_confidence="low"),
+        )
+        retained = category_eligible_annotations(original, make_rules())
+        queue = review_queue(retained, make_rules(), PublicationConfig())
+        self.assertEqual(queue["candidate_id"].tolist(), list(fields))
+
+    def test_category_filter_accepts_empty_and_all_excluded_tables(self) -> None:
+        for original in (annotations(), annotations(reviewed_row("low", category_confidence="low"))):
+            with self.subTest(rows=len(original)):
+                retained = category_eligible_annotations(original, make_rules())
+                self.assertTrue(retained.empty)
+                self.assertEqual(len(retained.attrs["category_exclusions"]), len(original))
+
     def test_branch_collisions_retain_original_identity_and_duplicate_mapping(self) -> None:
         merged = merge_candidates(
             validated_frame([make_candidate("one").model_dump(mode="json")], CommandCandidatesTable),

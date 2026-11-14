@@ -128,8 +128,9 @@ class SourceReviewTests(unittest.TestCase):
         )
 
     def test_source_review_retraction_does_not_invalidate_inventory_outputs(self) -> None:
+        self.workflow.prepare(self.spec.dataset_id)
         view = self.workflow.view(self.query)
-        for identity in view.batch.snapshot.candidate_ids:
+        for identity in (row.review_record_id for row in view.page.rows):
             self.workflow.decide(
                 DecisionRequest(
                     dataset_id=self.spec.dataset_id,
@@ -159,7 +160,7 @@ class SourceReviewTests(unittest.TestCase):
                 dataset_id=self.spec.dataset_id,
                 snapshot_id=completed.batch.snapshot.snapshot_id,
                 expected=completed.batch,
-                candidate_id=completed.batch.snapshot.candidate_ids[0],
+                candidate_id=completed.page.rows[0].review_record_id,
                 expected_row_revision=1,
                 reviewer="historical fixture reviewer",
             )

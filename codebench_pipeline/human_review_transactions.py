@@ -1,280 +1,245 @@
 from __future__ import annotations
 
-from typing import assert_never
+import json
 from uuid import uuid4
 
-from pydantic import TypeAdapter
+from psycopg.types.json import Jsonb
+from pydantic import JsonValue, TypeAdapter
 
+from codebench_pipeline.category_rules import CategoryRules
 from codebench_pipeline.human_review import (
-    BatchVersion,
-    CompletionToken,
     DecisionChange,
     HumanReviewError,
-    PublicationPayload,
-    PublicationReference,
+    PreparedReview,
     ReviewBatch,
     ReviewDecision,
     ReviewHistoryEntry,
     ReviewSnapshot,
     Text,
-    decisions_digest,
-    require_decided_batch,
 )
-from codebench_pipeline.human_review_schema import ReviewRepository, timestamp
+from codebench_pipeline.human_review_schema import timestamp
+from codebench_pipeline.label_corrections import LabelCorrectionContext, validate_review_edits
+from codebench_pipeline.review_identity import review_identity
+from codebench_pipeline.review_postgres_lifecycle import ReviewLifecycle
+from codebench_pipeline.review_postgres_values import decision_values, row_cells, same_json_type
+from codebench_pipeline.storage import fingerprint
 
 
-class HumanReviewTransaction(ReviewRepository):
+class HumanReviewTransaction(ReviewLifecycle):
+    def prepare(self, prepared: PreparedReview) -> ReviewBatch:
+        snapshot = prepared.snapshot
+        if len(set(prepared.columns)) != len(prepared.columns):
+            raise HumanReviewError("conflict", "Prepared columns must be distinct")
+        if not snapshot.review_columns or not set(snapshot.review_columns).issubset(prepared.columns):
+            raise HumanReviewError("conflict", "Selected review columns must belong to the prepared table")
+        if len(set(snapshot.review_columns)) != len(snapshot.review_columns):
+            raise HumanReviewError("conflict", "Selected review columns must be distinct")
+        if prepared.id_column not in prepared.columns or set(prepared.columns).intersection(
+            {"human_decision", "human_reviewer", "human_notes", "human_edits"}
+        ):
+            raise HumanReviewError("conflict", "Prepared columns conflict with review metadata or lack the identity")
+        if "rules" in prepared.validation:
+            CategoryRules.model_validate(prepared.validation["rules"])
+        ids: list[str] = []
+        for row in prepared.rows:
+            if set(row) != set(prepared.columns):
+                raise HumanReviewError("conflict", "Prepared row columns differ from the captured schema")
+            candidate_id = TypeAdapter(Text).validate_python(row.get(prepared.id_column), strict=True)
+            try:
+                json.dumps(row, allow_nan=False)
+            except ValueError as error:
+                raise HumanReviewError("ineligible", "Prepared rows must contain finite JSON values") from error
+            review_identity(row, snapshot.review_columns)
+            ids.append(candidate_id)
+        if tuple(ids) != snapshot.candidate_ids:
+            raise HumanReviewError("conflict", "Prepared identities differ from the snapshot")
+        metadata = prepared.model_dump(mode="json", exclude={"snapshot", "rows"})
+        return self._activate(snapshot, prepared.rows, prepared.id_column, metadata)
+
     def ensure_current_batch(self, snapshot: ReviewSnapshot) -> ReviewBatch:
-        reusable: dict[str, ReviewDecision] = {}
-        try:
-            current = self.get_current_batch(snapshot.dataset_id, snapshot.review_stage)
-        except HumanReviewError as error:
-            if error.code != "not_found":
-                raise
-        else:
-            if current.snapshot == snapshot:
+        self.lock_dataset(snapshot.dataset_id)
+        existing = self.connection.execute(
+            "SELECT batch_id,invalidated,prepared IS NOT NULL AS prepared FROM review_batches "
+            "WHERE dataset_id=%s AND review_stage=%s AND current",
+            (snapshot.dataset_id, snapshot.review_stage),
+        ).fetchone()
+        if existing is not None:
+            batch_id = TypeAdapter(str).validate_python(existing["batch_id"])
+            if existing["prepared"] and existing["invalidated"] is not None:
+                raise HumanReviewError("stale", "Prepared review authority must be revalidated by prepare")
+            full = self._full_batch(batch_id)
+            if existing["invalidated"] is None and snapshot == full.snapshot:
+                return full
+        rows: tuple[dict[str, JsonValue], ...] = tuple(
+            {"candidate_id": identifier} for identifier in snapshot.candidate_ids
+        )
+        return self._activate(snapshot, rows, "candidate_id", None)
+
+    def _activate(
+        self, snapshot: ReviewSnapshot, rows: tuple[dict[str, JsonValue], ...],
+        id_column: str, metadata: dict[str, JsonValue] | None,
+    ) -> ReviewBatch:
+        self.lock_dataset(snapshot.dataset_id)
+        binding = fingerprint({"snapshot": snapshot.model_dump(mode="json"), "rows": list(rows),
+                               "metadata": metadata})
+        current_row = self.connection.execute(
+            "SELECT batch_id,binding,invalidated FROM review_batches WHERE dataset_id=%s AND review_stage=%s AND current",
+            (snapshot.dataset_id, snapshot.review_stage),
+        ).fetchone()
+        if current_row:
+            current = self._full_batch(TypeAdapter(str).validate_python(current_row["batch_id"]))
+            if current_row["binding"] == binding and current_row["invalidated"] is None:
                 return current
-            if current.snapshot.snapshot_id == snapshot.snapshot_id:
+            if current.snapshot.snapshot_id == snapshot.snapshot_id and current_row["binding"] != binding:
                 raise HumanReviewError("conflict", "Snapshot digest has a different identity binding")
-            if (
-                current.snapshot.min_approvals == snapshot.min_approvals
-                and current.snapshot.max_approvals == snapshot.max_approvals
-            ):
-                reusable = {
-                    row.candidate_id: row
-                    for row in self.list_decisions(current.batch_id)
-                    if row.decision != "pending"
-                    and row.candidate_id in snapshot.record_fingerprints
-                    and snapshot.record_fingerprints[row.candidate_id]
-                    == current.snapshot.record_fingerprints.get(row.candidate_id)
-                    and (row.candidate_id in snapshot.eligible_candidate_ids)
-                    == (row.candidate_id in current.snapshot.eligible_candidate_ids)
-                }
             superseded = current.model_copy(update={"state": "superseded", "updated_at": timestamp()})
             self._write_batch(superseded, current=False)
-            self._audit(
-                ReviewHistoryEntry(event="superseded", batch=superseded, recorded_at=superseded.updated_at)
-            )
+            self.audit(ReviewHistoryEntry(event="superseded", batch=superseded, recorded_at=superseded.updated_at))
         now = timestamp()
         batch = ReviewBatch(
-            batch_id=uuid4().hex,
-            snapshot=snapshot,
-            generation=1,
-            batch_revision=len(reusable),
-            state="open",
-            created_at=now,
-            updated_at=now,
+            batch_id=uuid4().hex, snapshot=snapshot, generation=1, batch_revision=0,
+            state="open", created_at=now, updated_at=now,
         )
-        self._connection.execute(
-            """INSERT INTO human_review_batches(batch_id, dataset_id, review_stage, current, data)
-               VALUES (?, ?, ?, 1, ?)""",
-            (batch.batch_id, snapshot.dataset_id, snapshot.review_stage, batch.model_dump_json()),
-        )
-        for candidate_id in snapshot.candidate_ids:
-            previous = reusable.get(candidate_id)
-            row = (
-                previous.model_copy(
-                    update={"batch_id": batch.batch_id, "carried_from_batch_id": previous.batch_id}
-                )
-                if previous is not None
-                else ReviewDecision(
-                    batch_id=batch.batch_id, candidate_id=candidate_id, created_at=now, updated_at=now
-                )
+        self.insert_batch(batch, binding, metadata)
+        eligible = set(snapshot.eligible_candidate_ids)
+        grouped: dict[str, list[tuple[int, str, dict[str, JsonValue]]]] = {}
+        for index, row in enumerate(rows):
+            identifier = TypeAdapter(str).validate_python(row[id_column], strict=True)
+            record_hash = (
+                review_identity(row, snapshot.review_columns) if metadata is not None
+                else snapshot.record_fingerprints.get(identifier)
+                or fingerprint({"snapshot": snapshot.snapshot_id, "candidate": identifier})
             )
-            self._connection.execute(
-                "INSERT INTO human_review_decisions(batch_id, candidate_id, data) VALUES (?, ?, ?)",
-                (batch.batch_id, candidate_id, row.model_dump_json()),
+            grouped.setdefault(record_hash, []).append((index, identifier, row))
+        carried: list[ReviewDecision] = []
+        heads = {
+            TypeAdapter(str).validate_python(row["record_hash"]): ReviewDecision.model_validate(row["data"])
+            for row in self.connection.execute(
+                "SELECT record_hash,data FROM review_heads WHERE dataset_id=%s AND review_stage=%s "
+                "AND record_hash=ANY(%s)",
+                (snapshot.dataset_id, snapshot.review_stage, list(grouped)),
             )
-        self._audit(ReviewHistoryEntry(event="created", batch=batch, recorded_at=now))
-        for row in self.list_decisions(batch.batch_id):
-            if row.carried_from_batch_id is not None:
-                self._audit(ReviewHistoryEntry(event="carried", batch=batch, decision=row, recorded_at=now))
+        }
+        items: list[tuple[str, str, Jsonb, Jsonb]] = []
+        occurrences_to_insert: list[tuple[str, str, int, str, bool, str, Jsonb, str | None]] = []
+        for record_hash, occurrences in grouped.items():
+            previous = heads.get(record_hash)
+            identifier = occurrences[0][1]
+            if previous is not None:
+                decision = previous.model_copy(update={
+                    "batch_id": batch.batch_id, "candidate_id": identifier,
+                    "carried_from_batch_id": previous.batch_id,
+                })
+                carried.append(decision)
+            else:
+                decision = ReviewDecision(batch_id=batch.batch_id, candidate_id=identifier,
+                                          created_at=now, updated_at=now)
+            items.append((batch.batch_id, record_hash, Jsonb(decision.model_dump(mode="json")),
+                          Jsonb(row_cells(decision_values(decision)))))
+            for index, candidate_id, row in occurrences:
+                blocked_reason = None if candidate_id in eligible else "Machine-ineligible occurrence"
+                if decision.decision == "approve":
+                    try:
+                        self._validate_edits(row, decision.edits, snapshot.review_columns, metadata)
+                    except HumanReviewError as error:
+                        blocked_reason = error.detail
+                occurrences_to_insert.append((
+                    batch.batch_id, candidate_id, index, record_hash, candidate_id in eligible,
+                    json.dumps(row, ensure_ascii=False, allow_nan=False), Jsonb(row_cells(row)), blocked_reason,
+                ))
+        with self.connection.cursor() as cursor:
+            cursor.executemany(
+                "INSERT INTO review_items(batch_id,record_hash,data,cells) VALUES(%s,%s,%s,%s)", items
+            )
+            cursor.executemany(
+                """INSERT INTO review_rows(batch_id,candidate_id,row_index,record_hash,eligible,row_data,cells,blocked_reason)
+                    VALUES(%s,%s,%s,%s,%s,%s,%s,%s)""",
+                occurrences_to_insert,
+            )
+        batch = batch.model_copy(update={"batch_revision": len(carried)})
+        self._write_batch(batch)
+        self.audit(ReviewHistoryEntry(event="created", batch=batch, recorded_at=now))
+        for decision in carried:
+            self.audit(ReviewHistoryEntry(event="carried", batch=batch, decision=decision, recorded_at=now))
         return batch
 
-    def _bound(self, snapshot: ReviewSnapshot, batch_id: str, generation: int) -> ReviewBatch:
-        batch = self.get_current_batch(snapshot.dataset_id, snapshot.review_stage)
-        if batch.snapshot != snapshot or batch.batch_id != batch_id or batch.generation != generation:
-            raise HumanReviewError("stale", "Snapshot, batch or generation is no longer current")
-        return batch
+    def _validate_edits(
+        self, row: dict[str, JsonValue], edits: dict[str, JsonValue], columns: tuple[str, ...],
+        metadata: dict[str, JsonValue] | None,
+    ) -> None:
+        if metadata is None:
+            if edits:
+                raise HumanReviewError("ineligible", "Edits require captured prepared column values")
+            return
+        if not set(edits).issubset(columns):
+            raise HumanReviewError("ineligible", "Edits must be limited to selected review columns")
+        for column, value in edits.items():
+            if not same_json_type(row[column], value):
+                raise HumanReviewError("ineligible", f"Edit changes the captured JSON type of {column}")
+        if columns:
+            review_identity({**row, **edits}, columns)
+        validation = TypeAdapter(dict[str, JsonValue]).validate_python(metadata["validation"])
+        if "rules" in validation:
+            validate_review_edits(row, edits, CategoryRules.model_validate(validation["rules"]))
 
-    def save_decision(self, snapshot: ReviewSnapshot, change: DecisionChange) -> ReviewDecision:
+    def invalidate(self, dataset_id: str, reason: str) -> None:
+        self.lock_dataset(dataset_id)
+        reason = TypeAdapter(Text).validate_python(reason)
+        self.connection.execute(
+            "UPDATE review_batches SET invalidated=%s WHERE dataset_id=%s AND current", (reason, dataset_id)
+        )
+
+    def save_decision(
+        self, snapshot: ReviewSnapshot, change: DecisionChange, *,
+        correction_context: LabelCorrectionContext | None = None,
+    ) -> ReviewDecision:
         batch = self._bound(snapshot, change.batch_id, change.generation)
         batch.require_open()
-        row = self._connection.execute(
-            "SELECT data FROM human_review_decisions WHERE batch_id = ? AND candidate_id = ?",
-            (batch.batch_id, change.candidate_id),
+        row = self.connection.execute(
+            """SELECT i.data,r.record_hash FROM review_rows r JOIN review_items i USING(batch_id,record_hash)
+                WHERE r.batch_id=%s AND r.candidate_id=%s""", (batch.batch_id, change.candidate_id)
         ).fetchone()
         if row is None:
             raise HumanReviewError("not_found", "Candidate is not in this batch")
-        previous = ReviewDecision.model_validate_json(TypeAdapter(str).validate_python(row[0]))
+        previous = ReviewDecision.model_validate(row["data"])
         if previous.row_revision != change.expected_row_revision:
             raise HumanReviewError("stale", "Decision row revision changed")
-        match change.decision:
-            case "approve":
-                if change.candidate_id not in snapshot.eligible_candidate_ids:
-                    raise HumanReviewError("ineligible", "Human approval cannot override eligibility")
-            case "pending" | "reject":
-                pass
-            case _:
-                assert_never(change.decision)
+        metadata = self._metadata(batch.batch_id)
+        for original in self.rows_for_hash(batch.batch_id, change.candidate_id):
+            if change.decision == "approve":
+                self._validate_edits(original, change.edits, batch.snapshot.review_columns, metadata)
+        if change.decision == "approve":
+            blocked = self.connection.execute(
+                "SELECT 1 FROM review_rows WHERE batch_id=%s AND record_hash=%s AND NOT eligible LIMIT 1",
+                (batch.batch_id, row["record_hash"]),
+            ).fetchone()
+            if blocked:
+                raise HumanReviewError("ineligible", "Human approval cannot override eligibility")
         now = timestamp()
         decision = ReviewDecision(
-            batch_id=batch.batch_id,
-            candidate_id=change.candidate_id,
-            decision=change.decision,
-            notes=change.notes,
-            reviewer=change.reviewer,
-            row_revision=previous.row_revision + 1,
-            created_at=previous.created_at,
-            updated_at=now,
+            batch_id=batch.batch_id, candidate_id=previous.candidate_id, decision=change.decision,
+            edits=change.edits, notes=change.notes, reviewer=change.reviewer,
+            row_revision=previous.row_revision + 1, created_at=previous.created_at, updated_at=now,
         )
-        self._connection.execute(
-            "UPDATE human_review_decisions SET data = ? WHERE batch_id = ? AND candidate_id = ?",
-            (decision.model_dump_json(), batch.batch_id, change.candidate_id),
+        result = self.connection.execute(
+            """UPDATE review_items SET data=%s,cells=%s WHERE batch_id=%s AND record_hash=%s
+                AND (data->>'row_revision')::bigint=%s""",
+            (Jsonb(decision.model_dump(mode="json")), Jsonb(row_cells(decision_values(decision))),
+             batch.batch_id, row["record_hash"], change.expected_row_revision),
         )
-        updated = batch.model_copy(
-            update={
-                "batch_revision": batch.batch_revision + 1,
-                "updated_at": now,
-            }
+        if result.rowcount != 1:
+            raise HumanReviewError("stale", "Decision row revision changed")
+        self.connection.execute(
+            """INSERT INTO review_heads VALUES(%s,%s,%s,%s)
+                ON CONFLICT(dataset_id,review_stage,record_hash) DO UPDATE SET data=excluded.data""",
+            (snapshot.dataset_id, snapshot.review_stage, row["record_hash"], Jsonb(decision.model_dump(mode="json"))),
         )
-        self._write_batch(updated)
-        self._audit(ReviewHistoryEntry(event="decision", batch=updated, decision=decision, recorded_at=now))
-        return decision
-
-    def expected_batch(self, snapshot: ReviewSnapshot, expected: BatchVersion) -> ReviewBatch:
-        batch = self._bound(snapshot, expected.batch_id, expected.generation)
-        if batch.batch_revision != expected.batch_revision:
-            raise HumanReviewError("stale", "Batch revision changed")
-        return batch
-
-    def complete(
-        self,
-        snapshot: ReviewSnapshot,
-        expected: BatchVersion,
-        reviewer: str,
-    ) -> CompletionToken:
-        actor = TypeAdapter(Text).validate_python(reviewer)
-        batch = self.expected_batch(snapshot, expected)
-        batch.require_open()
-        decisions = self.list_decisions(batch.batch_id)
-        require_decided_batch(batch, decisions)
-        token = CompletionToken(
-            dataset_id=snapshot.dataset_id,
-            review_stage=snapshot.review_stage,
-            snapshot_id=snapshot.snapshot_id,
-            decision_digest=decisions_digest(decisions),
-            batch_id=batch.batch_id,
-            generation=batch.generation,
-            batch_revision=batch.batch_revision + 1,
-            token=uuid4().hex,
-        )
-        now = timestamp()
-        updated = batch.model_copy(
-            update={
-                "state": "completed",
-                "completion": token,
-                "reviewer": actor,
-                "batch_revision": token.batch_revision,
-                "updated_at": now,
-            }
-        )
-        self._write_batch(updated)
-        self._audit(ReviewHistoryEntry(event="completed", batch=updated, recorded_at=now))
-        return token
-
-    def reopen(self, snapshot: ReviewSnapshot, expected: BatchVersion, reviewer: str) -> ReviewBatch:
-        actor = TypeAdapter(Text).validate_python(reviewer)
-        batch = self.expected_batch(snapshot, expected)
-        match batch.state:
-            case "completed":
-                pass
-            case "open":
-                raise HumanReviewError("conflict", "Only a completed batch can be reopened")
-            case "superseded":
-                raise HumanReviewError("stale", "Batch was superseded")
-            case _:
-                assert_never(batch.state)
-        now = timestamp()
-        updated = batch.model_copy(
-            update={
-                "state": "open",
-                "generation": batch.generation + 1,
-                "batch_revision": batch.batch_revision + 1,
-                "completion": None,
-                "continuation_run_id": None,
-                "reviewer": actor,
-                "updated_at": now,
-            }
-        )
-        self._write_batch(updated)
-        self._audit(ReviewHistoryEntry(event="reopened", batch=updated, recorded_at=now))
-        return updated
-
-    def record_continuation(
-        self,
-        snapshot: ReviewSnapshot,
-        authorization: CompletionToken,
-        run_id: str | None,
-    ) -> ReviewBatch:
-        run_id = TypeAdapter(Text | None).validate_python(run_id)
-        self.authorize_completion(snapshot, authorization)
-        batch = self.get_current_batch(snapshot.dataset_id, snapshot.review_stage)
-        if run_id is None:
-            return batch
-        updated = batch.model_copy(update={"continuation_run_id": run_id, "updated_at": timestamp()})
-        self._write_batch(updated)
-        self._audit(ReviewHistoryEntry(event="continued", batch=updated, recorded_at=updated.updated_at))
-        return updated
-
-    def authorize_completion(
-        self,
-        snapshot: ReviewSnapshot,
-        token: CompletionToken,
-    ) -> CompletionToken:
-        batch = self._bound(snapshot, token.batch_id, token.generation)
-        if (
-            batch.completion != token
-            or token.dataset_id != snapshot.dataset_id
-            or token.review_stage != snapshot.review_stage
-        ):
-            raise HumanReviewError("stale", "Completion token does not match persisted authorization")
-        match batch.state:
-            case "completed":
-                decisions = self.list_decisions(batch.batch_id)
-                require_decided_batch(batch, decisions)
-                if not batch.reviewer.strip() or decisions_digest(decisions) != token.decision_digest:
-                    raise HumanReviewError("stale", "Completed decisions or completion provenance changed")
-                return token
-            case "open" | "superseded":
-                raise HumanReviewError("conflict", "Current batch is not completed")
-            case _:
-                assert_never(batch.state)
-
-    def record_publication(
-        self,
-        snapshot: ReviewSnapshot,
-        authorization: CompletionToken,
-        payload: PublicationPayload,
-    ) -> PublicationReference:
-        token = self.authorize_completion(snapshot, authorization)
-        reference = PublicationReference(
-            **payload.model_dump(),
-            publication_id=uuid4().hex,
-            authorization=token,
-            created_at=timestamp(),
-        )
-        self._connection.execute(
-            """INSERT INTO human_review_publications(publication_id, dataset_id, batch_id, data)
-                VALUES (?, ?, ?, ?)""",
-            (reference.publication_id, snapshot.dataset_id, token.batch_id, reference.model_dump_json()),
-        )
-        self._audit(
-            ReviewHistoryEntry(
-                event="published",
-                batch=self.get_current_batch(snapshot.dataset_id, snapshot.review_stage),
-                publication=reference,
-                recorded_at=reference.created_at,
+        if change.decision == "approve":
+            self.connection.execute(
+                "UPDATE review_rows SET blocked_reason=NULL WHERE batch_id=%s AND record_hash=%s",
+                (batch.batch_id, row["record_hash"]),
             )
-        )
-        return reference
+        updated = batch.model_copy(update={"batch_revision": batch.batch_revision + 1, "updated_at": now})
+        self._write_batch(updated)
+        self.audit(ReviewHistoryEntry(event="decision", batch=updated, decision=decision, recorded_at=now))
+        return decision.model_copy(update={"candidate_id": change.candidate_id})

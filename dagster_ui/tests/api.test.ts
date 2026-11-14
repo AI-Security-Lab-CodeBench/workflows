@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
 import {afterEach, test} from 'node:test';
-import {ApiError, request} from '../src/api';
-import {batchSchema, completeSchema, dataSchema, reviewStagesSchema, savedSchema, stageResponses} from '../src/models';
-import {retractionBody} from '../src/decisions';
+import {ApiError, getReviewItem, nextReviewItem, request} from '../src/api';
+import {batchSchema, completeSchema, dataSchema, initialQuery, reviewStagesSchema, savedSchema, stageResponses} from '../src/models';
+import {changeEditValue, decisionBody, decisionDraft, retractionBody} from '../src/decisions';
 import {reviewPath} from '../src/reviewStages';
 
 const originalFetch = globalThis.fetch;
@@ -70,7 +70,7 @@ function completionFixture(reviewStage?: string) {
         ...(reviewStage === undefined ? {} : {review_stage: reviewStage})},
       created_at: '2026-11-10', updated_at: '2026-11-10', reviewer: 'one', completion,
     },
-    counts: {pending: 0, approve: 1, reject: 0}, completion, publication: null, run_id: null,
+    counts: {pending: 0, approve: 1, reject: 0, blocked: 0, approved_occurrences: 1}, completion, publication: null, run_id: null,
   };
 }
 
@@ -117,7 +117,7 @@ test('retraction posts revision-bound JSON and accepts a reopened generation wit
     return Response.json({
       batch: {...batch, state: 'open', generation: 2, batch_revision: 3, completion: null},
       decision: {...decision, decision: 'pending', row_revision: 5},
-      counts: {pending: 1, approve: 0, reject: 0},
+      counts: {pending: 1, approve: 0, reject: 0, blocked: 0, approved_occurrences: 0},
     });
   };
   const result = await request(`${reviewPath('sources')}/retract`, stageResponses('sources').saved,
@@ -185,5 +185,97 @@ test('stale decision and downstream tables remain inspectable without a publishe
   if (data.kind === 'table') {
     assert.equal(data.publication_state, 'stale');
     assert.deepEqual(data.page.rows.map((row) => row.values), [{id: 'source-1'}]);
+  }
+});
+
+test('approval sends configured generic edits and retains server values after response parsing', async () => {
+  const batch = batchSchema.parse({...completionFixture().batch, state: 'open', completion: null});
+  const draft = changeEditValue(changeEditValue(
+    {...decisionDraft(undefined), decision: 'approve'}, 'command', 'edited command'), 'extra', {nested: [false, null]});
+  let posted: unknown;
+  globalThis.fetch = async (path, options) => {
+    posted = {path, method: options?.method, body: JSON.parse(String(options?.body))};
+    return Response.json({
+      batch,
+      decision: {
+        batch_id: 'batch-1', candidate_id: 'model-a', decision: 'approve', notes: '',
+        reviewer: 'two', row_revision: 1, created_at: '2026-11-14', updated_at: '2026-11-14',
+        edits: {command: 'edited command', extra: {nested: [false, null]}},
+      },
+      counts: {pending: 0, approve: 1, reject: 0, blocked: 0, approved_occurrences: 1},
+    });
+  };
+  const result = await request(`${reviewPath('annotations')}/decision`, savedSchema,
+    'PUT', decisionBody(batch, 'model-a', draft, 'two', ['command', 'extra']));
+  assert.deepEqual(posted, {
+    path: '/codebench/api/reviews/annotations/decision', method: 'PUT',
+    body: {
+      dataset_id: 'dataset-1', snapshot_id: 'a'.repeat(64),
+      change: {batch_id: 'batch-1', generation: 1, candidate_id: 'model-a', expected_row_revision: 0,
+        decision: 'approve', notes: '', reviewer: 'two', edits: {command: 'edited command', extra: {nested: [false, null]}}},
+    },
+  });
+  assert.deepEqual(decisionDraft(result.decision).edits, {command: 'edited command', extra: {nested: [false, null]}});
+});
+
+function itemFixture() {
+  return {
+    row: {row_index: 102, review_record_id: 'off/page', occurrence_count: 4, blocked_reason: null,
+      values: {command: 'original command', payload: {a: true}}},
+    decision: {batch_id: 'batch-1', candidate_id: 'off/page', decision: 'pending',
+      notes: '', reviewer: '', row_revision: 0, created_at: '2026-11-14', updated_at: '2026-11-14', edits: {}},
+    review_columns: ['command', 'payload'],
+  };
+}
+
+test('server next pending receives the active query and returns an off-page item with compact metadata', async () => {
+  const original = batchSchema.parse(completionFixture('custom/stage').batch);
+  const batch = {...original, snapshot: {...original.snapshot, candidate_ids: [], eligible_candidate_ids: []}};
+  const query = {...initialQuery, offset: 50, search: 'literal text'};
+  let posted: unknown;
+  globalThis.fetch = async (path, options) => {
+    posted = {path, method: options?.method, body: JSON.parse(String(options?.body))};
+    return Response.json(itemFixture());
+  };
+  const item = await nextReviewItem(batch, query, 'current/id');
+  assert.deepEqual(posted, {
+    path: '/codebench/api/reviews/custom%2Fstage/next', method: 'POST',
+    body: {dataset_id: 'dataset-1', snapshot_id: 'a'.repeat(64), query, after_id: 'current/id'},
+  });
+  assert.deepEqual([item?.row.review_record_id, item?.row.occurrence_count, item?.decision.decision],
+    ['off/page', 4, 'pending']);
+});
+
+test('server next pending permits an exhausted filtered queue', async () => {
+  const batch = batchSchema.parse(completionFixture().batch);
+  globalThis.fetch = async () => Response.json(null);
+  assert.equal(await nextReviewItem(batch, initialQuery), null);
+});
+
+test('item lookup encodes stage batch and identity and retains original JSON values', async () => {
+  const batch = batchSchema.parse(completionFixture('custom/stage').batch);
+  let requested: unknown;
+  globalThis.fetch = async (path, options) => {
+    requested = {path, method: options?.method};
+    return Response.json(itemFixture());
+  };
+  const item = await getReviewItem(batch, 'off/page');
+  assert.deepEqual(requested, {
+    path: '/codebench/api/reviews/custom%2Fstage/batch-1/item/off%2Fpage?dataset_id=dataset-1', method: 'GET',
+  });
+  assert.deepEqual(item.row.values, {command: 'original command', payload: {a: true}});
+  assert.deepEqual(item.review_columns, ['command', 'payload']);
+});
+
+test('item responses reject mismatched batch and record identities', async () => {
+  const batch = batchSchema.parse(completionFixture().batch);
+  for (const {response, id} of [
+    {response: {...itemFixture(), decision: {...itemFixture().decision, batch_id: 'foreign'}}, id: 'off/page'},
+    {response: {...itemFixture(), decision: {...itemFixture().decision, candidate_id: 'foreign'}}, id: 'off/page'},
+    {response: itemFixture(), id: 'different-record'},
+  ]) {
+    globalThis.fetch = async () => Response.json(response);
+    await assert.rejects(getReviewItem(batch, id),
+      (error: unknown) => error instanceof ApiError && error.code === 'invalid_response');
   }
 });

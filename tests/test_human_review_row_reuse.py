@@ -107,20 +107,37 @@ class HumanReviewRowReuseTests(unittest.TestCase):
             self.assertNotEqual(token.token, self.token.token)
             self.assertEqual(tx.authorize_completion(updated, token), token)
 
-    def test_changed_eligibility_does_not_carry_an_obsolete_approval(self) -> None:
+    def test_changed_eligibility_retains_decision_but_blocks_obsolete_approval(self) -> None:
         updated = self.snapshot.model_copy(
             update={"snapshot_id": "1" * 64, "eligible_candidate_ids": ("second",)}
         )
         with self.store.transaction() as tx:
             batch = tx.ensure_current_batch(updated)
             self.assertEqual(
-                [row.decision for row in tx.list_decisions(batch.batch_id)], ["pending", "reject"]
+                [row.decision for row in tx.list_decisions(batch.batch_id)], ["approve", "reject"]
             )
+            self.assertEqual(tx.counts(batch.batch_id).blocked, 1)
+            with self.assertRaises(HumanReviewError) as blocked:
+                tx.complete(updated, batch, "completion reviewer")
+            self.assertEqual(blocked.exception.code, "ineligible")
 
-    def test_changed_bounds_and_legacy_fingerprints_require_fresh_decisions(self) -> None:
+    def test_changed_bounds_reuse_decisions_but_revalidate_completion(self) -> None:
+        for index, bounds in enumerate(({"min_approvals": 2}, {"max_approvals": 0}), start=1):
+            updated = self.snapshot.model_copy(update={
+                **bounds, "snapshot_id": str(index) * 64,
+            })
+            with self.subTest(bounds=bounds), self.store.transaction() as tx:
+                batch = tx.ensure_current_batch(updated)
+                self.assertEqual(
+                    [row.decision for row in tx.list_decisions(batch.batch_id)], ["approve", "reject"]
+                )
+                self.assertIsNone(batch.completion)
+                with self.assertRaises(HumanReviewError) as selection:
+                    tx.complete(updated, batch, "completion reviewer")
+                self.assertEqual(selection.exception.code, "selection")
+
+    def test_unverified_legacy_fingerprints_and_foreign_scopes_require_fresh_decisions(self) -> None:
         updates: tuple[dict[str, JsonValue], ...] = (
-            {"min_approvals": 1},
-            {"max_approvals": 1},
             {"record_fingerprints": {}},
             {"review_stage": "another_stage"},
             {"dataset_id": "another_dataset"},
@@ -134,6 +151,48 @@ class HumanReviewRowReuseTests(unittest.TestCase):
                 self.assertEqual(
                     [row.decision for row in tx.list_decisions(batch.batch_id)], ["pending", "pending"]
                 )
+
+    def test_candidate_renaming_reuses_original_selected_fingerprints(self) -> None:
+        updated = self.snapshot.model_copy(update={
+            "snapshot_id": "1" * 64,
+            "candidate_ids": ("renamed-first", "renamed-second"),
+            "eligible_candidate_ids": ("renamed-first", "renamed-second"),
+            "record_fingerprints": {"renamed-first": "a" * 64, "renamed-second": "b" * 64},
+        })
+        with self.store.transaction() as tx:
+            batch = tx.ensure_current_batch(updated)
+            rows = tx.list_decisions(batch.batch_id)
+            self.assertEqual([row.candidate_id for row in rows], ["renamed-first", "renamed-second"])
+            self.assertEqual([row.decision for row in rows], ["approve", "reject"])
+            self.assertEqual([row.notes for row in rows], ["checked first", "checked second"])
+            self.assertEqual(tx.list_decisions(self.original.batch_id), self.decisions)
+            self.assertIsNone(batch.completion)
+
+    def test_identical_fingerprints_in_another_home_do_not_reuse_decisions(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            with HumanReviewStore(Path(temporary)).transaction() as tx:
+                batch = tx.ensure_current_batch(self.snapshot)
+                self.assertEqual(
+                    [row.decision for row in tx.list_decisions(batch.batch_id)], ["pending", "pending"]
+                )
+
+    def test_removed_original_values_reuse_decisions_when_they_reappear(self) -> None:
+        removed = self.snapshot.model_copy(update={
+            "snapshot_id": "1" * 64,
+            "candidate_ids": ("second",),
+            "eligible_candidate_ids": ("second",),
+            "record_fingerprints": {"second": "b" * 64},
+        })
+        restored = self.snapshot.model_copy(update={"snapshot_id": "2" * 64})
+        with self.store.transaction() as tx:
+            tx.ensure_current_batch(removed)
+            batch = tx.ensure_current_batch(restored)
+            rows = tx.list_decisions(batch.batch_id)
+            self.assertEqual([row.decision for row in rows], ["approve", "reject"])
+            self.assertEqual(rows[0].notes, "checked first")
+            self.assertEqual(rows[0].carried_from_batch_id, self.original.batch_id)
+            self.assertIsNone(batch.completion)
+            self.assertEqual(tx.list_decisions(self.original.batch_id), self.decisions)
 
     def test_retracted_decision_is_not_resurrected_from_completed_history(self) -> None:
         with self.store.transaction() as tx:

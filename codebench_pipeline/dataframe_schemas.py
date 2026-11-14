@@ -113,6 +113,11 @@ class ReviewQueueTable(ProposedAnnotationsTable):
     exclusion_reason: Series[str]
 
 
+class ReviewSnapshotTable(StrictTable):
+    batch_id: Series[str] = pa.Field(unique=True)
+    snapshot_id: Series[str]
+
+
 class HumanReviewDecisionsTable(StrictTable):
     candidate_id: Series[str] = pa.Field(unique=True)
     batch_id: Series[str]

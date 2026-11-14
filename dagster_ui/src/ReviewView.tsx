@@ -2,13 +2,13 @@ import {Button, TextInput} from '@dagster-io/ui-components';
 import type {AssetViewFeatureInput} from '@dagster-io/ui-core/assets/AssetFeatureContext';
 import {useHistory, useLocation} from 'react-router-dom';
 import {useEffect, useMemo, useRef, useState} from 'react';
-import {ApiError, request} from './api';
-import {batchBody, decisionBody, decisionDraft, draftScopeKey, mayComplete, mayContinue, mayRetract, nextPending, retractionBody} from './decisions';
+import {ApiError, getReviewItem, nextReviewItem, request} from './api';
+import {batchBody, decisionBody, decisionDraft, draftScopeKey, mayComplete, mayContinue, mayRetract, retractionBody} from './decisions';
 import type {Draft} from './decisions';
 import {
   initialQuery, stageResponses,
 } from './models';
-import type {Dataset, Review, ReviewRow, ReviewStage} from './models';
+import type {Dataset, Review, ReviewItem, ReviewRow, ReviewStage} from './models';
 import {Scope} from './Scope';
 import {QueryControls} from './QueryControls';
 import {RowsTable} from './RowsTable';
@@ -62,9 +62,11 @@ function ReviewTable({dataset, stage}: {readonly dataset: Dataset; readonly stag
   const result = useSnapshotQuery(path, schemas.review, dataset.dataset_id, query,
     (data) => data.batch.snapshot.snapshot_id);
   const [savedReview, setSavedReview] = useState<Review>();
-  const review = result.data ?? savedReview;
+  const review = savedReview ?? result.data;
   const {reviewer, change, storageError} = useReviewer();
-  const [selected, setSelected] = useState<string>();
+  const [selection, setSelection] = useState<{readonly scope: string; readonly id: string}>();
+  const [focused, setFocused] = useState<{readonly key: string; readonly item: ReviewItem}>();
+  const [itemError, setItemError] = useState<{readonly key: string; readonly error: unknown}>();
   const [drafts, setDrafts] = useState<Readonly<Record<string, Draft>>>({});
   const [saving, setSaving] = useState(false);
   const writeInFlight = useRef(false);
@@ -72,13 +74,38 @@ function ReviewTable({dataset, stage}: {readonly dataset: Dataset; readonly stag
   const [conflict, setConflict] = useState(false);
   const [notice, setNotice] = useState('');
   const prefix = review ? draftScopeKey(review.batch) : '';
+  const selected = selection?.scope === prefix ? selection.id : undefined;
+  const selectionKey = review && selected
+    ? `${prefix}${review.batch.generation}/${review.batch.batch_revision}/${selected}` : '';
+  const item = focused?.key === selectionKey ? focused.item : undefined;
   const draftKey = `${prefix}${selected ?? ''}`;
-  const persisted = review?.decisions.find((entry) => entry.candidate_id === selected);
+  const persisted = item?.decision;
   const draft = drafts[draftKey] ?? decisionDraft(persisted);
   const dirty = Object.keys(drafts).some((key) => key.startsWith(prefix));
   const unavailable = saving || conflict || result.stale || result.loading || result.error !== undefined;
   const canRetract = !!review && !!selected && mayRetract(review, selected,
-    {reviewer, dirty, unavailable, rowRevision: draft.rowRevision});
+    {reviewer, dirty, unavailable: unavailable || !item, rowRevision: draft.rowRevision}, persisted);
+
+  useEffect(() => {
+    if (result.data) {setSavedReview(undefined);}
+  }, [result.data]);
+
+  useEffect(() => {
+    if (!review || !selected || !selectionKey || focused?.key === selectionKey) {return;}
+    const controller = new AbortController();
+    void getReviewItem(review.batch, selected, controller.signal).then(
+      (loaded) => {
+        if (!controller.signal.aborted) {
+          setFocused({key: selectionKey, item: loaded});
+          setItemError(undefined);
+        }
+      },
+      (error: unknown) => {
+        if (!controller.signal.aborted) {setItemError({key: selectionKey, error});}
+      },
+    );
+    return () => controller.abort();
+  }, [review, selected, selectionKey, focused]);
 
   function dropDraft() {
     setDrafts((current) => {
@@ -90,33 +117,52 @@ function ReviewTable({dataset, stage}: {readonly dataset: Dataset; readonly stag
   function refresh() {
     setConflict(false);
     setSavedReview(undefined);
+    setFocused(undefined);
+    setItemError(undefined);
     setWriteError(undefined);
     setNotice('Snapshot refreshed. Unsaved drafts are retained for their original batch and snapshot.');
     setQuery({...query, offset: 0});
     result.refresh();
   }
   function select(row: ReviewRow) {
-    setSelected(row.review_record_id);
+    setItemError(undefined);
+    setSelection({scope: prefix, id: row.review_record_id});
   }
   function handleFailure(error: unknown) {
     setWriteError(error);
     if (error instanceof ApiError && error.status === 409) {setConflict(true);}
   }
   async function save(next: boolean) {
-    if (!review || !selected || unavailable || writeInFlight.current || !reviewer.trim() ||
+    if (!review || !selected || !item || unavailable || writeInFlight.current || !reviewer.trim() ||
       review.batch.state !== 'open' || draft.rowRevision !== (persisted?.row_revision ?? 0) ||
-      (draft.decision === 'approve' && !review.batch.snapshot.eligible_candidate_ids.includes(selected))) {return;}
+      item.review_columns.some((field) => draft.invalidEdits[field] !== undefined) ||
+      (draft.decision === 'approve' && item.row.blocked_reason !== null)) {return;}
     writeInFlight.current = true;
     setSaving(true);
     setWriteError(undefined);
     setNotice('');
     try {
       const saved = await request(`${path}/decision`, schemas.saved, 'PUT',
-        decisionBody(review.batch, selected, draft, reviewer));
+        decisionBody(review.batch, selected, draft, reviewer, item.review_columns));
       dropDraft();
+      setSavedReview({...review, batch: saved.batch, counts: saved.counts,
+        decisions: review.decisions.map((entry) =>
+          entry.candidate_id === saved.decision.candidate_id ? saved.decision : entry)});
+      const savedKey = `${draftScopeKey(saved.batch)}${saved.batch.generation}/${saved.batch.batch_revision}/${selected}`;
+      setFocused({key: savedKey, item: {...item, decision: saved.decision}});
       setNotice(`Decision saved. ${saved.counts.pending} pending; ${saved.counts.approve} approved; ${saved.counts.reject} rejected.`);
-      if (next) {setSelected(nextPending(review, selected, saved.decision.decision));}
       result.reload();
+      if (next) {
+        const pending = await nextReviewItem(saved.batch, query, selected);
+        if (pending) {
+          setSelection({scope: draftScopeKey(saved.batch), id: pending.row.review_record_id});
+          setFocused({key: `${draftScopeKey(saved.batch)}${saved.batch.generation}/${saved.batch.batch_revision}/${pending.row.review_record_id}`,
+            item: pending});
+        } else {
+          setSelection(undefined);
+          setNotice('Decision saved. No pending records match the current query.');
+        }
+      }
     } catch (error) {handleFailure(error);}
     finally {writeInFlight.current = false; setSaving(false);}
   }
@@ -132,6 +178,7 @@ function ReviewTable({dataset, stage}: {readonly dataset: Dataset; readonly stag
       setSavedReview({...review, batch: saved.batch, counts: saved.counts, publication: null,
         decisions: review.decisions.map((entry) =>
           entry.candidate_id === saved.decision.candidate_id ? saved.decision : entry)});
+      setFocused(undefined);
       setNotice('Decision retracted. This record is pending. Dependent results are invalid until review is completed again; other saved decisions are preserved.');
       result.reload();
     } catch (error) {handleFailure(error);}
@@ -189,14 +236,20 @@ function ReviewTable({dataset, stage}: {readonly dataset: Dataset; readonly stag
     {result.loading && <Status>Loading persisted review decisions...</Status>}
     {result.error !== undefined && <Status error={result.error} />}
     {writeError !== undefined && <Status error={writeError} />}
+    {selected && !item && itemError?.key !== selectionKey && <Status>Loading review item...</Status>}
+    {itemError?.key === selectionKey && <Status error={itemError.error} />}
     {notice && <Status>{notice}</Status>}
     {dirty && <Status>Unsaved drafts are retained while browsing. Save or discard them before completing review.</Status>}
     {review && <>
       <div className={styles.split}>
-        <div className={styles.pane}><RowsTable page={review.page} query={query} onChange={setQuery}
+        <div className={styles.pane}><RowsTable page={{...review.page,
+          columns: [...new Set([...review.page.columns, 'occurrence_count', 'blocked_reason'])],
+          rows: review.page.rows.map((row) => ({...row, values: {...row.values,
+            occurrence_count: row.occurrence_count, blocked_reason: row.blocked_reason}}))}}
+          query={query} onChange={setQuery}
           onSelect={select} disabled={saving} /></div>
-        {selected && review.batch.snapshot.candidate_ids.includes(selected) && <DecisionInspector
-          review={review} candidateId={selected} draft={draft} dirty={drafts[draftKey] !== undefined}
+        {selected && item && <DecisionInspector
+          review={review} item={item} draft={draft} dirty={drafts[draftKey] !== undefined}
           disabled={unavailable || !reviewer.trim()} canRetract={canRetract} onRetract={() => void retract()}
           onDraft={(value) => setDrafts({...drafts, [draftKey]: value})}
           onDiscard={dropDraft} onSave={(next) => void save(next)}

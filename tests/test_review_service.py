@@ -37,6 +37,7 @@ from codebench_pipeline.review_api_models import (
     PublicationTarget,
     RetractionRequest,
 )
+from codebench_pipeline.review_identity import review_identity
 from codebench_pipeline.review_service import ReviewService
 from codebench_pipeline.review_snapshots import ResolvedReview, ReviewManifest, ReviewSnapshots
 from codebench_pipeline.runtime_instance import dataset_instance
@@ -54,21 +55,17 @@ class ReviewServiceTests(unittest.TestCase):
         self.service = ReviewService(self.home, self.data, self.fail_publication)
         self.manager = DataFrameIOManager(storage=self.spec.storage)
         self.resolved = self.resolve_evidence("  old\n<script>inert</script>  ")
-        self.enterContext(patch.object(ReviewSnapshots, "current", self.current))
+        self.enterContext(patch.object(ReviewSnapshots, "capture", self.current))
         self.query = DatasetQueryRequest(dataset_id=self.spec.dataset_id)
+        self.service.prepare(self.spec.dataset_id)
 
-    def current(self, dataset_id: str) -> ResolvedReview:
+    def current(self, dataset_id: str, review_columns: tuple[str, ...]) -> ResolvedReview:
         self.data.specification(dataset_id)
+        self.assertEqual(review_columns, tuple(self.spec.publication.review_columns))
         return self.resolved
 
-    def locked_current(self, dataset_id: str) -> ResolvedReview:
-        with self.assertRaises(HumanReviewError) as locked, self.service.store.transaction():
-            self.fail("Mutating snapshot resolution must hold the review lock")
-        self.assertEqual(locked.exception.code, "conflict")
-        return self.current(dataset_id)
-
     def fail_publication(self, token: CompletionToken) -> PublicationReference:
-        with self.service.store.transaction() as tx:
+        with self.service.store.transaction(dataset_id=token.dataset_id) as tx:
             self.assertEqual(tx.get_batch(token.batch_id).completion, token)
         raise HumanReviewError("publication_failed", "Fixture runner failed")
 
@@ -137,6 +134,8 @@ class ReviewServiceTests(unittest.TestCase):
             snapshot_id=snapshot_id,
             candidate_ids=("first",),
             eligible_candidate_ids=("first",),
+            review_columns=tuple(self.spec.publication.review_columns),
+            record_fingerprints={"first": review_identity(row, tuple(self.spec.publication.review_columns))},
         )
         annotations = validated_frame([row], ProposedAnnotationsTable)
         prepared = publication(annotations, self.spec.rules, self.spec.publication)
@@ -165,9 +164,12 @@ class ReviewServiceTests(unittest.TestCase):
             reviewer="human",
         )
 
-    def test_mutations_resolve_evidence_under_writer_lock_and_release_it_for_continuation(self) -> None:
+    def test_mutations_use_prepared_state_without_resolving_sources_or_configuration(self) -> None:
         batch = self.service.view(self.query).batch
-        with patch.object(ReviewSnapshots, "current", self.locked_current):
+        with (
+            patch.object(ReviewSnapshots, "capture", side_effect=AssertionError("Resolved upstream")),
+            patch.object(self.data, "specification", side_effect=AssertionError("Loaded configuration")),
+        ):
             saved = self.service.decide(self.change(batch))
             with self.assertRaises(HumanReviewError) as failed:
                 self.service.complete(self.completion(saved.batch))
@@ -202,9 +204,11 @@ class ReviewServiceTests(unittest.TestCase):
             self.service.decide(request)
         self.assertEqual(stale.exception.code, "stale")
 
-    def test_changed_snapshot_rejects_old_requests_and_refresh_starts_pending(self) -> None:
+    def test_changed_evidence_reuses_selected_values_but_rejects_stale_requests(self) -> None:
         saved = self.service.decide(self.change(self.service.view(self.query).batch))
         self.resolved = self.resolve_evidence("new context")
+        self.assertEqual(self.service.view(self.query).batch, saved.batch)
+        self.service.prepare(self.spec.dataset_id)
         actions = (
             lambda: self.service.view(
                 self.query.model_copy(update={"snapshot_id": saved.batch.snapshot.snapshot_id})
@@ -219,7 +223,9 @@ class ReviewServiceTests(unittest.TestCase):
             self.assertEqual(stale.exception.code, "stale")
         fresh = self.service.view(self.query)
         self.assertNotEqual(fresh.batch.batch_id, saved.batch.batch_id)
-        self.assertEqual(fresh.counts.pending, 1)
+        self.assertEqual(fresh.counts.pending, 0)
+        self.assertEqual(fresh.decisions[0].decision, "approve")
+        self.assertEqual(fresh.decisions[0].carried_from_batch_id, saved.batch.batch_id)
         with self.service.store.transaction() as tx:
             self.assertEqual(tx.list_decisions(saved.batch.batch_id), (saved.decision,))
 
@@ -242,7 +248,7 @@ class ReviewServiceTests(unittest.TestCase):
         batch = self.service.view(self.query).batch
         original = self.resolved.reviewed.iloc[0]["context"]
         self.resolved = self.resolve_evidence("new context")
-        self.service.view(self.query)
+        self.service.prepare(self.spec.dataset_id)
         response = self.service.evidence(
             EvidenceTarget(
                 dataset_id=self.spec.dataset_id,
@@ -251,6 +257,9 @@ class ReviewServiceTests(unittest.TestCase):
             )
         )
         fields = response.fields
+        self.assertEqual(TypeAdapter(dict[str, JsonValue]).validate_python(fields["record"])["context"], original)
+        historical = self.service.source.evidence(batch.snapshot, "first")
+        fields = historical.fields
         self.assertEqual(
             TypeAdapter(dict[str, JsonValue]).validate_python(fields["source_document"])["content"], original
         )
@@ -264,6 +273,8 @@ class ReviewServiceTests(unittest.TestCase):
         )
         self.assertNotIn("PRIVATE_ENV", response.model_dump_json())
         self.assertNotIn("local_root", response.model_dump_json())
+        self.assertNotIn("PRIVATE_ENV", historical.model_dump_json())
+        self.assertNotIn("local_root", historical.model_dump_json())
         inference = TypeAdapter(dict[str, dict[str, JsonValue]]).validate_python(fields["inference"])
         self.assertEqual(inference["proposed_annotations"]["receipt.json"], {"status": "validated"})
         self.assertEqual(inference["reviewed_annotations"]["receipt.json"], {"status": "validated"})

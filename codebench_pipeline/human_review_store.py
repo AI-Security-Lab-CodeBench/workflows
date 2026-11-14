@@ -1,9 +1,16 @@
 from __future__ import annotations
 
-import sqlite3
+import hashlib
+import os
 from collections.abc import Generator
-from contextlib import closing, contextmanager
+from contextlib import contextmanager
 from pathlib import Path
+
+import psycopg
+from psycopg import IsolationLevel, sql
+from psycopg.errors import DeadlockDetected, LockNotAvailable, SerializationFailure, UndefinedTable
+from psycopg.rows import dict_row
+from pydantic import JsonValue
 
 from codebench_pipeline.human_review import HumanReviewError
 from codebench_pipeline.human_review_schema import initialize
@@ -13,34 +20,43 @@ from codebench_pipeline.human_review_transactions import HumanReviewTransaction
 class HumanReviewStore:
     def __init__(self, home: Path) -> None:
         self.path = home.resolve() / "human-review.sqlite3"
+        self.schema = "review_" + hashlib.sha256(str(home.resolve()).encode()).hexdigest()[:40]
+        self.dsn = os.environ.get("CODEBENCH_REVIEW_DATABASE_URL", "")
+        if not self.dsn:
+            raise HumanReviewError("conflict", "CODEBENCH_REVIEW_DATABASE_URL is required")
 
     @contextmanager
     def reader(self) -> Generator[HumanReviewTransaction]:
-        """Read committed review state, including while the caller holds the writer lock."""
-        if not self.path.is_file():
-            raise HumanReviewError("not_found", "No review ledger exists")
-        with closing(sqlite3.connect(self.path.as_uri() + "?mode=ro", uri=True)) as connection:
-            connection.execute("BEGIN")
-            columns = {row[1] for row in connection.execute("PRAGMA table_info(human_review_batches)")}
-            if "review_stage" not in columns:
-                raise HumanReviewError(
-                    "not_found", "The review ledger has not been initialized for stage review"
-                )
-            yield HumanReviewTransaction(connection)
+        with psycopg.Connection[dict[str, JsonValue]].connect(self.dsn, row_factory=dict_row) as connection:
+            connection.isolation_level = IsolationLevel.REPEATABLE_READ
+            connection.read_only = True
+            try:
+                with connection.transaction():
+                    exists = connection.execute(
+                        "SELECT 1 FROM pg_namespace WHERE nspname = %s", (self.schema,)
+                    ).fetchone()
+                    if not exists:
+                        raise HumanReviewError("not_found", "No review ledger exists")
+                    connection.execute(sql.SQL("SET LOCAL search_path TO {}").format(sql.Identifier(self.schema)))
+                    yield HumanReviewTransaction(connection, namespace=self.schema)
+            except UndefinedTable as error:
+                raise HumanReviewError("not_found", "Review schema has not been initialized") from error
 
     @contextmanager
-    def transaction(self, *, timeout: float = 0) -> Generator[HumanReviewTransaction]:
-        """Hold the write lock through server snapshot resolution and release registration."""
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        with closing(sqlite3.connect(self.path, timeout=timeout)) as connection:
-            connection.execute("PRAGMA foreign_keys = ON")
-            try:
-                connection.execute("PRAGMA journal_mode=WAL")
-                with connection:
-                    connection.execute("BEGIN IMMEDIATE")
-                    initialize(connection)
-                    yield HumanReviewTransaction(connection)
-            except sqlite3.OperationalError as error:
-                if error.sqlite_errorcode in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED):
-                    raise HumanReviewError("conflict", "Another review transaction holds the lock") from error
-                raise
+    def transaction(
+        self, *, timeout: float = 0, dataset_id: str | None = None
+    ) -> Generator[HumanReviewTransaction]:
+        if timeout < 0:
+            raise HumanReviewError("conflict", "Transaction timeout must be nonnegative")
+        try:
+            with psycopg.Connection[dict[str, JsonValue]].connect(self.dsn, row_factory=dict_row) as connection:
+                with connection.transaction():
+                    initialize(connection, self.schema)
+                with connection.transaction():
+                    connection.execute(sql.SQL("SET LOCAL search_path TO {}").format(sql.Identifier(self.schema)))
+                    transaction = HumanReviewTransaction(connection, namespace=self.schema, timeout=timeout)
+                    if dataset_id is not None:
+                        transaction.lock_dataset(dataset_id)
+                    yield transaction
+        except (LockNotAvailable, DeadlockDetected, SerializationFailure) as error:
+            raise HumanReviewError("conflict", "Another review transaction changed or locked this dataset") from error

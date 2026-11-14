@@ -1,4 +1,7 @@
 import {z} from 'zod';
+import {reviewItemSchema} from './models';
+import type {Batch, Query} from './models';
+import {reviewPath} from './reviewStages';
 
 export class ApiError extends Error {
   constructor(readonly status: number, readonly code: string, message: string) {
@@ -41,6 +44,24 @@ export async function request<T>(
 
 export function failure(error: unknown): string {
   return error instanceof Error ? error.message : 'Request failed.';
+}
+
+export function reviewItemResponse(batch: Batch) {
+  return reviewItemSchema.refine((item) => item.decision.batch_id === batch.batch_id);
+}
+
+export function nextReviewItem(batch: Batch, query: Query, afterId?: string | null, signal?: AbortSignal) {
+  return request(`${reviewPath(batch.snapshot.review_stage)}/next`, reviewItemResponse(batch).nullable(), 'POST', {
+    dataset_id: batch.snapshot.dataset_id, snapshot_id: batch.snapshot.snapshot_id, query,
+    after_id: afterId ?? null,
+  }, signal);
+}
+
+export function getReviewItem(batch: Batch, candidateId: string, signal?: AbortSignal) {
+  const path = `${reviewPath(batch.snapshot.review_stage)}/${encodeURIComponent(batch.batch_id)}/item/${encodeURIComponent(candidateId)}`;
+  return request(`${path}?dataset_id=${encodeURIComponent(batch.snapshot.dataset_id)}`,
+    reviewItemResponse(batch).refine((item) => item.row.review_record_id === candidateId),
+    'GET', undefined, signal);
 }
 
 export function cellText(value: unknown): string {

@@ -95,6 +95,17 @@ class DatasetGraphTests(unittest.TestCase):
                 {AssetKey(["datasets", "proposed_annotations"])},
             )
             self.assertEqual(
+                assets.get(AssetKey(["datasets", "category_eligible_annotations"])).parent_keys,
+                {
+                    AssetKey(["datasets", "deduplicated_annotations"]),
+                    AssetKey(["datasets", "category_rules"]),
+                },
+            )
+            self.assertIn(
+                AssetKey(["datasets", "category_eligible_annotations"]),
+                assets.get(AssetKey(["datasets", "human_review_queue"])).parent_keys,
+            )
+            self.assertEqual(
                 assets.get(AssetKey(["datasets", "merged_command_candidates"])).parent_keys,
                 {
                     AssetKey(["datasets", "command_candidates"]),
@@ -170,7 +181,9 @@ class DatasetGraphTests(unittest.TestCase):
                     "labeling_documentation",
                     "proposed_annotations",
                     "deduplicated_annotations",
+                    "category_eligible_annotations",
                     "human_review_queue",
+                    "human_review_snapshot",
                 ),
             )
             self.assertEqual(plan.unconfigured, ("dataset", "documentation"))

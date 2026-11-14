@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from typing import Annotated, Literal, Self, assert_never
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, model_serializer, model_validator
 
+from codebench_pipeline.category_rules import ClassName, SeverityName
 from codebench_pipeline.storage import fingerprint
 
 Text = Annotated[str, Field(min_length=1, pattern=r"\S")]
@@ -38,6 +39,33 @@ class ReviewModel(BaseModel):
     model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
 
 
+class LabelCorrections(ReviewModel):
+    model_config = ConfigDict(
+        frozen=True, strict=True, extra="forbid", populate_by_name=True, serialize_by_alias=True
+    )
+
+    category_id: Text | None = None
+    risk_id: Text | None = None
+    severity: SeverityName | None = None
+    class_: ClassName | None = Field(default=None, alias="class")
+
+    @model_validator(mode="after")
+    def require_values(self) -> Self:
+        if not self.model_fields_set or any(getattr(self, field) is None for field in self.model_fields_set):
+            raise ValueError("Label corrections require nonnull values for supplied dimensions")
+        return self
+
+    @model_serializer
+    def supplied_values(self) -> dict[str, str]:
+        values = {
+            "category_id": self.category_id,
+            "risk_id": self.risk_id,
+            "severity": self.severity,
+            "class": self.class_,
+        }
+        return {key: value for key, value in values.items() if value is not None}
+
+
 class ReviewSnapshot(ReviewModel):
     """Server-resolved immutable content and evidence, never a client assertion."""
 
@@ -47,6 +75,7 @@ class ReviewSnapshot(ReviewModel):
     candidate_ids: tuple[Text, ...]
     eligible_candidate_ids: tuple[Text, ...]
     record_fingerprints: dict[Text, Digest] = Field(default_factory=dict)
+    review_columns: tuple[Text, ...] = ()
     min_approvals: Revision = 0
     max_approvals: Revision | None = None
 
@@ -109,6 +138,24 @@ class ReviewDecision(ReviewModel):
     created_at: Text
     updated_at: Text
     carried_from_batch_id: Text | None = None
+    label_corrections: LabelCorrections | None = None
+    edits: dict[Text, JsonValue] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def require_correction_approval(self) -> Self:
+        if (self.label_corrections is not None or self.edits) and self.decision != "approve":
+            raise ValueError("Label corrections require an approval")
+        return self
+
+
+def compact_batch(batch: ReviewBatch) -> ReviewBatch:
+    return batch.model_copy(
+        update={
+            "snapshot": batch.snapshot.model_copy(
+                update={"candidate_ids": (), "eligible_candidate_ids": (), "record_fingerprints": {}}
+            )
+        }
+    )
 
 
 class DecisionChange(ReviewModel):
@@ -119,12 +166,30 @@ class DecisionChange(ReviewModel):
     decision: DecisionValue
     notes: str = ""
     reviewer: Text
+    edits: dict[Text, JsonValue] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def require_correction_approval(self) -> Self:
+        if self.edits and self.decision != "approve":
+            raise ValueError("Edits require an approval")
+        return self
 
 
 class ReviewCounts(ReviewModel):
     pending: Revision
     approve: Revision
     reject: Revision
+    blocked: Revision = 0
+    approved_occurrences: Revision = 0
+
+
+class PreparedReview(ReviewModel):
+    snapshot: ReviewSnapshot
+    id_column: Text
+    columns: tuple[Text, ...]
+    rows: tuple[dict[str, JsonValue], ...]
+    validation: dict[str, JsonValue] = Field(default_factory=dict)
+    evidence: dict[str, JsonValue] = Field(default_factory=dict)
 
 
 class PublicationPayload(ReviewModel):

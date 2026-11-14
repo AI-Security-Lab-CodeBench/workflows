@@ -139,8 +139,21 @@ and exclusion reasons. Normalization preserves shell semantics, quoted text, fla
 substitutions and meaningful context/label disagreements. Ambiguous similarities remain for review.
 Fuzzy matching, resource renaming, safe-pair construction and model-conditioned deduplication are excluded.
 """,
+    "category_eligible_annotations": """
+**Input:** Exact-deduplicated annotations and the configured category rules.
+
+**Goal:** Keep relevant category labels with medium or high category confidence.
+
+**Why:** Unrelated commands and low-confidence category assignments must not enter final review or release.
+
+**Output:** `ProposedAnnotationsTable` retaining target-category, non-rejected rows with medium/high
+category confidence. Excluded identities and reasons are preserved in `category_exclusions`
+and the category-exclusions.json receipt; original rows remain in deduplicated_annotations.
+An empty result is valid. Invalid input schemas fail; no inference or human decision runs here.
+Other medium/low label confidences remain for human correction and review.
+""",
     "dataset_release": """
-**Input:** Deduplicated annotations, category rules, completed human decisions and a version-bound authorization.
+**Input:** Category-eligible annotations, category rules, completed human decisions and a version-bound authorization.
 
 **Goal:** Produce the accepted canonical dataset table.
 
@@ -164,7 +177,8 @@ Retracted or superseded approval marks old outputs stale; completing changed dec
 **Why:** Human decisions must be separate from machine labels and visibly upstream of publication.
 
 **Output:** `HumanReviewDecisionsTable` with record identity, decision, notes, reviewer, revisions
-and snapshot binding. Its Parquet metadata also binds empty tables to the completed batch.
+and snapshot binding. Approved label corrections retain original model evidence and apply
+validated human values at release. Its Parquet metadata also binds empty tables to the completed batch.
 Open reviews live in the durable ledger and Review tab; this asset materializes only at publication.
 Unchanged row evidence and policy preserve saved decisions across changed table snapshots,
 with original reviewer and carry-forward audit provenance. Nonempty snapshots require explicit completion;
@@ -172,18 +186,27 @@ changed or retracted row decisions are never resurrected from old approval.
 An empty queue is completed by the automatic policy, with zero human decisions.
 Reviewer names are self-reported. Approving a record does not authorize executing its command.
 """,
+    "human_review_snapshot": """
+**Input:** The persisted uncertain-row queue, eligible annotations, and category rules.
+**Goal:** Prepare durable PostgreSQL review items once and reuse terminal decisions by selected values.
+**Output:** ReviewSnapshotTable containing the immutable snapshot and batch identifiers.
+Selected columns alone define identity and editable values. Duplicate occurrences share a review item
+while retaining provenance. Invalid inputs fail preparation; unresolved or blocked decisions leave
+durable waiting state without a sleeping worker. Page reads never rebuild this snapshot.
+""",
     "human_review_queue": """
-**Input:** The unified deduplicated annotations and category rules.
+**Input:** Category-eligible annotations and category rules.
 
-**Goal:** Expose final rows with medium or higher uncertainty for human inclusion decisions.
+**Goal:** Expose final rows with medium or higher uncertainty for human value corrections and inclusion decisions.
 
 **Why:** Any medium/low classifier confidence requires human review; all four high
 confidences permit automatic inclusion only when machine eligibility also passes.
+A supported needs_review label always requires explicit human resolution.
 
 **Output:** `ReviewQueueTable` with original candidate/label fields and `exclusion_reason`.
 Machine-eligible records have an empty reason; caps are applied only after human exclusions.
 This queue precedes human_review_decisions and release. Low-uncertainty rows remain visible in
-deduplicated_annotations and need no human decisions. Source exclusions stay in source_catalog,
+category_eligible_annotations and need no human decisions. Source exclusions stay in source_catalog,
 filtered candidates stay in filtered_commands, and inference failures stay in observations/receipts.
 Machine-rejected or unsupported rows remain ineligible. No row here implies human sign-off.
 """,

@@ -40,7 +40,7 @@ class DatasetDataService:
         self.instance = instance
 
     def datasets(self) -> DatasetList:
-        specs = [self.registry.get(key) for key in self.registry.keys()]
+        specs = [self.registry.get_snapshot(key) for key in self.registry.keys()]
         return DatasetList(
             datasets=tuple(
                 DatasetDescriptor(

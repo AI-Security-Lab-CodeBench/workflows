@@ -2,6 +2,7 @@ import json
 import tempfile
 import unittest
 from contextlib import ExitStack
+from dataclasses import replace
 from hashlib import sha256
 from pathlib import Path
 from unittest.mock import patch
@@ -10,7 +11,7 @@ import pandas as pd
 from configuration_fixture import write_fixture
 from test_dataset_incremental import provider_response
 
-from codebench_pipeline.data_view_models import DatasetQueryRequest, TableResponse
+from codebench_pipeline.data_view_models import DatasetQueryRequest, DatasetViewError, TableResponse
 from codebench_pipeline.data_views import DatasetDataService
 from codebench_pipeline.dataset_catalog import build_catalog
 from codebench_pipeline.dataset_config import load_build_config
@@ -20,6 +21,7 @@ from codebench_pipeline.dataset_finalization import (
     available_candidates,
     merge_candidates,
 )
+from codebench_pipeline.dataset_plan import plan_dataset
 from codebench_pipeline.dataset_registry import DatasetRegistry
 from codebench_pipeline.dataset_run import run_registered
 from codebench_pipeline.definitions import build_definitions
@@ -28,7 +30,9 @@ from codebench_pipeline.human_review_store import HumanReviewStore
 from codebench_pipeline.release_runner import ReleaseRunner
 from codebench_pipeline.review_api_models import DecisionRequest, EvidenceTarget
 from codebench_pipeline.review_service import ReviewService
+from codebench_pipeline.review_snapshots import ReviewSnapshots
 from codebench_pipeline.runtime_instance import dataset_instance
+from codebench_pipeline.stage_configuration import stage_configs
 from codebench_pipeline.storage import IntegrityError
 
 
@@ -51,6 +55,25 @@ class IndependentBranchDatasetTests(unittest.TestCase):
         configured = catalog.model_copy(update={"documents": [corpus]})
         with self.assertRaises(IntegrityError):
             build_catalog(configured, self.spec.rules, self.home / "attempt", branch="documentation")
+
+    def test_review_snapshot_rejects_disagreement_in_verified_source_bindings(self) -> None:
+        DatasetRegistry(self.home).register(self.spec)
+        run_registered(self.spec.dataset_id, self.home)
+        with dataset_instance(self.home) as instance:
+            snapshots = ReviewSnapshots(self.home, DatasetDataService(self.home, instance))
+            original = snapshots.current(self.spec.dataset_id)
+            planned = plan_dataset(self.spec, stage_configs(self.spec), instance, home=self.home)
+            authorizations = dict(planned.source_authorizations)
+            stage = "documentation/command_candidates"
+            authorizations[stage] = authorizations[stage].model_copy(
+                update={"inventory_signature": "0" * 64}
+            )
+            altered = replace(planned, source_authorizations=authorizations)
+            with patch("codebench_pipeline.review_snapshots.plan_dataset", return_value=altered):
+                with self.assertRaises(DatasetViewError) as stale:
+                    snapshots.capture(self.spec.dataset_id, tuple(self.spec.publication.review_columns))
+                self.assertEqual(stale.exception.code, "not_ready")
+            self.assertEqual(snapshots.current(self.spec.dataset_id).snapshot, original.snapshot)
 
     def test_documentation_job_needs_no_dataset_discovery_or_source_approval(self) -> None:
         DatasetRegistry(self.home).register(self.spec)
@@ -207,7 +230,9 @@ class IndependentBranchDatasetTests(unittest.TestCase):
                 "labeling_documentation",
                 "proposed_annotations",
                 "deduplicated_annotations",
+                "category_eligible_annotations",
                 "human_review_queue",
+                "human_review_snapshot",
                 "human_review_decisions",
                 "dataset_release",
             },
@@ -233,7 +258,7 @@ class IndependentBranchDatasetTests(unittest.TestCase):
             )
             query = DatasetQueryRequest(dataset_id=self.spec.dataset_id)
             initial = service.view(query)
-            identity = initial.batch.snapshot.candidate_ids[0]
+            identity = initial.page.rows[0].review_record_id
             service.decide(
                 DecisionRequest(
                     dataset_id=self.spec.dataset_id,
@@ -281,8 +306,8 @@ class IndependentBranchDatasetTests(unittest.TestCase):
             current = service.view(query)
             self.assertNotEqual(current.batch.snapshot.snapshot_id, initial.batch.snapshot.snapshot_id)
             self.assertEqual(
-                current.batch.snapshot.record_fingerprints[identity],
-                initial.batch.snapshot.record_fingerprints[identity],
+                next(row for row in current.decisions if row.candidate_id == identity).decision,
+                "approve",
             )
             carried = next(row for row in current.decisions if row.candidate_id == identity)
             self.assertEqual(
@@ -316,7 +341,9 @@ class IndependentBranchDatasetTests(unittest.TestCase):
                 "labeling_documentation",
                 "proposed_annotations",
                 "deduplicated_annotations",
+                "category_eligible_annotations",
                 "human_review_queue",
+                "human_review_snapshot",
             },
         )
         with dataset_instance(self.home) as instance:
@@ -348,7 +375,7 @@ class IndependentBranchDatasetTests(unittest.TestCase):
                 EvidenceTarget(
                     dataset_id=spec.dataset_id,
                     batch_id=view.batch.batch_id,
-                    candidate_id=view.batch.snapshot.candidate_ids[0],
+                    candidate_id=view.page.rows[0].review_record_id,
                 )
             )
             self.assertTrue(evidence.fields["duplicate_evidence"])

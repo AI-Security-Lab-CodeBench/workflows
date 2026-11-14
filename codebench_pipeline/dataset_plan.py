@@ -5,6 +5,7 @@ from typing import Literal
 
 import pandas as pd
 from dagster import AssetKey, AssetRecordsFilter, Config, DagsterInstance, build_input_context
+from pydantic import JsonValue, TypeAdapter
 
 from codebench_pipeline.category_rules import CategoryRules
 from codebench_pipeline.dataframe_io import AssetReference, AssetSnapshot, DataFrameIOManager
@@ -14,7 +15,14 @@ from codebench_pipeline.dataset_branches import FINALIZATION_STAGES, Branch, sta
 from codebench_pipeline.dataset_catalog import source_scope
 from codebench_pipeline.dataset_config import DatasetBuildSpec, catalog_for_branch
 from codebench_pipeline.dataset_engine import stage_signature
-from codebench_pipeline.storage import fingerprint
+from codebench_pipeline.documentation_authorization import (
+    SourceInventoryAuthorization,
+    frame_inventory_authorization,
+)
+from codebench_pipeline.human_review import HumanReviewError
+from codebench_pipeline.human_review_store import HumanReviewStore
+from codebench_pipeline.stage_cache_compatibility import legacy_signature_matches
+from codebench_pipeline.storage import IntegrityError, fingerprint
 
 INPUT_STAGES: dict[str, dict[str, str]] = {
     "category_rules": {},
@@ -52,13 +60,25 @@ INPUT_STAGES.update(
             "category_rules": "category_rules",
         },
         "deduplicated_annotations": {"annotations": "proposed_annotations"},
-        "human_review_queue": {
+        "category_eligible_annotations": {
             "annotations": "deduplicated_annotations",
             "category_rules": "category_rules",
         },
-        "human_review_decisions": {"human_review_queue": "human_review_queue"},
+        "human_review_queue": {
+            "annotations": "category_eligible_annotations",
+            "category_rules": "category_rules",
+        },
+        "human_review_snapshot": {
+            "human_review_queue": "human_review_queue",
+            "category_eligible_annotations": "category_eligible_annotations",
+            "category_rules": "category_rules",
+        },
+        "human_review_decisions": {
+            "human_review_queue": "human_review_queue",
+            "human_review_snapshot": "human_review_snapshot",
+        },
         "dataset_release": {
-            "deduplicated_annotations": "deduplicated_annotations",
+            "category_eligible_annotations": "category_eligible_annotations",
             "human_review_decisions": "human_review_decisions",
             "category_rules": "category_rules",
         },
@@ -93,6 +113,7 @@ class BuildPlan:
     source_revision: str | None = None
     unconfigured: tuple[Branch, ...] = ()
     references: dict[str, AssetReference] = field(default_factory=dict)
+    source_authorizations: dict[str, SourceInventoryAuthorization] = field(default_factory=dict)
 
     @property
     def asset_selection(self) -> list[AssetKey]:
@@ -110,6 +131,7 @@ def plan_dataset(
     blocked: list[str] = []
     source_revision: str | None = None
     references: dict[str, AssetReference] = {}
+    source_authorizations: dict[str, SourceInventoryAuthorization] = {}
     branches: tuple[Branch, ...] = ("dataset", "documentation")
     unconfigured: tuple[Branch, ...] = tuple(
         branch
@@ -163,7 +185,15 @@ def plan_dataset(
             if stage == "category_rules" and materialization.tags is not None
             else materialization.metadata[metadata_key].value
         )
-        if recorded != expected:
+        if recorded != expected and not (
+            stage != "category_rules"
+            and legacy_signature_matches(
+                manager, stage.rsplit("/", 1)[-1], configurations[stage], inputs, str(recorded),
+                evidence=TypeAdapter(dict[str, JsonValue]).validate_python(
+                    materialization.metadata["evidence"].value
+                ),
+            )
+        ):
             selected[stage] = "inputs_or_configuration_changed"
             continue
         try:
@@ -177,9 +207,37 @@ def plan_dataset(
         except FileNotFoundError:
             selected[stage] = "stored_output_missing"
             continue
+        if materialization.metadata["codebench/content_digest"].value != persisted.reference.digest:
+            raise IntegrityError("Current output differs from its recorded materialization")
+        if stage == "human_review_snapshot":
+            try:
+                with HumanReviewStore(home).reader() as transaction:
+                    batch = transaction.get_current_batch(spec.dataset_id, "annotations", compact=True)
+                if not isinstance(persisted.value, pd.DataFrame) or (
+                    persisted.value.iloc[0]["batch_id"] != batch.batch_id
+                    or persisted.value.iloc[0]["snapshot_id"] != batch.snapshot.snapshot_id
+                ):
+                    selected[stage] = "review_authority_changed"
+                    continue
+            except HumanReviewError as error:
+                if error.code not in {"not_found", "stale"}:
+                    raise
+                selected[stage] = "review_authority_invalidated"
+                continue
         if stage != "category_rules":
             values[stage] = persisted
         references[stage] = persisted.reference
+        if stage.rsplit("/", 1)[-1] == "source_catalog":
+            source_authorizations[stage] = SourceInventoryAuthorization(
+                dataset_id=spec.dataset_id,
+                branch=stage_branch(stage),
+                catalog_digest=persisted.reference.digest,
+                inventory_signature=str(recorded),
+            )
+        elif stage.rsplit("/", 1)[-1] == "command_candidates" and isinstance(persisted.value, pd.DataFrame):
+            source_authorizations[stage] = frame_inventory_authorization(
+                persisted.value, stage_branch(stage)
+            )
         unchanged.append(stage)
     return BuildPlan(
         tuple(selected),
@@ -190,4 +248,5 @@ def plan_dataset(
         source_revision,
         unconfigured,
         references,
+        source_authorizations,
     )

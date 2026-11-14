@@ -1,5 +1,6 @@
 import {Button} from '@dagster-io/ui-components';
 import {useState} from 'react';
+import type {ReactNode} from 'react';
 import {evidenceSchema} from './models';
 import {useResource} from './useResource';
 import {Fields} from './Fields';
@@ -7,14 +8,16 @@ import {Status} from './Status';
 import {reviewPath} from './reviewStages';
 import styles from './ui.module.css';
 
-export function Evidence({stageId, batchId, candidateId, datasetId}: {
+export function Evidence({stageId, batchId, candidateId, datasetId, children}: {
   readonly stageId: string;
   readonly batchId: string; readonly candidateId: string; readonly datasetId: string;
+  readonly children?: (fields: Readonly<Record<string, unknown>>) => ReactNode;
 }) {
   const [refresh, setRefresh] = useState(0);
   const path = `${reviewPath(stageId)}/${encodeURIComponent(batchId)}/evidence/${encodeURIComponent(candidateId)}?dataset_id=${encodeURIComponent(datasetId)}`;
   const result = useResource(path, evidenceSchema, undefined, refresh, 'GET');
   return <div className={styles.stack}>
+    {result?.data && children?.(result.data.fields)}
     <strong>Record evidence</strong>
     {!result && <Status>Loading full immutable evidence...</Status>}
     {result?.error !== undefined && <>

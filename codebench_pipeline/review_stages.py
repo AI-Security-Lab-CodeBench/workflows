@@ -1,8 +1,8 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Protocol, Self
 
 import pandas as pd
-from pydantic import Field, model_validator
+from pydantic import Field, JsonValue, model_validator
 
 from codebench_pipeline.dataset_branches import asset_path
 from codebench_pipeline.human_review import ReviewSnapshot, Text
@@ -21,9 +21,12 @@ class ReviewStage(QueryModel):
     additional_publication_stages: tuple[Identifier, ...] = ()
     min_approvals: int = Field(default=0, ge=0)
     max_approvals: int | None = Field(default=None, ge=0)
+    review_columns: tuple[Text, ...] = Field(min_length=1)
 
     @model_validator(mode="after")
     def valid_bounds(self) -> Self:
+        if len(set(self.review_columns)) != len(self.review_columns):
+            raise ValueError("Review columns must be distinct")
         if self.max_approvals is not None and self.max_approvals < self.min_approvals:
             raise ValueError("Approval bounds are inconsistent")
         return self
@@ -38,6 +41,8 @@ class ReviewInput:
     snapshot: ReviewSnapshot
     frame: pd.DataFrame
     id_column: str
+    validation: dict[str, JsonValue] = field(default_factory=dict)
+    evidence: dict[str, JsonValue] = field(default_factory=dict)
 
 
 class ReviewSource(Protocol):
@@ -62,7 +67,9 @@ def annotation_stage() -> ReviewStage:
             tuple(asset_path(stage))
             for stage in (
                 "deduplicated_annotations",
+                "category_eligible_annotations",
                 "human_review_queue",
+                "human_review_snapshot",
                 "human_review_decisions",
                 "dataset_release",
             )
@@ -70,4 +77,5 @@ def annotation_stage() -> ReviewStage:
         completion_label="Complete review and publish",
         can_continue=True,
         continuation_label="Continue publication",
+        review_columns=("command", "category_id", "risk_id", "severity", "class"),
     )

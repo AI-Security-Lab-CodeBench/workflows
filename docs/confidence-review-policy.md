@@ -24,7 +24,7 @@ The branches remain independently executable through extraction. They converge
 at `merged_command_candidates` before shared filtering, semantic documentation
 and `proposed_annotations`, with one isolated labeling invocation
 per eligible command, followed
-by conservative exact deduplication, the uncertain human queue and one
+by conservative exact deduplication, category eligibility filtering, the uncertain human queue and one
 `dataset_release`. `reviewed_annotations` is removed from the active graph;
 historical artifacts remain readable. Current rows must not receive manufactured
 `review_verdict` or `review_confidence` values.
@@ -36,18 +36,31 @@ omitted from the final release. See [independent branches](independent-branches.
 The classifier supplies four enum confidences: category, risk, severity and class.
 These are qualitative judgments, not calibrated probabilities.
 
-- Any `medium` or `low` among these four confidences means medium-or-higher
+- The post-deduplication `category_eligible_annotations` stage excludes rejected
+  labels, non-target categories and `low` category confidence. Excluded records
+  remain inspectable in the original table with linked exclusion reasons.
+- Among retained rows, any `medium` or `low` among these four confidences means medium-or-higher
   uncertainty and requires review in the shared `human_review_queue`.
 - All four `high` means low uncertainty. Such a row needs no human decision and
   is automatically admitted only if machine eligible.
 - Missing or invalid confidence is a validation failure, never an implicit `high`.
-- Machine-ineligible rows are never admitted by inclusion approval. Uncertain
-  ineligible rows remain in the queue but cannot be approved for release;
-  all-high ineligible rows remain inspectable in the full deduplicated table.
-  Supporting evidence must be resolved through a new valid labeling pass.
+- A supported `needs_review` label always requires review, even if all four
+  confidence fields say `high`. A human may confirm or correct it before approval.
+  Missing supporting documentation, rejected labels and invalid taxonomy cannot
+  be repaired by inclusion approval.
 
-The queue follows conservative exact normalized deduplication of the unified
-labeled dataset. Full evidence, exclusions, branch/source identities and
+The Review inspector allows changes only to configured `publication.review_columns`,
+which also define review deduplication identity. The default includes command,
+category, risk, severity and class; selected high-confidence fields remain editable.
+Corrections are recorded separately from immutable model labels
+with the reviewer, notes, row revision and decision history. Only approved
+corrections reach release. Corrected values must satisfy the configured taxonomy
+and corrected command routing; a correction cannot move a command into another
+dataset category or replace its source evidence. Original confidence values
+remain evidence, not rewritten model judgments.
+
+The queue follows category eligibility filtering after conservative exact normalized
+deduplication of the unified labeled dataset. Full evidence, exclusions, branch/source identities and
 duplicate-to-survivor mappings remain inspectable outside the queue. There is
 one final `annotations` review stage, not branch-specific final reviews.
 
@@ -86,9 +99,11 @@ at commit for automatic release; recheck decisions and completion authorization
 for a nonempty queue. Changed evidence, policy or retraction makes affected
 publication stale. An empty queue doesn't authorize reuse of stale inputs.
 
-Reuse labels and real human decisions per record only when all relevant
-evidence, labels, semantic documentation, eligibility and policy still match.
-Packet order and neighboring changes don't invalidate an unchanged record.
+Label reuse still binds relevant evidence, labels, semantic documentation and policy.
+Human decisions instead reuse the hash of original selected review-column values.
+Unselected evidence and policy changes do not erase decisions; current eligibility
+and validation are checked separately, and unusable cached approvals are blocked.
+Candidate renaming, packet order and neighboring changes do not invalidate identity.
 Completion authorization doesn't carry to a new snapshot: a nonempty queue needs
 explicit completion again; an empty queue is revalidated automatically.
 Historical evidence and CSVs stay immutable, and no older publication silently

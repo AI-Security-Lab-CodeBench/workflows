@@ -3,7 +3,9 @@ from pathlib import Path
 from typing import assert_never
 
 import pandas as pd
+from pydantic import JsonValue
 
+from codebench_pipeline.category_rules import CategoryRules
 from codebench_pipeline.data_views import DatasetDataService
 from codebench_pipeline.dataset_branches import Branch, annotation_stage_id, automatic_stage_id
 from codebench_pipeline.human_review import (
@@ -11,12 +13,11 @@ from codebench_pipeline.human_review import (
     CompletionToken,
     HumanReviewError,
     PublicationReference,
-    ReviewBatch,
     ReviewSnapshot,
 )
-from codebench_pipeline.human_review_transactions import HumanReviewTransaction
+from codebench_pipeline.label_corrections import validate_review_edits
 from codebench_pipeline.object_store import ObjectStore
-from codebench_pipeline.review_api_models import EvidenceResponse, PublicationTarget
+from codebench_pipeline.review_api_models import EvidenceResponse, EvidenceTarget, PublicationTarget
 from codebench_pipeline.review_evidence import review_evidence
 from codebench_pipeline.review_snapshots import ReviewSnapshots
 from codebench_pipeline.review_stages import ReviewInput, annotation_stage
@@ -28,12 +29,17 @@ class AnnotationReviewSource:
         self.snapshots = snapshots
 
     def current(self, dataset_id: str) -> ReviewInput:
-        resolved = self.snapshots.current(dataset_id)
+        columns = tuple(self.snapshots.data.specification(dataset_id).publication.review_columns)
+        resolved = self.snapshots.capture(dataset_id, columns)
         reviewed = pd.DataFrame(resolved.reviewed, copy=False)
-        uncertain = reviewed.loc[
-            reviewed["candidate_id"].isin(resolved.snapshot.candidate_ids)
-        ].copy()
-        return ReviewInput(resolved.snapshot, uncertain, "candidate_id")
+        uncertain = reviewed.loc[reviewed["candidate_id"].isin(resolved.snapshot.candidate_ids)].copy()
+        return ReviewInput(
+            resolved.snapshot,
+            uncertain,
+            "candidate_id",
+            validation={"rules": resolved.rules.model_dump(mode="json")},
+            evidence={"manifest": resolved.manifest.model_dump(mode="json")},
+        )
 
     def evidence(self, snapshot: ReviewSnapshot, candidate_id: str) -> EvidenceResponse:
         return review_evidence(self.snapshots, snapshot, candidate_id)
@@ -66,18 +72,22 @@ class ReviewService(ReviewWorkflow):
             home, annotation_stage(), AnnotationReviewSource(self.snapshots), on_complete=on_complete
         )
 
-    def current_publication(
-        self, transaction: HumanReviewTransaction, batch: ReviewBatch
-    ) -> PublicationReference | None:
-        reference = transaction.last_publication(batch.snapshot.dataset_id, branch=self.branch)
-        if reference is None:
-            return None
-        snapshot = batch.snapshot
-        try:
-            transaction.authorize_completion(snapshot, reference.authorization)
-        except HumanReviewError:
-            return None
-        return reference
+    def validate_edits(
+        self,
+        rows: tuple[dict[str, JsonValue], ...],
+        edits: dict[str, JsonValue],
+        validation: dict[str, JsonValue],
+    ) -> None:
+        rules = CategoryRules.model_validate(validation["rules"])
+        for row in rows:
+            validate_review_edits(row, edits, rules)
+
+    def evidence(self, target: EvidenceTarget) -> EvidenceResponse:
+        stored = super().evidence(target)
+        with self.store.reader() as tx:
+            snapshot = tx.get_batch(target.batch_id).snapshot
+        original = self.source.evidence(snapshot, target.candidate_id)
+        return EvidenceResponse(fields={**original.fields, **stored.fields})
 
     def download(self, target: PublicationTarget) -> bytes:
         with self.store.reader() as tx:

@@ -102,6 +102,16 @@ class ReviewConfig(AnnotationConfig):
 
 class PublicationConfig(StrictStageConfig):
     limit_per_risk: int = Field(default=250, ge=1, le=250)
+    review_columns: list[str] = Field(
+        default_factory=lambda: ["command", "category_id", "risk_id", "severity", "class"]
+    )
+
+    @field_validator("review_columns")
+    @classmethod
+    def unique_review_columns(cls, value: list[str]) -> list[str]:
+        if not value or any(not column.strip() for column in value) or len(set(value)) != len(value):
+            raise ValueError("Review columns must be nonempty and distinct")
+        return value
 
 
 class DatasetFileConfig(StrictStageConfig):

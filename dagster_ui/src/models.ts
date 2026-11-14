@@ -5,6 +5,16 @@ const revision = z.number().int().nonnegative();
 const digest = z.string().regex(/^[0-9a-f]{64}$/);
 export const decisionValue = z.enum(['pending', 'approve', 'reject']);
 export type DecisionValue = z.infer<typeof decisionValue>;
+export const severityValue = z.enum(['low', 'medium', 'high', 'critical']);
+export const classValue = z.enum(['allow', 'deny', 'ask']);
+export const labelCorrectionsSchema = z.object({
+  category_id: text.optional(), risk_id: text.optional(),
+  severity: severityValue.optional(), class: classValue.optional(),
+}).strict();
+export type LabelCorrections = z.infer<typeof labelCorrectionsSchema>;
+export const editsSchema = z.record(z.string(), z.json());
+export type Edits = z.infer<typeof editsSchema>;
+export type JsonValue = Edits[string];
 export const querySchema = z.object({
   offset: revision,
   limit: z.number().int().min(1).max(200),
@@ -64,18 +74,32 @@ export const batchSchema = z.object({
   completion: tokenSchema.nullable(),
   continuation_run_id: text.nullable().default(null),
 });
-export const countsSchema = z.object({pending: revision, approve: revision, reject: revision});
+export const countsSchema = z.object({
+  pending: revision, approve: revision, reject: revision, blocked: revision, approved_occurrences: revision,
+});
 export const decisionSchema = z.object({
   batch_id: text, candidate_id: text, decision: decisionValue, notes: z.string(),
   reviewer: z.string(), row_revision: revision, created_at: text, updated_at: text,
+  label_corrections: labelCorrectionsSchema.nullable().optional(),
+  edits: editsSchema.optional(),
 });
 export const publicationSchema = z.object({
   payload_key: text, payload_hash: digest, csv_reference: text, bundle_reference: text,
   dagster_run_id: text, publication_id: text, authorization: tokenSchema, created_at: text,
 });
+export const reviewRowSchema = rowSchema.extend({
+  review_record_id: text,
+  occurrence_count: z.number().int().positive().default(1),
+  blocked_reason: z.string().nullable().default(null),
+});
+export const reviewItemSchema = z.object({
+  row: reviewRowSchema, decision: decisionSchema, review_columns: z.array(text),
+}).refine((item) => item.row.review_record_id === item.decision.candidate_id);
+export type ReviewItem = z.infer<typeof reviewItemSchema>;
 export const reviewSchema = z.object({
   batch: batchSchema, counts: countsSchema, decisions: z.array(decisionSchema),
-  page: pageSchema.extend({rows: z.array(rowSchema.extend({review_record_id: text}))}),
+  review_columns: z.array(text),
+  page: pageSchema.extend({rows: z.array(reviewRowSchema)}),
   publication: publicationSchema.nullable(),
 });
 export const savedSchema = z.object({

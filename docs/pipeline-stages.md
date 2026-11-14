@@ -23,7 +23,9 @@ license/reuse terms, content eligibility and inspected-source bindings. Agent
 proposals aren't human approval. Final human review covers only rows with any
 `medium` or `low` among the four label confidences. All four `high` means low uncertainty and automatic admission only
 if machine eligible. Conservative exact normalized
-deduplication runs on the combined labeled dataset before human review.
+deduplication runs on the combined labeled dataset, followed by category eligibility
+filtering before human review. Rejected labels, other categories and low category
+confidence are excluded; medium/high category confidence remains eligible for review.
 Fuzzy linking and safe-counterpart pairing remain deferred.
 
 The sections below describe common stage behavior and the dataset paths.
@@ -276,9 +278,28 @@ all original evidence still traceable.
 context/label differences. Ambiguous similarities remain separate. No fuzzy
 matching, resource renaming, model-based equivalence or safe-pair gate applies.
 
+## `datasets/category_eligible_annotations`
+
+**Input:** Exact-deduplicated annotations and the configured category rules.
+
+**Goal:** Retain relevant target-category rows with at least medium category confidence.
+
+**Why:** Irrelevant commands and uncertain category assignments must not reach final review or release.
+
+**Output:** `ProposedAnnotationsTable` with target-category, non-rejected rows whose
+category confidence is `medium` or `high`. `category_exclusions` preserves excluded
+candidate identities and reasons, also recorded in `category-exclusions.json`.
+The complete original rows remain inspectable in `deduplicated_annotations`.
+
+**Gate/inspection:** Empty and all-excluded inputs produce a valid empty table.
+Malformed input fails schema validation. This deterministic stage performs no
+inference and changes no labels. Medium/low risk, severity or class confidence
+remains in the retained table and requires human review; medium category
+confidence also requires review.
+
 ## `datasets/dataset_release`
 
-**Input:** Unified deduplicated annotations, real completed decisions when the
+**Input:** Category-eligible annotations, real completed decisions when the
 uncertainty queue is nonempty, category rules and the per-risk publication cap
 (default and maximum 250, independently within each dataset partition).
 
@@ -303,7 +324,10 @@ machine-eligible uncertain rows actually approved by a human, marked
 `human_reviewed=true`. If the queue is nonempty, release waits for real terminal
 decisions and explicit completion of the current snapshot. An empty queue lets
 the build release automatically without a fabricated reviewer, decision or
-human completion token. Accepted labels remain mandatory; human inclusion cannot repair an unsupported label.
+human completion token. Supported `needs_review` labels require explicit human
+resolution and cannot release automatically. Missing documentation, rejected
+labels and invalid taxonomy remain ineligible. Approved human value corrections
+are applied to a copy of the annotation table; original model labels remain immutable.
 Eligibility and required human approval precede the cap in input order.
 Final validation checks nonblank fields,
 column order and allowed taxonomy/class/severity values. No random sampling or
@@ -316,14 +340,14 @@ The IO boundary rechecks the snapshot, exact record set, current completion
 generation and frozen decision digest while holding the shared review transaction.
 For an empty queue, the automatic policy completes a verified empty decision set;
 machine eligibility and the exact empty-queue snapshot remain bound to its token.
-The committed SQLite publication reference is authoritative, not a mutable
+The committed PostgreSQL publication reference is authoritative, not a mutable
 object-store pointer. Root `commands.csv`/`README.md` are not replaced.
 An empty release is not quota completion. Historical nine-column releases are
 preserved; newly published releases use the ten-column contract.
 
 ## `datasets/human_review_queue`
 
-**Input:** Unified deduplicated annotations, rules and the same publication cap as the release.
+**Input:** Category-eligible annotations, rules and the same publication cap as the release.
 It precedes `human_review_decisions` and `dataset_release`.
 
 **Goal:** Expose only medium-or-higher uncertainty rows for final inclusion review.
@@ -335,9 +359,11 @@ the queue. Full-table evidence and cap exclusions remain inspectable separately.
 plus `exclusion_reason`. Machine-eligible rows have an empty reason; other rows
 retain the actual label exclusion. Caps do not exclude rows from human review.
 
-**Gate/inspection:** Any `medium` or `low` among category, risk, severity or class confidence puts a row in this queue. All four `high` removes
+**Gate/inspection:** Among retained category-eligible rows, any `medium` or `low`
+among category, risk, severity or class confidence puts a row in this queue. All four `high` removes
 it from the queue, not from machine eligibility checks. Missing/invalid confidence
-fails validation. Uncertain machine-ineligible rows cannot receive inclusion
+fails validation. A supported `needs_review` decision also requires review
+regardless of its confidence fields. Uncertain machine-ineligible rows cannot receive inclusion
 approval; all-high ineligible rows remain inspectable in the full deduplicated
 table and never enter release. Every queued row requires a real terminal decision.
 This isn't an all-pipeline error inbox: source exclusions stay in
@@ -345,9 +371,24 @@ the catalog, quarantined candidates stay in `filtered_commands`, and inference
 failures stay in observations/receipts. Nothing here records human sign-off or
 automatically resolves a withheld row.
 
+## `datasets/human_review_snapshot`
+
+**Input:** The uncertain queue, category-eligible annotations and category rules.
+
+**Goal:** Prepare immutable PostgreSQL review items and reuse terminal decisions
+by original selected-column values, without repeating preparation on UI reads.
+
+**Output:** `ReviewSnapshotTable` with the snapshot and batch IDs. Original
+occurrences and provenance remain persisted; equal selected values share one item.
+
+**Gate/inspection:** Invalid or missing selected values fail preparation. Unresolved
+or blocked items leave a durable waiting batch without occupying a worker.
+Only configured `publication.review_columns` can be edited. Current eligibility
+and release authorization are checked separately from decision reuse.
+
 ## `datasets/human_review_decisions`
 
-**Input:** The prepared uncertainty queue and a completion
+**Input:** The prepared uncertainty queue, review snapshot pointer and a completion
 authorization bound to the current dataset/evidence snapshot, generation and exact
 decision digest.
 
@@ -356,7 +397,9 @@ decision digest.
 **Why:** Uncertain annotations need real human decisions separate from model judgments.
 
 **Output:** `HumanReviewDecisionsTable` with candidate/batch/snapshot identities,
-generation and revisions, approve/reject, notes, reviewer and decision timestamp.
+generation and revisions, approve/reject, notes, reviewer, decision timestamp
+and optional approved edits. The Review inspector edits configured review
+columns; taxonomy and corrected command routing are validated before saving and again at release.
 An empty queue retains its automatic-policy completion binding in Parquet
 attributes, with zero decision rows. The policy actor is not a human reviewer.
 Automatic-admission evidence remains separate from real human decisions.
@@ -367,8 +410,8 @@ an empty queue. Every expected queued record
 must be present and terminal. Approval cannot override machine eligibility.
 The IO boundary revalidates authorization before advancing its current reference.
 Reopening increments the generation. Changed evidence starts an open batch,
-carrying terminal decisions only for rows with unchanged evidence/policy,
-eligibility and selection bounds. Changed/new rows start pending; retracted rows
+reusing terminal decisions by original selected-column values independently of
+candidate IDs and batch history. Unseen identities start pending; retracted rows
 are never restored from older approval. Carried decisions retain reviewer,
 notes, timestamps and their origin batch in the audit history. The new snapshot
 still requires explicit completion if its queue is nonempty; an empty queue is

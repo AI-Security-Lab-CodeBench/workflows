@@ -1,18 +1,19 @@
 from collections.abc import Callable
 from pathlib import Path
-from typing import assert_never
 
 import pandas as pd
-from pydantic import TypeAdapter
+from pydantic import JsonValue
 
 from codebench_pipeline.data_view_models import DatasetQueryRequest
+from codebench_pipeline.dataframe_schemas import frame_records
 from codebench_pipeline.human_review import (
     CompletionEffect,
     CompletionToken,
     DecisionChange,
     HumanReviewError,
-    PublicationReference,
+    PreparedReview,
     ReviewBatch,
+    compact_batch,
 )
 from codebench_pipeline.human_review_store import HumanReviewStore
 from codebench_pipeline.human_review_transactions import HumanReviewTransaction
@@ -22,20 +23,19 @@ from codebench_pipeline.review_api_models import (
     DecisionResponse,
     EvidenceResponse,
     EvidenceTarget,
+    NextReviewRequest,
     PublicationResponse,
     PublicationTarget,
     RetractionRequest,
-    ReviewPage,
+    ReviewItemResponse,
     ReviewStatus,
-    ReviewTableRow,
     ReviewViewResponse,
 )
-from codebench_pipeline.review_stages import ReviewInput, ReviewSource, ReviewStage
-from codebench_pipeline.table_query import query_table
+from codebench_pipeline.review_stages import ReviewSource, ReviewStage
 
 
 class ReviewWorkflow:
-    """Stage-isolated human decisions over any immutable, server-resolved table."""
+    """Prepare once, review persisted rows, and authorize immutable decision versions."""
 
     def __init__(
         self,
@@ -50,187 +50,130 @@ class ReviewWorkflow:
         self.source = source
         self.on_complete = on_complete
 
-    def _current(self, dataset_id: str, snapshot_id: str | None) -> ReviewInput:
-        resolved = self.source.current(dataset_id)
-        snapshot = resolved.snapshot
-        if (
-            snapshot.dataset_id != dataset_id
-            or snapshot.review_stage != self.stage.stage_id
-            or snapshot.min_approvals != self.stage.min_approvals
-            or snapshot.max_approvals != self.stage.max_approvals
-        ):
-            raise HumanReviewError("conflict", "Review source has a different stage or policy binding")
-        identities = TypeAdapter(list[str]).validate_python(
-            resolved.frame[resolved.id_column].tolist(), strict=True
-        )
-        if tuple(identities) != snapshot.candidate_ids:
-            raise HumanReviewError("conflict", "Review table identities differ from its snapshot")
-        if snapshot_id is not None and snapshot_id != snapshot.snapshot_id:
-            raise HumanReviewError("stale", "The review snapshot changed; refresh before continuing")
-        return resolved
+    def prepare(self, dataset_id: str) -> ReviewBatch:
+        with self.store.transaction(timeout=10, dataset_id=dataset_id) as tx:
+            resolved = self.source.current(dataset_id)
+            if resolved.snapshot.review_stage != self.stage.stage_id:
+                raise HumanReviewError("conflict", "Prepared input belongs to another review stage")
+            prepared = PreparedReview(
+                snapshot=resolved.snapshot,
+                id_column=resolved.id_column,
+                columns=tuple(str(column) for column in resolved.frame.columns),
+                rows=tuple(frame_records(resolved.frame)),
+                validation=resolved.validation,
+                evidence=resolved.evidence,
+            )
+            return tx.prepare(prepared)
 
-    def current_publication(
-        self, transaction: HumanReviewTransaction, batch: ReviewBatch
-    ) -> PublicationReference | None:
-        publication = transaction.last_publication(batch.snapshot.dataset_id, self.stage.stage_id)
-        if publication is not None and publication.authorization == batch.completion:
-            return publication
-        return None
+    def _batch(
+        self, tx: HumanReviewTransaction, dataset_id: str, snapshot_id: str | None
+    ) -> ReviewBatch:
+        batch = tx.get_current_batch(dataset_id, self.stage.stage_id)
+        if snapshot_id is not None and batch.snapshot.snapshot_id != snapshot_id:
+            raise HumanReviewError("stale", "The prepared input changed; refresh before continuing")
+        return batch
 
     def view(self, request: DatasetQueryRequest) -> ReviewViewResponse:
-        try:
-            with self.store.reader() as tx:
-                resolved = self._current(request.dataset_id, request.snapshot_id)
-                if (
-                    tx.get_current_batch(request.dataset_id, self.stage.stage_id).snapshot
-                    == resolved.snapshot
-                ):
-                    return self._view_response(request, resolved, tx)
-        except HumanReviewError as error:
-            if error.code != "not_found":
-                raise
-        with self.store.transaction(timeout=10) as tx:
-            resolved = self._current(request.dataset_id, request.snapshot_id)
-            tx.ensure_current_batch(resolved.snapshot)
-            return self._view_response(request, resolved, tx)
+        with self.store.reader() as tx:
+            return tx.review_page(request, self.stage.stage_id)
 
-    def _view_response(
-        self, request: DatasetQueryRequest, resolved: ReviewInput, tx: HumanReviewTransaction
-    ) -> ReviewViewResponse:
-        batch = tx.get_current_batch(request.dataset_id, self.stage.stage_id)
-        decisions = tx.list_decisions(batch.batch_id)
-        publication = self.current_publication(tx, batch)
-        indexed = {row.candidate_id: row for row in decisions}
-        frame = resolved.frame.copy(deep=True)
-        identifiers = resolved.snapshot.candidate_ids
-        frame["human_decision"] = [indexed[key].decision for key in identifiers]
-        frame["human_reviewer"] = [indexed[key].reviewer for key in identifiers]
-        frame["human_notes"] = [indexed[key].notes for key in identifiers]
-        page = query_table(frame, request.query)
-        reviewed_page = ReviewPage(
-            columns=page.columns,
-            total_rows=page.total_rows,
-            matched_rows=page.matched_rows,
-            offset=page.offset,
-            limit=page.limit,
-            rows=tuple(
-                ReviewTableRow(
-                    row_index=row.row_index,
-                    values=row.values,
-                    review_record_id=identifiers[row.row_index],
-                )
-                for row in page.rows
-            ),
-        )
-        return ReviewViewResponse(
-            batch=batch,
-            counts=tx.counts(batch.batch_id),
-            decisions=decisions,
-            page=reviewed_page,
-            publication=publication,
-        )
+    def item(self, target: EvidenceTarget) -> ReviewItemResponse:
+        with self.store.reader() as tx:
+            batch = tx.get_batch(target.batch_id)
+            if batch.snapshot.review_stage != self.stage.stage_id:
+                raise HumanReviewError("not_found", "Item belongs to another review stage")
+            return tx.item(target)
+
+    def next_pending(self, request: NextReviewRequest) -> ReviewItemResponse | None:
+        with self.store.reader() as tx:
+            return tx.next_pending(request, self.stage.stage_id)
+
+    def validate_edits(
+        self,
+        rows: tuple[dict[str, JsonValue], ...],
+        edits: dict[str, JsonValue],
+        validation: dict[str, JsonValue],
+    ) -> None:
+        return None
 
     def decide(self, request: DecisionRequest) -> DecisionResponse:
-        with self.store.transaction(timeout=10) as tx:
-            resolved = self._current(request.dataset_id, request.snapshot_id)
-            decision = tx.save_decision(resolved.snapshot, request.change)
+        with self.store.transaction(timeout=10, dataset_id=request.dataset_id) as tx:
+            batch = self._batch(tx, request.dataset_id, request.snapshot_id)
+            if request.change.edits:
+                self.validate_edits(
+                    tx.rows_for_hash(batch.batch_id, request.change.candidate_id),
+                    request.change.edits,
+                    tx.validation(batch.batch_id),
+                )
+            decision = tx.save_decision(batch.snapshot, request.change)
             return DecisionResponse(
-                batch=tx.get_current_batch(request.dataset_id, self.stage.stage_id),
+                batch=compact_batch(tx.get_current_batch(request.dataset_id, self.stage.stage_id)),
                 decision=decision,
-                counts=tx.counts(decision.batch_id),
+                counts=tx.counts(batch.batch_id),
             )
 
     def complete(self, request: CompletionRequest) -> PublicationResponse:
-        with self.store.transaction(timeout=10) as tx:
-            resolved = self._current(request.dataset_id, request.snapshot_id)
-            batch = tx.get_current_batch(request.dataset_id, self.stage.stage_id)
+        with self.store.transaction(timeout=10, dataset_id=request.dataset_id) as tx:
+            batch = self._batch(tx, request.dataset_id, request.snapshot_id)
             if (
-                self.stage.stage_id == "annotations"
-                and batch.snapshot == resolved.snapshot
-                and batch.completion is not None
+                batch.completion is not None
                 and request.expected.batch_id == batch.batch_id
                 and request.expected.generation == batch.generation
-                and request.expected.batch_revision
-                in {
-                    batch.batch_revision,
-                    batch.completion.batch_revision - 1,
+                and request.expected.batch_revision in {
+                    batch.batch_revision, batch.completion.batch_revision - 1
                 }
             ):
-                token = tx.authorize_completion(resolved.snapshot, batch.completion)
+                token = tx.authorize_completion(batch.snapshot, batch.completion)
             else:
-                token = tx.complete(resolved.snapshot, request.expected, request.reviewer)
+                token = tx.complete(batch.snapshot, request.expected, request.reviewer)
         return self._completion_response(token)
 
     def continue_review(self, request: CompletionRequest) -> PublicationResponse:
-        with self.store.transaction(timeout=10) as tx:
-            resolved = self._current(request.dataset_id, request.snapshot_id)
-            batch = tx.expected_batch(resolved.snapshot, request.expected)
+        with self.store.transaction(timeout=10, dataset_id=request.dataset_id) as tx:
+            batch = self._batch(tx, request.dataset_id, request.snapshot_id)
+            tx.expected_batch(batch.snapshot, request.expected)
             if batch.completion is None:
-                raise HumanReviewError("conflict", "Current batch is not completed")
-            token = tx.authorize_completion(resolved.snapshot, batch.completion)
+                raise HumanReviewError("conflict", "Current review is not completed")
+            token = tx.authorize_completion(batch.snapshot, batch.completion)
             if self.on_complete is None or not self.stage.can_continue:
                 raise HumanReviewError("continuation_failed", "This review stage has no continuation")
         return self._completion_response(token)
 
     def _completion_response(self, token: CompletionToken) -> PublicationResponse:
         effect = self.on_complete(token) if self.on_complete is not None else CompletionEffect()
-        reference = effect.publication
-        with self.store.transaction(timeout=10) as tx:
-            resolved = self._current(token.dataset_id, token.snapshot_id)
-            tx.authorize_completion(resolved.snapshot, token)
-            if reference is not None:
-                persisted = tx.get_publication(reference.publication_id)
-                if persisted != reference or persisted.authorization != token:
-                    raise HumanReviewError(
-                        "publication_failed", "Publisher returned a different authorization"
-                    )
-            batch = (
-                tx.record_continuation(resolved.snapshot, token, effect.run_id)
-                if self.on_complete is not None
-                else tx.get_batch(token.batch_id)
-            )
+        with self.store.transaction(timeout=10, dataset_id=token.dataset_id) as tx:
+            batch = self._batch(tx, token.dataset_id, token.snapshot_id)
+            tx.authorize_completion(batch.snapshot, token)
+            if effect.publication is not None and tx.get_publication(
+                effect.publication.publication_id
+            ) != effect.publication:
+                raise HumanReviewError("publication_failed", "Publication reference does not match")
+            batch = tx.record_continuation(batch.snapshot, token, effect.run_id)
             return PublicationResponse(
-                batch=batch,
-                counts=tx.counts(token.batch_id),
+                batch=compact_batch(batch),
+                counts=tx.counts(batch.batch_id),
                 completion=token,
-                publication=reference,
+                publication=effect.publication,
                 run_id=effect.run_id,
             )
 
     def retract(self, request: RetractionRequest) -> DecisionResponse:
-        with self.store.transaction(timeout=10) as tx:
-            resolved = self._current(request.dataset_id, request.snapshot_id)
-            batch = tx.expected_batch(resolved.snapshot, request.expected)
-            previous = next(
-                (
-                    row
-                    for row in tx.list_decisions(batch.batch_id)
-                    if row.candidate_id == request.candidate_id
-                ),
-                None,
-            )
-            if previous is None:
-                raise HumanReviewError("not_found", "Candidate is not in this batch")
-            if previous.row_revision != request.expected_row_revision:
-                raise HumanReviewError("stale", "Decision row revision changed")
-            match previous.decision:
-                case "pending":
-                    raise HumanReviewError("conflict", "Only a terminal decision can be retracted")
-                case "approve" | "reject":
-                    pass
-                case _:
-                    assert_never(previous.decision)
-            match batch.state:
-                case "completed":
-                    batch = tx.reopen(resolved.snapshot, request.expected, request.reviewer)
-                case "open":
-                    pass
-                case "superseded":
-                    raise HumanReviewError("stale", "Batch was superseded")
-                case _:
-                    assert_never(batch.state)
+        with self.store.transaction(timeout=10, dataset_id=request.dataset_id) as tx:
+            batch = self._batch(tx, request.dataset_id, request.snapshot_id)
+            tx.expected_batch(batch.snapshot, request.expected)
+            previous = tx.item(
+                EvidenceTarget(
+                    dataset_id=request.dataset_id,
+                    batch_id=batch.batch_id,
+                    candidate_id=request.candidate_id,
+                )
+            ).decision
+            if previous.decision == "pending":
+                raise HumanReviewError("conflict", "Only a terminal decision can be retracted")
+            if batch.state == "completed":
+                batch = tx.reopen(batch.snapshot, request.expected, request.reviewer)
             decision = tx.save_decision(
-                resolved.snapshot,
+                batch.snapshot,
                 DecisionChange(
                     batch_id=batch.batch_id,
                     generation=batch.generation,
@@ -242,38 +185,45 @@ class ReviewWorkflow:
                 ),
             )
             return DecisionResponse(
-                batch=tx.get_current_batch(request.dataset_id, self.stage.stage_id),
-                counts=tx.counts(decision.batch_id),
+                batch=compact_batch(tx.get_current_batch(request.dataset_id, self.stage.stage_id)),
+                counts=tx.counts(batch.batch_id),
                 decision=decision,
             )
 
     def reopen(self, request: CompletionRequest) -> ReviewStatus:
-        with self.store.transaction(timeout=10) as tx:
-            resolved = self._current(request.dataset_id, request.snapshot_id)
-            batch = tx.reopen(resolved.snapshot, request.expected, request.reviewer)
-            return ReviewStatus(batch=batch, counts=tx.counts(batch.batch_id))
+        with self.store.transaction(timeout=10, dataset_id=request.dataset_id) as tx:
+            batch = self._batch(tx, request.dataset_id, request.snapshot_id)
+            reopened = tx.reopen(batch.snapshot, request.expected, request.reviewer)
+            return ReviewStatus(batch=compact_batch(reopened), counts=tx.counts(batch.batch_id))
 
     def evidence(self, target: EvidenceTarget) -> EvidenceResponse:
         with self.store.reader() as tx:
+            item = tx.item(target)
             batch = tx.get_batch(target.batch_id)
-            if (
-                batch.snapshot.dataset_id != target.dataset_id
-                or batch.snapshot.review_stage != self.stage.stage_id
-            ):
-                raise HumanReviewError("not_found", "Review batch does not belong to this dataset and stage")
-            if target.candidate_id not in batch.snapshot.candidate_ids:
-                raise HumanReviewError("not_found", "Record is not in this batch")
-        return self.source.evidence(batch.snapshot, target.candidate_id)
+            if batch.snapshot.review_stage != self.stage.stage_id:
+                raise HumanReviewError("not_found", "Evidence belongs to another stage")
+            return EvidenceResponse(
+                fields={
+                    "record": item.row.values,
+                    "occurrences": list(tx.rows_for_hash(target.batch_id, target.candidate_id)),
+                    "validation": tx.validation(target.batch_id),
+                    "review_columns": list(item.review_columns),
+                    "edits": item.decision.edits,
+                }
+            )
 
     def approved_records(self, dataset_id: str, token: CompletionToken) -> pd.DataFrame:
-        """Downstream stages must resolve and authorize again at their own commit boundary."""
-        with self.store.transaction(timeout=10) as tx:
-            resolved = self._current(dataset_id, token.snapshot_id)
-            tx.authorize_completion(resolved.snapshot, token)
-            approved = {
-                row.candidate_id for row in tx.list_decisions(token.batch_id) if row.decision == "approve"
-            }
-            return resolved.frame.loc[resolved.frame[resolved.id_column].isin(approved)].copy(deep=True)
+        with self.store.reader() as tx:
+            batch = self._batch(tx, dataset_id, token.snapshot_id)
+            tx.authorize_completion(batch.snapshot, token)
+            prepared = tx.prepared(batch.batch_id)
+            decisions = {row.candidate_id: row for row in tx.list_decisions(batch.batch_id)}
+            rows: list[dict[str, JsonValue]] = []
+            for row in prepared.rows:
+                decision = decisions[str(row[prepared.id_column])]
+                if decision.decision == "approve":
+                    rows.append({**row, **decision.edits})
+            return pd.DataFrame(rows, columns=prepared.columns)
 
     def download(self, target: PublicationTarget) -> bytes:
         raise HumanReviewError("not_found", "This review stage does not publish downloadable files")

@@ -21,6 +21,7 @@ from codebench_pipeline.dataset_export import csv_text
 from codebench_pipeline.dataset_tables import publication
 from codebench_pipeline.human_review import CompletionToken, HumanReviewError, PublicationPayload
 from codebench_pipeline.human_review_store import HumanReviewStore
+from codebench_pipeline.label_corrections import apply_label_corrections
 from codebench_pipeline.object_store import ObjectStore, sha256
 from codebench_pipeline.publication_authorization import authorize_publication
 from codebench_pipeline.review_frames import REVIEW_BINDING, decision_frame, require_decision_frame
@@ -61,8 +62,8 @@ def write_review_output(
     data = DatasetDataService(home, context.step_context.instance)
     branch = asset_branch(context.asset_key.path)
     snapshots = ReviewSnapshots(home, data, branch)
-    with HumanReviewStore(home).transaction(timeout=10) as tx:
-        resolved = snapshots.current(context.asset_partition_key)
+    with HumanReviewStore(home).transaction(timeout=10, dataset_id=context.asset_partition_key) as tx:
+        resolved = snapshots.authoritative(context.asset_partition_key)
         if manager.storage.model_dump() != resolved.manifest.storage.model_dump():
             raise HumanReviewError("conflict", "Release storage differs from the registered dataset")
         authorization_snapshot = authorize_publication(resolved, token, tx)
@@ -76,7 +77,10 @@ def write_review_output(
             return reference
         approved = frozenset(row.candidate_id for row in decisions if row.decision == "approve")
         prepared = publication(
-            resolved.reviewed, resolved.rules, resolved.manifest.publication, approved_ids=approved
+            apply_label_corrections(resolved.reviewed, decisions, resolved.rules),
+            resolved.rules,
+            resolved.manifest.publication,
+            approved_ids=approved,
         )
         expected = validated_frame(
             [{key: value for key, value in row.items()} for row in prepared.commands], CommandsTable
@@ -95,6 +99,7 @@ def write_review_output(
                 {
                     "origins": resolved.reviewed.attrs.get("origins", {}),
                     "duplicates": resolved.reviewed.attrs.get("duplicates", []),
+                    "category_exclusions": resolved.reviewed.attrs.get("category_exclusions", []),
                 },
                 ensure_ascii=False,
                 sort_keys=True,

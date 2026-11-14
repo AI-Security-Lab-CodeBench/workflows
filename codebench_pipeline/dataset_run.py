@@ -3,14 +3,12 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict
 
-from codebench_pipeline.data_views import DatasetDataService
 from codebench_pipeline.dataset_branches import FINALIZATION_STAGES, Branch, stage_branch
 from codebench_pipeline.dataset_plan import plan_dataset
 from codebench_pipeline.dataset_registry import DatasetRegistry
 from codebench_pipeline.definitions import build_definitions, dataset_run_config
 from codebench_pipeline.human_review_store import HumanReviewStore
 from codebench_pipeline.release_runner import ReleaseRunner
-from codebench_pipeline.review_snapshots import ReviewSnapshots
 from codebench_pipeline.runtime_instance import dataset_instance
 from codebench_pipeline.stage_configuration import stage_configs
 from codebench_pipeline.storage import exclusive
@@ -85,11 +83,9 @@ def run_registered(dataset_id: str, home: Path) -> BuildOutcome:
         current = plan_dataset(spec, stage_configs(spec), instance, home=home)
         branches: dict[Branch, BranchOutcome] = {}
         branch_names: tuple[Branch, ...] = ("dataset", "documentation")
-        with HumanReviewStore(home).transaction() as transaction:
+        with HumanReviewStore(home).transaction(dataset_id=dataset_id) as transaction:
             shared_batch = (
-                transaction.ensure_current_batch(
-                    ReviewSnapshots(home, DatasetDataService(home, instance)).current(dataset_id).snapshot
-                )
+                transaction.get_current_batch(dataset_id, "annotations")
                 if not current.selected and not current.blocked
                 else None
             )

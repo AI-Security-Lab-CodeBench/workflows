@@ -133,7 +133,9 @@ class IncrementalDatasetTests(unittest.TestCase):
             "labeling_documentation",
             "proposed_annotations",
             "deduplicated_annotations",
+            "category_eligible_annotations",
             "human_review_queue",
+            "human_review_snapshot",
         }
         self.assertEqual(
             set(changed),
@@ -157,7 +159,9 @@ class IncrementalDatasetTests(unittest.TestCase):
         expected = {
             "proposed_annotations",
             "deduplicated_annotations",
+            "category_eligible_annotations",
             "human_review_queue",
+            "human_review_snapshot",
         }
         self.assertEqual(set(changed), expected)
         after = self.materializations(self.configuration["dataset_id"])
@@ -174,17 +178,29 @@ class IncrementalDatasetTests(unittest.TestCase):
                 "labeling_documentation",
                 "proposed_annotations",
                 "human_review_queue",
+                "human_review_snapshot",
                 "deduplicated_annotations",
+                "category_eligible_annotations",
             },
         )
 
     def test_publication_cap_changes_only_prepared_review_queue(self) -> None:
         self.configuration["publication"]["limit_per_risk"] = 1
-        self.assertEqual(set(self.build()), {"human_review_queue"})
+        self.assertEqual(set(self.build()), {"human_review_queue", "human_review_snapshot"})
         with dataset_instance(self.home) as instance:
             run = instance.get_runs(limit=1)[0]
         receipt = json.loads((self.home / f"build-{run.run_id}.json").read_text())
         self.assertEqual(receipt["status"], "awaiting_human_review")
+
+    def test_registered_metadata_revision_refreshes_only_review_authority(self) -> None:
+        before = self.materializations(self.configuration["dataset_id"])
+        self.configuration["revision"] = "metadata-only"
+        with patch("codebench_pipeline.dataset_annotation.infer_typed", side_effect=AssertionError("Inference reran")):
+            self.assertEqual(set(self.build()), {"human_review_snapshot"})
+        after = self.materializations(self.configuration["dataset_id"])
+        self.assertEqual(
+            {stage for stage in before if before[stage] != after[stage]}, {"human_review_snapshot"}
+        )
 
     def test_failed_labeling_retries_only_unfinished_dependent_stages(self) -> None:
         before = self.materializations(self.configuration["dataset_id"])
@@ -201,7 +217,9 @@ class IncrementalDatasetTests(unittest.TestCase):
             {
                 "proposed_annotations",
                 "deduplicated_annotations",
+                "category_eligible_annotations",
                 "human_review_queue",
+                "human_review_snapshot",
             },
         )
 
@@ -243,7 +261,9 @@ class IncrementalDatasetTests(unittest.TestCase):
                 for stage in (
                     "proposed_annotations",
                     "deduplicated_annotations",
+                    "category_eligible_annotations",
                     "human_review_queue",
+                    "human_review_snapshot",
                 )
             },
         )
@@ -271,7 +291,9 @@ class IncrementalDatasetTests(unittest.TestCase):
             {
                 "proposed_annotations",
                 "deduplicated_annotations",
+                "category_eligible_annotations",
                 "human_review_queue",
+                "human_review_snapshot",
             },
         )
         self.assertEqual(self.materializations(identity), before)

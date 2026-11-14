@@ -105,7 +105,8 @@ class HumanReviewTests(unittest.TestCase):
             self.assertEqual(first.reviewer, "self-reported person")
             self.assertEqual(first.row_revision, 1)
             self.assertEqual(
-                tx.counts(batch.batch_id).model_dump(), {"pending": 0, "approve": 1, "reject": 1}
+                tx.counts(batch.batch_id).model_dump(),
+                {"pending": 0, "approve": 1, "reject": 1, "blocked": 0, "approved_occurrences": 1},
             )
 
     def test_stale_same_row_fails_but_different_rows_share_original_generation(self) -> None:

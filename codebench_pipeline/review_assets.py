@@ -21,13 +21,15 @@ from codebench_pipeline.dataframe_schemas import (
     HumanReviewDecisionsTable,
     ProposedAnnotationsTable,
     ReviewQueueTable,
+    ReviewSnapshotTable,
     validated_frame,
 )
 from codebench_pipeline.dataset_asset_types import DATASET_PARTITIONS, TABLE_TYPES, rules_input, table_input
 from codebench_pipeline.dataset_branches import Branch, asset_branch, asset_path
 from codebench_pipeline.dataset_tables import publication
-from codebench_pipeline.human_review import CompletionToken, HumanReviewError
+from codebench_pipeline.human_review import CompletionToken, HumanReviewError, ReviewDecision
 from codebench_pipeline.human_review_store import HumanReviewStore
+from codebench_pipeline.label_corrections import apply_label_corrections
 from codebench_pipeline.review_config import HumanReviewConfig
 from codebench_pipeline.review_frames import decision_frame, require_decision_frame
 from codebench_pipeline.review_snapshots import ResolvedReview, ReviewSnapshots
@@ -39,6 +41,7 @@ class AuthorizedReview:
     resolved: ResolvedReview
     token: CompletionToken
     decisions: DataFrame[HumanReviewDecisionsTable]
+    records: tuple[ReviewDecision, ...]
 
 
 def authorized_review(
@@ -55,10 +58,11 @@ def authorized_review(
         home, DatasetDataService(home, context.instance), asset_branch(context.asset_key.path)
     )
     with HumanReviewStore(home).reader() as tx:
-        resolved = snapshots.current(context.partition_key)
+        resolved = snapshots.authoritative(context.partition_key)
         tx.authorize_completion(resolved.snapshot, token)
-        decisions = decision_frame(token, tx.list_decisions(token.batch_id))
-    return AuthorizedReview(resolved, token, decisions)
+        records = tx.list_decisions(token.batch_id)
+        decisions = decision_frame(token, records)
+    return AuthorizedReview(resolved, token, decisions, records)
 
 
 def human_assets(branch: Branch = "dataset") -> list[AssetsDefinition]:
@@ -68,15 +72,21 @@ def human_assets(branch: Branch = "dataset") -> list[AssetsDefinition]:
         partitions_def=DATASET_PARTITIONS,
         io_manager_key="dataset_io_manager",
         dagster_type=TABLE_TYPES[HumanReviewDecisionsTable],
-        ins={"human_review_queue": table_input("human_review_queue", ReviewQueueTable, branch)},
+        ins={
+            "human_review_queue": table_input("human_review_queue", ReviewQueueTable, branch),
+            "human_review_snapshot": table_input("human_review_snapshot", ReviewSnapshotTable),
+        },
     )
     def human_review_decisions(
         context: AssetExecutionContext,
         config: HumanReviewConfig,
         human_review_queue: DataFrame[ReviewQueueTable],
+        human_review_snapshot: DataFrame[ReviewSnapshotTable],
         dataset_io_manager: ResourceParam[DataFrameIOManager],
     ) -> Output[DataFrame[HumanReviewDecisionsTable]]:
         approved = authorized_review(context, config, dataset_io_manager)
+        if human_review_snapshot.iloc[0]["snapshot_id"] != approved.token.snapshot_id:
+            raise HumanReviewError("stale", "Prepared snapshot differs from completion authorization")
         reviewed = approved.resolved.reviewed.loc[
             approved.resolved.reviewed["candidate_id"].isin(approved.resolved.snapshot.candidate_ids)
         ].reset_index(drop=True)
@@ -102,7 +112,9 @@ def human_assets(branch: Branch = "dataset") -> list[AssetsDefinition]:
         io_manager_key="dataset_io_manager",
         dagster_type=TABLE_TYPES[CommandsTable],
         ins={
-            "deduplicated_annotations": table_input("deduplicated_annotations", ProposedAnnotationsTable),
+            "category_eligible_annotations": table_input(
+                "category_eligible_annotations", ProposedAnnotationsTable
+            ),
             "human_review_decisions": table_input(
                 "human_review_decisions", HumanReviewDecisionsTable, branch
             ),
@@ -112,7 +124,7 @@ def human_assets(branch: Branch = "dataset") -> list[AssetsDefinition]:
     def dataset_release(
         context: AssetExecutionContext,
         config: HumanReviewConfig,
-        deduplicated_annotations: DataFrame[ProposedAnnotationsTable],
+        category_eligible_annotations: DataFrame[ProposedAnnotationsTable],
         human_review_decisions: DataFrame[HumanReviewDecisionsTable],
         category_rules: CategoryRules,
         dataset_io_manager: ResourceParam[DataFrameIOManager],
@@ -120,7 +132,7 @@ def human_assets(branch: Branch = "dataset") -> list[AssetsDefinition]:
         approved = authorized_review(context, config, dataset_io_manager)
         require_decision_frame(human_review_decisions, approved.decisions)
         if (
-            not ProposedAnnotationsTable.validate(deduplicated_annotations).equals(approved.resolved.reviewed)
+            not ProposedAnnotationsTable.validate(category_eligible_annotations).equals(approved.resolved.reviewed)
             or category_rules != approved.resolved.rules
         ):
             raise HumanReviewError("stale", "Release inputs differ from the completed snapshot")
@@ -131,7 +143,9 @@ def human_assets(branch: Branch = "dataset") -> list[AssetsDefinition]:
             ]
         )
         prepared = publication(
-            approved.resolved.reviewed,
+            apply_label_corrections(
+                approved.resolved.reviewed, approved.records, approved.resolved.rules
+            ),
             approved.resolved.rules,
             approved.resolved.manifest.publication,
             approved_ids=identities,
