@@ -129,6 +129,14 @@ existing data before replacing it; never overwrite concurrent work.
   `CODEBENCH_HOME` and `DAGSTER_HOME`; build and UI must use the same dataset home.
 - Every visible stage needs a description stating its input, purpose, typed
   output, acceptance and failure/waiting rules. Maintain `docs/pipeline-stages.md`.
+- Start every artifact's native UI description with a brief **How it works**
+  paragraph explaining its core algorithm or architecture in plain language:
+  what it consumes, how the main transformation or decision works, and what it
+  produces. Be concrete and easy to follow, not a restatement of the stage name
+  or a list of implementation symbols. Keep branch-specific behavior accurate.
+  Maintain this paragraph with the implementation in `stage_descriptions.py`
+  and verify it renders when the artifact is clicked in Dagster's Overview.
+  Documentation-only explanations do not satisfy this requirement.
 - Viewing persisted tables must not require inference or rematerialization.
   Show schema, row count, bounded samples and inspectable full cell values.
 

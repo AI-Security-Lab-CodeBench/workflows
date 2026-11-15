@@ -6,6 +6,11 @@ from codebench_pipeline.dataset_branches import FINALIZATION_STAGES
 
 DESCRIPTIONS: dict[str, str] = {
     "category_rules": """
+**How it works:** The configured category, taxonomy and labeling instructions are validated
+and saved together as one policy snapshot. A fingerprint of that configuration identifies
+the version, so downstream stages share the same rules and can detect changes. Command
+patterns help route records to relevant risks; they do not decide whether a command is safe.
+
 **Input:** The category's inline taxonomy, version, policy, command families and language.
 
 **Goal:** Preserve the exact rules used by selection, labeling, review and publication.
@@ -17,6 +22,12 @@ This is the only non-table asset; inspect its `rules` metadata rather than a row
 Patterns route candidates but never assign safety labels.
 """,
     "source_catalog": """
+**How it works:** A source manifest prepared outside the pipeline becomes a structured
+inventory of the declared corpus files, their formats and their provenance and reuse
+evidence. The catalog preserves the source settings needed for retrieval, so acquisition
+can follow the inspected inventory rather than rediscovering sources or asking a model
+to choose them.
+
 **Input:** Category scope and the source manifest prepared by the local agent.
 
 **Goal:** Validate the declared dataset/corpus inventory for acquisition.
@@ -30,6 +41,12 @@ Source discovery, README/license assessment and scope enumeration happen outside
 Inspect the retained manifest and local preparation inventory; no selector model is invoked.
 """,
     "source_documents": """
+**How it works:** Each eligible catalog entry is loaded from its declared local or remote
+location and checked against its pinned integrity and content limits. The complete text
+is stored with a content hash and source attribution, giving extraction a reproducible
+copy of the source rather than a search snippet. A failed check stops acquisition instead
+of quietly substituting different bytes.
+
 **Input:** The eligible source catalog and snapshot settings.
 
 **Goal:** Capture the complete source text and its actual byte hash.
@@ -43,6 +60,12 @@ Every output is bound to its current inventory; changed evidence makes dependent
 Original documentation has a separately bound acquisition branch. Neither branch waits for human admission.
 """,
     "human_source_decisions": """
+**How it works:** This historical stage converted a completed source-selection review
+into a version-bound table of human decisions, which formerly controlled acquisition.
+It is no longer part of the active pipeline: current collection follows eligible
+manifests directly. Old decisions remain evidence of past reviews, not permission
+to acquire or publish current data.
+
 **Input:** The discovered/inspected source catalog and a completed Source selection review.
 
 **Goal:** Materialize the exact source choices before any source is used downstream.
@@ -54,6 +77,12 @@ catalog rows proceed to source_documents. Manual materialization uses the same l
 Retraction invalidates descendants; completing a revised selection continues the pipeline.
 """,
     "document_adapters": """
+**How it works:** Each captured document is paired with its declared format and the fields
+that contain command text and context. This creates a decoding plan for extraction rather
+than guessing the document's structure with a model. When a source needs custom conversion,
+the manifest names a reviewed, hash-pinned Python transformation; downloaded content itself
+is never treated as executable code.
+
 **Input:** Full source documents and their manifest-declared format mappings.
 
 **Goal:** Bind each document to its declared format and command/context fields.
@@ -66,6 +95,12 @@ and pinned by module hash in the manifest. Extraction checks actual field and ou
 Invalid mappings fail; no adapter model is invoked.
 """,
     "command_candidates": """
+**How it works:** Extraction follows each document's decoding plan, using the declared
+fields or a trusted batch transformation to collect commands with their surrounding
+context. Each candidate gets an identity derived from its source, position and command,
+while transformation markers retain how it was obtained. The result is a broad, traceable
+candidate table; command text is not executed or assigned a safety label here.
+
 **Input:** Source documents, per-document adapters and the surrounding-context window.
 
 **Goal:** Extract broad command candidates while retaining their original evidence.
@@ -78,6 +113,12 @@ Declared decoders or trusted hash-pinned batch transformations preserve original
 Invalid transformation hashes or canonical outputs fail extraction. Collected strings remain inert.
 """,
     "filtered_commands": """
+**How it works:** Each candidate is matched against the category's command-family patterns,
+then checked for oversized text, unresolved placeholders, opaque shell constructs and
+unbalanced quotes. Every row is retained with either an eligible marker or a concrete
+quarantine reason. This deterministic pass decides what can proceed to labeling, not
+whether an eligible command is safe.
+
 **Input:** All raw candidates, category command-family patterns and filtering settings.
 
 **Goal:** Mark candidates eligible for inference or quarantine them with a concrete reason.
@@ -89,6 +130,12 @@ Invalid transformation hashes or canonical outputs fail extraction. Collected st
 Quarantined records remain here, not in the downstream human-review queue.
 """,
     "labeling_documentation": """
+**How it works:** Prepared semantic references are loaded and validated into a documentation
+table, with a receipt comparing their coverage against the eligible command operations.
+Missing coverage stays visible as a gap rather than being filled with invented evidence.
+The labeler uses these offline references to reason about command behavior; this stage
+does not search for sources or label commands.
+
 **Input:** Eligible filtered commands, category rules and the prepared semantic-reference manifest.
 
 **Goal:** Expose the behavior, flags and version limits used to support judgments.
@@ -101,6 +148,12 @@ fail validation. Receipts retain operation-level gaps rather than inventing evid
 Semantic use does not authorize corpus redistribution. Only the single labeling pass uses this table.
 """,
     "proposed_annotations": """
+**How it works:** Each eligible command is considered separately with its source context,
+relevant documentation and category policy. Unchanged record inputs can reuse a saved
+label; otherwise one isolated model invocation proposes category, risk, severity and class
+with confidences, rationale and citations. Responses are checked against the label contract
+and retained with inference evidence, producing proposals rather than human approvals.
+
 **Input:** Eligible filtered candidates, documentation, category rules and labeler settings.
 
 **Goal:** Label each record independently from original evidence.
@@ -113,6 +166,12 @@ Malformed responses fail with retained evidence; acceptance requires supported t
 Confidence is self-reported, not proof of safety.
 """,
     "merged_command_candidates": """
+**How it works:** Current candidates from the two independent collection branches are
+combined into one table. Candidate and source identifiers are prefixed with their branch,
+and an origins map preserves the original identities, preventing collisions without
+losing provenance. Branch-state bindings distinguish an unconfigured source from one
+still waiting; shared processing requires every configured branch to be ready.
+
 **Input:** Current raw command candidates from authorized collection branches.
 
 **Goal:** Combine authorized Existing datasets and Documentation crawl records into one category table.
@@ -128,6 +187,12 @@ Only the merge may expose partial waiting inputs; shared processing and publicat
 require all configured branches to be current and complete.
 """,
     "deduplicated_annotations": """
+**How it works:** Commands containing only a restricted set of plain characters have
+repeated spaces and tabs collapsed; commands with quoting or shell syntax are left
+unchanged. A comparison key combines that command with its annotation, context and
+documentation evidence. Only identical keys are collapsed, keeping the first row and
+recording a duplicate-to-survivor link; similar commands or disagreeing labels remain.
+
 **Input:** The unified merged labels with original evidence and category rules.
 
 **Goal:** Remove only proven exact normalized command duplicates before uncertainty-based human review.
@@ -140,6 +205,12 @@ substitutions and meaningful context/label disagreements. Ambiguous similarities
 Fuzzy matching, resource renaming, safe-pair construction and model-conditioned deduplication are excluded.
 """,
     "category_eligible_annotations": """
+**How it works:** The deduplicated labels are filtered by the configured category:
+rejected labels, other-category assignments and low category confidence are excluded.
+Target-category rows with medium or high category confidence are retained, along with
+their other confidence values for the next review step. Excluded identities and reasons
+are recorded separately, so an empty result is explainable rather than padded.
+
 **Input:** Exact-deduplicated annotations and the configured category rules.
 
 **Goal:** Keep relevant category labels with medium or high category confidence.
@@ -153,6 +224,12 @@ An empty result is valid. Invalid input schemas fail; no inference or human deci
 Other medium/low label confidences remain for human correction and review.
 """,
     "dataset_release": """
+**How it works:** Eligible labels are combined with the completed review snapshot:
+low-uncertainty rows can enter automatically, while uncertain rows need real approval
+and any validated human corrections. Human exclusions are applied before category-wide
+caps, and authorization is checked again when the output is committed. The resulting
+canonical table and export preserve which rows were actually human reviewed.
+
 **Input:** Category-eligible annotations, category rules, completed human decisions and a version-bound authorization.
 
 **Goal:** Produce the accepted canonical dataset table.
@@ -170,6 +247,12 @@ Older published outputs remain historical. An empty human queue completes automa
 Retracted or superseded approval marks old outputs stale; completing changed decisions rebuilds release.
 """,
     "human_review_decisions": """
+**How it works:** The completed review's authorization is checked against the current
+prepared queue before saved decisions are turned into a typed table. The table preserves
+reviewer identity, revisions and corrections separately from the model's original labels,
+giving release an explicit decision input. An automatically completed empty queue produces
+an empty decision table, not fabricated human approvals.
+
 **Input:** The uncertain-row queue and its snapshot-bound completion authorization.
 
 **Goal:** Materialize the exact completed batch as a typed decision table.
@@ -187,6 +270,13 @@ An empty queue is completed by the automatic policy, with zero human decisions.
 Reviewer names are self-reported. Approving a record does not authorize executing its command.
 """,
     "human_review_queue": """
+**How it works:** Category-eligible labels are screened for machine eligibility and
+uncertainty: any medium or low label confidence, or a supported needs_review label,
+requires human attention. The resulting queue is prepared in the durable review store,
+reusing saved decisions by the original values of the configured review columns.
+Unresolved items leave a waiting batch instead of a sleeping worker; an empty queue
+can complete automatically without human decisions.
+
 **Input:** Category-eligible annotations and category rules.
 
 **Goal:** Expose final rows with medium or higher uncertainty for human value corrections and inclusion decisions.
@@ -230,6 +320,12 @@ def describe_stage(spec: DescribedAsset) -> AssetSpec:
         group_name = "documentation_crawl"
         if stage == "source_catalog":
             description = """
+**How it works:** The separately prepared documentation manifest becomes an inventory
+of original documentation sources, retaining their declared formats, provenance and
+reuse evidence. Source-kind checks reject dataset and agent-training corpora from this
+branch. Its inventory is independent of the dataset catalog, so later acquisition uses
+only the documentation sources actually declared here.
+
 **Input:** The original-documentation manifest prepared by the local agent and category scope.
 **Goal:** Validate the declared documentation inventory independently of corpus collection.
 **Why:** Documentation and corpus inputs remain separate and retain their original provenance.
@@ -240,6 +336,12 @@ no selector model, human source decision or synthetic approval is created.
 """.strip()
         elif stage == "source_documents":
             description = """
+**How it works:** Each eligible entry in the documentation catalog is retrieved and
+checked against its own pinned content and size limits. The complete documentation text
+is saved with hashes and source attribution for extraction. Its input binding belongs
+to this branch alone, so a change to the dataset inventory cannot authorize different
+documentation or invalidate an otherwise unchanged documentation input.
+
 **Input:** The selected documentation catalog and its own snapshot configuration.
 **Goal:** Persist the exact inspected documentation bodies for command extraction.
 **Why:** Documentation processing must use its own inspected inventory rather than corpus sources.
@@ -250,7 +352,7 @@ or invalidate these independent documentation inputs.
 """.strip()
         else:
             description = (
-                "Documentation branch: uses only its own inspected-source binding and preparation. "
-                "The dataset inventory is not an input.\n\n" + description
+                description + "\n\nDocumentation branch: uses only its own inspected-source binding "
+                "and preparation. The dataset inventory is not an input."
             )
     return spec.replace_attributes(description=description, group_name=group_name)

@@ -38,6 +38,22 @@ semantic documentation, labeling, deduplication, final human review and release.
 See [independent branch contracts](independent-branches.md) for configuration
 and source-binding rules.
 
+## Reading an artifact's algorithm in the UI
+
+Click an artifact in Dagster and open **Overview**. Its native **Description**
+starts with **How it works**: a short paragraph connecting the inputs, the main
+transformation or decision, and the resulting artifact. The following Input,
+Goal, Why and Output sections retain the detailed contract and limitations.
+The same description is available from the lineage selection's details.
+These are definition descriptions, so reading them does not require a
+materialization, model call or human-review decision.
+
+`codebench_pipeline/stage_descriptions.py` is the source for these rendered
+paragraphs. The documentation branch has its own catalog and acquisition
+explanations; shared extraction descriptions retain the branch's independent
+input binding. Keep explanations specific to the implemented algorithm rather
+than promising behavior from a proposed design.
+
 ## `datasets/category_rules`
 
 **Input:** Inline rules from the dataset configuration: category identity and
@@ -477,7 +493,8 @@ must be investigated against the actual partition, events and stored output.
 
 ## Mandatory working rule for stage changes
 
-Every new or changed stage must maintain this guide's Input, Goal, Why, Output
+Every new or changed stage must maintain a brief **How it works** paragraph in
+its native artifact description and this guide's Input, Goal, Why, Output
 and Gate/inspection description alongside its implementation. The stage must be
 exposed in Dagster with an accurate asset description and dependencies, a declared
 schema or typed non-table contract, inspectable data and retained evidence.
@@ -489,3 +506,10 @@ limitations and acceptance gates, including where manual inspection is required.
 The descriptions are wired into asset metadata through `stage_descriptions.py`
 and `definitions.py`. A stage is not complete until its description and persisted
 data have been inspected in the intended UI instance.
+Write the paragraph for a human scanning the architecture: describe the input,
+the central mechanism and the result in a few connected sentences. Explain
+important distinctions such as deterministic filtering versus model judgment,
+exact matching versus fuzzy matching, and durable waiting versus running work
+where they apply. Avoid unexplained jargon, symbol inventories and generic
+claims. Verify the paragraph by clicking the artifact and reading its rendered
+Description in Overview; source text or this guide alone is not UI evidence.
