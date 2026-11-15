@@ -53,13 +53,18 @@ export function reviewItemResponse(batch: Batch) {
 export function nextReviewItem(batch: Batch, query: Query, afterId?: string | null, signal?: AbortSignal) {
   return request(`${reviewPath(batch.snapshot.review_stage)}/next`, reviewItemResponse(batch).nullable(), 'POST', {
     dataset_id: batch.snapshot.dataset_id, snapshot_id: batch.snapshot.snapshot_id, query,
+    artifact_id: batch.snapshot.artifact_id, scope_id: batch.snapshot.scope_id,
     after_id: afterId ?? null,
   }, signal);
 }
 
 export function getReviewItem(batch: Batch, candidateId: string, signal?: AbortSignal) {
   const path = `${reviewPath(batch.snapshot.review_stage)}/${encodeURIComponent(batch.batch_id)}/item/${encodeURIComponent(candidateId)}`;
-  return request(`${path}?dataset_id=${encodeURIComponent(batch.snapshot.dataset_id)}`,
+  const target = new URLSearchParams({
+    dataset_id: batch.snapshot.dataset_id,
+    artifact_id: batch.snapshot.artifact_id, scope_id: batch.snapshot.scope_id,
+  });
+  return request(`${path}?${target}`,
     reviewItemResponse(batch).refine((item) => item.row.review_record_id === candidateId),
     'GET', undefined, signal);
 }

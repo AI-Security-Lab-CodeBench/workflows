@@ -8,13 +8,15 @@ import {Status} from './Status';
 import {reviewPath} from './reviewStages';
 import styles from './ui.module.css';
 
-export function Evidence({stageId, batchId, candidateId, datasetId, children}: {
+export function Evidence({stageId, batchId, candidateId, datasetId, artifactId, scopeId, children}: {
   readonly stageId: string;
   readonly batchId: string; readonly candidateId: string; readonly datasetId: string;
+  readonly artifactId: string; readonly scopeId: string;
   readonly children?: (fields: Readonly<Record<string, unknown>>) => ReactNode;
 }) {
   const [refresh, setRefresh] = useState(0);
-  const path = `${reviewPath(stageId)}/${encodeURIComponent(batchId)}/evidence/${encodeURIComponent(candidateId)}?dataset_id=${encodeURIComponent(datasetId)}`;
+  const target = new URLSearchParams({dataset_id: datasetId, artifact_id: artifactId, scope_id: scopeId});
+  const path = `${reviewPath(stageId)}/${encodeURIComponent(batchId)}/evidence/${encodeURIComponent(candidateId)}?${target}`;
   const result = useResource(path, evidenceSchema, undefined, refresh, 'GET');
   return <div className={styles.stack}>
     {result?.data && children?.(result.data.fields)}

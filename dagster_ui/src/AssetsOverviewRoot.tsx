@@ -19,24 +19,15 @@ const views: Readonly<Record<string, React.ComponentType<AssetViewFeatureInput> 
   data: DataView,
   review: ReviewView,
 };
-function isDataAsset(path: readonly string[]): boolean {
-  return path[0] === 'datasets' &&
-    (path.length === 2 || (path.length === 3 && path[1] === 'documentation'));
-}
-
 function useProjectTabs(input: AssetTabConfigInput): AssetTabConfig[] {
   const defaults = useAssetTabs(input);
   const location = useLocation();
   const registry = useReviewStages();
   const assetKey = assetKeyFromPath(location.pathname);
   const stages = stagesForAsset(registry.stages ?? [], assetKey);
-  const dataAsset = isDataAsset(assetKey);
-  if (!dataAsset && stages.length === 0) {
-    return defaults;
-  }
-  const additions: AssetTabConfig[] = dataAsset ? [
+  const additions: AssetTabConfig[] = [
     {id: 'data', title: 'Data', to: panelLink(location.search, 'data'), mobile: true},
-  ] : [];
+  ];
   const requested = new URLSearchParams(location.search).get('review_stage');
   const selected = stages.find((stage) => stage.stage_id === requested) ?? stages[0];
   if (selected) {
@@ -45,9 +36,9 @@ function useProjectTabs(input: AssetTabConfigInput): AssetTabConfig[] {
   }
   const partition = new URLSearchParams(location.search).get('partition');
   const native = defaults.map((tab) => {
-    if (!partition && !requested) {return tab;}
+    if (partition === null && !requested) {return tab;}
     const query = new URLSearchParams(tab.to);
-    if (partition) {query.set('partition', partition);}
+    if (partition !== null) {query.set('partition', partition);}
     if (requested) {query.set('review_stage', requested);}
     return {...tab, to: `?${query}`};
   });
@@ -62,14 +53,13 @@ export function AssetsOverviewRoot(props: Props) {
 function ProjectAssetsOverviewRoot(props: Props) {
   const inherited = React.useContext(AssetFeatureContext);
   const location = useLocation();
-  useNarrowNavigation(isDataAsset(assetKeyFromPath(location.pathname)));
+  useNarrowNavigation(assetKeyFromPath(location.pathname).length > 0);
   const value = React.useMemo<Features>(() => ({
     ...inherited,
     useTabBuilder: useProjectTabs,
     renderFeatureView(input) {
       const View = views[input.selectedTab];
-      return View && (isDataAsset(input.assetKey.path) || View === ReviewView)
-        ? <View {...input} /> : inherited.renderFeatureView(input);
+      return View ? <View {...input} /> : inherited.renderFeatureView(input);
     },
   }), [inherited]);
   return <AssetFeatureContext.Provider value={value}><OriginalRoot {...props} /></AssetFeatureContext.Provider>;

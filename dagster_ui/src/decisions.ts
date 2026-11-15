@@ -37,6 +37,7 @@ export function changeEdit(draft: Draft, field: string, original: JsonValue, inp
 export function decisionBody(batch: Batch, candidateId: string, draft: Draft, reviewer: string, columns: readonly string[]) {
   return {
     dataset_id: batch.snapshot.dataset_id,
+    artifact_id: batch.snapshot.artifact_id, scope_id: batch.snapshot.scope_id,
     snapshot_id: batch.snapshot.snapshot_id,
     change: {
       batch_id: batch.batch_id, generation: batch.generation, candidate_id: candidateId,
@@ -51,6 +52,7 @@ export function decisionBody(batch: Batch, candidateId: string, draft: Draft, re
 export function batchBody(batch: Batch, reviewer: string) {
   return {
     dataset_id: batch.snapshot.dataset_id, snapshot_id: batch.snapshot.snapshot_id,
+    artifact_id: batch.snapshot.artifact_id, scope_id: batch.snapshot.scope_id,
     expected: {batch_id: batch.batch_id, generation: batch.generation, batch_revision: batch.batch_revision},
     reviewer,
   };

@@ -1,24 +1,26 @@
 import {Button, TextInput} from '@dagster-io/ui-components';
 import type {AssetViewFeatureInput} from '@dagster-io/ui-core/assets/AssetFeatureContext';
 import {useHistory, useLocation} from 'react-router-dom';
-import {useEffect, useMemo, useRef, useState} from 'react';
+import {useEffect, useMemo, useReducer, useRef, useState} from 'react';
 import {ApiError, getReviewItem, nextReviewItem, request} from './api';
 import {batchBody, decisionBody, decisionDraft, draftScopeKey, mayComplete, mayContinue, mayRetract, retractionBody} from './decisions';
 import type {Draft} from './decisions';
 import {
   initialQuery, stageResponses,
 } from './models';
-import type {Dataset, Review, ReviewItem, ReviewRow, ReviewStage} from './models';
-import {Scope} from './Scope';
+import type {Review, ReviewItem, ReviewRow, ReviewStage, ReviewPartition} from './models';
+import {ReviewScope} from './ReviewScope';
 import {QueryControls} from './QueryControls';
 import {RowsTable} from './RowsTable';
 import {Status} from './Status';
 import {useSnapshotQuery} from './useResource';
 import {useReviewer} from './useReviewer';
 import {DecisionInspector} from './DecisionInspector';
+import {FullscreenInspector} from './FullscreenInspector';
+import {inspectorSelection} from './inspectorSelection';
 import {PublicationLinks, RunLink} from './PublicationLinks';
 import {useReviewStages} from './ReviewStageContext';
-import {reviewPath, reviewScopeKey, reviewStageLink, stagesForAsset} from './reviewStages';
+import {reviewPath, reviewStageLink, stagesForAsset} from './reviewStages';
 import styles from './ui.module.css';
 
 export function ReviewView({assetKey}: AssetViewFeatureInput) {
@@ -33,7 +35,7 @@ export function ReviewView({assetKey}: AssetViewFeatureInput) {
       history.replace({...location, search: reviewStageLink(location.search, stage.stage_id)});
     }
   }, [requested, stage, history, location]);
-  return <Scope>{(dataset) => <div className={styles.stack}>
+  return <section className={styles.surface} aria-label="Artifact review"><div className={styles.stack}>
     {registry.error !== undefined && <>
       <Status error={registry.error} />
       <Button onClick={registry.reload}>Refresh review stages</Button>
@@ -48,23 +50,29 @@ export function ReviewView({assetKey}: AssetViewFeatureInput) {
       </select>
     </label>}
     {requested && !stage && registry.stages && <Status>Unknown review stage for this asset. Choose a configured stage.</Status>}
-    {stage && <ReviewTable key={reviewScopeKey(dataset.dataset_id, stage.stage_id)} dataset={dataset} stage={stage} />}
-  </div>}</Scope>;
+    {stage && <ReviewScope assetKey={assetKey.path} stageId={stage.stage_id}>{(partition) =>
+      <ReviewTable key={JSON.stringify([partition.dataset_id, partition.artifact_id, partition.scope_id, stage.stage_id])}
+        partition={partition} stage={stage} />
+    }</ReviewScope>}
+  </div></section>;
 }
 
-function ReviewTable({dataset, stage}: {readonly dataset: Dataset; readonly stage: ReviewStage}) {
+function ReviewTable({partition, stage}: {readonly partition: ReviewPartition; readonly stage: ReviewStage}) {
   const [query, setQuery] = useState(initialQuery);
   const schemas = useMemo(
     () => stageResponses(stage.stage_id, stage.additional_publication_stages),
     [stage.stage_id, stage.additional_publication_stages],
   );
   const path = reviewPath(stage.stage_id);
-  const result = useSnapshotQuery(path, schemas.review, dataset.dataset_id, query,
+  const result = useSnapshotQuery(path, schemas.review, {
+    dataset_id: partition.dataset_id, artifact_id: partition.artifact_id, scope_id: partition.scope_id,
+  }, query,
     (data) => data.batch.snapshot.snapshot_id);
   const [savedReview, setSavedReview] = useState<Review>();
   const review = savedReview ?? result.data;
   const {reviewer, change, storageError} = useReviewer();
-  const [selection, setSelection] = useState<{readonly scope: string; readonly id: string}>();
+  const [inspector, dispatchInspector] = useReducer(inspectorSelection, {revision: 0});
+  const selection = inspector.selection;
   const [focused, setFocused] = useState<{readonly key: string; readonly item: ReviewItem}>();
   const [itemError, setItemError] = useState<{readonly key: string; readonly error: unknown}>();
   const [drafts, setDrafts] = useState<Readonly<Record<string, Draft>>>({});
@@ -126,7 +134,7 @@ function ReviewTable({dataset, stage}: {readonly dataset: Dataset; readonly stag
   }
   function select(row: ReviewRow) {
     setItemError(undefined);
-    setSelection({scope: prefix, id: row.review_record_id});
+    dispatchInspector({type: 'select', selection: {scope: prefix, id: row.review_record_id}});
   }
   function handleFailure(error: unknown) {
     setWriteError(error);
@@ -155,11 +163,12 @@ function ReviewTable({dataset, stage}: {readonly dataset: Dataset; readonly stag
       if (next) {
         const pending = await nextReviewItem(saved.batch, query, selected);
         if (pending) {
-          setSelection({scope: draftScopeKey(saved.batch), id: pending.row.review_record_id});
+          dispatchInspector({type: 'advance', revision: inspector.revision,
+            selection: {scope: draftScopeKey(saved.batch), id: pending.row.review_record_id}});
           setFocused({key: `${draftScopeKey(saved.batch)}${saved.batch.generation}/${saved.batch.batch_revision}/${pending.row.review_record_id}`,
             item: pending});
         } else {
-          setSelection(undefined);
+          dispatchInspector({type: 'advance', revision: inspector.revision, selection: undefined});
           setNotice('Decision saved. No pending records match the current query.');
         }
       }
@@ -236,8 +245,6 @@ function ReviewTable({dataset, stage}: {readonly dataset: Dataset; readonly stag
     {result.loading && <Status>Loading persisted review decisions...</Status>}
     {result.error !== undefined && <Status error={result.error} />}
     {writeError !== undefined && <Status error={writeError} />}
-    {selected && !item && itemError?.key !== selectionKey && <Status>Loading review item...</Status>}
-    {itemError?.key === selectionKey && <Status error={itemError.error} />}
     {notice && <Status>{notice}</Status>}
     {dirty && <Status>Unsaved drafts are retained while browsing. Save or discard them before completing review.</Status>}
     {review && <>
@@ -248,13 +255,28 @@ function ReviewTable({dataset, stage}: {readonly dataset: Dataset; readonly stag
             occurrence_count: row.occurrence_count, blocked_reason: row.blocked_reason}}))}}
           query={query} onChange={setQuery}
           onSelect={select} disabled={saving} /></div>
-        {selected && item && <DecisionInspector
+      </div>
+    </>}
+    <FullscreenInspector isOpen={selected !== undefined} title="Review record"
+      onClose={() => dispatchInspector({type: 'close'})}>
+      <div className={styles.stack}>
+      <label className={styles.field}>Reviewer (self-reported)
+        <TextInput value={reviewer} disabled={saving} onChange={(event) => change(event.target.value)} />
+      </label>
+      {result.error !== undefined && <Status error={result.error} />}
+      {selected && !item && itemError?.key !== selectionKey && <Status>Loading review item...</Status>}
+      {itemError?.key === selectionKey && <Status error={itemError.error} />}
+      {writeError !== undefined && <Status error={writeError} />}
+      {notice && <Status>{notice}</Status>}
+      {review && selected && item && <DecisionInspector
           review={review} item={item} draft={draft} dirty={drafts[draftKey] !== undefined}
           disabled={unavailable || !reviewer.trim()} canRetract={canRetract} onRetract={() => void retract()}
           onDraft={(value) => setDrafts({...drafts, [draftKey]: value})}
           onDiscard={dropDraft} onSave={(next) => void save(next)}
           onRebase={() => setDrafts({...drafts, [draftKey]: {...draft, rowRevision: persisted?.row_revision ?? 0}})} />}
       </div>
+    </FullscreenInspector>
+    {review && <>
       <Status>
         Completion requires no pending decisions or unsaved drafts and a reviewer.
         {' '}Approvals required: {stage.min_approvals} minimum; {stage.max_approvals === null ? 'no maximum' : `${stage.max_approvals} maximum`}.
@@ -274,7 +296,7 @@ function ReviewTable({dataset, stage}: {readonly dataset: Dataset; readonly stag
     </>}
     {runId && <RunLink runId={runId} />}
     {review?.publication && <PublicationLinks publication={review.publication}
-      datasetId={dataset.dataset_id} historical={review.batch.state !== 'completed' ||
+      datasetId={review.batch.snapshot.dataset_id} historical={review.batch.state !== 'completed' ||
         review.publication.authorization.token !== review.batch.completion?.token} />}
   </div>;
 }

@@ -42,14 +42,28 @@
 .fields dt { overflow-wrap: anywhere; }
 .split { display: flex; flex-wrap: wrap; align-items: start; gap: var(--space-large); min-width: 0; }
 .pane { flex: 1 1 var(--pane-floor); min-width: 0; max-width: 100%; }
-.inspector { padding: var(--space-large); border: 1px solid var(--color-border-default); overflow-wrap: anywhere; }
+.inspector { min-width: 0; overflow-wrap: anywhere; }
 .surface button:not([role='radio']), .dialog button:not([role='radio']) { min-height: var(--touch-target); }
 .radioOption { min-height: var(--touch-target); }
-.surface input, .surface textarea { min-height: var(--touch-target); max-width: 100%; }
-.surface textarea { width: 100%; }
+.surface input, .surface textarea, .dialog input, .dialog textarea { min-height: var(--touch-target); max-width: 100%; }
+.surface textarea, .dialog textarea { width: 100%; }
 .surface a { color: var(--color-link-default); overflow-wrap: anywhere; }
 .surface th, .surface td { font-variant-numeric: tabular-nums; }
 .surface td { vertical-align: top; }
 .status { padding: var(--space-medium); background: var(--color-background-light); overflow-wrap: anywhere; }
-.dialog { max-width: calc(100vw - var(--space-large) * 2); }
-.dialogBody { max-height: 70dvh; overflow: auto; }
+.dialog:global(.dagster-dialog) {
+  grid-area: auto;
+  position: fixed;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  width: 100vw;
+  max-width: none;
+  height: 100dvh;
+  max-height: 100dvh;
+  margin: 0;
+  border-radius: 0;
+  overflow: hidden;
+}
+.dialogHeader { flex: none; min-width: 0; }
+.dialogBody { flex: 1; min-height: 0; min-width: 0; padding: var(--space-large); overflow: auto; }

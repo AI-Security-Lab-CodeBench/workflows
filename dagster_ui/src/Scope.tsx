@@ -1,55 +1,64 @@
 import {Button} from '@dagster-io/ui-components';
 import {NavCollapseContext} from '@dagster-io/ui-core/app/navigation/NavCollapseProvider';
-import {useContext, useEffect, useState} from 'react';
+import {useContext, useEffect, useMemo, useState} from 'react';
 import type {ReactNode} from 'react';
 import {useHistory, useLocation} from 'react-router-dom';
-import {datasetsSchema} from './models';
-import type {Dataset} from './models';
+import {partitionsResponse} from './artifacts';
 import {useResource} from './useResource';
 import {Status} from './Status';
 import styles from './ui.module.css';
 
-export function Scope({children}: {readonly children: (dataset: Dataset) => ReactNode}) {
+export function Scope({assetKey, children}: {
+  readonly assetKey: readonly string[];
+  readonly children: (partition: string | null) => ReactNode;
+}) {
   const location = useLocation();
   const history = useHistory();
   const [refresh, setRefresh] = useState(0);
-  const result = useResource('/datasets', datasetsSchema, undefined, refresh, 'GET');
+  const body = useMemo(() => ({asset_key: assetKey}), [assetKey]);
+  const schema = useMemo(() => partitionsResponse(assetKey), [assetKey]);
+  const result = useResource('/artifacts/partitions', schema, body, refresh);
   const partition = new URLSearchParams(location.search).get('partition');
-  const datasets = result?.data?.datasets;
-  const selected = datasets?.find((dataset) => dataset.dataset_id === partition);
+  const partitions = result?.data?.partitions;
+  const selected = partitions?.includes(partition) ?? false;
   const {isCollapsed, toggleCollapsed, canCollapse} = useContext(NavCollapseContext);
   useEffect(() => {
-    const first = datasets?.[0];
-    if (!partition && first) {
+    const first = partitions?.[0];
+    if (partition === null && !selected && first !== undefined && first !== null) {
       const query = new URLSearchParams(location.search);
-      query.set('partition', first.dataset_id);
+      query.set('partition', first);
       history.replace({...location, search: `?${query}`});
     }
-  }, [datasets, partition, history, location]);
-  function choose(datasetId: string) {
+  }, [partitions, partition, selected, history, location]);
+  function choose(partitionKey: string | null) {
     const query = new URLSearchParams(location.search);
-    query.set('partition', datasetId);
+    if (partitionKey === null) {query.delete('partition');}
+    else {query.set('partition', partitionKey);}
     history.push({...location, search: `?${query}`});
   }
-  return <section className={styles.surface} aria-label="Persisted dataset">
+  return <section className={styles.surface} aria-label="Persisted artifact">
     <div className={styles.stack}>
       <div className={styles.toolbar}>
-        <label className={styles.field}>Category
-          <select className={styles.select} value={partition ?? ''} onChange={(e) => choose(e.target.value)}>
-            {!selected && <option value={partition ?? ''}>{partition ?? 'Choose category'}</option>}
-            {datasets?.map((dataset) => <option key={dataset.dataset_id} value={dataset.dataset_id}>{dataset.category}</option>)}
+        <label className={styles.field}>Partition
+          <select className={styles.select} value={selected ? String(partitions?.indexOf(partition)) : ''}
+            onChange={(event) => {
+              const value = partitions?.[Number(event.target.value)];
+              if (value !== undefined) {choose(value);}
+            }}>
+            {!selected && <option value="">{partition ?? 'Choose partition'}</option>}
+            {partitions?.map((value, index) => <option key={index} value={index}>{value ?? 'Unpartitioned'}</option>)}
           </select>
         </label>
         {canCollapse && <Button onClick={toggleCollapsed}>{isCollapsed ? 'Show navigation' : 'Hide navigation'}</Button>}
       </div>
-      {!result && <Status>Loading categories...</Status>}
+      {!result && <Status>Loading partitions...</Status>}
       {result?.error !== undefined && <>
         <Status error={result.error} />
-        <Button onClick={() => setRefresh((value) => value + 1)}>Refresh categories</Button>
+        <Button onClick={() => setRefresh((value) => value + 1)}>Refresh partitions</Button>
       </>}
-      {datasets?.length === 0 && <Status>No datasets are configured.</Status>}
-      {datasets && partition && !selected && <Status>Unknown category. Choose a configured category.</Status>}
-      {selected && children(selected)}
+      {partitions?.length === 0 && <Status>No persisted partitions are available for this artifact.</Status>}
+      {partitions && partition !== null && !selected && <Status>Unknown partition. Choose an available partition.</Status>}
+      {selected && children(partition)}
     </div>
   </section>;
 }

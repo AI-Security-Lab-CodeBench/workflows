@@ -17,9 +17,10 @@ This is a private build-time interface, not a supported runtime plugin. The
 upstream URL decoder currently passes custom view strings to the feature
 renderer. Upgrades require build, route, context-identity and browser checks.
 
-Build and installation instructions are in `dagster_ui/BUILD.md`. URL `partition`
-values are dataset IDs, not taxonomy category IDs. The category selector preserves
-that binding across the native Data and Review tabs.
+Build and installation instructions are in `dagster_ui/BUILD.md`. The Data and
+Review tabs select artifact partitions through the native `partition` URL value.
+The dataset adapter uses dataset IDs as partition keys; category is only a row
+column, not an additional scope selector.
 
 ## Shared transport
 
@@ -44,7 +45,40 @@ origin failures return 403, and review conflicts/staleness/incomplete batches
 return 409. Responses must not expose exception stacks, credentials or arbitrary
 server configuration.
 
-## Dataset and table queries
+## Artifact and table queries
+
+The native Data tab uses `POST /artifacts/partitions` with
+`{"asset_key":["datasets","category_eligible_annotations"]}`. The response contains
+that exact asset key and `partitions`, an array of partition keys; `null` denotes
+an unpartitioned artifact. An empty array means no persisted partitions.
+
+`POST /artifacts/data` accepts:
+
+```json
+{
+  "asset_key":["datasets","category_eligible_annotations"],
+  "partition_key":"example",
+  "snapshot_id":null,
+  "query":{"offset":0,"limit":25,"search":"","filters":[],"sort":[]}
+}
+```
+
+The response carries `asset_key`, `partition_key`, `snapshot_id`, and either
+`kind: "table"` with `page` and `publication_state`, or `kind: "json"` with `value`.
+Full asset keys are never reduced to a leaf name. `ArtifactDataService` accepts an
+`ArtifactCatalog` that supplies persisted storage/reference bindings and partitions;
+it does not require dataset registration, categories, or graph evaluation.
+An application can pass its catalog through `make_dataset_api(..., artifacts=...)`
+and register only its own review stages, with `data=None` and `review=None`.
+
+The dataset adapter reads the stored location and immutable object directly.
+Browsing does not resolve live configuration, reconstruct upstream rows, or run
+publication eligibility logic. Publication status reflects durable current review
+authorization. Pipeline input loading and publication retain their independent
+authority checks.
+
+The older dataset-specific routes retain their business-authority checks for
+workflow clients. The native viewer does not call them.
 
 `GET /datasets` returns:
 
@@ -115,6 +149,19 @@ gate or `human_source_decisions` asset. The local agent discovers sources and
 prepares manifests from actual README/license/origin evidence outside Dagster.
 Both branches retrieve complete declared files with pinned integrity checks;
 neither searches for sources nor invokes source-selector or adapter models.
+
+`POST /reviews/{stage_id}/partitions` accepts the complete `asset_key` and an
+optional `scope_id`. It returns prepared scopes as `partitions`, each carrying
+`dataset_id`, `artifact_id`, `scope_id`, nullable `partition_key`, and `invalidated`.
+Clients display the native partition key and reuse the returned opaque target
+fields in every read and write. Item/evidence GETs carry those fields as query
+parameters. No dataset registry or category discovery is required.
+
+Review query, decision, completion, reopening, retraction and continuation bodies
+accept `artifact_id` and `scope_id`; legacy annotation requests default both to
+empty strings. Snapshots and completion tokens bind these fields. View and item
+responses include `column_schema`, with explicit `editable` and `readOnly` flags
+and captured JSON Schema constraints. Only `review_columns` are editable.
 
 The branches merge extracted rows at `merged_command_candidates`, before shared
 filtering and semantic documentation. Each eligible command then receives one

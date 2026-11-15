@@ -21,7 +21,7 @@ export function RowsTable<T extends Row>({page, query, onChange, onSelect, disab
         </th>;
       })}</tr></thead>
         <tbody>{page.rows.map((row) => <tr key={row.row_index}>
-          <td><Button disabled={disabled} onClick={() => onSelect(row)}>Row {row.row_index + 1}</Button></td>
+          <td><Button onClick={() => onSelect(row)}>Row {row.row_index + 1}</Button></td>
           {page.columns.map((column) => <td key={column}><div className={styles.preview}
             tabIndex={0} role="region" aria-label={`${column}, row ${row.row_index + 1}`}>
             {cellText(row.values[column])}

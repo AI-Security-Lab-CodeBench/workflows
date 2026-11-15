@@ -39,6 +39,15 @@ export const datasetsSchema = z.object({
   datasets: z.array(z.object({dataset_id: text, category_id: text, category: text})),
 });
 export type Dataset = z.infer<typeof datasetsSchema>['datasets'][number];
+const artifactBinding = {asset_key: z.array(text).min(1), partition_key: z.string().nullable(), snapshot_id: digest};
+export const partitionsSchema = z.object({
+  asset_key: z.array(text).min(1), partitions: z.array(z.string().nullable()),
+});
+export const artifactSchema = z.discriminatedUnion('kind', [
+  z.object({...artifactBinding, kind: z.literal('table'), page: pageSchema,
+    publication_state: z.enum(['published', 'legacy_unreviewed', 'stale']).nullable()}),
+  z.object({...artifactBinding, kind: z.literal('json'), value: z.json()}),
+]);
 export const reviewStagesSchema = z.object({
   stages: z.array(z.object({
     stage_id: text, title: text, asset_keys: z.array(z.array(text).min(1)),
@@ -49,6 +58,11 @@ export const reviewStagesSchema = z.object({
   })),
 });
 export type ReviewStage = z.infer<typeof reviewStagesSchema>['stages'][number];
+export const reviewPartitionsSchema = z.object({partitions: z.array(z.object({
+  dataset_id: text, artifact_id: z.string(), scope_id: z.string(),
+  partition_key: z.string().nullable(), invalidated: z.boolean(),
+}))});
+export type ReviewPartition = z.infer<typeof reviewPartitionsSchema>['partitions'][number];
 const binding = {dataset_id: text, stage: text, snapshot_id: digest};
 export const dataSchema = z.discriminatedUnion('kind', [
   z.object({...binding, kind: z.literal('table'), page: pageSchema,
@@ -61,11 +75,14 @@ const version = {
 const tokenSchema = z.object({
   ...version, dataset_id: text, snapshot_id: digest, decision_digest: digest, token: text,
   review_stage: text.default('annotations'),
+  artifact_id: z.string().default(''), scope_id: z.string().default(''),
 });
 export const batchSchema = z.object({
   ...version,
   snapshot: z.object({
     dataset_id: text, snapshot_id: digest,
+    artifact_id: z.string().default(''), scope_id: z.string().default(''),
+    partition_key: z.string().nullable().default(null),
     review_stage: text.default('annotations'),
     candidate_ids: z.array(text), eligible_candidate_ids: z.array(text),
   }),
@@ -94,11 +111,13 @@ export const reviewRowSchema = rowSchema.extend({
 });
 export const reviewItemSchema = z.object({
   row: reviewRowSchema, decision: decisionSchema, review_columns: z.array(text),
+  column_schema: z.record(z.string(), z.record(z.string(), z.json())).default({}),
 }).refine((item) => item.row.review_record_id === item.decision.candidate_id);
 export type ReviewItem = z.infer<typeof reviewItemSchema>;
 export const reviewSchema = z.object({
   batch: batchSchema, counts: countsSchema, decisions: z.array(decisionSchema),
   review_columns: z.array(text),
+  column_schema: z.record(z.string(), z.record(z.string(), z.json())).default({}),
   page: pageSchema.extend({rows: z.array(reviewRowSchema)}),
   publication: publicationSchema.nullable(),
 });

@@ -44,6 +44,7 @@ test('decision writes bind snapshot generation and persisted row revision', () =
   const body = decisionBody(review.batch, 'a', {...draft, decision: 'reject'}, 'two', review.review_columns);
   assert.deepEqual(body, {
     dataset_id: 'dataset-1', snapshot_id: 'a'.repeat(64),
+    artifact_id: '', scope_id: '',
     change: {batch_id: 'batch-1', generation: 3, candidate_id: 'a', expected_row_revision: 7,
       decision: 'reject', notes: '  retain\n', reviewer: 'two', edits: {}},
   });
@@ -148,6 +149,7 @@ test('retraction binds both batch and saved row revisions without changing the d
   assert.ok(decision);
   assert.deepEqual(retractionBody(review.batch, decision, 'two'), {
     dataset_id: 'dataset-1', snapshot_id: 'a'.repeat(64),
+    artifact_id: '', scope_id: '',
     expected: {batch_id: 'batch-1', generation: 3, batch_revision: 8},
     candidate_id: 'a', expected_row_revision: 7, reviewer: 'two',
   });

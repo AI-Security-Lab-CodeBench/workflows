@@ -4,7 +4,7 @@ All source in this directory is a native Dagster asset-view extension, not an
 independent application. `src/pages/` re-exports the original OSS pages.
 `AssetsOverviewRoot.tsx` supplies the inner feature provider and preserves
 inherited fields. Data and eligible Review tabs follow Overview immediately.
-Native and custom links preserve the category partition.
+Native and custom links preserve the artifact partition.
 
 Use `python -m codebench_pipeline.ui_build` for a packaged production build;
 see `BUILD.md`. The following setup is for direct frontend development.
@@ -50,15 +50,19 @@ PostCSS resolves plugins relative to original app-oss.
   asset-key matching, scoped routes, URL selection and component identity.
 - `useResource.ts`: abort-on-obsolescence reads, response-key isolation,
   immutable snapshot binding, explicit recovery and bound reload after writes.
-- `Scope.tsx`, `useNarrowNavigation.ts`: category URL selection and native
-  navigation context; manual reopening is respected within a narrow interval.
+- `Scope.tsx`, `ReviewScope.tsx`: persisted artifact and prepared-review partition
+  selection, without category discovery. Review targets retain their returned
+  opaque storage ID, artifact identity and named scope.
 - `QueryControls.tsx`, `query.ts`, `RowsTable.tsx`: shared global search,
   AND filters, up to four ordered sorts and full server pagination.
-- `DataView.tsx`, `Fields.tsx`: table/rules rendering and complete inert text
+- `DataView.tsx`, `Fields.tsx`: table/JSON rendering and complete inert text
   inspection, including nested evidence strings with original whitespace.
 - `ReviewView.tsx`, `DecisionInspector.tsx`, `decisions.ts`, `Evidence.tsx`:
   per-record decisions, snapshot-scoped drafts, revision conflict recovery,
   immutable evidence, explicit completion and reopening.
+- `FullscreenInspector.tsx`: shared viewport-sized inspector, visible Close,
+  topmost-dialog Escape handling and focus restoration. Closing retains drafts;
+  a late Save-and-next response cannot reopen a dismissed inspector.
 - `PublicationLinks.tsx`, `Status.tsx`, `useReviewer.ts`: successful publication
   references, state feedback and convenience-only reviewer persistence.
 - `tests/`: query/URL/cell behavior, request parsing/cancellation/no-retry errors,

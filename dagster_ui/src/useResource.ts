@@ -22,7 +22,9 @@ export function useResource<T>(
 }
 
 export function useSnapshotQuery<T>(
-  path: string, schema: z.ZodType<T>, datasetId: string, query: Query,
+  path: string, schema: z.ZodType<T>,
+  target: string | null | {readonly asset_key: readonly string[]; readonly partition_key: string | null} |
+    {readonly dataset_id: string; readonly artifact_id: string; readonly scope_id: string}, query: Query,
   getSnapshot: (data: T) => string,
 ) {
   const snapshot = useRef<string | null>(null);
@@ -30,13 +32,15 @@ export function useSnapshotQuery<T>(
   selector.current = getSnapshot;
   const active = useRef<AbortController>();
   const [refresh, setRefresh] = useState(0);
-  const key = JSON.stringify([path, datasetId, query, refresh]);
+  const targetKey = JSON.stringify(target);
+  const key = JSON.stringify([path, targetKey, query, refresh]);
   const [received, setReceived] = useState<Result<T>>();
   useEffect(() => {
     const controller = new AbortController();
     active.current = controller;
     void request(path, schema, 'POST',
-      {dataset_id: datasetId, snapshot_id: snapshot.current, query}, controller.signal).then(
+      {...(typeof target === 'object' && target !== null ? target : {dataset_id: target}),
+        snapshot_id: snapshot.current, query}, controller.signal).then(
       (data) => {
         if (!controller.signal.aborted) {
           snapshot.current = selector.current(data);
@@ -46,7 +50,7 @@ export function useSnapshotQuery<T>(
       (error: unknown) => {if (!controller.signal.aborted) {setReceived({key, error});}},
     );
     return () => controller.abort();
-  }, [key, path, schema, datasetId, query, refresh]);
+  }, [key, path, schema, targetKey, query, refresh]);
   const result = received?.key === key ? received : undefined;
   return {
     data: result?.data, error: result?.error, loading: !result,

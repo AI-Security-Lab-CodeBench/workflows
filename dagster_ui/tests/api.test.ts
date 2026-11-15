@@ -4,9 +4,48 @@ import {ApiError, getReviewItem, nextReviewItem, request} from '../src/api';
 import {batchSchema, completeSchema, dataSchema, initialQuery, reviewStagesSchema, savedSchema, stageResponses} from '../src/models';
 import {changeEditValue, decisionBody, decisionDraft, retractionBody} from '../src/decisions';
 import {reviewPath} from '../src/reviewStages';
+import {artifactResponse, partitionsResponse} from '../src/artifacts';
 
 const originalFetch = globalThis.fetch;
 afterEach(() => {globalThis.fetch = originalFetch;});
+
+test('artifact partition discovery retains full keys and unpartitioned artifacts', async () => {
+  const assetKey = ['models', 'candidate/list'];
+  let payload: unknown;
+  globalThis.fetch = async (_path, options) => {
+    payload = JSON.parse(String(options?.body));
+    return Response.json({asset_key: assetKey, partitions: [null, 'experiment/one']});
+  };
+  const response = await request('/artifacts/partitions', partitionsResponse(assetKey), 'POST', {asset_key: assetKey});
+  assert.deepEqual([payload, response.partitions], [{asset_key: assetKey}, [null, 'experiment/one']]);
+});
+
+test('artifact data accepts generic JSON without a dataset descriptor', async () => {
+  const assetKey = ['models', 'selection'];
+  globalThis.fetch = async () => Response.json({
+    kind: 'json', asset_key: assetKey, partition_key: null, snapshot_id: 'a'.repeat(64),
+    value: {selected: ['model-a'], score: 0.9},
+  });
+  const response = await request('/artifacts/data', artifactResponse(assetKey, null), 'POST',
+    {asset_key: assetKey, partition_key: null, query: initialQuery});
+  assert.equal(response.kind, 'json');
+  if (response.kind === 'json') {assert.deepEqual(response.value, {selected: ['model-a'], score: 0.9});}
+});
+
+test('artifact responses reject another full asset identity or partition', async () => {
+  const assetKey = ['models', 'selection'];
+  for (const binding of [
+    {asset_key: ['datasets', 'selection'], partition_key: 'one'},
+    {asset_key: assetKey, partition_key: 'two'},
+  ]) {
+    globalThis.fetch = async () => Response.json({
+      kind: 'table', ...binding, snapshot_id: 'a'.repeat(64), publication_state: null,
+      page: {columns: [], total_rows: 0, matched_rows: 0, offset: 0, limit: 25, rows: []},
+    });
+    await assert.rejects(request('/artifacts/data', artifactResponse(assetKey, 'one'), 'POST', {}),
+      (error: unknown) => error instanceof ApiError && error.code === 'invalid_response');
+  }
+});
 
 for (const {operation, method} of [
   {operation: 'decision', method: 'PUT'},
@@ -125,6 +164,7 @@ test('retraction posts revision-bound JSON and accepts a reopened generation wit
   assert.deepEqual(posted, {
     path: '/codebench/api/reviews/sources/retract', method: 'POST',
     body: {dataset_id: 'dataset-1', snapshot_id: 'a'.repeat(64),
+      artifact_id: '', scope_id: '',
       expected: {batch_id: 'batch-1', generation: 1, batch_revision: 2},
       candidate_id: 'model-a', expected_row_revision: 4, reviewer: 'two'},
   });
@@ -211,6 +251,7 @@ test('approval sends configured generic edits and retains server values after re
     path: '/codebench/api/reviews/annotations/decision', method: 'PUT',
     body: {
       dataset_id: 'dataset-1', snapshot_id: 'a'.repeat(64),
+      artifact_id: '', scope_id: '',
       change: {batch_id: 'batch-1', generation: 1, candidate_id: 'model-a', expected_row_revision: 0,
         decision: 'approve', notes: '', reviewer: 'two', edits: {command: 'edited command', extra: {nested: [false, null]}}},
     },
@@ -230,7 +271,8 @@ function itemFixture() {
 
 test('server next pending receives the active query and returns an off-page item with compact metadata', async () => {
   const original = batchSchema.parse(completionFixture('custom/stage').batch);
-  const batch = {...original, snapshot: {...original.snapshot, candidate_ids: [], eligible_candidate_ids: []}};
+  const batch = {...original, snapshot: {...original.snapshot, candidate_ids: [], eligible_candidate_ids: [],
+    artifact_id: 'measurements', scope_id: 'uncertain'}};
   const query = {...initialQuery, offset: 50, search: 'literal text'};
   let posted: unknown;
   globalThis.fetch = async (path, options) => {
@@ -240,7 +282,8 @@ test('server next pending receives the active query and returns an off-page item
   const item = await nextReviewItem(batch, query, 'current/id');
   assert.deepEqual(posted, {
     path: '/codebench/api/reviews/custom%2Fstage/next', method: 'POST',
-    body: {dataset_id: 'dataset-1', snapshot_id: 'a'.repeat(64), query, after_id: 'current/id'},
+    body: {dataset_id: 'dataset-1', artifact_id: 'measurements', scope_id: 'uncertain',
+      snapshot_id: 'a'.repeat(64), query, after_id: 'current/id'},
   });
   assert.deepEqual([item?.row.review_record_id, item?.row.occurrence_count, item?.decision.decision],
     ['off/page', 4, 'pending']);
@@ -261,7 +304,7 @@ test('item lookup encodes stage batch and identity and retains original JSON val
   };
   const item = await getReviewItem(batch, 'off/page');
   assert.deepEqual(requested, {
-    path: '/codebench/api/reviews/custom%2Fstage/batch-1/item/off%2Fpage?dataset_id=dataset-1', method: 'GET',
+    path: '/codebench/api/reviews/custom%2Fstage/batch-1/item/off%2Fpage?dataset_id=dataset-1&artifact_id=&scope_id=', method: 'GET',
   });
   assert.deepEqual(item.row.values, {command: 'original command', payload: {a: true}});
   assert.deepEqual(item.review_columns, ['command', 'payload']);

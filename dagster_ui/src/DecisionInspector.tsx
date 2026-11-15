@@ -22,7 +22,7 @@ export function DecisionInspector({review, item, draft, dirty, disabled, canRetr
   const eligible = row.blocked_reason === null;
   const invalid = columns.some((field) => draft.invalidEdits[field] !== undefined);
   const locked = review.batch.state !== 'open';
-  return <aside className={`${styles.pane} ${styles.inspector}`} aria-label="Record inspector">
+  return <div className={styles.inspector} role="region" aria-label="Record inspector">
     <div className={styles.stack}>
       <strong>Record: {candidateId}</strong>
       <div role="status">Occurrences: {row.occurrence_count}. One decision applies to all occurrences.</div>
@@ -51,7 +51,8 @@ export function DecisionInspector({review, item, draft, dirty, disabled, canRetr
         disabled={disabled || locked} onDraft={onDraft} />
       <Evidence key={`${review.batch.snapshot.review_stage}/${review.batch.batch_id}/${candidateId}`}
         stageId={review.batch.snapshot.review_stage} batchId={review.batch.batch_id}
-        candidateId={candidateId} datasetId={review.batch.snapshot.dataset_id} />
+        candidateId={candidateId} datasetId={review.batch.snapshot.dataset_id}
+        artifactId={review.batch.snapshot.artifact_id} scopeId={review.batch.snapshot.scope_id} />
       <label className={styles.field}>Human notes
         <TextArea value={draft.notes} disabled={disabled || locked}
           onChange={(e) => onDraft({...draft, notes: e.target.value})} />
@@ -69,5 +70,5 @@ export function DecisionInspector({review, item, draft, dirty, disabled, canRetr
       </div>
       <details><summary>Complete reviewed row</summary><Fields fields={row.values} /></details>
     </div>
-  </aside>;
+  </div>;
 }
