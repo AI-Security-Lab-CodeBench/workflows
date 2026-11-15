@@ -3,6 +3,7 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import psycopg
 from psycopg import sql
@@ -405,6 +406,23 @@ class ReviewPostgresTests(unittest.TestCase):
             assert following is not None
             self.assertEqual(following.row.review_record_id, "three")
             self.assertIsNone(tx.next_pending(NextReviewRequest(dataset_id="qa", after_id="three"), "selection"))
+
+    def test_review_page_metadata_reads_do_not_grow_with_page_size(self) -> None:
+        prepared = self.prepared((
+            {"id": "one", "text": "first"},
+            {"id": "two", "text": "second"},
+        ), schema={"text": {"type": "string", "minLength": 1}})
+        with self.store.transaction() as tx:
+            tx.prepare(prepared)
+        with self.store.reader() as tx, patch.object(tx, "_metadata", wraps=tx._metadata) as metadata:
+            single = tx.review_page(DatasetQueryRequest(dataset_id="qa", query=TableQuery(limit=1)), "selection")
+            single_reads = metadata.call_count
+            metadata.reset_mock()
+            page = tx.review_page(DatasetQueryRequest(dataset_id="qa", query=TableQuery(limit=2)), "selection")
+            self.assertEqual((len(single.page.rows), len(page.page.rows)), (1, 2))
+            self.assertEqual(page.column_schema, single.column_schema)
+            self.assertEqual(page.column_schema["text"]["minLength"], 1)
+            self.assertEqual(metadata.call_count, single_reads)
 
     def test_dataset_locks_are_not_global_and_stale_revisions_cannot_write(self) -> None:
         prepared = self.prepared(({"id": "one", "text": "value"},))

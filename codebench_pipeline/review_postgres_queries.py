@@ -168,6 +168,7 @@ class ReviewQueries(ReviewRepository):
 
     def _item_response(
         self, row: dict[str, JsonValue], batch: ReviewBatch,
+        column_schema: dict[str, dict[str, JsonValue]],
     ) -> ReviewItemResponse:
         decision = ReviewDecision.model_validate(row["decision_data"])
         values = TypeAdapter(dict[str, JsonValue]).validate_json(
@@ -182,11 +183,12 @@ class ReviewQueries(ReviewRepository):
                 blocked_reason=TypeAdapter(str | None).validate_python(row["item_blocked_reason"]),
             ),
             decision=decision, review_columns=batch.snapshot.review_columns,
-            column_schema=self.column_schema(batch.batch_id),
+            column_schema=column_schema,
         )
 
     def review_page(self, request: DatasetQueryRequest, stage: str) -> ReviewViewResponse:
         batch, columns = self._query_batch(request, stage)
+        column_schema = self.column_schema(batch.batch_id)
         where, params, order = self._clauses(request.query, columns)
         count = next(self.connection.execute(
             sql.SQL(REPRESENTATIVES + "SELECT count(*) AS total,count(*) FILTER(WHERE {}) AS matched FROM items").format(where),
@@ -196,7 +198,7 @@ class ReviewQueries(ReviewRepository):
             sql.SQL(REPRESENTATIVES + "SELECT * FROM items WHERE {} ORDER BY {} LIMIT %s OFFSET %s").format(where, order),
             [batch.batch_id, *params, request.query.limit, request.query.offset],
         )
-        items = tuple(self._item_response(row, batch) for row in records)
+        items = tuple(self._item_response(row, batch, column_schema) for row in records)
         publication = self.last_publication(
             request.dataset_id, stage,
             artifact_id=batch.snapshot.artifact_id, scope_id=batch.snapshot.scope_id,
@@ -209,7 +211,7 @@ class ReviewQueries(ReviewRepository):
                             matched_rows=TypeAdapter(int).validate_python(count["matched"]),
                             offset=request.query.offset, limit=request.query.limit, rows=tuple(item.row for item in items)),
             publication=publication, review_columns=batch.snapshot.review_columns,
-            column_schema=self.column_schema(batch.batch_id),
+            column_schema=column_schema,
         )
 
     def item(self, target: EvidenceTarget) -> ReviewItemResponse:
@@ -225,7 +227,7 @@ class ReviewQueries(ReviewRepository):
         ).fetchone()
         if row is None:
             raise HumanReviewError("not_found", "Candidate is not in this batch")
-        return self._item_response(row, batch)
+        return self._item_response(row, batch, self.column_schema(batch.batch_id))
 
     def next_pending(self, request: NextReviewRequest, stage: str) -> ReviewItemResponse | None:
         batch, columns = self._query_batch(request, stage)
@@ -240,4 +242,4 @@ class ReviewQueries(ReviewRepository):
         row = self.connection.execute(
             query, [batch.batch_id, *params, request.after_id, batch.batch_id, request.after_id]
         ).fetchone()
-        return self._item_response(row, batch) if row else None
+        return self._item_response(row, batch, self.column_schema(batch.batch_id)) if row else None
