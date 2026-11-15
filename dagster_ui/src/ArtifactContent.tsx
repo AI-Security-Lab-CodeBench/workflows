@@ -1,8 +1,9 @@
 import {useState} from 'react';
 import type {ReactNode} from 'react';
 import type {JsonValue} from './models';
-import {objectValue, orderedFields, prettyJson, resolveSchema, schemaType, schemaValue, valueSchema} from './artifactSchema';
+import {objectValue, prettyJson, resolveSchema, schemaType, schemaValue} from './artifactSchema';
 import type {SchemaNode as Schema, SchemaObject} from './artifactSchema';
+import {StructuredInspector} from './StructuredInspector';
 import styles from './ui.module.css';
 
 export function ArtifactContent({value, dataSchema, table = false, children}: {
@@ -22,7 +23,7 @@ export function ArtifactContent({value, dataSchema, table = false, children}: {
       </label>
       <span className={styles.schemaMeta}>{dataSchema.source === 'declared' ? 'Declared schema' : 'Storage schema'}</span>
     </div>
-    {view === 'data' && (table ? children : <StructuredValue value={value} schema={dataSchema.schema} root={dataSchema.schema} />)}
+    {view === 'data' && (table ? children : <StructuredInspector value={value} schema={dataSchema.schema} />)}
     {view === 'schema' && <div className={styles.stack}>
       <div className={styles.schemaMeta}>
         {table ? 'Schema describes one row. ' : 'Schema describes the artifact root. '}
@@ -50,54 +51,6 @@ function Disclosure({label, children, accessibleLabel}: {
     <summary aria-label={accessibleLabel}>{label}</summary>
     {open && <div className={styles.artifactChildren}>{children}</div>}
   </details>;
-}
-
-function StructuredValue({value, schema, root}: {
-  readonly value: JsonValue; readonly schema: Schema | undefined; readonly root: SchemaObject;
-}) {
-  const resolved = valueSchema(schema, root, value);
-  if (Array.isArray(value)) {
-    if (!value.length) {return <pre className={styles.literal}>[]</pre>;}
-    return <dl className={`${styles.stack} ${styles.artifactFields}`}>{value.map((entry, index) => {
-      const prefix = Array.isArray(resolved.prefixItems) ? schemaValue(resolved.prefixItems[index]) : undefined;
-      return <ValueField key={index} name={`[${index}]`} value={entry}
-        schema={prefix ?? schemaValue(resolved.items)} root={root} />;
-    })}</dl>;
-  }
-  const object = objectValue(value);
-  if (object) {
-    const keys = orderedFields(object, resolved);
-    if (!keys.length) {return <pre className={styles.literal}>{'{}'}</pre>;}
-    const properties = objectValue(resolved.properties);
-    return <dl className={`${styles.stack} ${styles.artifactFields}`}>{keys.map((name) =>
-      <ValueField key={name} name={name} value={object[name] ?? null}
-        schema={schemaValue(properties?.[name]) ?? schemaValue(resolved.additionalProperties)} root={root} />)}</dl>;
-  }
-  return <pre className={styles.valueText}>{typeof value === 'string'
-    ? value === '' ? '""' : value
-    : prettyJson(value)}</pre>;
-}
-
-function ValueField({name, value, schema, root}: {
-  readonly name: string; readonly value: JsonValue; readonly schema: Schema | undefined; readonly root: SchemaObject;
-}) {
-  const object = objectValue(value);
-  const count = Array.isArray(value) ? `${value.length} ${value.length === 1 ? 'item' : 'items'}`
-    : object ? `${Object.keys(object).length} ${Object.keys(object).length === 1 ? 'field' : 'fields'}` : null;
-  const long = typeof value === 'string' && (value.includes('\n') || value.length > 240);
-  const type = schema === undefined ? undefined : schemaType(schema, root);
-  const description = valueSchema(schema, root, value).description;
-  const body = <StructuredValue value={value} schema={schema} root={root} />;
-  return <div className={styles.artifactField}>
-    <dt className={styles.artifactLabel}><strong>{name}</strong>{type && <code className={styles.schemaMeta}>{type}</code>}</dt>
-    <dd>
-      {typeof description === 'string' && <div className={styles.schemaDescription}>{description}</div>}
-      {count !== null || long
-        ? <Disclosure accessibleLabel={`${name}: ${count ?? `${typeof value === 'string' ? value.length : 0} characters`}`}
-          label={count ?? `${typeof value === 'string' ? value.length : 0} characters`}>{body}</Disclosure>
-        : body}
-    </dd>
-  </div>;
 }
 
 function SchemaNode({node, root, name, required, ancestors = []}: {

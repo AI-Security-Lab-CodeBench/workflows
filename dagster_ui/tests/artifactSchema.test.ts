@@ -67,7 +67,7 @@ test('nullable referenced objects preserve field order for structured data and a
   const root: SchemaObject = {$defs: {Item: {
     type: 'object', properties: {id: {type: 'string'}, detail: {type: 'string'}},
   }}};
-  const schema = {anyOf: [{type: 'null'}, {$ref: '#/$defs/Item'}]};
+  const schema: SchemaObject = {anyOf: [{type: 'null'}, {$ref: '#/$defs/Item'}]};
   assert.deepEqual(orderedFields({detail: 'text', id: 'one'}, valueSchema(schema, root, {detail: 'text', id: 'one'})),
     ['id', 'detail']);
   assert.equal(schemaType({type: ['array', 'null']}, root), 'array | null');

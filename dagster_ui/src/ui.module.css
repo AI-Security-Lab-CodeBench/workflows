@@ -87,3 +87,76 @@
 .artifactGroup > summary:hover { background: var(--color-background-light); }
 .artifactGroup > summary:focus-visible { outline: 2px solid var(--color-focus-ring); outline-offset: 2px; }
 .artifactChildren { margin-top: var(--space-small); min-width: 0; display: flex; flex-direction: column; gap: var(--space-large); }
+.structuredInspector { min-width: 0; container-type: inline-size; }
+.inspectorSearch { display: flex; align-items: end; gap: var(--space-small); flex-wrap: wrap; margin-bottom: var(--space-large); }
+.inspectorSearch > label { flex: 1; min-width: min(240px, 100%); }
+.inspectorLayout { display: grid; grid-template-columns: minmax(180px, 24%) minmax(0, 1fr); border-top: 1px solid var(--color-border-default); }
+.valueOutline { min-width: 0; max-height: 70dvh; overflow: auto; padding: var(--space-medium) var(--space-small) var(--space-medium) 0; border-right: 1px solid var(--color-border-default); }
+.outlineTitle { padding: var(--space-small); color: var(--color-text-light); font-weight: 600; }
+.outlineBranch { min-width: 0; }
+.outlineRow { display: flex; align-items: center; min-width: 0; }
+.outlineChildren { margin-left: var(--space-medium); border-left: 1px solid var(--color-border-default); padding-left: 4px; }
+.outlineItem, .outlineDisclosure, .valueButton, .propertyName, .propertyNavigate, .searchResult {
+  font: inherit; color: var(--color-text-default); background: transparent; cursor: pointer;
+  border: 0; border-radius: 4px; text-align: left;
+}
+.outlineDisclosure, .outlineSpacer { flex: 0 0 28px; width: 28px; text-align: center; }
+.outlineItem { flex: 1; min-width: 0; padding: var(--space-small); overflow-wrap: anywhere; }
+.outlineItem > span { display: inline-block; margin-left: var(--space-small); color: var(--color-text-light); font-variant-numeric: tabular-nums; }
+.outlineItem[aria-current="true"] { background: var(--color-background-light); color: var(--color-link-default); font-weight: 600; box-shadow: inset 2px 0 var(--color-link-default); }
+.valueButton { padding: 6px var(--space-small); border: 1px solid var(--color-border-default); }
+.valueButton:hover, .outlineItem:hover, .outlineDisclosure:hover, .propertyName:hover, .propertyNavigate:hover, .searchResult:hover { background: var(--color-background-light); }
+.valueButton:active, .outlineItem:active, .propertyName:active { background: var(--color-background-light); }
+.valueButton:disabled { color: var(--color-text-light); cursor: not-allowed; opacity: .6; }
+.valueButton:focus-visible, .outlineItem:focus-visible, .outlineDisclosure:focus-visible, .propertyName:focus-visible,
+.propertyNavigate:focus-visible, .searchResult:focus-visible, .fullValueText:focus-visible {
+  outline: 2px solid var(--color-focus-ring); outline-offset: 2px;
+}
+.valueDetail { min-width: 0; padding: var(--space-medium) 0 var(--space-medium) var(--space-large); }
+.valueBreadcrumbs { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; margin-bottom: var(--space-medium); }
+.valueBreadcrumbs > span { display: flex; min-width: 0; align-items: center; gap: 4px; }
+.valueBreadcrumbs button { border: 0; color: var(--color-link-default); overflow-wrap: anywhere; min-width: 0; }
+.detailHeader { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: var(--space-small); }
+.detailHeader h3 { margin: 0; font-size: 20px; overflow-wrap: anywhere; }
+.detailHeader h3:focus { outline: none; }
+.valueType { display: inline-block; color: var(--color-text-light); font: 12px/1.5 var(--font-mono); }
+.valueActions { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-small); }
+.copyNotice { min-height: 24px; color: var(--color-text-light); line-height: 1.5; overflow-wrap: anywhere; }
+.propertyList { margin: 0; min-width: 0; }
+.propertyRow { display: grid; grid-template-columns: minmax(120px, 27%) minmax(0, 1fr); gap: var(--space-large); padding: var(--space-medium) 0; border-top: 1px solid var(--color-border-default); }
+.propertyRow dt { display: flex; flex-direction: column; align-items: start; gap: 4px; min-width: 0; }
+.propertyRow dd { min-width: 0; margin: 0; display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: var(--space-small); }
+.propertyName { padding: 0 4px; font-family: var(--font-mono); font-weight: 600; overflow-wrap: anywhere; max-width: 100%; }
+.propertyNavigate { color: var(--color-link-default); padding: 0 var(--space-small); }
+.propertyPreview, .selectedPreview { font: inherit; white-space: pre-wrap; overflow-wrap: anywhere; margin: 0; line-height: 1.6; max-width: 75ch; }
+.propertyPreview { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.propertyDescription { grid-column: 1 / -1; color: var(--color-text-light); line-height: 1.5; overflow-wrap: anywhere; max-width: 75ch; }
+.valuePagination { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-small); margin-top: var(--space-medium); font-variant-numeric: tabular-nums; }
+.searchResults { max-height: 320px; overflow: auto; margin-bottom: var(--space-large); padding: var(--space-small); background: var(--color-background-light); }
+.searchResult { display: flex; flex-direction: column; gap: 4px; width: 100%; padding: var(--space-small); }
+.searchResult code { color: var(--color-link-default); overflow-wrap: anywhere; }
+.searchResult span { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; max-width: 100%; }
+.outlineToggle { display: none; }
+.fullValue { height: 100%; min-height: 0; display: flex; flex-direction: column; gap: var(--space-medium); }
+.fullValueTools { flex: none; display: flex; flex-direction: column; gap: var(--space-small); }
+.valuePath { overflow-wrap: anywhere; font-family: var(--font-mono); }
+.inlineControl { display: flex; align-items: center; gap: var(--space-small); min-height: var(--touch-target); cursor: pointer; }
+.inlineControl input { accent-color: var(--color-link-default); }
+.fullValueText { flex: 1; min-height: 100px; margin: 0; overflow: auto; padding: var(--space-large); border: 1px solid var(--color-border-default); background: var(--color-background-light); font: 14px/1.7 var(--font-mono); white-space: pre; tab-size: 2; }
+.wrappedValue { white-space: pre-wrap; overflow-wrap: anywhere; }
+.fullValueText mark { background: var(--color-background-yellow); color: var(--color-text-default); outline: 1px solid var(--color-border-default); }
+@container (max-width: 680px) {
+  .inspectorLayout { grid-template-columns: minmax(0, 1fr); }
+  .valueOutline { display: none; border-right: 0; border-bottom: 1px solid var(--color-border-default); max-height: 40dvh; }
+  .outlineOpen { display: block; }
+  .outlineToggle { display: block; }
+  .valueDetail { padding-left: 0; }
+  .propertyRow { grid-template-columns: minmax(0, 1fr); gap: 4px; }
+  .propertyRow dt { flex-direction: row; flex-wrap: wrap; align-items: center; gap: var(--space-small); }
+  .propertyRow dd { grid-template-columns: minmax(0, 1fr); }
+}
+@media (max-width: 600px) {
+  .fullValueTools .toolbar { gap: 4px; }
+  .fullValueText { padding: var(--space-small); }
+  .fullValueTools .copyNotice:empty { display: none; }
+}

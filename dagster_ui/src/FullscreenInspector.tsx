@@ -25,8 +25,9 @@ export function FullscreenInspector({isOpen, title, onClose, children}: {
   }, [isOpen, onClose]);
   return <Dialog isOpen={isOpen} className={styles.dialog} onClose={onClose}
     aria-labelledby={titleId} canEscapeKeyClose={false} canOutsideClickClose={false}
+    onOpened={() => header.current?.focus({preventScroll: true})}
     enforceFocus shouldReturnFocusOnClose>
-    <div ref={header} className={styles.dialogHeader}>
+    <div ref={header} tabIndex={-1} className={styles.dialogHeader}>
       <DialogHeader label={<span id={titleId}>{title}</span>}
         right={<Button onClick={onClose}>Close</Button>} />
     </div>

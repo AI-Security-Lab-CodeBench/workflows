@@ -137,13 +137,25 @@ and Pydantic configuration models. Pipeline authors do not enable a viewer,
 register schemas, or maintain an asset-name map. Browsing reads persisted
 values; it does not invoke asset functions or reload business configuration.
 
-Data is the default view. Objects use schema property order followed by any
-undeclared keys in their original order. Short values remain visible; multiline
-or long strings and nested groups expand through keyboard-accessible native
-disclosures with character/field/item counts. Expansion exposes complete text,
-including whitespace, empty values and HTML-like content rendered as inert text.
-Arrays retain order and use tuple or item schema when supplied. The fullscreen
-row inspector uses this renderer without changing Review's evidence renderer.
+Data is the default view. Its outline and detail pane show immediate properties,
+with breadcrumbs, actual value types and bounded previews. Objects use schema
+property order followed by undeclared keys in their original order. Array entries
+retain their numeric indices and may show an existing name, title or ID.
+The outline uses ordinary disclosure buttons and navigation, not ARIA tree roles.
+On narrow screens an Outline button reveals navigation above the detail pane.
+Properties are paged in groups of 50; outline children load in groups of 50.
+Search covers keys and complete scalar values, including collapsed descendants;
+results retain full JSON Pointer paths and show at most 100 matches.
+
+Every property, container and root supports Copy and full-value inspection.
+Copy preserves literal strings, including whitespace; other values use formatted
+JSON. The full-value dialog offers Copy as JSON, Copy path (JSON Pointer), Download,
+line wrapping and case-sensitive find. Empty strings, null, false and zero remain
+distinct. Content is inert text, never interpreted as markup. Copy reads underlying
+values, not truncated previews, and reports clipboard failures. Full-value dialogs
+reuse the native focus-enforced inspector and return focus on close.
+Arrays use tuple or item schema when supplied. The fullscreen row inspector uses
+this renderer without changing Review's evidence renderer.
 
 Schema shows field types (including null unions), required/optional fields,
 descriptions, all supplied constraints and enum values, object properties, array
@@ -159,7 +171,8 @@ JSON artifacts have none of those controls; Refresh snapshot remains available
 in loading, error and loaded states. Artifact selection, independent partition
 scope, aborts and immutable snapshot binding remain owned by the existing code.
 
-Focused parser/helper coverage is in `tests/artifactSchema.test.ts`, with
+Focused parser/helper coverage is in `tests/artifactSchema.test.ts` and
+`tests/structuredValue.test.ts`, with
 transport binding fixtures in `tests/api.test.ts`. The integration lead owns
 execution, native typecheck/build and browser QA. Exercise Data/Schema/JSON and
 row inspection at 390/1440 in light/dark themes, long prompts, null/empty roots,
