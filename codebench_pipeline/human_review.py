@@ -1,10 +1,10 @@
 from __future__ import annotations
 
+import json
 from typing import Annotated, Literal, Self, assert_never
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, model_serializer, model_validator
 
-from codebench_pipeline.category_rules import ClassName, SeverityName
 from codebench_pipeline.storage import fingerprint
 
 Text = Annotated[str, Field(min_length=1, pattern=r"\S")]
@@ -39,6 +39,22 @@ class ReviewModel(BaseModel):
     model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
 
 
+def review_partition_id(partition_key: str | None) -> str:
+    return "partition-" + fingerprint(partition_key)
+
+
+def review_artifact_id(asset_key: tuple[str, ...]) -> str:
+    return json.dumps(asset_key, ensure_ascii=False, separators=(",", ":"))
+
+
+class ReviewPartition(ReviewModel):
+    dataset_id: Text
+    artifact_id: str = ""
+    scope_id: str = ""
+    partition_key: str | None
+    invalidated: bool = False
+
+
 class LabelCorrections(ReviewModel):
     model_config = ConfigDict(
         frozen=True, strict=True, extra="forbid", populate_by_name=True, serialize_by_alias=True
@@ -46,8 +62,8 @@ class LabelCorrections(ReviewModel):
 
     category_id: Text | None = None
     risk_id: Text | None = None
-    severity: SeverityName | None = None
-    class_: ClassName | None = Field(default=None, alias="class")
+    severity: Literal["low", "medium", "high", "critical"] | None = None
+    class_: Literal["allow", "deny", "ask"] | None = Field(default=None, alias="class")
 
     @model_validator(mode="after")
     def require_values(self) -> Self:
@@ -70,6 +86,9 @@ class ReviewSnapshot(ReviewModel):
     """Server-resolved immutable content and evidence, never a client assertion."""
 
     dataset_id: Text
+    artifact_id: str = ""
+    scope_id: str = ""
+    partition_key: str | None = None
     review_stage: Text = "annotations"
     snapshot_id: Digest
     candidate_ids: tuple[Text, ...]
@@ -101,6 +120,8 @@ class BatchVersion(ReviewModel):
 
 class CompletionToken(BatchVersion):
     dataset_id: Text
+    artifact_id: str = ""
+    scope_id: str = ""
     review_stage: Text = "annotations"
     snapshot_id: Digest
     decision_digest: Digest
@@ -190,6 +211,31 @@ class PreparedReview(ReviewModel):
     rows: tuple[dict[str, JsonValue], ...]
     validation: dict[str, JsonValue] = Field(default_factory=dict)
     evidence: dict[str, JsonValue] = Field(default_factory=dict)
+    column_schema: dict[str, dict[str, JsonValue]] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def capture_column_schema(self) -> Self:
+        from codebench_pipeline.review_postgres_values import json_type
+
+        if set(self.column_schema) - set(self.columns):
+            raise ValueError("Declared column schema contains unknown columns")
+        captured: dict[str, dict[str, JsonValue]] = {}
+        for column in self.columns:
+            declared = self.column_schema.get(column, {})
+            editable = column in self.snapshot.review_columns
+            if "editable" in declared and declared["editable"] != editable:
+                raise ValueError("Only selected review columns may be editable")
+            types: list[JsonValue] = [
+                name for name in sorted({json_type(row[column]) for row in self.rows if column in row})
+            ]
+            captured[column] = {
+                **({"type": types} if types else {}),
+                **declared,
+                "editable": editable,
+                "readOnly": not editable,
+            }
+        object.__setattr__(self, "column_schema", captured)
+        return self
 
 
 class PublicationPayload(ReviewModel):

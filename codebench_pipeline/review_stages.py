@@ -43,6 +43,7 @@ class ReviewInput:
     id_column: str
     validation: dict[str, JsonValue] = field(default_factory=dict)
     evidence: dict[str, JsonValue] = field(default_factory=dict)
+    column_schema: dict[str, dict[str, JsonValue]] = field(default_factory=dict)
 
 
 class ReviewSource(Protocol):
@@ -69,7 +70,6 @@ def annotation_stage() -> ReviewStage:
                 "deduplicated_annotations",
                 "category_eligible_annotations",
                 "human_review_queue",
-                "human_review_snapshot",
                 "human_review_decisions",
                 "dataset_release",
             )

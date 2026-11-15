@@ -128,11 +128,11 @@ class ReviewSnapshots:
         input_stages = tuple(
             stage
             for stage in PREPARATION_STAGES
-            if stage != "human_review_snapshot"
+            if stage != "human_review_queue"
             if stage in ("category_rules", *FINALIZATION_STAGES)
             or ("documentation" if stage.startswith("documentation/") else "dataset") not in plan.unconfigured
         )
-        if set(plan.selected) - {"human_review_snapshot"} or plan.blocked:
+        if set(plan.selected) - {"human_review_queue"} or plan.blocked:
             raise DatasetViewError("not_ready", "Preparation is incomplete or changed")
         manager = DataFrameIOManager(storage=spec.storage)
         binding: dict[str, JsonValue] = {}

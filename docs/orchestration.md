@@ -167,10 +167,15 @@ See [branch contracts and migration](independent-branches.md).
 9. `proposed_annotations`: independent per-command labels, confidence and rationale.
 10. `deduplicated_annotations`: conservative exact normalized survivors with an audit mapping.
 11. `category_eligible_annotations`: excludes rejected, foreign-category and low-category-confidence labels.
-12. `human_review_queue`: only medium-or-higher uncertainty annotations, with machine exclusion reasons.
-13. `human_review_snapshot`: prepares PostgreSQL rows and reusable selected-value decisions once.
-14. `human_review_decisions`: real, version-bound terminal queue decisions; no invented rows for automatic admission.
-15. `dataset_release`: the single current release, with per-row `human_reviewed` after the nine command columns.
+12. `human_review_queue`: medium-or-higher uncertainty annotations, machine exclusion reasons and prepared PostgreSQL review items.
+13. `human_review_decisions`: real, version-bound terminal queue decisions; no invented rows for automatic admission.
+14. `dataset_release`: the single current release, with per-row `human_reviewed` after the nine command columns.
+
+`human_review_queue` retains `ReviewQueueTable` as its output. Its namespaced
+`codebench_review_preparation` attributes bind `batch_id` and `snapshot_id` even
+when no rows need review. Preparation runs after the queue cache lookup, including
+on a cache hit, and excludes the queue itself from captured upstream references.
+The former `human_review_snapshot` node is historical, not an active asset.
 
 The authoritative publication pointer is the PostgreSQL review ledger, committed
 after immutable Parquet, CSV and audit sidecars are written. A manual release
@@ -405,7 +410,7 @@ Annotation schema checks and publication preparation operate on table values
 without the evidence metadata attached, avoiding repeated whole-evidence copies
 during column validation. Full snapshot authorization retains its semantic evidence,
 but reusable row identity includes only original selected-column values.
-Preparation runs at `human_review_snapshot`, never on Review page requests.
+Preparation runs at `human_review_queue`, never on Review page requests.
 Pages, individual items and next-pending navigation query PostgreSQL directly,
 returning bounded rows and page-local decisions rather than full tables.
 

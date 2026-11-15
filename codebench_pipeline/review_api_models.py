@@ -11,6 +11,7 @@ from codebench_pipeline.human_review import (
     ReviewBatch,
     ReviewCounts,
     ReviewDecision,
+    ReviewPartition,
     Revision,
     Text,
 )
@@ -20,12 +21,16 @@ from codebench_pipeline.table_query import QueryModel, TableRow
 
 class DecisionRequest(QueryModel):
     dataset_id: Identifier
+    artifact_id: str = ""
+    scope_id: str = ""
     snapshot_id: Digest
     change: DecisionChange
 
 
 class CompletionRequest(QueryModel):
     dataset_id: Identifier
+    artifact_id: str = ""
+    scope_id: str = ""
     snapshot_id: Digest
     expected: BatchVersion
     reviewer: Text
@@ -38,6 +43,8 @@ class RetractionRequest(CompletionRequest):
 
 class EvidenceTarget(QueryModel):
     dataset_id: Identifier
+    artifact_id: str = ""
+    scope_id: str = ""
     batch_id: Text
     candidate_id: Text
 
@@ -76,9 +83,15 @@ class ReviewViewResponse(ReviewStatus):
     page: ReviewPage
     publication: PublicationReference | None
     review_columns: tuple[str, ...] = ()
+    column_schema: dict[str, dict[str, JsonValue]] = {}
 
 
-class NextReviewRequest(DatasetQueryRequest):
+class ReviewQueryRequest(DatasetQueryRequest):
+    artifact_id: str = ""
+    scope_id: str = ""
+
+
+class NextReviewRequest(ReviewQueryRequest):
     after_id: Text | None = None
 
 
@@ -86,6 +99,7 @@ class ReviewItemResponse(QueryModel):
     row: ReviewTableRow
     decision: ReviewDecision
     review_columns: tuple[str, ...]
+    column_schema: dict[str, dict[str, JsonValue]] = {}
 
 
 class PublicationResponse(ReviewStatus):
@@ -99,6 +113,10 @@ class EvidenceResponse(QueryModel):
 
 
 class ReviewBackend(Protocol):
+    def partitions(
+        self, *, artifact_id: str | None = None, scope_id: str | None = None,
+    ) -> tuple[ReviewPartition, ...]: ...
+
     def view(self, request: DatasetQueryRequest) -> ReviewViewResponse: ...
 
     def next_pending(self, request: NextReviewRequest) -> ReviewItemResponse | None: ...

@@ -1,3 +1,4 @@
+import hashlib
 import json
 import sqlite3
 import tempfile
@@ -6,20 +7,32 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pandas as pd
-from configuration_fixture import write_fixture
+from configuration_fixture import example_config, write_fixture
+from jsonschema.exceptions import ValidationError
 from starlette.testclient import TestClient
 
 from codebench_pipeline.data_api import make_dataset_api
 from codebench_pipeline.data_view_models import DatasetQueryRequest
 from codebench_pipeline.data_views import DatasetDataService
 from codebench_pipeline.dataset_config import load_build_config
+from codebench_pipeline.dataset_records import CandidateRecord, LabelDecision
 from codebench_pipeline.dataset_registry import DatasetRegistry
-from codebench_pipeline.human_review import DecisionChange, HumanReviewError
+from codebench_pipeline.human_review import (
+    DecisionChange,
+    HumanReviewError,
+    PreparedReview,
+    ReviewSnapshot,
+    review_artifact_id,
+    review_partition_id,
+)
+from codebench_pipeline.human_review_transactions import schema_validator
+from codebench_pipeline.label_corrections import annotation_review_validation
 from codebench_pipeline.review_api_models import (
     CompletionRequest,
     DecisionRequest,
     EvidenceTarget,
     PublicationResponse,
+    ReviewQueryRequest,
     ReviewViewResponse,
 )
 from codebench_pipeline.review_legacy_import import import_legacy
@@ -27,8 +40,91 @@ from codebench_pipeline.review_stages import ReviewRegistration, ReviewStage, Re
 from codebench_pipeline.review_tables import ReviewTable, TableReviewSource
 from codebench_pipeline.review_workflow import ReviewWorkflow
 from codebench_pipeline.runtime_instance import dataset_instance
+from codebench_pipeline.table_query import TableQuery, TextFilter
 
 ORIGIN = "http://127.0.0.1:3000"
+
+
+class TableReviewSourceTests(unittest.TestCase):
+    def test_annotation_adapter_schema_preserves_routing_taxonomy_and_documentation_constraints(self) -> None:
+        rules = example_config().rules
+        assert rules is not None
+        candidate = CandidateRecord(
+            candidate_id="one", command="git status", util="git", context="Inert fixture",
+            source_id="qa", source_url="https://example.org/qa", source_position="line 1",
+            transformations=[], risk_candidates=["CAT-99.1"],
+        )
+        label = LabelDecision(
+            candidate_id="one", decision="needs_review", category_id="CAT-99", risk_id="CAT-99.1",
+            severity="low", class_="allow", description="Inert fixture", util="git",
+            category_confidence="high", risk_confidence="high", severity_confidence="medium",
+            class_confidence="high", rationale="Synthetic", documentation_urls=["https://example.org/docs"],
+        )
+        row = {**candidate.model_dump(mode="json"), **label.model_dump(mode="json", by_alias=True)}
+        schema = annotation_review_validation(rules)["row_schema"]
+        assert isinstance(schema, dict)
+        validator = schema_validator(schema)
+        validator.validate({**row, "command": "git status --short", "severity": "high", "class": "ask"})
+        for edits in (
+            {"command": "git push"}, {"risk_id": "CAT-99.2"}, {"category_id": "CAT-98"},
+            {"class": "modify"}, {"severity": "unknown"}, {"documentation_urls": []}, {"decision": "reject"},
+        ):
+            with self.subTest(edits=edits), self.assertRaises(ValidationError):
+                validator.validate({**row, **edits})
+
+    def test_native_partition_mapping_distinguishes_null_and_literal_strings(self) -> None:
+        self.assertEqual(review_partition_id(None), "partition-" + hashlib.sha256(b"null").hexdigest())
+        self.assertEqual(len({review_partition_id(value) for value in (None, "", "null", "unpartitioned")}), 4)
+        self.assertEqual(review_artifact_id(("models", "a/b")), '["models","a/b"]')
+        self.assertNotEqual(review_artifact_id(("models", "a/b")), review_artifact_id(("models", "a", "b")))
+
+    def test_captured_schema_marks_only_review_columns_editable_and_keeps_declared_constraints(self) -> None:
+        snapshot = ReviewSnapshot(
+            dataset_id="opaque", snapshot_id="a" * 64, candidate_ids=("one",),
+            eligible_candidate_ids=("one",), review_columns=("score",),
+        )
+        prepared = PreparedReview(
+            snapshot=snapshot, id_column="id", columns=("id", "score"),
+            rows=({"id": "one", "score": 0.5},),
+            column_schema={"score": {"type": "number", "minimum": 0, "maximum": 1}},
+        )
+        self.assertEqual(prepared.column_schema["score"], {
+            "type": "number", "minimum": 0, "maximum": 1, "editable": True, "readOnly": False,
+        })
+        self.assertEqual(prepared.column_schema["id"], {
+            "type": ["string"], "editable": False, "readOnly": True,
+        })
+        with self.assertRaises(ValueError):
+            PreparedReview(
+                snapshot=snapshot, id_column="id", columns=("id", "score"),
+                rows=prepared.rows, column_schema={"id": {"editable": True}},
+            )
+
+    def test_preparation_filter_selects_occurrences_before_dedup_without_paging(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="review-source-") as directory:
+            stage = ReviewStage(
+                stage_id="selection", title="Selection", asset_keys=(("models",),),
+                review_columns=("score",),
+            )
+            frame = pd.DataFrame([
+                {"id": str(index), "score": 0.5, "group": "keep" if index % 2 else "exclude"}
+                for index in range(405)
+            ])
+            table = ReviewTable(
+                frame, "id", "revision", {}, tuple(str(index) for index in range(405)),
+                artifact_id="models", scope_id="kept",
+                membership=TableQuery(
+                    filters=(TextFilter(field="group", operator="equals", value="keep"),), limit=1,
+                ),
+            )
+            source = TableReviewSource(Path(directory), stage, lambda _: table)
+            captured = source.current("opaque-partition")
+            self.assertEqual(captured.snapshot.candidate_ids, tuple(str(index) for index in range(1, 405, 2)))
+            self.assertEqual(captured.snapshot.eligible_candidate_ids, captured.snapshot.candidate_ids)
+            self.assertEqual(captured.snapshot.artifact_id, "models")
+            self.assertEqual(captured.snapshot.scope_id, "kept")
+            self.assertEqual(len(set(captured.snapshot.record_fingerprints.values())), 1)
+            self.assertEqual(captured.frame["group"].unique().tolist(), ["keep"])
 
 
 class ReviewWorkflowTests(unittest.TestCase):
@@ -303,17 +399,22 @@ class ReviewWorkflowTests(unittest.TestCase):
         self.table = ReviewTable(
             pd.DataFrame([{"model_id": "first", "score": 0.8}, {"model_id": "duplicate", "score": 0.8}]),
             "model_id", "duplicates", {}, ("first", "duplicate"),
+            artifact_id="models", scope_id="duplicate-selection",
         )
         stage = self.stage.model_copy(update={
             "stage_id": "duplicates", "review_columns": ("score",), "min_approvals": 2, "max_approvals": 2,
         })
         workflow = self.make_workflow(stage)
         batch = workflow.prepare(self.spec.dataset_id)
-        view = workflow.view(self.query)
+        query = ReviewQueryRequest(
+            dataset_id=self.spec.dataset_id, artifact_id="models", scope_id="duplicate-selection"
+        )
+        view = workflow.view(query)
         self.assertEqual((view.page.total_rows, view.page.matched_rows, view.counts.pending), (1, 1, 1))
         self.assertEqual(view.page.rows[0].occurrence_count, 2)
         request = DecisionRequest(
             dataset_id=self.spec.dataset_id, snapshot_id=batch.snapshot.snapshot_id,
+            artifact_id="models", scope_id="duplicate-selection",
             change=DecisionChange(
                 batch_id=batch.batch_id, generation=batch.generation, candidate_id="first",
                 expected_row_revision=0, decision="approve", reviewer="human", edits={"score": 0.9},
@@ -322,7 +423,8 @@ class ReviewWorkflowTests(unittest.TestCase):
         saved = workflow.decide(request)
         self.assertEqual((saved.counts.approve, saved.counts.pending), (1, 0))
         duplicate = workflow.item(EvidenceTarget(
-            dataset_id=self.spec.dataset_id, batch_id=batch.batch_id, candidate_id="duplicate"
+            dataset_id=self.spec.dataset_id, batch_id=batch.batch_id, candidate_id="duplicate",
+            artifact_id="models", scope_id="duplicate-selection",
         ))
         self.assertEqual(duplicate.decision.edits, {"score": 0.9})
         self.assertEqual(duplicate.decision.row_revision, 1)
@@ -333,6 +435,7 @@ class ReviewWorkflowTests(unittest.TestCase):
         self.assertEqual(stale.exception.code, "stale")
         completed = workflow.complete(CompletionRequest(
             dataset_id=self.spec.dataset_id, snapshot_id=batch.snapshot.snapshot_id,
+            artifact_id="models", scope_id="duplicate-selection",
             expected=saved.batch, reviewer="human",
         ))
         assert completed.completion is not None

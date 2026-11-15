@@ -15,7 +15,7 @@ from codebench_pipeline.human_review import (
     PublicationReference,
     ReviewSnapshot,
 )
-from codebench_pipeline.label_corrections import validate_review_edits
+from codebench_pipeline.label_corrections import annotation_review_validation, validate_review_edits
 from codebench_pipeline.object_store import ObjectStore
 from codebench_pipeline.review_api_models import EvidenceResponse, EvidenceTarget, PublicationTarget
 from codebench_pipeline.review_evidence import review_evidence
@@ -37,7 +37,7 @@ class AnnotationReviewSource:
             resolved.snapshot,
             uncertain,
             "candidate_id",
-            validation={"rules": resolved.rules.model_dump(mode="json")},
+            validation=annotation_review_validation(resolved.rules),
             evidence={"manifest": resolved.manifest.model_dump(mode="json")},
         )
 

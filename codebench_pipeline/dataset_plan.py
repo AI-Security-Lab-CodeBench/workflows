@@ -8,7 +8,12 @@ from dagster import AssetKey, AssetRecordsFilter, Config, DagsterInstance, build
 from pydantic import JsonValue, TypeAdapter
 
 from codebench_pipeline.category_rules import CategoryRules
-from codebench_pipeline.dataframe_io import AssetReference, AssetSnapshot, DataFrameIOManager
+from codebench_pipeline.dataframe_io import (
+    REVIEW_PREPARATION,
+    AssetReference,
+    AssetSnapshot,
+    DataFrameIOManager,
+)
 from codebench_pipeline.dataframe_schemas import CommandCandidatesTable, validated_frame
 from codebench_pipeline.dataset_asset_types import DATASET_PARTITIONS
 from codebench_pipeline.dataset_branches import FINALIZATION_STAGES, Branch, stage_branch, stage_name
@@ -68,14 +73,8 @@ INPUT_STAGES.update(
             "annotations": "category_eligible_annotations",
             "category_rules": "category_rules",
         },
-        "human_review_snapshot": {
-            "human_review_queue": "human_review_queue",
-            "category_eligible_annotations": "category_eligible_annotations",
-            "category_rules": "category_rules",
-        },
         "human_review_decisions": {
             "human_review_queue": "human_review_queue",
-            "human_review_snapshot": "human_review_snapshot",
         },
         "dataset_release": {
             "category_eligible_annotations": "category_eligible_annotations",
@@ -209,13 +208,13 @@ def plan_dataset(
             continue
         if materialization.metadata["codebench/content_digest"].value != persisted.reference.digest:
             raise IntegrityError("Current output differs from its recorded materialization")
-        if stage == "human_review_snapshot":
+        if stage == "human_review_queue":
             try:
                 with HumanReviewStore(home).reader() as transaction:
                     batch = transaction.get_current_batch(spec.dataset_id, "annotations", compact=True)
                 if not isinstance(persisted.value, pd.DataFrame) or (
-                    persisted.value.iloc[0]["batch_id"] != batch.batch_id
-                    or persisted.value.iloc[0]["snapshot_id"] != batch.snapshot.snapshot_id
+                    persisted.value.attrs.get(REVIEW_PREPARATION)
+                    != {"batch_id": batch.batch_id, "snapshot_id": batch.snapshot.snapshot_id}
                 ):
                     selected[stage] = "review_authority_changed"
                     continue

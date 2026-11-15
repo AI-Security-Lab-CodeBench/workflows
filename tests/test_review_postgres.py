@@ -7,6 +7,8 @@ from pathlib import Path
 import psycopg
 from psycopg import sql
 from psycopg.errors import ReadOnlySqlTransaction
+from psycopg.rows import dict_row
+from psycopg.types.json import Jsonb
 from pydantic import JsonValue
 
 from codebench_pipeline.category_rules import CategoryRules, ClassRule, RiskRule, SeverityRule
@@ -18,10 +20,13 @@ from codebench_pipeline.human_review import (
     HumanReviewError,
     PreparedReview,
     PublicationPayload,
+    ReviewBatch,
     ReviewSnapshot,
 )
+from codebench_pipeline.human_review_schema import MIGRATIONS, timestamp
 from codebench_pipeline.human_review_store import HumanReviewStore
-from codebench_pipeline.review_api_models import EvidenceTarget, NextReviewRequest
+from codebench_pipeline.label_corrections import annotation_review_validation
+from codebench_pipeline.review_api_models import EvidenceTarget, NextReviewRequest, ReviewQueryRequest
 from codebench_pipeline.storage import fingerprint
 from codebench_pipeline.table_query import ColumnSort, NullFilter, TableQuery, TextFilter
 
@@ -38,36 +43,156 @@ class ReviewPostgresTests(unittest.TestCase):
         with psycopg.connect(self.store.dsn, autocommit=True) as connection:
             connection.execute(sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(sql.Identifier(self.store.schema)))
 
+    def test_scope_migration_requires_refresh_before_old_metadata_can_authorize_edits(self) -> None:
+        prepared = self.prepared(())
+        now = timestamp()
+        legacy = ReviewBatch(
+            batch_id="legacy", snapshot=prepared.snapshot, generation=1, batch_revision=0,
+            state="open", created_at=now, updated_at=now,
+        )
+        metadata = prepared.model_dump(mode="json", exclude={"snapshot", "rows", "column_schema"})
+        with psycopg.connect(self.store.dsn, row_factory=dict_row) as connection:
+            connection.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(self.store.schema)))
+            connection.execute(sql.SQL("SET search_path TO {}").format(sql.Identifier(self.store.schema)))
+            connection.execute("CREATE TABLE review_schema_versions(version integer PRIMARY KEY, applied_at text NOT NULL)")
+            for version, migration in enumerate(MIGRATIONS[:2], start=1):
+                for statement in migration:
+                    connection.execute(statement)
+                connection.execute("INSERT INTO review_schema_versions VALUES(%s,%s)", (version, now))
+            connection.execute(
+                """INSERT INTO review_batches(batch_id,dataset_id,review_stage,current,binding,data,prepared)
+                    VALUES(%s,%s,%s,true,%s,%s,%s)""",
+                ("legacy", "qa", "selection", "legacy-binding", Jsonb(legacy.model_dump(mode="json")), Jsonb(metadata)),
+            )
+        with self.assertRaises(HumanReviewError) as unmigrated:
+            with self.store.reader():
+                self.fail("Read-only routes used unmigrated review storage")
+        self.assertEqual(unmigrated.exception.code, "stale")
+        with self.store.transaction() as tx:
+            with self.assertRaises(HumanReviewError) as stale:
+                tx.get_current_batch("qa", "selection")
+            self.assertEqual(stale.exception.code, "stale")
+            self.assertEqual(tx.prepared("legacy").column_schema["text"]["editable"], True)
+            refreshed = tx.prepare(prepared)
+            self.assertNotEqual(refreshed.batch_id, "legacy")
+            self.assertEqual(tx.column_schema(refreshed.batch_id)["text"]["editable"], True)
+
     def prepared(
         self, rows: tuple[dict[str, JsonValue], ...], *, eligible: tuple[str, ...] | None = None,
         minimum: int = 0, maximum: int | None = None, dataset: str = "qa",
         stage: str = "selection", columns: tuple[str, ...] = ("text",),
         evidence: dict[str, JsonValue] | None = None,
+        artifact: str = "", scope: str = "",
+        schema: dict[str, dict[str, JsonValue]] | None = None,
     ) -> PreparedReview:
         identifiers = tuple(str(row["id"]) for row in rows)
         eligible_ids = identifiers if eligible is None else eligible
         snapshot = ReviewSnapshot(
             dataset_id=dataset, review_stage=stage,
+            artifact_id=artifact, scope_id=scope,
             snapshot_id=fingerprint({"rows": list(rows), "eligible": list(eligible_ids),
                                      "minimum": minimum, "maximum": maximum,
-                                     "columns": list(columns), "evidence": evidence or {}}),
+                                     "columns": list(columns), "evidence": evidence or {},
+                                     "schema": schema or {}, "artifact": artifact, "scope": scope}),
             candidate_ids=identifiers, eligible_candidate_ids=eligible_ids, review_columns=columns,
             min_approvals=minimum, max_approvals=maximum,
         )
         return PreparedReview(snapshot=snapshot, id_column="id", columns=tuple(rows[0]) if rows else ("id", "text"),
-                              rows=rows, evidence=evidence or {})
+                              rows=rows, evidence=evidence or {}, column_schema=schema or {})
 
     def decide(
         self, prepared: PreparedReview, candidate_id: str, choice: DecisionValue, *,
         revision: int = 0, edits: dict[str, JsonValue] | None = None,
     ) -> None:
         with self.store.transaction(dataset_id=prepared.snapshot.dataset_id) as tx:
-            batch = tx.get_current_batch(prepared.snapshot.dataset_id, prepared.snapshot.review_stage)
+            batch = tx.get_current_batch(
+                prepared.snapshot.dataset_id, prepared.snapshot.review_stage,
+                artifact_id=prepared.snapshot.artifact_id, scope_id=prepared.snapshot.scope_id,
+            )
             tx.save_decision(prepared.snapshot, DecisionChange(
                 batch_id=batch.batch_id, generation=batch.generation, candidate_id=candidate_id,
                 expected_row_revision=revision, decision=choice, reviewer="synthetic QA reviewer",
                 edits=edits or {},
             ))
+
+    def test_artifacts_partitions_and_named_scopes_keep_authority_and_heads_isolated(self) -> None:
+        scopes = (
+            self.prepared(({"id": "one", "text": "same"},), artifact="models", scope="primary"),
+            self.prepared(({"id": "one", "text": "same"},), artifact="models", scope="secondary"),
+            self.prepared(({"id": "one", "text": "same"},), artifact="metrics", scope="primary"),
+            self.prepared(({"id": "one", "text": "same"},), artifact="models", scope="primary", dataset="other"),
+        )
+        batches = []
+        for prepared in scopes:
+            with self.store.transaction() as tx:
+                batches.append(tx.prepare(prepared))
+        self.decide(scopes[0], "one", "approve")
+        with self.store.transaction() as tx:
+            token = tx.complete(scopes[0].snapshot, tx.get_batch(batches[0].batch_id), "synthetic QA")
+            published = tx.record_publication(scopes[0].snapshot, token, PublicationPayload(
+                payload_key="models", payload_hash="a" * 64, csv_reference="models.csv",
+                bundle_reference="models-bundle", dagster_run_id="models-run",
+            ))
+            for batch in batches[1:]:
+                self.assertEqual(tx.counts(batch.batch_id).pending, 1)
+            tx.invalidate("qa", "Only secondary changed", review_stage="selection",
+                          artifact_id="models", scope_id="secondary")
+            self.assertEqual(tx.authorize_completion(scopes[0].snapshot, token), token)
+            for index in (2, 3):
+                snapshot = scopes[index].snapshot
+                self.assertEqual(
+                    tx.get_current_batch(snapshot.dataset_id, "selection",
+                                         artifact_id=snapshot.artifact_id, scope_id=snapshot.scope_id).batch_id,
+                    batches[index].batch_id,
+                )
+        self.decide(scopes[2], "one", "approve")
+        with self.store.transaction() as tx:
+            other = tx.complete(scopes[2].snapshot, tx.get_batch(batches[2].batch_id), "synthetic QA")
+            tx.record_publication(scopes[2].snapshot, other, PublicationPayload(
+                payload_key="metrics", payload_hash="b" * 64, csv_reference="metrics.csv",
+                bundle_reference="metrics-bundle", dagster_run_id="metrics-run",
+            ))
+            page = tx.review_page(ReviewQueryRequest(
+                dataset_id="qa", artifact_id="models", scope_id="primary",
+            ), "selection")
+            self.assertEqual(page.publication, published)
+
+    def test_declared_schema_blocks_carried_edits_and_preserves_original_hash(self) -> None:
+        old = self.prepared(({"id": "one", "text": "original"},), schema={
+            "text": {"type": "string", "enum": ["original", "corrected"]},
+        })
+        with self.store.transaction() as tx:
+            tx.prepare(old)
+        self.decide(old, "one", "approve", edits={"text": "corrected"})
+        changed = self.prepared(({"id": "renamed", "text": "original"},), schema={
+            "text": {"type": "string", "enum": ["original"]},
+        })
+        with self.store.transaction() as tx:
+            batch = tx.prepare(changed)
+            self.assertEqual(tx.counts(batch.batch_id).approve, 1)
+            self.assertEqual(tx.counts(batch.batch_id).blocked, 1)
+            self.assertEqual(tx.list_decisions(batch.batch_id)[0].edits, {"text": "corrected"})
+            self.assertEqual(tx.column_schema(batch.batch_id)["id"]["editable"], False)
+            self.assertEqual(tx.column_schema(batch.batch_id)["text"]["editable"], True)
+            with self.assertRaises(HumanReviewError) as blocked:
+                tx.complete(changed.snapshot, batch, "synthetic QA")
+            self.assertEqual(blocked.exception.code, "ineligible")
+
+    def test_empty_scope_completes_without_decisions_and_cannot_complete_another_scope(self) -> None:
+        empty = self.prepared((), artifact="models", scope="empty")
+        populated = self.prepared(({"id": "one", "text": "value"},), artifact="models", scope="pending")
+        with self.store.transaction() as tx:
+            batch = tx.prepare(empty)
+            pending = tx.prepare(populated)
+            token = tx.complete(empty.snapshot, batch, "automatic-policy")
+            self.assertEqual(tx.list_decisions(batch.batch_id), ())
+            self.assertEqual(tx.authorize_completion(empty.snapshot, token), token)
+            self.assertEqual(tx.counts(pending.batch_id).pending, 1)
+            discovered = tx.partitions("selection", artifact_id="models")
+            self.assertEqual({row.scope_id for row in discovered}, {"empty", "pending"})
+            self.assertTrue(all(row.partition_key is None for row in discovered))
+            with self.assertRaises(HumanReviewError):
+                tx.authorize_completion(populated.snapshot, token)
 
     def test_selected_values_share_one_item_and_expand_downstream_occurrences(self) -> None:
         prepared = self.prepared(({"id": "one", "text": "same", "source": "a"},
@@ -197,7 +322,7 @@ class ReviewPostgresTests(unittest.TestCase):
             )
             rows.append({"id": identifier, **candidate.model_dump(mode="json"), **label.model_dump(mode="json", by_alias=True)})
         old = self.prepared(tuple(rows), columns=("severity",)).model_copy(
-            update={"validation": {"rules": rules.model_dump(mode="json")}}
+            update={"validation": annotation_review_validation(rules)}
         )
         with self.store.transaction() as tx:
             tx.prepare(old)
@@ -207,7 +332,7 @@ class ReviewPostgresTests(unittest.TestCase):
         ]})
         changed = old.model_copy(update={
             "snapshot": old.snapshot.model_copy(update={"snapshot_id": "f" * 64}),
-            "validation": {"rules": changed_rules.model_dump(mode="json")},
+            "validation": annotation_review_validation(changed_rules),
         })
         with self.store.transaction() as tx:
             batch = tx.prepare(changed)
@@ -223,10 +348,17 @@ class ReviewPostgresTests(unittest.TestCase):
             self.assertEqual(blocked.exception.code, "ineligible")
 
     def test_edit_boundary_rejects_unselected_columns_and_changed_json_types(self) -> None:
-        prepared = self.prepared(({"id": "one", "text": "value", "count": 1},), columns=("text", "count"))
+        prepared = self.prepared(
+            ({"id": "one", "text": "value", "count": 1},), columns=("text", "count"),
+            schema={"text": {"type": "string", "enum": ["value", "fixed"]},
+                    "count": {"type": "number", "minimum": 0, "maximum": 2}},
+        )
         with self.store.transaction() as tx:
             tx.prepare(prepared)
-        for edits in ({"id": "renamed"}, {"count": True}, {"text": None}, {"count": "1"}):
+        for edits in (
+            {"id": "renamed"}, {"count": True}, {"text": None}, {"count": "1"},
+            {"count": 3}, {"count": -1}, {"text": "outside-enum"},
+        ):
             with self.subTest(edits=edits), self.assertRaises(HumanReviewError):
                 self.decide(prepared, "one", "approve", edits=edits)
         self.decide(prepared, "one", "approve", edits={"count": 1.5})

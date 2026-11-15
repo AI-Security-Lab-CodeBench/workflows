@@ -186,8 +186,8 @@ def import_legacy(
                     historical.extend(f"{decision.batch_id}/{decision.candidate_id}: ambiguous or unproven decision head" for decision in versions)
                     continue
                 inserted = tx.connection.execute(
-                    """INSERT INTO review_heads VALUES(%s,%s,%s,%s)
-                        ON CONFLICT(dataset_id,review_stage,record_hash) DO NOTHING""",
+                    """INSERT INTO review_heads(dataset_id,review_stage,record_hash,data) VALUES(%s,%s,%s,%s)
+                        ON CONFLICT(dataset_id,review_stage,artifact_id,scope_id,record_hash) DO NOTHING""",
                     (dataset, stage, record_hash, Jsonb(latest.model_dump(mode="json"))),
                 )
                 if inserted.rowcount != 1:

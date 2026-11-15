@@ -2,7 +2,7 @@ import os
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import TypeAdapter
+from pydantic import BaseModel, TypeAdapter
 
 from codebench_pipeline.dataset_config import (
     CatalogConfig,
@@ -14,12 +14,18 @@ from codebench_pipeline.dataset_config import (
 )
 from codebench_pipeline.human_review_store import HumanReviewStore
 from codebench_pipeline.models import Identifier
+from codebench_pipeline.object_store import StorageConfig
 from codebench_pipeline.storage import IntegrityError, exclusive, fingerprint
 
 
 @lru_cache(maxsize=4)
 def _validated_spec(payload: bytes) -> DatasetBuildSpec:
     return DatasetBuildSpec.model_validate_json(payload)
+
+
+class StoredLocation(BaseModel):
+    dataset_id: Identifier
+    storage: StorageConfig
 
 
 class DatasetRegistry:
@@ -61,6 +67,16 @@ class DatasetRegistry:
     def get_snapshot(self, dataset_id: str) -> DatasetBuildSpec:
         """Read persisted configuration without resolving any live business files."""
         return self._stored_spec(dataset_id).model_copy(deep=True)
+
+    def storage(self, dataset_id: str) -> StorageConfig:
+        """Read the persisted location without loading category policy or source inventories."""
+        key = TypeAdapter(Identifier).validate_python(dataset_id)
+        directory = self.root / key
+        version = (directory / "current").read_text(encoding="ascii")
+        location = StoredLocation.model_validate_json((directory / f"{version}.json").read_bytes())
+        if location.dataset_id != key:
+            raise IntegrityError("Dataset registry identity mismatch")
+        return location.storage
 
     def get(self, dataset_id: str) -> DatasetBuildSpec:
         spec = self._stored_spec(dataset_id)

@@ -27,6 +27,7 @@ from codebench_pipeline.dataset_plan import plan_dataset, unavailable_candidates
 from codebench_pipeline.dataset_tables import review_queue
 from codebench_pipeline.human_review import HumanReviewError
 from codebench_pipeline.object_store import sha256
+from codebench_pipeline.review_preparation import prepare_review_queue
 from codebench_pipeline.stage_configuration import stage_configs
 from codebench_pipeline.typed_config import TypedConfig
 
@@ -284,13 +285,18 @@ def finalization_assets() -> list[AssetsDefinition]:
         category_rules: CategoryRules,
         dataset_io_manager: ResourceParam[DataFrameIOManager],
     ) -> Output[DataFrame[ReviewQueueTable]]:
-        return cached_table(
+        result = cached_table(
             context,
             dataset_io_manager,
             config,
             {"annotations": category_eligible_annotations, "category_rules": category_rules},
             ReviewQueueTable,
             lambda evidence: review_queue(category_eligible_annotations, category_rules, config),
+        )
+        return Output(
+            prepare_review_queue(context, dataset_io_manager, result.value),
+            data_version=result.data_version,
+            metadata=result.metadata,
         )
 
     return [

@@ -1,11 +1,13 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import pandas as pd
 from configuration_fixture import write_fixture
 from dagster import AssetKey, build_input_context, build_output_context
 
+from codebench_pipeline.artifact_views import ArtifactQuery, ArtifactTable
 from codebench_pipeline.data_view_models import (
     DatasetQueryRequest,
     DatasetViewError,
@@ -78,6 +80,22 @@ class DatasetViewTests(unittest.TestCase):
         self.assertEqual(response.page.rows[0].row_index, 1)
         self.assertEqual(response.page.rows[0].values["context"], self.context)
         self.assertEqual(self.instance.get_runs(), [])
+
+    def test_browsing_does_not_resolve_business_inputs_or_upstream_authority(self) -> None:
+        with (
+            patch.object(DatasetRegistry, "get", side_effect=AssertionError("Live configuration read")),
+            patch.object(DatasetRegistry, "get_snapshot", side_effect=AssertionError("Full configuration read")),
+            patch(
+                "codebench_pipeline.review_output_state.materialization_stale",
+                side_effect=AssertionError("Upstream traversal"),
+            ),
+        ):
+            response = self.service.artifacts.query(ArtifactQuery(
+                asset_key=("datasets", "command_candidates"), partition_key=self.spec.dataset_id,
+            ))
+        assert isinstance(response, ArtifactTable)
+        self.assertEqual(response.page.total_rows, 2)
+        self.assertEqual(response.page.rows[0].values["context"], self.context)
 
     def test_legacy_release_is_inspectable_but_not_authorized_as_pipeline_input(self) -> None:
         legacy = pd.DataFrame(

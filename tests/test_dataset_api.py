@@ -154,6 +154,23 @@ class DatasetAPITests(unittest.TestCase):
         self.assertEqual(self.instance.get_runs(), [])
         self.assertEqual(response.headers["cache-control"], "no-store")
 
+    def test_artifact_endpoints_discover_partitions_and_read_full_asset_keys(self) -> None:
+        key = ["datasets", "command_candidates"]
+        partitions = self.client.post(
+            "/artifacts/partitions", headers={"Origin": ORIGIN}, json={"asset_key": key}
+        )
+        self.assertEqual(partitions.status_code, 200)
+        self.assertEqual(partitions.json(), {
+            "asset_key": key, "partitions": [self.spec.dataset_id],
+        })
+        response = self.client.post(
+            "/artifacts/data", headers={"Origin": ORIGIN},
+            json={"asset_key": key, "partition_key": self.spec.dataset_id, "query": {"limit": 1}},
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["page"]["total_rows"], 2)
+        self.assertEqual(response.json()["page"]["rows"][0]["values"]["context"], self.context)
+
     def test_unknown_fields_filters_and_expressions_are_invalid_requests(self) -> None:
         for extra in (
             {"sql": "SELECT * FROM annotations"},

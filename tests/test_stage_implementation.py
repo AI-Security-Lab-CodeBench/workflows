@@ -28,17 +28,42 @@ ROOT = Path(__file__).resolve().parents[1]
 
 class StageImplementationTests(unittest.TestCase):
     def test_review_driver_changes_preserve_processing_dependencies(self) -> None:
-        base = {"package": [{"name": "pandas", "version": "3"}, {"name": "codebench", "dependencies": []}]}
-        review = {
+        base = {
+            "project": {"dependencies": ["pandas>=3"]},
             "package": [
                 {"name": "pandas", "version": "3"},
-                {"name": "codebench", "dependencies": [{"name": "psycopg"}]},
+                {"name": "jsonschema", "version": "4"},
+                {"name": "codebench", "dependencies": []},
+            ],
+        }
+        review = {
+            "project": {"dependencies": ["pandas>=3", "psycopg>=3", "jsonschema>=4"]},
+            "package": [
+                {"name": "pandas", "version": "3"},
+                {"name": "jsonschema", "version": "4"},
+                {"name": "codebench", "dependencies": [{"name": "psycopg"}, {"name": "jsonschema"}]},
                 {"name": "psycopg", "version": "3.3"},
             ]
         }
-        changed = {"package": [{"name": "pandas", "version": "4"}, {"name": "codebench", "dependencies": []}]}
+        changed = {
+            **base,
+            "package": [
+                {"name": "pandas", "version": "4"},
+                {"name": "jsonschema", "version": "4"},
+                {"name": "codebench", "dependencies": []},
+            ],
+        }
         self.assertEqual(processing_runtime(base), processing_runtime(review))
         self.assertNotEqual(processing_runtime(base), processing_runtime(changed))
+        shared_upgrade = {
+            **base,
+            "package": [
+                {"name": "pandas", "version": "3"},
+                {"name": "jsonschema", "version": "5"},
+                {"name": "codebench", "dependencies": []},
+            ],
+        }
+        self.assertNotEqual(processing_runtime(base), processing_runtime(shared_upgrade))
 
     def test_downstream_graph_and_review_edits_preserve_upstream_signatures(self) -> None:
         original = Path.read_bytes
@@ -66,7 +91,11 @@ class StageImplementationTests(unittest.TestCase):
         with patch.object(Path, "read_bytes", changed):
             after = {stage: stage_signature(stage, TypedConfig(), {}) for stage in STAGE_ROOTS}
 
-        self.assertEqual(after, before)
+        self.assertNotEqual(after["human_review_queue"], before["human_review_queue"])
+        self.assertEqual(
+            {stage: value for stage, value in after.items() if stage != "human_review_queue"},
+            {stage: value for stage, value in before.items() if stage != "human_review_queue"},
+        )
 
     def test_changed_processing_invalidates_affected_but_not_unrelated_stages(self) -> None:
         original = Path.read_bytes

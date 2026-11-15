@@ -2,7 +2,7 @@ from dataclasses import dataclass
 
 import pandas as pd
 from pandera.typing import DataFrame
-from pydantic import JsonValue, ValidationError
+from pydantic import JsonValue, TypeAdapter, ValidationError
 
 from codebench_pipeline.category_rules import CategoryRules
 from codebench_pipeline.dataframe_schemas import (
@@ -18,6 +18,54 @@ class LabelCorrectionContext:
     candidate: CandidateRecord
     label: LabelDecision
     rules: CategoryRules
+
+
+def annotation_review_validation(rules: CategoryRules) -> dict[str, JsonValue]:
+    """Compile annotation policy into the generic persisted JSON Schema contract."""
+    candidate = CandidateRecord.model_json_schema()
+    label = LabelDecision.model_json_schema(by_alias=True)
+    properties = {**candidate["properties"], **label["properties"]}
+    for field in ("command", "category_id", "risk_id", "severity", "class"):
+        properties[field] = {**properties[field], "minLength": 1}
+    properties["category_id"] = {"const": rules.category_id}
+    properties["class"] = {"enum": [rule.name for rule in rules.classes]}
+    properties["severity"] = {"enum": [rule.name for rule in rules.severities]}
+    properties["decision"] = {"enum": ["accept", "needs_review"]}
+    properties["documentation_urls"] = {
+        **properties["documentation_urls"], "minItems": 1, "uniqueItems": True,
+    }
+    properties["risk_candidates"] = {
+        "type": "array", "items": {"enum": [risk.id for risk in rules.risks]}, "uniqueItems": True,
+    }
+    routes: list[dict[str, JsonValue]] = [
+        {
+            "properties": {
+                "risk_id": {"const": risk.id},
+                "risk_candidates": {"contains": {"const": risk.id}},
+                "command": {"anyOf": [{"pattern": pattern} for pattern in risk.command_patterns]},
+            },
+        }
+        for risk in rules.risks
+    ]
+    return TypeAdapter(dict[str, JsonValue]).validate_python({
+        "rules": rules.model_dump(mode="json"),
+        "original_row_schema": {
+            "type": "object",
+            "properties": {
+                "category_id": {"const": rules.category_id},
+                "decision": {"enum": ["accept", "needs_review"]},
+                "documentation_urls": {"type": "array", "minItems": 1},
+            },
+            "required": ["category_id", "decision", "documentation_urls"],
+        },
+        "row_schema": {
+            "type": "object",
+            "properties": properties,
+            "required": sorted(set(candidate["required"]) | set(label["required"])),
+            "anyOf": routes,
+            "$defs": {**candidate.get("$defs", {}), **label.get("$defs", {})},
+        },
+    })
 
 
 def corrected_label(context: LabelCorrectionContext, corrections: LabelCorrections) -> LabelDecision:

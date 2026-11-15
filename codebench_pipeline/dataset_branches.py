@@ -3,6 +3,7 @@ from typing import Literal
 
 Branch = Literal["dataset", "documentation"]
 HISTORICAL_PROCESSING_STAGES = (
+    "human_review_snapshot",
     "merged_proposed_annotations",
     "documentation/filtered_commands",
     "documentation/labeling_documentation",
@@ -16,7 +17,6 @@ FINALIZATION_STAGES = (
     "deduplicated_annotations",
     "category_eligible_annotations",
     "human_review_queue",
-    "human_review_snapshot",
     "human_review_decisions",
     "dataset_release",
 )

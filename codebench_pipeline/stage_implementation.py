@@ -22,10 +22,12 @@ STAGE_ROOTS: Final = {
     "merged_command_candidates": ("dataset_finalization", "merged_command_candidates"),
     "deduplicated_annotations": ("dataset_finalization", "deduplicated_annotations"),
     "category_eligible_annotations": ("dataset_finalization", "category_eligible_annotations"),
+    "human_review_queue": ("dataset_finalization", "human_review_queue"),
 }
 BOUNDARIES: Final = {
     ("dataset_engine", "cached_table"),
     ("dataset_finalization", "finalization_binding"),
+    ("review_preparation", "prepare_review_queue"),
     ("data_views", "DatasetDataService"),
     ("human_review", "HumanReviewError"),
     ("dataframe_io", "DataFrameIOManager"),
@@ -33,6 +35,7 @@ BOUNDARIES: Final = {
 WHOLE_MODULES: Final = frozenset({"object_store", "storage"})
 RUNTIME_FILES: Final = ("pyproject.toml", "uv.lock", "scripts/dataset_schema.py")
 REVIEW_DEPENDENCIES: Final = frozenset({"psycopg", "psycopg-binary"})
+REVIEW_DECLARATIONS: Final = frozenset({"jsonschema"})
 
 
 def processing_runtime(value: JsonValue) -> JsonValue:
@@ -45,8 +48,10 @@ def processing_runtime(value: JsonValue) -> JsonValue:
                 for item in value
                 if not (
                     isinstance(item, dict) and item.get("name") in REVIEW_DEPENDENCIES
+                    or isinstance(item, dict) and item.get("name") in REVIEW_DECLARATIONS
+                    and "version" not in item
                     or isinstance(item, str) and re.split(r"[\[<>=!~; ]", item, maxsplit=1)[0]
-                    in REVIEW_DEPENDENCIES
+                    in REVIEW_DEPENDENCIES | REVIEW_DECLARATIONS
                 )
             ]
         case str() | bool() | int() | float() | None:

@@ -3,10 +3,12 @@ from __future__ import annotations
 import json
 from uuid import uuid4
 
+from jsonschema import Draft202012Validator
+from jsonschema.exceptions import SchemaError, ValidationError
+from jsonschema.protocols import Validator
 from psycopg.types.json import Jsonb
 from pydantic import JsonValue, TypeAdapter
 
-from codebench_pipeline.category_rules import CategoryRules
 from codebench_pipeline.human_review import (
     DecisionChange,
     HumanReviewError,
@@ -18,15 +20,19 @@ from codebench_pipeline.human_review import (
     Text,
 )
 from codebench_pipeline.human_review_schema import timestamp
-from codebench_pipeline.label_corrections import LabelCorrectionContext, validate_review_edits
 from codebench_pipeline.review_identity import review_identity
 from codebench_pipeline.review_postgres_lifecycle import ReviewLifecycle
-from codebench_pipeline.review_postgres_values import decision_values, row_cells, same_json_type
+from codebench_pipeline.review_postgres_values import decision_values, row_cells
 from codebench_pipeline.storage import fingerprint
+
+
+def schema_validator(schema: dict[str, JsonValue] | bool) -> Validator:
+    return Draft202012Validator(schema)
 
 
 class HumanReviewTransaction(ReviewLifecycle):
     def prepare(self, prepared: PreparedReview) -> ReviewBatch:
+        prepared = PreparedReview.model_validate(prepared.model_dump())
         snapshot = prepared.snapshot
         if len(set(prepared.columns)) != len(prepared.columns):
             raise HumanReviewError("conflict", "Prepared columns must be distinct")
@@ -38,8 +44,16 @@ class HumanReviewTransaction(ReviewLifecycle):
             {"human_decision", "human_reviewer", "human_notes", "human_edits"}
         ):
             raise HumanReviewError("conflict", "Prepared columns conflict with review metadata or lack the identity")
-        if "rules" in prepared.validation:
-            CategoryRules.model_validate(prepared.validation["rules"])
+        try:
+            for schema in prepared.column_schema.values():
+                Draft202012Validator.check_schema(schema)
+            for name in ("original_row_schema", "row_schema"):
+                if name in prepared.validation:
+                    Draft202012Validator.check_schema(
+                        TypeAdapter(dict[str, JsonValue] | bool).validate_python(prepared.validation[name])
+                    )
+        except SchemaError as error:
+            raise HumanReviewError("conflict", f"Invalid declared review schema: {error.message}") from error
         ids: list[str] = []
         for row in prepared.rows:
             if set(row) != set(prepared.columns):
@@ -60,8 +74,8 @@ class HumanReviewTransaction(ReviewLifecycle):
         self.lock_dataset(snapshot.dataset_id)
         existing = self.connection.execute(
             "SELECT batch_id,invalidated,prepared IS NOT NULL AS prepared FROM review_batches "
-            "WHERE dataset_id=%s AND review_stage=%s AND current",
-            (snapshot.dataset_id, snapshot.review_stage),
+            "WHERE dataset_id=%s AND review_stage=%s AND artifact_id=%s AND scope_id=%s AND current",
+            (snapshot.dataset_id, snapshot.review_stage, snapshot.artifact_id, snapshot.scope_id),
         ).fetchone()
         if existing is not None:
             batch_id = TypeAdapter(str).validate_python(existing["batch_id"])
@@ -83,14 +97,23 @@ class HumanReviewTransaction(ReviewLifecycle):
         binding = fingerprint({"snapshot": snapshot.model_dump(mode="json"), "rows": list(rows),
                                "metadata": metadata})
         current_row = self.connection.execute(
-            "SELECT batch_id,binding,invalidated FROM review_batches WHERE dataset_id=%s AND review_stage=%s AND current",
-            (snapshot.dataset_id, snapshot.review_stage),
+            "SELECT batch_id,binding,invalidated,prepared FROM review_batches "
+            "WHERE dataset_id=%s AND review_stage=%s AND artifact_id=%s AND scope_id=%s AND current",
+            (snapshot.dataset_id, snapshot.review_stage, snapshot.artifact_id, snapshot.scope_id),
         ).fetchone()
         if current_row:
             current = self._full_batch(TypeAdapter(str).validate_python(current_row["batch_id"]))
             if current_row["binding"] == binding and current_row["invalidated"] is None:
                 return current
-            if current.snapshot.snapshot_id == snapshot.snapshot_id and current_row["binding"] != binding:
+            previous_metadata = TypeAdapter(dict[str, JsonValue] | None).validate_python(current_row["prepared"])
+            schema_upgrade = (
+                current_row["invalidated"] is not None
+                and previous_metadata is not None and "column_schema" not in previous_metadata
+            )
+            if (
+                current.snapshot.snapshot_id == snapshot.snapshot_id
+                and current_row["binding"] != binding and not schema_upgrade
+            ):
                 raise HumanReviewError("conflict", "Snapshot digest has a different identity binding")
             superseded = current.model_copy(update={"state": "superseded", "updated_at": timestamp()})
             self._write_batch(superseded, current=False)
@@ -116,8 +139,8 @@ class HumanReviewTransaction(ReviewLifecycle):
             TypeAdapter(str).validate_python(row["record_hash"]): ReviewDecision.model_validate(row["data"])
             for row in self.connection.execute(
                 "SELECT record_hash,data FROM review_heads WHERE dataset_id=%s AND review_stage=%s "
-                "AND record_hash=ANY(%s)",
-                (snapshot.dataset_id, snapshot.review_stage, list(grouped)),
+                "AND artifact_id=%s AND scope_id=%s AND record_hash=ANY(%s)",
+                (snapshot.dataset_id, snapshot.review_stage, snapshot.artifact_id, snapshot.scope_id, list(grouped)),
             )
         }
         items: list[tuple[str, str, Jsonb, Jsonb]] = []
@@ -173,25 +196,39 @@ class HumanReviewTransaction(ReviewLifecycle):
             return
         if not set(edits).issubset(columns):
             raise HumanReviewError("ineligible", "Edits must be limited to selected review columns")
-        for column, value in edits.items():
-            if not same_json_type(row[column], value):
-                raise HumanReviewError("ineligible", f"Edit changes the captured JSON type of {column}")
+        schemas = TypeAdapter(dict[str, dict[str, JsonValue]]).validate_python(metadata["column_schema"])
+        for column in columns:
+            try:
+                schema_validator(schemas[column]).validate(edits.get(column, row[column]))
+            except ValidationError as error:
+                raise HumanReviewError(
+                    "ineligible", f"Invalid reviewed value for {column}: {error.message}"
+                ) from error
         if columns:
             review_identity({**row, **edits}, columns)
         validation = TypeAdapter(dict[str, JsonValue]).validate_python(metadata["validation"])
-        if "rules" in validation:
-            validate_review_edits(row, edits, CategoryRules.model_validate(validation["rules"]))
+        for name, value in (("original_row_schema", row), ("row_schema", {**row, **edits})):
+            if name in validation:
+                schema = TypeAdapter(dict[str, JsonValue] | bool).validate_python(validation[name])
+                try:
+                    schema_validator(schema).validate(value)
+                except ValidationError as error:
+                    raise HumanReviewError("ineligible", f"Invalid reviewed row: {error.message}") from error
 
-    def invalidate(self, dataset_id: str, reason: str) -> None:
+    def invalidate(
+        self, dataset_id: str, reason: str, *, review_stage: str | None = None,
+        artifact_id: str = "", scope_id: str = "",
+    ) -> None:
         self.lock_dataset(dataset_id)
         reason = TypeAdapter(Text).validate_python(reason)
         self.connection.execute(
-            "UPDATE review_batches SET invalidated=%s WHERE dataset_id=%s AND current", (reason, dataset_id)
+            "UPDATE review_batches SET invalidated=%s WHERE dataset_id=%s AND artifact_id=%s "
+            "AND scope_id=%s AND (%s::text IS NULL OR review_stage=%s) AND current",
+            (reason, dataset_id, artifact_id, scope_id, review_stage, review_stage),
         )
 
     def save_decision(
-        self, snapshot: ReviewSnapshot, change: DecisionChange, *,
-        correction_context: LabelCorrectionContext | None = None,
+        self, snapshot: ReviewSnapshot, change: DecisionChange,
     ) -> ReviewDecision:
         batch = self._bound(snapshot, change.batch_id, change.generation)
         batch.require_open()
@@ -230,9 +267,12 @@ class HumanReviewTransaction(ReviewLifecycle):
         if result.rowcount != 1:
             raise HumanReviewError("stale", "Decision row revision changed")
         self.connection.execute(
-            """INSERT INTO review_heads VALUES(%s,%s,%s,%s)
-                ON CONFLICT(dataset_id,review_stage,record_hash) DO UPDATE SET data=excluded.data""",
-            (snapshot.dataset_id, snapshot.review_stage, row["record_hash"], Jsonb(decision.model_dump(mode="json"))),
+            """INSERT INTO review_heads(dataset_id,review_stage,record_hash,data,artifact_id,scope_id)
+                VALUES(%s,%s,%s,%s,%s,%s)
+                ON CONFLICT(dataset_id,review_stage,artifact_id,scope_id,record_hash)
+                DO UPDATE SET data=excluded.data""",
+            (snapshot.dataset_id, snapshot.review_stage, row["record_hash"], Jsonb(decision.model_dump(mode="json")),
+             snapshot.artifact_id, snapshot.scope_id),
         )
         if change.decision == "approve":
             self.connection.execute(

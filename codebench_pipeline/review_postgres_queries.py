@@ -7,13 +7,20 @@ from psycopg import sql
 from pydantic import JsonValue, TypeAdapter
 
 from codebench_pipeline.data_view_models import DatasetQueryRequest
-from codebench_pipeline.human_review import HumanReviewError, PreparedReview, ReviewBatch, ReviewDecision
+from codebench_pipeline.human_review import (
+    HumanReviewError,
+    PreparedReview,
+    ReviewBatch,
+    ReviewDecision,
+    ReviewPartition,
+)
 from codebench_pipeline.human_review_schema import ReviewRepository
 from codebench_pipeline.review_api_models import (
     EvidenceTarget,
     NextReviewRequest,
     ReviewItemResponse,
     ReviewPage,
+    ReviewQueryRequest,
     ReviewTableRow,
     ReviewViewResponse,
 )
@@ -34,6 +41,20 @@ REPRESENTATIVES: Final = """WITH occurrences AS (
 
 
 class ReviewQueries(ReviewRepository):
+    def partitions(
+        self, stage: str, *, artifact_id: str | None = None, scope_id: str | None = None,
+    ) -> tuple[ReviewPartition, ...]:
+        rows = self.connection.execute(
+            """SELECT dataset_id,artifact_id,scope_id,invalidated IS NOT NULL AS invalidated,
+                CASE WHEN artifact_id='' THEN dataset_id
+                    ELSE data->'snapshot'->>'partition_key' END AS partition_key
+                FROM review_batches WHERE review_stage=%s AND current AND prepared IS NOT NULL
+                AND (%s::text IS NULL OR artifact_id=%s) AND (%s::text IS NULL OR scope_id=%s)
+                ORDER BY artifact_id,scope_id,dataset_id""",
+            (stage, artifact_id, artifact_id, scope_id, scope_id),
+        )
+        return tuple(ReviewPartition.model_validate(row) for row in rows)
+
     def _metadata(self, batch_id: str) -> dict[str, JsonValue] | None:
         row = self.connection.execute(
             "SELECT prepared FROM review_batches WHERE batch_id=%s", (batch_id,)
@@ -62,6 +83,12 @@ class ReviewQueries(ReviewRepository):
             return {}
         return TypeAdapter(dict[str, JsonValue]).validate_python(metadata["validation"])
 
+    def column_schema(self, batch_id: str) -> dict[str, dict[str, JsonValue]]:
+        metadata = self._metadata(batch_id)
+        if metadata is None:
+            return {}
+        return TypeAdapter(dict[str, dict[str, JsonValue]]).validate_python(metadata.get("column_schema", {}))
+
     def rows_for_hash(self, batch_id: str, candidate_id: str) -> tuple[dict[str, JsonValue], ...]:
         rows = self.connection.execute(
             """SELECT row_data FROM review_rows WHERE batch_id=%s AND record_hash=(
@@ -75,7 +102,10 @@ class ReviewQueries(ReviewRepository):
         ) for row in rows)
 
     def _query_batch(self, request: DatasetQueryRequest, stage: str) -> tuple[ReviewBatch, tuple[str, ...]]:
-        batch = self.get_current_batch(request.dataset_id, stage, compact=True)
+        request = ReviewQueryRequest.model_validate(request.model_dump(exclude={"after_id"}))
+        batch = self.get_current_batch(
+            request.dataset_id, stage, compact=True, artifact_id=request.artifact_id, scope_id=request.scope_id
+        )
         if request.snapshot_id is not None and request.snapshot_id != batch.snapshot.snapshot_id:
             raise HumanReviewError("stale", "Review snapshot changed; refresh before continuing")
         metadata = self._metadata(batch.batch_id)
@@ -152,6 +182,7 @@ class ReviewQueries(ReviewRepository):
                 blocked_reason=TypeAdapter(str | None).validate_python(row["item_blocked_reason"]),
             ),
             decision=decision, review_columns=batch.snapshot.review_columns,
+            column_schema=self.column_schema(batch.batch_id),
         )
 
     def review_page(self, request: DatasetQueryRequest, stage: str) -> ReviewViewResponse:
@@ -166,7 +197,10 @@ class ReviewQueries(ReviewRepository):
             [batch.batch_id, *params, request.query.limit, request.query.offset],
         )
         items = tuple(self._item_response(row, batch) for row in records)
-        publication = self.last_publication(request.dataset_id, stage)
+        publication = self.last_publication(
+            request.dataset_id, stage,
+            artifact_id=batch.snapshot.artifact_id, scope_id=batch.snapshot.scope_id,
+        )
         if publication is not None and publication.authorization != batch.completion:
             publication = None
         return ReviewViewResponse(
@@ -175,11 +209,14 @@ class ReviewQueries(ReviewRepository):
                             matched_rows=TypeAdapter(int).validate_python(count["matched"]),
                             offset=request.query.offset, limit=request.query.limit, rows=tuple(item.row for item in items)),
             publication=publication, review_columns=batch.snapshot.review_columns,
+            column_schema=self.column_schema(batch.batch_id),
         )
 
     def item(self, target: EvidenceTarget) -> ReviewItemResponse:
         batch = self.get_batch(target.batch_id, compact=True)
-        if batch.snapshot.dataset_id != target.dataset_id:
+        if (batch.snapshot.dataset_id, batch.snapshot.artifact_id, batch.snapshot.scope_id) != (
+            target.dataset_id, target.artifact_id, target.scope_id
+        ):
             raise HumanReviewError("not_found", "Batch does not belong to this dataset")
         row = self.connection.execute(
             sql.SQL(REPRESENTATIVES + """SELECT * FROM items WHERE record_hash=(

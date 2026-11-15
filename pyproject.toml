@@ -17,6 +17,7 @@ dependencies = [
   "pydantic>=2.11,<3",
   "mcp>=1.12,<2",
   "psycopg[binary]>=3.2,<4",
+  "jsonschema>=4.26,<5",
 ]
 
 [dependency-groups]

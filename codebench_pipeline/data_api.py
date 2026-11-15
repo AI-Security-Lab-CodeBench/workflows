@@ -12,9 +12,10 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 
+from codebench_pipeline.artifact_views import ArtifactDataService, ArtifactKey, ArtifactQuery
 from codebench_pipeline.data_view_models import DatasetQueryRequest, DatasetViewError
 from codebench_pipeline.data_views import DatasetDataService
-from codebench_pipeline.human_review import HumanReviewError
+from codebench_pipeline.human_review import HumanReviewError, ReviewPartition, review_artifact_id
 from codebench_pipeline.review_api_models import (
     CompletionRequest,
     DecisionRequest,
@@ -23,11 +24,20 @@ from codebench_pipeline.review_api_models import (
     PublicationTarget,
     RetractionRequest,
     ReviewBackend,
+    ReviewQueryRequest,
 )
 from codebench_pipeline.review_stages import ReviewRegistration, ReviewStageList, annotation_stage
-from codebench_pipeline.table_query import TableQueryError
+from codebench_pipeline.table_query import QueryModel, TableQueryError
 
 MAX_BODY_BYTES: Final = 64 * 1024
+
+
+class ReviewPartitionsRequest(ArtifactKey):
+    scope_id: str | None = None
+
+
+class ReviewPartitionsResponse(QueryModel):
+    partitions: tuple[ReviewPartition, ...]
 
 
 def _error(status: int, code: str, message: str) -> JSONResponse:
@@ -53,12 +63,13 @@ async def _body[T: BaseModel](request: Request, model: type[T]) -> T:
 
 
 def _target[T: BaseModel](request: Request, model: type[T]) -> T:
-    if tuple(request.query_params.keys()) != ("dataset_id",):
+    allowed = {"dataset_id", "artifact_id", "scope_id"} & model.model_fields.keys()
+    if "dataset_id" not in request.query_params or set(request.query_params) - allowed:
         raise HTTPException(422)
-    if len(request.query_params.getlist("dataset_id")) != 1:
+    if any(len(request.query_params.getlist(key)) != 1 for key in request.query_params):
         raise HTTPException(422)
     path = {key: value for key, value in request.path_params.items() if key != "review_stage"}
-    return model.model_validate({"dataset_id": request.query_params["dataset_id"], **path})
+    return model.model_validate({**dict(request.query_params), **path})
 
 
 async def _http_error(_request: Request, error: Exception) -> Response:
@@ -74,19 +85,29 @@ async def _http_error(_request: Request, error: Exception) -> Response:
 
 
 def make_dataset_api(
-    data: DatasetDataService,
-    review: ReviewBackend,
+    data: DatasetDataService | None,
+    review: ReviewBackend | None,
     port: int,
     *,
     stages: Sequence[ReviewRegistration] = (),
+    artifacts: ArtifactDataService | None = None,
 ) -> Starlette:
     if not 1 <= port <= 65535:
         raise ValueError("API port must be between 1 and 65535")
     allowed_hosts = {f"localhost:{port}", f"127.0.0.1:{port}"}
-    registered = (ReviewRegistration(annotation_stage(), review), *stages)
+    registered = (
+        *((ReviewRegistration(annotation_stage(), review),) if review is not None else ()),
+        *stages,
+    )
     registry = {entry.stage.stage_id: entry for entry in registered}
     if len(registry) != len(registered):
         raise ValueError("Review stage IDs must be unique")
+    if artifacts is not None:
+        artifact_data = artifacts
+    elif data is not None:
+        artifact_data = data.artifacts
+    else:
+        raise ValueError("An artifact data service is required")
 
     def backend(request: Request) -> ReviewBackend:
         stage_id = request.path_params.get("review_stage", "annotations")
@@ -172,6 +193,8 @@ def make_dataset_api(
         return response
 
     async def datasets(request: Request) -> Response:
+        if data is None:
+            raise HTTPException(404)
         if request.query_params:
             raise HTTPException(422)
         return _json(await run_in_threadpool(data.datasets))
@@ -182,12 +205,34 @@ def make_dataset_api(
         return _json(ReviewStageList(stages=tuple(entry.stage for entry in registered)))
 
     async def table(request: Request) -> Response:
+        if data is None:
+            raise HTTPException(404)
         query = await _body(request, DatasetQueryRequest)
         return _json(await run_in_threadpool(data.query, request.path_params["stage"], query))
 
+    async def artifact_partitions(request: Request) -> Response:
+        key = await _body(request, ArtifactKey)
+        return _json(await run_in_threadpool(artifact_data.partitions, key))
+
+    async def artifact_table(request: Request) -> Response:
+        query = await _body(request, ArtifactQuery)
+        return _json(await run_in_threadpool(artifact_data.query, query))
+
     async def view(request: Request) -> Response:
-        query = await _body(request, DatasetQueryRequest)
+        query = await _body(request, ReviewQueryRequest)
         return _json(await run_in_threadpool(backend(request).view, query))
+
+    async def review_partitions(request: Request) -> Response:
+        key = await _body(request, ReviewPartitionsRequest)
+        stage_id = request.path_params["review_stage"]
+        selected_backend = backend(request)
+        if key.asset_key not in registry[stage_id].stage.asset_keys:
+            raise HTTPException(404)
+        partitions = await run_in_threadpool(selected_backend.partitions, scope_id=key.scope_id)
+        artifact_id = review_artifact_id(key.asset_key)
+        return _json(ReviewPartitionsResponse(
+            partitions=tuple(partition for partition in partitions if partition.artifact_id in {"", artifact_id})
+        ))
 
     async def next_pending(request: Request) -> Response:
         query = await _body(request, NextReviewRequest)
@@ -223,6 +268,8 @@ def make_dataset_api(
         return _json(await run_in_threadpool(backend(request).evidence, target))
 
     async def download(request: Request) -> Response:
+        if review is None:
+            raise HTTPException(404)
         target = _target(request, PublicationTarget)
         payload = await run_in_threadpool(review.download, target)
         return Response(
@@ -236,6 +283,8 @@ def make_dataset_api(
             Route("/datasets", datasets, methods=["GET"]),
             Route("/review-stages", review_stages, methods=["GET"]),
             Route("/data/{stage:path}", table, methods=["POST"]),
+            Route("/artifacts/partitions", artifact_partitions, methods=["POST"]),
+            Route("/artifacts/data", artifact_table, methods=["POST"]),
             Route("/review", view, methods=["POST"]),
             Route("/review/next", next_pending, methods=["POST"]),
             Route("/review/{batch_id}/item/{candidate_id}", item, methods=["GET"]),
@@ -246,6 +295,7 @@ def make_dataset_api(
             Route("/review/continue", continue_review, methods=["POST"]),
             Route("/review/{batch_id}/evidence/{candidate_id}", evidence, methods=["GET"]),
             Route("/reviews/{review_stage}", view, methods=["POST"]),
+            Route("/reviews/{review_stage}/partitions", review_partitions, methods=["POST"]),
             Route("/reviews/{review_stage}/next", next_pending, methods=["POST"]),
             Route("/reviews/{review_stage}/{batch_id}/item/{candidate_id}", item, methods=["GET"]),
             Route("/reviews/{review_stage}/decision", decide, methods=["PUT"]),

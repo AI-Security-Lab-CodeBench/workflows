@@ -45,7 +45,10 @@ class ReviewLifecycle(ReviewQueries):
         if not self.connection.read_only:
             self.lock_dataset(snapshot.dataset_id)
         try:
-            batch = self.get_current_batch(snapshot.dataset_id, snapshot.review_stage)
+            batch = self.get_current_batch(
+                snapshot.dataset_id, snapshot.review_stage,
+                artifact_id=snapshot.artifact_id, scope_id=snapshot.scope_id,
+            )
         except HumanReviewError as error:
             if error.code == "not_found":
                 raise HumanReviewError("stale", "No current authorization exists for this snapshot") from error
@@ -73,6 +76,7 @@ class ReviewLifecycle(ReviewQueries):
         require_decided_batch(self._full_batch(batch.batch_id), decisions)
         token = CompletionToken(
             dataset_id=snapshot.dataset_id, review_stage=snapshot.review_stage, snapshot_id=snapshot.snapshot_id,
+            artifact_id=snapshot.artifact_id, scope_id=snapshot.scope_id,
             decision_digest=decisions_digest(decisions), batch_id=batch.batch_id, generation=batch.generation,
             batch_revision=batch.batch_revision + 1, token=uuid4().hex,
         )
@@ -116,7 +120,10 @@ class ReviewLifecycle(ReviewQueries):
     ) -> ReviewBatch:
         run_id = TypeAdapter(Text | None).validate_python(run_id)
         self.authorize_completion(snapshot, authorization)
-        batch = self.get_current_batch(snapshot.dataset_id, snapshot.review_stage)
+        batch = self.get_current_batch(
+            snapshot.dataset_id, snapshot.review_stage,
+            artifact_id=snapshot.artifact_id, scope_id=snapshot.scope_id,
+        )
         if run_id is None:
             return batch
         updated = batch.model_copy(update={"continuation_run_id": run_id, "updated_at": timestamp()})
@@ -134,6 +141,8 @@ class ReviewLifecycle(ReviewQueries):
             "INSERT INTO review_publications(publication_id,dataset_id,batch_id,data) VALUES(%s,%s,%s,%s)",
             (reference.publication_id, snapshot.dataset_id, token.batch_id, Jsonb(reference.model_dump(mode="json"))),
         )
-        self.audit(ReviewHistoryEntry(event="published", batch=self.get_current_batch(snapshot.dataset_id, snapshot.review_stage),
+        self.audit(ReviewHistoryEntry(event="published", batch=self.get_current_batch(
+            snapshot.dataset_id, snapshot.review_stage,
+            artifact_id=snapshot.artifact_id, scope_id=snapshot.scope_id),
                                        publication=reference, recorded_at=reference.created_at))
         return reference

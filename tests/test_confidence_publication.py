@@ -8,6 +8,7 @@ from hashlib import sha256
 from pathlib import Path
 from unittest.mock import patch
 
+import pandas as pd
 from configuration_fixture import write_fixture
 from dagster import AssetKey, build_input_context
 from pydantic import BaseModel, JsonValue, TypeAdapter
@@ -16,7 +17,7 @@ from test_dataset_rules import make_candidate, make_label, make_rules
 
 from codebench_pipeline.data_view_models import DatasetQueryRequest, DatasetViewError, TableResponse
 from codebench_pipeline.data_views import DatasetDataService
-from codebench_pipeline.dataframe_io import DataFrameIOManager
+from codebench_pipeline.dataframe_io import REVIEW_PREPARATION, DataFrameIOManager
 from codebench_pipeline.dataset_asset_types import DATASET_PARTITIONS
 from codebench_pipeline.dataset_cli import execute_build, execute_registered_build
 from codebench_pipeline.dataset_config import load_build_config
@@ -297,7 +298,7 @@ class ConfidencePublicationTests(unittest.TestCase):
                 resolved = ReviewSnapshots(home, data).current(spec.dataset_id)
             self.assertEqual(
                 set(resolved.manifest.references),
-                set(built) - {"human_review_snapshot", "human_review_decisions", "dataset_release"},
+                set(built) - {"human_review_queue", "human_review_decisions", "dataset_release"},
             )
             reference = resolved.manifest.references["documentation/command_candidates"]
             manager = DataFrameIOManager(storage=spec.storage)
@@ -347,6 +348,13 @@ class ConfidencePublicationTests(unittest.TestCase):
                 batch = transaction.get_current_batch(spec.dataset_id, "annotations")
                 self.assertEqual(batch.snapshot.candidate_ids, ())
                 self.assertEqual(transaction.list_decisions(batch.batch_id), ())
+            queue = data.read_current(spec.dataset_id, "human_review_queue").value
+            assert isinstance(queue, pd.DataFrame)
+            self.assertTrue(queue.empty)
+            self.assertEqual(
+                queue.attrs[REVIEW_PREPARATION],
+                {"batch_id": batch.batch_id, "snapshot_id": batch.snapshot.snapshot_id},
+            )
             before = len(instance.get_runs())
             with redirect_stdout(io.StringIO()):
                 self.assertEqual(execute_registered_build(spec.dataset_id, home), {})

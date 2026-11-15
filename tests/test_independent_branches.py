@@ -232,7 +232,6 @@ class IndependentBranchDatasetTests(unittest.TestCase):
                 "deduplicated_annotations",
                 "category_eligible_annotations",
                 "human_review_queue",
-                "human_review_snapshot",
                 "human_review_decisions",
                 "dataset_release",
             },
@@ -343,7 +342,6 @@ class IndependentBranchDatasetTests(unittest.TestCase):
                 "deduplicated_annotations",
                 "category_eligible_annotations",
                 "human_review_queue",
-                "human_review_snapshot",
             },
         )
         with dataset_instance(self.home) as instance:

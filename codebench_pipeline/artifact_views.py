@@ -1,0 +1,98 @@
+from dataclasses import dataclass
+from typing import Annotated, Literal, Protocol, assert_never
+
+from pydantic import Field, JsonValue, TypeAdapter
+
+from codebench_pipeline.dataframe_io import AssetReference, read_frame
+from codebench_pipeline.human_review import HumanReviewError
+from codebench_pipeline.models import Digest
+from codebench_pipeline.object_store import ObjectStore, StorageConfig, sha256
+from codebench_pipeline.storage import IntegrityError
+from codebench_pipeline.table_query import QueryModel, TablePage, TableQuery, TableQueryError, query_table
+
+AssetComponent = Annotated[str, Field(min_length=1, max_length=512)]
+PublicationState = Literal["published", "legacy_unreviewed", "stale"]
+
+
+class ArtifactKey(QueryModel):
+    asset_key: tuple[AssetComponent, ...] = Field(min_length=1, max_length=32)
+
+
+class ArtifactTarget(ArtifactKey):
+    partition_key: str | None = Field(default=None, max_length=1024)
+
+
+class ArtifactQuery(ArtifactTarget):
+    snapshot_id: Digest | None = None
+    query: TableQuery = Field(default_factory=TableQuery)
+
+
+class ArtifactPartitions(ArtifactKey):
+    partitions: tuple[str | None, ...]
+
+
+class ArtifactTable(ArtifactTarget):
+    kind: Literal["table"] = "table"
+    snapshot_id: Digest
+    page: TablePage
+    publication_state: PublicationState | None = None
+
+
+class ArtifactJSON(ArtifactTarget):
+    kind: Literal["json"] = "json"
+    snapshot_id: Digest
+    value: JsonValue
+
+
+@dataclass(frozen=True, slots=True)
+class ArtifactBinding:
+    storage: StorageConfig
+    reference: AssetReference
+    publication_state: PublicationState | None = None
+
+
+class ArtifactCatalog(Protocol):
+    def partitions(self, key: ArtifactKey) -> ArtifactPartitions: ...
+
+    def resolve(self, target: ArtifactTarget) -> ArtifactBinding: ...
+
+
+class ArtifactDataService:
+    """Browse persisted artifact bindings without evaluating pipeline business rules."""
+
+    def __init__(self, catalog: ArtifactCatalog) -> None:
+        self.catalog = catalog
+
+    def partitions(self, key: ArtifactKey) -> ArtifactPartitions:
+        return self.catalog.partitions(key)
+
+    def query(self, request: ArtifactQuery) -> ArtifactTable | ArtifactJSON:
+        binding = self.catalog.resolve(request)
+        if request.snapshot_id is not None and request.snapshot_id != binding.reference.digest:
+            raise HumanReviewError("stale", "The artifact changed; refresh before continuing")
+        suffix = "parquet" if binding.reference.format == "parquet" else "json"
+        payload = ObjectStore(binding.storage).read(f"objects/{binding.reference.digest}.{suffix}")
+        if sha256(payload) != binding.reference.digest:
+            raise IntegrityError("Artifact reference content mismatch")
+        match binding.reference.format:
+            case "parquet":
+                value = read_frame(payload)
+                return ArtifactTable(
+                    asset_key=request.asset_key,
+                    partition_key=request.partition_key,
+                    snapshot_id=binding.reference.digest,
+                    page=query_table(value, request.query),
+                    publication_state=binding.publication_state,
+                )
+            case "rules":
+                query = request.query
+                if query.search or query.filters or query.sort or query.offset:
+                    raise TableQueryError("query", "JSON artifacts are not queryable tables")
+                return ArtifactJSON(
+                    asset_key=request.asset_key,
+                    partition_key=request.partition_key,
+                    snapshot_id=binding.reference.digest,
+                    value=TypeAdapter(JsonValue).validate_json(payload),
+                )
+            case _:
+                assert_never(binding.reference.format)

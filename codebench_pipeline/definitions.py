@@ -29,7 +29,6 @@ from codebench_pipeline.dataset_registry import DatasetRegistry
 from codebench_pipeline.human_review import CompletionToken
 from codebench_pipeline.review_assets import human_assets
 from codebench_pipeline.review_config import HumanReviewConfig
-from codebench_pipeline.review_preparation import human_review_snapshot
 from codebench_pipeline.stage_configuration import stage_configs as stage_configs
 from codebench_pipeline.stage_descriptions import describe_stage
 from codebench_pipeline.storage import fingerprint
@@ -81,7 +80,6 @@ def build_definitions(home: Path) -> Definitions:
             *processing_assets(),
             *annotation_assets(),
             *human_assets(),
-            human_review_snapshot,
             *source_assets("documentation"),
             *finalization_assets(),
         ]

@@ -9,6 +9,24 @@ from codebench_pipeline.human_review import ReviewDecision
 from codebench_pipeline.table_query import cell_text
 
 
+def json_type(value: JsonValue) -> str:
+    match value:
+        case None:
+            return "null"
+        case bool():
+            return "boolean"
+        case int() | float():
+            return "number"
+        case str():
+            return "string"
+        case list():
+            return "array"
+        case dict():
+            return "object"
+        case _:
+            assert_never(value)
+
+
 def decision_values(decision: ReviewDecision) -> dict[str, JsonValue]:
     return {"human_decision": decision.decision, "human_reviewer": decision.reviewer,
             "human_notes": decision.notes, "human_edits": decision.edits}

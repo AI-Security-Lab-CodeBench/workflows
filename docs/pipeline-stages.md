@@ -358,6 +358,8 @@ the queue. Full-table evidence and cap exclusions remain inspectable separately.
 **Output:** `ReviewQueueTable`, preserving candidate and label columns
 plus `exclusion_reason`. Machine-eligible rows have an empty reason; other rows
 retain the actual label exclusion. Caps do not exclude rows from human review.
+Its `codebench_review_preparation` attributes contain `batch_id` and `snapshot_id`,
+including for an empty queue.
 
 **Gate/inspection:** Among retained category-eligible rows, any `medium` or `low`
 among category, risk, severity or class confidence puts a row in this queue. All four `high` removes
@@ -371,24 +373,20 @@ the catalog, quarantined candidates stay in `filtered_commands`, and inference
 failures stay in observations/receipts. Nothing here records human sign-off or
 automatically resolves a withheld row.
 
-## `datasets/human_review_snapshot`
-
-**Input:** The uncertain queue, category-eligible annotations and category rules.
-
-**Goal:** Prepare immutable PostgreSQL review items and reuse terminal decisions
-by original selected-column values, without repeating preparation on UI reads.
-
-**Output:** `ReviewSnapshotTable` with the snapshot and batch IDs. Original
-occurrences and provenance remain persisted; equal selected values share one item.
-
-**Gate/inspection:** Invalid or missing selected values fail preparation. Unresolved
+The same `human_review_queue` asset prepares immutable PostgreSQL review items
+after computing or loading its cached table. Preparation runs on cache hits too,
+so invalidated authority is rebuilt without inference or queue recomputation.
+Original occurrences and provenance remain persisted; equal selected values share
+one item. Invalid or missing selected values fail preparation. Unresolved
 or blocked items leave a durable waiting batch without occupying a worker.
 Only configured `publication.review_columns` can be edited. Current eligibility
-and release authorization are checked separately from decision reuse.
+and release authorization are checked separately from decision reuse. Review page
+reads never prepare snapshots. The former `human_review_snapshot` asset is absent
+from the active graph; historical snapshot tables remain readable evidence.
 
 ## `datasets/human_review_decisions`
 
-**Input:** The prepared uncertainty queue, review snapshot pointer and a completion
+**Input:** The prepared uncertainty queue with its review snapshot attributes and a completion
 authorization bound to the current dataset/evidence snapshot, generation and exact
 decision digest.
 

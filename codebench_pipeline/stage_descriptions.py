@@ -186,14 +186,6 @@ changed or retracted row decisions are never resurrected from old approval.
 An empty queue is completed by the automatic policy, with zero human decisions.
 Reviewer names are self-reported. Approving a record does not authorize executing its command.
 """,
-    "human_review_snapshot": """
-**Input:** The persisted uncertain-row queue, eligible annotations, and category rules.
-**Goal:** Prepare durable PostgreSQL review items once and reuse terminal decisions by selected values.
-**Output:** ReviewSnapshotTable containing the immutable snapshot and batch identifiers.
-Selected columns alone define identity and editable values. Duplicate occurrences share a review item
-while retaining provenance. Invalid inputs fail preparation; unresolved or blocked decisions leave
-durable waiting state without a sleeping worker. Page reads never rebuild this snapshot.
-""",
     "human_review_queue": """
 **Input:** Category-eligible annotations and category rules.
 
@@ -209,6 +201,12 @@ This queue precedes human_review_decisions and release. Low-uncertainty rows rem
 category_eligible_annotations and need no human decisions. Source exclusions stay in source_catalog,
 filtered candidates stay in filtered_commands, and inference failures stay in observations/receipts.
 Machine-rejected or unsupported rows remain ineligible. No row here implies human sign-off.
+After computing or loading the cached queue, this same asset prepares durable PostgreSQL review
+items and reusable terminal decisions. The namespaced `codebench_review_preparation` attributes
+bind batch_id and snapshot_id even when the queue is empty. Invalid inputs fail preparation;
+unresolved or blocked items leave a durable waiting batch without occupying a worker.
+Selected columns define reusable identity and editable values; duplicate occurrences retain provenance.
+Review page reads never prepare snapshots. Cache hits still revalidate and prepare current authority.
 """,
 }
 

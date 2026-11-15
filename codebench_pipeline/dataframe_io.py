@@ -2,11 +2,11 @@ from __future__ import annotations
 
 import base64
 import json
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
-from typing import Literal, Protocol, assert_never
+from typing import Final, Literal, Protocol, assert_never
 
 import pandas as pd
 import pyarrow
@@ -29,6 +29,15 @@ from codebench_pipeline.dataset_branches import asset_branch
 from codebench_pipeline.human_review_store import HumanReviewStore
 from codebench_pipeline.object_store import ObjectStore, StorageConfig, sha256
 from codebench_pipeline.storage import IntegrityError
+
+REVIEW_PREPARATION: Final = "codebench_review_preparation"
+
+
+def asset_storage_key(asset_key: Sequence[str], partition_key: str | None) -> str:
+    identity = [list(asset_key)]
+    if partition_key is not None:
+        identity.append([partition_key])
+    return f"assets/{sha256(json.dumps(identity, ensure_ascii=False).encode())}.json"
 
 
 class AssetReference(BaseModel):
@@ -151,10 +160,10 @@ class DataFrameIOManager(ConfigurableIOManager):
         return ObjectStore(self.storage)
 
     def _asset_key(self, context: InputContext | OutputContext) -> str:
-        identity = [list(context.asset_key.path)]
-        if context.has_asset_partitions:
-            identity.append([context.asset_partition_key])
-        return f"assets/{sha256(json.dumps(identity, ensure_ascii=False).encode())}.json"
+        return asset_storage_key(
+            context.asset_key.path,
+            context.asset_partition_key if context.has_asset_partitions else None,
+        )
 
     def handle_output(self, context: OutputContext, obj: pd.DataFrame | CategoryRules) -> None:
         if context.asset_key.path[0] == "datasets" and context.asset_key.path[-1] in {
@@ -209,7 +218,7 @@ class DataFrameIOManager(ConfigurableIOManager):
                                 raise IntegrityError("Source-dependent outputs must be tables")
                             case _:
                                 assert_never(obj)
-                    if context.asset_key.path[-1] != "human_review_snapshot":
+                    if context.asset_key.path[-1] != "human_review_queue":
                         try:
                             previous = self.current_reference(context)
                         except FileNotFoundError:

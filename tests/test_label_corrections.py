@@ -32,7 +32,7 @@ from codebench_pipeline.human_review import (
     decisions_digest,
 )
 from codebench_pipeline.human_review_store import HumanReviewStore
-from codebench_pipeline.label_corrections import apply_label_corrections
+from codebench_pipeline.label_corrections import annotation_review_validation, apply_label_corrections
 from codebench_pipeline.review_api_models import CompletionRequest, DecisionRequest
 from codebench_pipeline.review_frames import (
     CORRECTIONS_BINDING,
@@ -127,7 +127,7 @@ class LabelCorrectionTests(unittest.TestCase):
             id_column="candidate_id",
             columns=tuple(original),
             rows=(original,),
-            validation={"rules": self.rules.model_dump(mode="json")},
+            validation=annotation_review_validation(self.rules),
         )
 
     def change(self, batch_id: str, **updates: JsonValue) -> DecisionChange:
@@ -205,7 +205,7 @@ class LabelCorrectionTests(unittest.TestCase):
             })
             prepared = self.prepared.model_copy(update={
                 "snapshot": snapshot, "rows": (row,),
-                "validation": {"rules": rules.model_dump(mode="json")},
+                "validation": annotation_review_validation(rules),
             })
             with self.subTest(index=index), self.store.transaction() as tx:
                 batch = tx.prepare(prepared)

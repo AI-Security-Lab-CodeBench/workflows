@@ -5,6 +5,7 @@ from typing import Literal, assert_never
 import pandas as pd
 from dagster import AssetKey, DagsterInstance, build_input_context
 
+from codebench_pipeline.artifact_views import ArtifactDataService
 from codebench_pipeline.category_rules import CategoryRules
 from codebench_pipeline.data_view_models import (
     DatasetDescriptor,
@@ -15,6 +16,7 @@ from codebench_pipeline.data_view_models import (
     TableResponse,
 )
 from codebench_pipeline.dataframe_io import AssetReference, DataFrameIOManager
+from codebench_pipeline.dataset_artifacts import DatasetArtifactCatalog
 from codebench_pipeline.dataset_asset_types import DATASET_PARTITIONS
 from codebench_pipeline.dataset_branches import HISTORICAL_PROCESSING_STAGES
 from codebench_pipeline.dataset_config import DatasetBuildSpec
@@ -38,6 +40,7 @@ class DatasetDataService:
         self.registry = DatasetRegistry(home)
         self.home = home.resolve()
         self.instance = instance
+        self.artifacts = ArtifactDataService(DatasetArtifactCatalog(self.home))
 
     def datasets(self) -> DatasetList:
         specs = [self.registry.get_snapshot(key) for key in self.registry.keys()]

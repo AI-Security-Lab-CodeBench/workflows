@@ -15,13 +15,12 @@ from pydantic import ValidationError
 
 from codebench_pipeline.category_rules import CategoryRules
 from codebench_pipeline.data_views import DatasetDataService
-from codebench_pipeline.dataframe_io import DataFrameIOManager
+from codebench_pipeline.dataframe_io import REVIEW_PREPARATION, DataFrameIOManager
 from codebench_pipeline.dataframe_schemas import (
     CommandsTable,
     HumanReviewDecisionsTable,
     ProposedAnnotationsTable,
     ReviewQueueTable,
-    ReviewSnapshotTable,
     validated_frame,
 )
 from codebench_pipeline.dataset_asset_types import DATASET_PARTITIONS, TABLE_TYPES, rules_input, table_input
@@ -74,18 +73,19 @@ def human_assets(branch: Branch = "dataset") -> list[AssetsDefinition]:
         dagster_type=TABLE_TYPES[HumanReviewDecisionsTable],
         ins={
             "human_review_queue": table_input("human_review_queue", ReviewQueueTable, branch),
-            "human_review_snapshot": table_input("human_review_snapshot", ReviewSnapshotTable),
         },
     )
     def human_review_decisions(
         context: AssetExecutionContext,
         config: HumanReviewConfig,
         human_review_queue: DataFrame[ReviewQueueTable],
-        human_review_snapshot: DataFrame[ReviewSnapshotTable],
         dataset_io_manager: ResourceParam[DataFrameIOManager],
     ) -> Output[DataFrame[HumanReviewDecisionsTable]]:
         approved = authorized_review(context, config, dataset_io_manager)
-        if human_review_snapshot.iloc[0]["snapshot_id"] != approved.token.snapshot_id:
+        if human_review_queue.attrs.get(REVIEW_PREPARATION) != {
+            "batch_id": approved.token.batch_id,
+            "snapshot_id": approved.token.snapshot_id,
+        }:
             raise HumanReviewError("stale", "Prepared snapshot differs from completion authorization")
         reviewed = approved.resolved.reviewed.loc[
             approved.resolved.reviewed["candidate_id"].isin(approved.resolved.snapshot.candidate_ids)
