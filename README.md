@@ -5,6 +5,15 @@ This repository contains no collected dataset, source captures, review ledger or
 published command table. Those inputs and outputs remain local and ignored.
 CAT-2 is a local multicategory example and is deliberately not shipped.
 
+## Development checkout
+
+Use `CodeBench-workflows` as the main working directory and `master` as the only
+development branch. The remote is
+`git@github.com:AI-Security-Lab-CodeBench/workflows.git`.
+The legacy sibling `CodeBench` is local archival material, not a source checkout
+for new changes. See `AGENTS.md` for verification, automatic push after authorized
+commits, and the policy against co-author trailers.
+
 ## Components
 
 - `codebench_pipeline/`: typed Dagster collection, labeling, review and publication.

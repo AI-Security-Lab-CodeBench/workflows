@@ -1,5 +1,25 @@
 # CodeBench dataset pipeline
 
+## Canonical checkout and Git workflow
+
+`CodeBench-workflows` is the main development checkout. Its only development
+branch is `master`, tracking `origin/master` at
+`git@github.com:AI-Security-Lab-CodeBench/workflows.git`.
+Run development commands from this checkout, not the legacy sibling `CodeBench`.
+Keep legacy data, strategy files and runtime evidence outside this repository.
+
+Work directly on `master`; do not create feature branches or linked worktrees
+unless the user explicitly requests them. Preserve unrelated working changes.
+When a commit is authorized, verify the relevant changes, create an atomic commit,
+then immediately push it to `origin master` without asking again. A task is not
+complete while its authorized commits remain unpushed; report a rejected push
+instead of silently deferring it. This standing push authorization does not
+authorize unrelated commits, force-pushes or history rewrites.
+
+Preserve the user's primary author identity. Never add `Co-authored-by` trailers,
+AI attribution or assistant signatures to commits, including amended commits.
+This explicit repository policy overrides attribution defaults in agent skills.
+
 ## Publication scope
 
 Publish pipelines, workflows, tests, operational documentation and CAT-3
