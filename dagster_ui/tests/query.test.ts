@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import {test} from 'node:test';
 import {cellText, panelLink} from '../src/api';
 import {initialQuery, querySchema, reviewStagesSchema} from '../src/models';
-import {toggleSort} from '../src/query';
+import {artifactPartitionLink, artifactSelectionLink, toggleSort} from '../src/query';
 import {assetKeyFromPath, reviewScopeKey, reviewStageLink, stagesForAsset} from '../src/reviewStages';
 
 test('custom tab URLs preserve partition and other native parameters', () => {
@@ -10,6 +10,28 @@ test('custom tab URLs preserve partition and other native parameters', () => {
   assert.deepEqual(Object.fromEntries(query), {
     partition: 'CAT-3', view: 'review', lineageDepth: '2',
   });
+});
+
+test('artifact selection retains the owner partition and clears the previous input scope', () => {
+  const search = '?view=data&partition=alpha&lineageDepth=2&data_input=old&input_partition=beta';
+  const input = ['qa', 'source/rows'];
+  const inputs = new URLSearchParams(artifactSelectionLink(search, 'inputs', input));
+  const output = new URLSearchParams(artifactSelectionLink(search, 'output'));
+  assert.deepEqual(Object.fromEntries(inputs), {
+    view: 'data', partition: 'alpha', lineageDepth: '2', data_view: 'inputs', data_input: JSON.stringify(input),
+  });
+  assert.deepEqual(Object.fromEntries(output), {
+    view: 'data', partition: 'alpha', lineageDepth: '2', data_view: 'output',
+  });
+});
+
+test('input partition selection and clearing never replace the owner partition', () => {
+  const search = '?view=data&partition=alpha&data_view=inputs&data_input=%5B%22qa%22%2C%22rows%22%5D&lineageDepth=2';
+  const selected = artifactPartitionLink(search, 'input_partition', 'beta/one');
+  assert.equal(new URLSearchParams(selected).get('input_partition'), 'beta/one');
+  assert.equal(new URLSearchParams(selected).get('partition'), 'alpha');
+  assert.deepEqual(Object.fromEntries(new URLSearchParams(artifactPartitionLink(selected, 'input_partition', null))),
+    Object.fromEntries(new URLSearchParams(search)));
 });
 
 test('sorting cycles direction without changing other sort priorities', () => {

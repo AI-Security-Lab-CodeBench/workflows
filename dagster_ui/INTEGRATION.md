@@ -75,6 +75,63 @@ discard. A changed evidence snapshot never inherits a draft approval.
 Drafts are intentionally in memory, not a second persisted decision store;
 browser reload restores server decisions and the saved reviewer.
 
+## Data artifact Inputs / Output
+
+The native Data tab defaults to **Output**. The **Artifact** selector switches
+between **Output** and **Inputs**. Inputs exposes an **Input asset** selector
+with full direct upstream asset paths and an independent **Input partition**
+selector. Partitioned inputs require an explicit choice; unpartitioned inputs
+use `null`. The owner's `partition` and unrelated native query parameters are
+preserved. No owner-to-input partition mapping is inferred.
+
+These are **current upstream persisted artifacts**, not exact historical
+versions consumed by the output, including when the native URL has `asOf`.
+The view labels that distinction. Both modes reuse the same artifact table,
+JSON renderer, query controls, and **Row 1** / **Complete row values** inspector.
+Changing mode, owner partition, input asset, or input partition remounts the
+table, clearing its query, snapshot binding, and inspector. Aborted obsolete
+reads and response-key isolation prevent late responses from replacing it.
+Review is unchanged.
+
+URL selectors are `data_view=output|inputs`, `data_input=<JSON asset path array>`,
+and `input_partition=<partition key>`. Missing `data_view` means Output.
+Changing mode or input clears the old input selectors. Unknown modes or input
+identities show a recoverable selection state, never a fallback artifact.
+For example, `/assets/qa/combined?view=data&partition=alpha&data_view=inputs&data_input=%5B%22qa%22%2C%22source_rows%22%5D&input_partition=beta`
+reads the source's beta artifact while preserving owner alpha.
+
+Dependency discovery uses the existing native Apollo provider and `gql` /
+`useQuery` exports from `@dagster-io/ui-core/apollo-client`, with a network-only
+`CodeBenchArtifactInputs` query:
+`assetNodeOrError(assetKey: $assetKey) { ... on AssetNode { id dependencyKeys { path } } }`.
+This is the definition's current direct dependency list, not transitive lineage
+or materialization-used-data. The inspected pin is
+`7dca97fabebf771d4ac0515d674e50e2a742446f`. Primary sources:
+
+- https://github.com/dagster-io/dagster/blob/7dca97fabebf771d4ac0515d674e50e2a742446f/js_modules/ui-core/src/graphql/schema.graphql
+- https://github.com/dagster-io/dagster/blob/7dca97fabebf771d4ac0515d674e50e2a742446f/js_modules/ui-core/src/apollo-client/index.tsx
+- https://github.com/dagster-io/dagster/blob/7dca97fabebf771d4ac0515d674e50e2a742446f/js_modules/ui-core/src/assets/AssetMaterializationUpstreamData.tsx
+
+`AssetViewFeatureInput.definition` is not assumed to contain dependency keys.
+Discovery errors and non-AssetNode results offer **Retry input discovery**;
+empty dependencies state that the asset has no direct upstream inputs.
+Missing persisted input partitions offer **Refresh partitions**, and data-read
+errors retain **Refresh snapshot**. Output remains selectable in every state,
+even if the owner's output has never been persisted.
+
+The existing `/artifacts/partitions` and `/artifacts/data` readers receive the
+selected full asset key and its own partition. Their response schemas enforce
+that binding; there is no new backend/service contract.
+
+Focused URL coverage lives in `tests/query.test.ts`; existing
+`tests/api.test.ts` covers full-key/partition response binding and cancellation.
+Lead invocation from `dagster_ui`:
+`bun test ./tests/query.test.ts ./tests/api.test.ts --timeout 30000`.
+Tests, native strict typecheck/build, and real-fixture browser QA are assigned
+to the integration lead. Verify source values 2/3 against output scores 20/30,
+alpha/beta isolation, unpartitioned lookup, absent persisted input, no dependencies,
+unknown URL input, discovery retry, and existing output filtering.
+
 ## Reusable review stages
 
 The active dataset workflow registers one final `annotations` uncertainty review,
