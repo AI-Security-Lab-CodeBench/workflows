@@ -1,4 +1,5 @@
 import type {AssetViewFeatureInput} from '@dagster-io/ui-core/assets/AssetFeatureContext';
+import {Button} from '@dagster-io/ui-components';
 import {useMemo, useState} from 'react';
 import {useHistory, useLocation} from 'react-router-dom';
 import {initialQuery} from './models';
@@ -8,10 +9,9 @@ import {FullscreenInspector} from './FullscreenInspector';
 import {Scope} from './Scope';
 import {QueryControls} from './QueryControls';
 import {RowsTable} from './RowsTable';
-import {Fields} from './Fields';
+import {ArtifactContent} from './ArtifactContent';
 import {Status} from './Status';
 import {useSnapshotQuery} from './useResource';
-import {cellText} from './api';
 import {ArtifactInputs} from './ArtifactInputs';
 import {artifactSelectionLink} from './query';
 import styles from './ui.module.css';
@@ -53,8 +53,9 @@ function DataTable({assetKey, partition}: {readonly assetKey: readonly string[];
   const data = result.data;
   function refresh() {setSelected(undefined); setQuery({...query, offset: 0}); result.refresh();}
   return <div className={styles.stack}>
-    <QueryControls query={query} columns={data?.kind === 'table' ? data.page.columns : []}
+    {data?.kind === 'table' ? <QueryControls query={query} columns={data.page.columns}
       onChange={(next) => {setSelected(undefined); setQuery(next);}} onRefresh={refresh} />
+      : <div className={styles.toolbar}><Button onClick={refresh}>Refresh snapshot</Button></div>}
     {result.loading && <Status>Loading persisted data...</Status>}
     {result.error !== undefined && <Status error={result.error} />}
     {data && <details><summary>Snapshot {data.snapshot_id.slice(0, 12)}</summary>
@@ -64,10 +65,14 @@ function DataTable({assetKey, partition}: {readonly assetKey: readonly string[];
     {data?.kind === 'table' && data.publication_state === 'stale' &&
       <Status>Stale output: a supporting review was retracted or changed. These rows are historical, not currently approved.
         Complete the affected review and continue the pipeline before using dependent results.</Status>}
-    {data?.kind === 'json' && <pre className={styles.literal}>{cellText(data.value)}</pre>}
-    {data?.kind === 'table' && <RowsTable page={data.page} query={query} onChange={setQuery} onSelect={setSelected} />}
+    {data?.kind === 'json' && <ArtifactContent key={data.snapshot_id} value={data.value} dataSchema={data.data_schema} />}
+    {data?.kind === 'table' && <ArtifactContent key={data.snapshot_id} table
+      value={data.page.rows.map((row) => row.values)} dataSchema={data.data_schema}>
+      <RowsTable page={data.page} query={query} onChange={setQuery} onSelect={setSelected} />
+    </ArtifactContent>}
     <FullscreenInspector isOpen={!!selected} title="Complete row values" onClose={() => setSelected(undefined)}>
-      {selected && <Fields fields={selected.values} />}
+      {selected && data && <ArtifactContent key={`${data.snapshot_id}:${selected.row_index}`}
+        value={selected.values} dataSchema={data.data_schema} />}
     </FullscreenInspector>
   </div>;
 }

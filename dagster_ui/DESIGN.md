@@ -42,3 +42,28 @@ reenters the narrow range. A native-context toggle remains available in the view
 Verification ledger: build, strict typecheck, focused tests, desktop/mobile,
 light/dark, keyboard and real-endpoint QA are assigned to the integration lead.
 This frontend unit must not start builds, tests, servers or browser sessions.
+
+## Schema-backed artifacts
+
+Primary action: Refresh snapshot. Information priority: selected category and
+short identity fields, structured complete values, then schema and raw JSON.
+Keep schema property order; long strings and nested groups disclose their size
+before expansion. Do not add dashboard chrome, validation badges or JSON filters.
+
+Layout: artifact content - one object or paged rows with inspectable structure ->
+existing stack and cluster primitives; scroll owner: extension section vertically,
+table reel horizontally, fullscreen dialog body for selected rows. Nested values
+wrap rather than widening the page; disclosure indentation uses the small space
+token without accumulating an unbounded gutter.
+
+ArtifactContent uses native select navigation between Data, Schema and JSON.
+StructuredValue uses definition lists and native details: scalar values remain
+readable, multiline/long strings and nested collections expand without clipping.
+SchemaNode uses the same disclosure anatomy, showing field type, requiredness,
+description and constraints. Unresolved and recursive references are explicit;
+the original full schema remains available. The source distinguishes declared
+contracts from storage-derived structure, never asserts successful validation.
+All typography inherits Dagster, including its Geist font; only data and raw
+JSON use its mono token. Schema metadata uses 1.5 line height for wrapped
+descriptions at narrow widths.
+Disclosure controls share the existing touch-target and focus-ring tokens.

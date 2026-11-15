@@ -86,8 +86,8 @@ preserved. No owner-to-input partition mapping is inferred.
 
 These are **current upstream persisted artifacts**, not exact historical
 versions consumed by the output, including when the native URL has `asOf`.
-The view labels that distinction. Both modes reuse the same artifact table,
-JSON renderer, query controls, and **Row 1** / **Complete row values** inspector.
+The view labels that distinction. Both modes reuse the same schema-backed artifact
+viewer and **Row 1** / **Complete row values** inspector.
 Changing mode, owner partition, input asset, or input partition remounts the
 table, clearing its query, snapshot binding, and inspector. Aborted obsolete
 reads and response-key isolation prevent late responses from replacing it.
@@ -121,7 +121,51 @@ even if the owner's output has never been persisted.
 
 The existing `/artifacts/partitions` and `/artifacts/data` readers receive the
 selected full asset key and its own partition. Their response schemas enforce
-that binding; there is no new backend/service contract.
+that binding.
+
+### Schema-backed artifact viewing
+
+Both artifact variants require `data_schema: {source: "declared" | "storage",
+schema: <JSON Schema object>}`. JSON schemas describe the artifact root; table
+schemas describe one row, not the page envelope. The boundary retains arbitrary
+schema keywords, property order and nested definitions. The source is displayed
+as supplied, without claiming that the UI validated persisted data.
+
+The platform discovers declared schemas from the existing Dagster output
+annotations at service initialization, including `Output[DataFrame[Model]]`
+and Pydantic configuration models. Pipeline authors do not enable a viewer,
+register schemas, or maintain an asset-name map. Browsing reads persisted
+values; it does not invoke asset functions or reload business configuration.
+
+Data is the default view. Objects use schema property order followed by any
+undeclared keys in their original order. Short values remain visible; multiline
+or long strings and nested groups expand through keyboard-accessible native
+disclosures with character/field/item counts. Expansion exposes complete text,
+including whitespace, empty values and HTML-like content rendered as inert text.
+Arrays retain order and use tuple or item schema when supplied. The fullscreen
+row inspector uses this renderer without changing Review's evidence renderer.
+
+Schema shows field types (including null unions), required/optional fields,
+descriptions, all supplied constraints and enum values, object properties, array
+items, additional properties, composition branches and definitions. Local JSON
+Pointer references resolve with sibling metadata; recursive, unavailable and
+external references remain explicit and are never fetched. Full schema JSON is
+always available. Schema browsing is not a JSON Schema validator.
+
+JSON shows pretty-printed original values. For tables it contains only current
+page row values and is explicitly labeled **current page**, never a complete
+dataset export. Table search, filters, sorting and pagination remain available.
+JSON artifacts have none of those controls; Refresh snapshot remains available
+in loading, error and loaded states. Artifact selection, independent partition
+scope, aborts and immutable snapshot binding remain owned by the existing code.
+
+Focused parser/helper coverage is in `tests/artifactSchema.test.ts`, with
+transport binding fixtures in `tests/api.test.ts`. The integration lead owns
+execution, native typecheck/build and browser QA. Exercise Data/Schema/JSON and
+row inspection at 390/1440 in light/dark themes, long prompts, null/empty roots,
+nested collections, nullable references, reference cycles, storage schema,
+table page changes, refresh, Inputs selection and partition isolation. No test,
+build or browser scenario should execute collected content.
 
 Focused URL coverage lives in `tests/query.test.ts`; existing
 `tests/api.test.ts` covers full-key/partition response binding and cancellation.

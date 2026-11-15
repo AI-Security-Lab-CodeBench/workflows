@@ -67,3 +67,23 @@
 }
 .dialogHeader { flex: none; min-width: 0; }
 .dialogBody { flex: 1; min-height: 0; min-width: 0; padding: var(--space-large); overflow: auto; }
+.artifactFields { margin: 0; }
+.artifactFields dd { margin: var(--space-small) 0 0; min-width: 0; }
+.artifactField { min-width: 0; overflow-wrap: anywhere; }
+.artifactLabel { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--space-small); }
+.artifactLabel code, .schemaConstraint code { font-family: var(--font-mono); }
+.schemaMeta { color: var(--color-text-light); overflow-wrap: anywhere; line-height: 1.5; }
+.schemaDescription { margin-block: var(--space-small); white-space: pre-wrap; overflow-wrap: anywhere; }
+.schemaConstraint { display: flex; flex-wrap: wrap; gap: var(--space-small); margin-top: var(--space-small); }
+.schemaConstraint pre { min-width: 0; }
+.valueText { margin: 0; font: inherit; white-space: pre-wrap; overflow-wrap: anywhere; }
+.artifactGroup { min-width: 0; overflow-wrap: anywhere; }
+.artifactGroup > summary {
+  min-height: var(--touch-target);
+  box-sizing: border-box;
+  padding-block: var(--space-medium);
+  cursor: pointer;
+}
+.artifactGroup > summary:hover { background: var(--color-background-light); }
+.artifactGroup > summary:focus-visible { outline: 2px solid var(--color-focus-ring); outline-offset: 2px; }
+.artifactChildren { margin-top: var(--space-small); min-width: 0; display: flex; flex-direction: column; gap: var(--space-large); }

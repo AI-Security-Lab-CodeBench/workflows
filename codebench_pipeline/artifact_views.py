@@ -1,8 +1,15 @@
 from dataclasses import dataclass
 from typing import Annotated, Literal, Protocol, assert_never
 
+from dagster import Definitions
 from pydantic import Field, JsonValue, TypeAdapter
 
+from codebench_pipeline.artifact_schemas import (
+    ArtifactSchema,
+    declared_artifact_schemas,
+    rules_artifact_schema,
+    table_artifact_schema,
+)
 from codebench_pipeline.dataframe_io import AssetReference, read_frame
 from codebench_pipeline.human_review import HumanReviewError
 from codebench_pipeline.models import Digest
@@ -35,6 +42,7 @@ class ArtifactTable(ArtifactTarget):
     kind: Literal["table"] = "table"
     snapshot_id: Digest
     page: TablePage
+    data_schema: ArtifactSchema
     publication_state: PublicationState | None = None
 
 
@@ -42,6 +50,7 @@ class ArtifactJSON(ArtifactTarget):
     kind: Literal["json"] = "json"
     snapshot_id: Digest
     value: JsonValue
+    data_schema: ArtifactSchema
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,8 +69,9 @@ class ArtifactCatalog(Protocol):
 class ArtifactDataService:
     """Browse persisted artifact bindings without evaluating pipeline business rules."""
 
-    def __init__(self, catalog: ArtifactCatalog) -> None:
+    def __init__(self, catalog: ArtifactCatalog, definitions: Definitions | None = None) -> None:
         self.catalog = catalog
+        self.schemas = declared_artifact_schemas(definitions) if definitions is not None else {}
 
     def partitions(self, key: ArtifactKey) -> ArtifactPartitions:
         return self.catalog.partitions(key)
@@ -82,17 +92,22 @@ class ArtifactDataService:
                     partition_key=request.partition_key,
                     snapshot_id=binding.reference.digest,
                     page=query_table(value, request.query),
+                    data_schema=table_artifact_schema(
+                        payload, tuple(value.columns), self.schemas.get(request.asset_key)
+                    ),
                     publication_state=binding.publication_state,
                 )
             case "rules":
                 query = request.query
                 if query.search or query.filters or query.sort or query.offset:
                     raise TableQueryError("query", "JSON artifacts are not queryable tables")
+                value = TypeAdapter(JsonValue).validate_json(payload)
                 return ArtifactJSON(
                     asset_key=request.asset_key,
                     partition_key=request.partition_key,
                     snapshot_id=binding.reference.digest,
-                    value=TypeAdapter(JsonValue).validate_json(payload),
+                    value=value,
+                    data_schema=rules_artifact_schema(value, self.schemas.get(request.asset_key)),
                 )
             case _:
                 assert_never(binding.reference.format)

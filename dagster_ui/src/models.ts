@@ -39,7 +39,14 @@ export const datasetsSchema = z.object({
   datasets: z.array(z.object({dataset_id: text, category_id: text, category: text})),
 });
 export type Dataset = z.infer<typeof datasetsSchema>['datasets'][number];
-const artifactBinding = {asset_key: z.array(text).min(1), partition_key: z.string().nullable(), snapshot_id: digest};
+const artifactDataSchema = z.object({
+  source: z.enum(['declared', 'storage']),
+  schema: z.record(z.string(), z.json()),
+});
+const artifactBinding = {
+  asset_key: z.array(text).min(1), partition_key: z.string().nullable(), snapshot_id: digest,
+  data_schema: artifactDataSchema,
+};
 export const partitionsSchema = z.object({
   asset_key: z.array(text).min(1), partitions: z.array(z.string().nullable()),
 });

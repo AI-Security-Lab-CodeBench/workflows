@@ -428,6 +428,24 @@ to 500 characters. Persisted Parquet contains the full table. The preview schema
 reports pandas dtypes; the declared Pandera model carries additional constraints.
 Rules have JSON metadata instead of a table preview.
 
+The native **Data** tab inspects complete persisted artifacts, for both **Output**
+and explicitly selected **Inputs**. Configuration objects use structured fields
+and expandable nested values rather than a compact JSON dump. **Schema** exposes
+the declared Pydantic configuration or Pandera row contract, including nested
+types, required fields, enum/range constraints and column uniqueness
+(`x-column-unique`). This describes the contract, not a new validation or
+materialization. The platform discovers output annotations from the loaded
+Dagster definitions automatically; pipeline authors add no viewer flag,
+schema registration, or stage-name mapping. All active stage outputs have declared schema coverage, even
+when their tables are empty. Generic tables and incompatible historical shapes
+show an explicitly identified storage schema instead.
+
+**JSON** preserves the full configuration object with indentation. Table JSON
+contains the current page only; use pagination and complete-row inspection for
+other records. Schema JSON remains available in full. Input views show current
+persisted upstream artifacts, not the historical snapshots consumed by an output.
+Viewing requires no inference, human decision, or rematerialization.
+
 Table materializations also expose `schema`, `input_fingerprint`, `cache_hit`
 and an `evidence` index. Successful computed stages retain effective config,
 implementation snapshots and available inference receipts. Attempt observations

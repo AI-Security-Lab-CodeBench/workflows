@@ -37,10 +37,12 @@ class StoredDatasetAsset:
 
 class DatasetDataService:
     def __init__(self, home: Path, instance: DagsterInstance) -> None:
+        from codebench_pipeline.definitions import build_definitions
+
         self.registry = DatasetRegistry(home)
         self.home = home.resolve()
         self.instance = instance
-        self.artifacts = ArtifactDataService(DatasetArtifactCatalog(self.home))
+        self.artifacts = ArtifactDataService(DatasetArtifactCatalog(self.home), build_definitions(self.home))
 
     def datasets(self) -> DatasetList:
         specs = [self.registry.get_snapshot(key) for key in self.registry.keys()]

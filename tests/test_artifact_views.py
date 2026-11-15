@@ -104,3 +104,10 @@ class ArtifactViewTests(unittest.TestCase):
             )
             self.assertEqual(response.status_code, 200)
             self.assertEqual(response.json()["page"]["rows"][0]["values"], {"name": "unpartitioned"})
+            schema = response.json()["data_schema"]
+            self.assertEqual(schema["source"], "storage")
+            self.assertEqual(schema["schema"]["type"], "object")
+            self.assertEqual(
+                schema["schema"]["properties"]["name"],
+                {"anyOf": [{"type": "string"}, {"type": "null"}]},
+            )

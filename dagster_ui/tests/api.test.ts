@@ -24,6 +24,7 @@ test('artifact data accepts generic JSON without a dataset descriptor', async ()
   const assetKey = ['models', 'selection'];
   globalThis.fetch = async () => Response.json({
     kind: 'json', asset_key: assetKey, partition_key: null, snapshot_id: 'a'.repeat(64),
+    data_schema: {source: 'declared', schema: {type: 'object', properties: {selected: {type: 'array'}}}},
     value: {selected: ['model-a'], score: 0.9},
   });
   const response = await request('/artifacts/data', artifactResponse(assetKey, null), 'POST',
@@ -40,6 +41,7 @@ test('artifact responses reject another full asset identity or partition', async
   ]) {
     globalThis.fetch = async () => Response.json({
       kind: 'table', ...binding, snapshot_id: 'a'.repeat(64), publication_state: null,
+      data_schema: {source: 'storage', schema: {type: 'object', properties: {}}},
       page: {columns: [], total_rows: 0, matched_rows: 0, offset: 0, limit: 25, rows: []},
     });
     await assert.rejects(request('/artifacts/data', artifactResponse(assetKey, 'one'), 'POST', {}),
