@@ -10,7 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, JsonValue
 from .agent_events import InferenceError, parse_json
 
 
-class _NoRedirect(HTTPRedirectHandler):
+class NoRedirect(HTTPRedirectHandler):
     def redirect_request(
         self,
         req: Request,
@@ -82,7 +82,7 @@ def complete(url: str, body: bytes, key: str | None, timeout: float) -> HTTPResp
     if key is not None:
         headers["Authorization"] = "Bearer " + key
     request = Request(url, data=body, headers=headers, method="POST")
-    with build_opener(_NoRedirect()).open(request, timeout=timeout) as response:
+    with build_opener(NoRedirect()).open(request, timeout=timeout) as response:
         payload: bytes = response.read()
         request_id: str | None = response.headers.get("x-request-id")
     return HTTPResponse(payload, request_id)
