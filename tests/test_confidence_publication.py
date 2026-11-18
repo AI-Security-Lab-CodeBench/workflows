@@ -49,8 +49,7 @@ def mixed_confidence_response(
             update={
                 "category_confidence": "medium"
                 if any(
-                    flag in payload["candidate"]["command"]
-                    for flag in ("-auto-approve", "-compact-warnings")
+                    flag in payload["candidate"]["command"] for flag in ("-auto-approve", "-compact-warnings")
                 )
                 else "high"
             }
@@ -318,7 +317,7 @@ class ConfidencePublicationTests(unittest.TestCase):
             self.assertNotIn("reviewed_annotations", resolved.manifest.references)
             label_stage = "proposed_annotations"
             metadata = TypeAdapter(dict[str, JsonValue]).validate_python(
-                resolved.manifest.evidence[label_stage]
+                resolved.manifest.evidence["labeling_attempts"]
             )
             receipts = TypeAdapter(dict[str, str]).validate_python(metadata["receipts"])
             labeled = data.query(label_stage, query)
@@ -330,15 +329,11 @@ class ConfidencePublicationTests(unittest.TestCase):
                 set(receipts),
                 {
                     "label-packets.json",
-                    *(
-                        f"label/{sha256(identity.encode()).hexdigest()}/reuse.json"
-                        for identity in identities
-                    ),
+                    *(f"label/{sha256(identity.encode()).hexdigest()}/reuse.json" for identity in identities),
                 },
             )
             exported = [
-                json.loads(line)
-                for line in resolved.prepared.files["review/reviewed.jsonl"].splitlines()
+                json.loads(line) for line in resolved.prepared.files["review/reviewed.jsonl"].splitlines()
             ]
             self.assertEqual(
                 [set(row) & {"review", "review_confidence", "review_verdict"} for row in exported],

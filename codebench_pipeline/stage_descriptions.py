@@ -147,23 +147,50 @@ References are prepared outside Dagster and used offline. Invalid reference reco
 fail validation. Receipts retain operation-level gaps rather than inventing evidence.
 Semantic use does not authorize corpus redistribution. Only the single labeling pass uses this table.
 """,
-    "proposed_annotations": """
-**How it works:** Each eligible command is considered separately with its source context,
-relevant documentation and category policy. Unchanged record inputs can reuse a saved
-label; otherwise one isolated model invocation proposes category, risk, severity and class
-with confidences, rationale and citations. Responses are checked against the label contract
-and retained with inference evidence, producing proposals rather than human approvals.
+    "labeling_attempts": """
+**How it works:** Eligible commands first reuse validated record-level results. Enhanced
+labeling groups the remaining commands by vector similarity and lets a bounded model
+conversation either submit independent labels or request shared Keenable/Context7
+documentation. Each outcome is checked against its original command, routing and evidence.
+Unsupported or invalid outcomes are retained as failures, never filled with guessed labels.
+The native baseline mode retains its isolated single-command invocation behavior.
 
 **Input:** Eligible filtered candidates, documentation, category rules and labeler settings.
 
-**Goal:** Label each record independently from original evidence.
+**Goal:** Account for every eligible command with a supported label or inspectable failure.
 
-**Why:** Parse eligibility and pattern matching cannot determine semantic safety judgments.
+**Why:** Similar commands can share retrieval without sharing judgments or losing provenance.
 
-**Output:** `ProposedAnnotationsTable` with candidate evidence, proposed category/risk/class/severity,
-description, four confidences, rationale and citations. Each record uses a fresh isolated invocation.
-Malformed responses fail with retained evidence; acceptance requires supported taxonomy and documentation.
-Confidence is self-reported, not proof of safety.
+**Output:** `LabelingAttemptsTable`, with exactly one success or failure per eligible candidate,
+original evidence, document hashes and invocation references. Enhanced remote calls require
+fresh metrics and a shared 50% slot/token admission guard. Capacity waiting does not become a
+labeling failure. Corrupt coverage or changed upstream bindings fail materialization.
+""",
+    "proposed_annotations": """
+**How it works:** The current labeling-attempt table is validated, and only successful
+outcomes are decoded into complete command labels. Each label retains its own documentation
+and original inference reference. Grounded rejections and context-dependent needs_review
+labels remain inspectable; failed attempts cannot enter this projection.
+
+**Input:** Current labeling attempts and category rules.
+**Goal:** Supply complete, validated proposals to exact deduplication and eligibility.
+**Why:** Retrieval or protocol failures must not masquerade as accepted or rejected labels.
+**Output:** `ProposedAnnotationsTable` with original evidence, category, risk, severity, class,
+four confidences, rationale and citations. This projection runs no inference and creates
+no human approval. Invalid identities, routing or evidence fail validation.
+""",
+    "labeling_failures": """
+**How it works:** Failed outcomes are selected from the same current labeling-attempt
+table that supplies successful annotations. Original commands, failure reasons and
+evidence references are retained without manufacturing taxonomy or confidence values.
+Inspect these rows to distinguish exhausted documentation grounding from invalid output.
+
+**Input:** The current complete labeling-attempt table.
+**Goal:** Make unsupported and failed labeling attempts visible for audit and targeted repair.
+**Why:** A smaller review queue must not hide missing labels or unsupported confidence.
+**Output:** `LabelingFailuresTable`; these rows are excluded from deduplication, review
+admission and release. An empty failure table is valid. Malformed failure records fail
+validation; capacity pauses remain execution state, not failed command judgments.
 """,
     "merged_command_candidates": """
 **How it works:** Current candidates from the two independent collection branches are

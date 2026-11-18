@@ -11,7 +11,7 @@ from unittest.mock import patch
 from pydantic import JsonValue, TypeAdapter, ValidationError
 from test_dataset_rules import make_candidate, make_label, make_review, make_rules
 
-from codebench_pipeline.dataset_annotation import annotate, review
+from codebench_pipeline.dataset_annotation import annotate, request, review
 from codebench_pipeline.dataset_records import LabelDecision, ReviewDecision
 from codebench_pipeline.inference import InferenceError
 from codebench_pipeline.model_config import ModelConfig
@@ -50,6 +50,19 @@ def config() -> ModelConfig:
 
 
 class DatasetAnnotationTests(unittest.TestCase):
+    def test_routing_constrains_candidates_without_entering_semantic_policy(self) -> None:
+        rules = make_rules()
+        system, payload = request(make_candidate(), documentation(), rules)
+        policy = json.loads(system.rsplit("\n\n", 1)[1])
+        self.assertEqual(payload["allowed_risk_ids"], ["CAT-8.1"])
+        self.assertEqual(
+            [(risk["id"], risk["definition"]) for risk in policy["risks"]],
+            [(risk.id, risk.definition) for risk in rules.risks],
+        )
+        for risk in policy["risks"]:
+            self.assertNotIn("command_patterns", risk)
+            self.assertNotIn("shell_routes", risk)
+
     def test_parallel_labels_preserve_input_order_and_single_record_packets(self) -> None:
         rules = make_rules()
         candidates = [make_candidate("one"), make_candidate("two")]
@@ -83,8 +96,13 @@ class DatasetAnnotationTests(unittest.TestCase):
                 side_effect=AssertionError("Validated labels must be reused"),
             ):
                 reused = annotate(
-                    candidates, documentation(), rules, config(), out / "replay",
-                    cache=out / "cache", workers=2,
+                    candidates,
+                    documentation(),
+                    rules,
+                    config(),
+                    out / "replay",
+                    cache=out / "cache",
+                    workers=2,
                 )
             self.assertEqual(reused, result)
             shared = list((out / "replay" / "label").glob("*/shared.json"))
@@ -129,7 +147,15 @@ class DatasetAnnotationTests(unittest.TestCase):
                     self.assertEqual(record["candidate"]["source_position"], candidates[0].source_position)
                 self.assertEqual(
                     json.loads(stored["system"].rsplit("\n", 1)[1]),
-                    rules.model_dump(mode="json", exclude={"policy", "base_prompt", "examples"}),
+                    rules.model_dump(
+                        mode="json",
+                        exclude={
+                            "policy": True,
+                            "base_prompt": True,
+                            "examples": True,
+                            "risks": {"__all__": {"command_patterns", "shell_routes"}},
+                        },
+                    ),
                 )
                 if path.parent.parent.name == "label":
                     self.assertEqual(set(payload), {"candidate", "documentation", "allowed_risk_ids"})

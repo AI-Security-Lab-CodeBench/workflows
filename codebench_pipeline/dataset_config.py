@@ -3,6 +3,7 @@ from typing import Literal, assert_never
 
 from pydantic import ConfigDict, Field, field_validator, model_validator
 
+from codebench_pipeline.batch_labeling_config import BatchLabelingConfig
 from codebench_pipeline.business_config import DEFAULT_BASE_PROMPT, load_business_rules, read_prompt
 from codebench_pipeline.category_rules import CategoryRules, Text
 from codebench_pipeline.dataset_branches import Branch
@@ -94,6 +95,13 @@ class AnnotationConfig(StrictStageConfig):
     model: ModelConfig
     maximum_context_characters: int = Field(default=131072, ge=1024, le=1048576)
     workers: int = Field(default=1, ge=1, le=8)
+    batch: BatchLabelingConfig | None = None
+
+    @model_validator(mode="after")
+    def batch_provider(self) -> "AnnotationConfig":
+        if self.batch is not None and self.model.provider != "openai_compatible":
+            raise ValueError("Tool-grounded batches require an OpenAI-compatible provider")
+        return self
 
 
 class ReviewConfig(AnnotationConfig):
@@ -127,6 +135,7 @@ class DatasetFileConfig(StrictStageConfig):
     adapters: Literal["provided"] = "provided"
     adapter_sample_characters: int = Field(default=8000, ge=100, le=50000)
     labeling_workers: int = Field(default=1, ge=1, le=8)
+    labeling_batch: BatchLabelingConfig | None = None
     extraction: ExtractionConfig = ExtractionConfig()
     filtering: FilteringConfig = FilteringConfig()
     publication: PublicationConfig = PublicationConfig()
@@ -204,18 +213,11 @@ def load_build_config(path: Path, home: Path | None = None) -> DatasetBuildSpec:
     supplied = DatasetFileConfig.model_validate_json(path.read_bytes())
     parent = path.resolve().parent
     business_config = (
-        str((parent / supplied.business_config).resolve())
-        if supplied.business_config is not None else None
+        str((parent / supplied.business_config).resolve()) if supplied.business_config is not None else None
     )
-    rules = (
-        load_business_rules(Path(business_config))
-        if business_config is not None else supplied.rules
-    )
+    rules = load_business_rules(Path(business_config)) if business_config is not None else supplied.rules
     assert rules is not None
-    documents = [
-        resolve_source_paths(document, parent)
-        for document in supplied.seeds.documents
-    ]
+    documents = [resolve_source_paths(document, parent) for document in supplied.seeds.documents]
     documentation_documents = [
         resolve_source_paths(document, parent)
         for document in (
@@ -227,71 +229,82 @@ def load_build_config(path: Path, home: Path | None = None) -> DatasetBuildSpec:
     )
     if storage.backend == "local" and not Path(storage.local_root).is_absolute():
         storage = storage.model_copy(update={"local_root": str((parent / storage.local_root).resolve())})
-    return resolve_business_inputs(DatasetBuildSpec(
-        dataset_id=supplied.dataset_id,
-        revision=supplied.revision,
-        rules=rules,
-        business_config=business_config,
-        catalog=CatalogConfig(
-            collection_revision=supplied.seeds.revision,
-            mode=supplied.seeds.mode,
-            documents=documents,
-            manifest=str((parent / supplied.seeds.manifest).resolve())
-            if supplied.seeds.manifest is not None else None,
-            search_request=supplied.seeds.search_request,
-            model=supplied.models.selector,
-        ),
-        snapshots=SnapshotConfig(
-            maximum_bytes=supplied.snapshot_maximum_bytes,
-            documents=documents,
-        ),
-        documentation_catalog=(
-            CatalogConfig(
-                collection_revision=supplied.documentation_sources.revision,
-                mode=supplied.documentation_sources.mode,
-                documents=documentation_documents,
-                manifest=str((parent / supplied.documentation_sources.manifest).resolve())
-                if supplied.documentation_sources.manifest is not None else None,
-                search_request=supplied.documentation_sources.search_request,
+    return resolve_business_inputs(
+        DatasetBuildSpec(
+            dataset_id=supplied.dataset_id,
+            revision=supplied.revision,
+            rules=rules,
+            business_config=business_config,
+            catalog=CatalogConfig(
+                collection_revision=supplied.seeds.revision,
+                mode=supplied.seeds.mode,
+                documents=documents,
+                manifest=str((parent / supplied.seeds.manifest).resolve())
+                if supplied.seeds.manifest is not None
+                else None,
+                search_request=supplied.seeds.search_request,
                 model=supplied.models.selector,
-            )
-            if supplied.documentation_sources is not None
-            else None
-        ),
-        documentation_snapshots=SnapshotConfig(
-            maximum_bytes=supplied.snapshot_maximum_bytes,
-            documents=documentation_documents,
-        ),
-        adapters=AdapterConfig(
-            model=supplied.models.adapter,
-            mode=supplied.adapters,
-            sample_characters=supplied.adapter_sample_characters,
-        ),
-        extraction=supplied.extraction,
-        filtering=supplied.filtering,
-        documentation=supplied.documentation.model_copy(
-            update={"manifest": str((parent / supplied.documentation.manifest).resolve())}
-            if supplied.documentation.manifest is not None else {}
-        ),
-        annotation=AnnotationConfig(model=supplied.models.labeler, workers=supplied.labeling_workers),
-        review=None,
-        publication=supplied.publication,
-        storage=storage,
-    ))
+            ),
+            snapshots=SnapshotConfig(
+                maximum_bytes=supplied.snapshot_maximum_bytes,
+                documents=documents,
+            ),
+            documentation_catalog=(
+                CatalogConfig(
+                    collection_revision=supplied.documentation_sources.revision,
+                    mode=supplied.documentation_sources.mode,
+                    documents=documentation_documents,
+                    manifest=str((parent / supplied.documentation_sources.manifest).resolve())
+                    if supplied.documentation_sources.manifest is not None
+                    else None,
+                    search_request=supplied.documentation_sources.search_request,
+                    model=supplied.models.selector,
+                )
+                if supplied.documentation_sources is not None
+                else None
+            ),
+            documentation_snapshots=SnapshotConfig(
+                maximum_bytes=supplied.snapshot_maximum_bytes,
+                documents=documentation_documents,
+            ),
+            adapters=AdapterConfig(
+                model=supplied.models.adapter,
+                mode=supplied.adapters,
+                sample_characters=supplied.adapter_sample_characters,
+            ),
+            extraction=supplied.extraction,
+            filtering=supplied.filtering,
+            documentation=supplied.documentation.model_copy(
+                update={"manifest": str((parent / supplied.documentation.manifest).resolve())}
+                if supplied.documentation.manifest is not None
+                else {}
+            ),
+            annotation=AnnotationConfig(
+                model=supplied.models.labeler,
+                workers=supplied.labeling_workers,
+                batch=supplied.labeling_batch,
+            ),
+            review=None,
+            publication=supplied.publication,
+            storage=storage,
+        )
+    )
 
 
 def resolve_business_inputs(spec: DatasetBuildSpec) -> DatasetBuildSpec:
     spec = resolve_labeling_inputs(spec)
     updates: dict[str, CatalogConfig | SnapshotConfig | DocumentationConfig] = {}
     for catalog_name, snapshot_name in (
-        ("catalog", "snapshots"), ("documentation_catalog", "documentation_snapshots")
+        ("catalog", "snapshots"),
+        ("documentation_catalog", "documentation_snapshots"),
     ):
         catalog = spec.catalog if catalog_name == "catalog" else spec.documentation_catalog
         if catalog is None:
             continue
         documents = (
             manifest_sources(Path(catalog.manifest), spec.rules.category_id)
-            if catalog.manifest is not None else catalog.documents
+            if catalog.manifest is not None
+            else catalog.documents
         )
         validate_transformations(documents)
         if catalog_name == "documentation_catalog" and any(
@@ -304,9 +317,9 @@ def resolve_business_inputs(spec: DatasetBuildSpec) -> DatasetBuildSpec:
         updates[snapshot_name] = snapshots.model_copy(update={"documents": documents})
     if spec.documentation.manifest is not None:
         updates["documentation"] = spec.documentation.model_copy(
-            update={"snippets": manifest_documentation(
-                Path(spec.documentation.manifest), spec.rules.category_id
-            )}
+            update={
+                "snippets": manifest_documentation(Path(spec.documentation.manifest), spec.rules.category_id)
+            }
         )
     return spec.model_copy(update=updates)
 

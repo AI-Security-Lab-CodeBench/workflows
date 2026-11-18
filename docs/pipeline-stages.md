@@ -217,7 +217,7 @@ table. Inspect this asset separately to account for extraction/filter losses.
 
 **Input:** Eligible operations, category rules and prepared semantic references.
 
-**Goal:** Expose original behavior evidence for the single labeling invocation.
+**Goal:** Expose prepared behavior evidence for labeling.
 
 **Why:** Command names do not establish effects, flags or version applicability.
 
@@ -226,44 +226,93 @@ full snippet and version limits, plus retained coverage and manifest evidence.
 
 **Gate/inspection:** Only provided snippets or a semantic manifest are accepted.
 Invalid category, record fields, URLs, sensitive indicators or byte limits fail.
-No online discovery occurs. Missing operation coverage remains explicit; an
-undocumented record cannot enter labeling inference. Operation-prefix and option
+No online discovery occurs in this stage. Missing operation coverage remains
+explicit; enhanced labeling may retrieve the missing evidence within its bounded
+tool conversation. Native single-command labeling still requires supplied
+documentation before inference. Operation-prefix and option
 matching selects relevant references, not a claim of complete semantic proof.
 Semantic use does not authorize corpus redistribution.
 
-## `datasets/proposed_annotations`
+## `datasets/labeling_attempts`
 
 **Input:** Only eligible filtered records, the documentation table, compiled
 generic/category instructions, applicable operation-family examples, rules and
 labeler model configuration.
 
-**Goal:** Label each record independently from its original evidence.
+**Goal:** Account for every eligible record with a supported label or an explicit
+failure, preserving independent judgments and original evidence.
 
 **Why:** Filtering can establish routing and parse eligibility, but can't decide
 category, risk, severity, class or factual description.
 
-**Output:** `ProposedAnnotationsTable`, retaining candidate evidence plus
-`accept`/`needs_review`/`reject`, category/risk IDs, severity, class, description,
-four confidence values, rationale and cited documentation URLs. Each candidate
-gets a fresh isolated no-tools invocation with retained request/response receipts.
+**Output:** `LabelingAttemptsTable`, retaining candidate evidence, success/failure
+status, validated label JSON or failure details, row fingerprint, document-manifest
+digest, assigned documentation and original inference reference.
+
+Enhanced mode reuses valid rows before deterministic TF-IDF cosine grouping.
+Pending records share a bounded conversation in batches of up to 25 or 50.
+The model can submit immediately or request shared Keenable/Context7 documentation;
+the final-answer tool returns independent outcomes. Model turns, retrieval rounds,
+provider calls, response bytes and exact tokenized context are bounded in code.
+Similarity never merges commands or supplies a neighboring record's judgment.
+Native mode retains the isolated no-tools baseline runner.
+
+Every enhanced model call, including evaluation grading, uses the shared admission
+guard. It combines fresh per-rank scheduler snapshots with Prometheus metrics and
+reserves a complete configured context window. New calls pause above the configured
+half-capacity slot/token boundary or while serving queues exist. Missing/stale
+metrics fail closed. Ambiguous submissions retain durable reservations rather than
+being released on idle observations. This is an admission policy, not GPU isolation.
 
 **Gate/inspection:** Local validation requires matching identity and utility,
 the configured category, a risk supported by both routing and current patterns,
 allowed class/severity, low/medium/high confidences, a nonblank rationale of at
 most 400 characters and unique citations drawn from supplied documentation.
-An accepted label must cite documentation. Candidate identity, category and
-source utility are bound in the per-record response schema; risk choices are
-restricted to the supplied routing shortlist. Independent post-validation
-still checks taxonomy and citations. Missing matching candidate documentation
-fails preflight before any record in the invocation is sent to the model.
-Example snippets cannot fill this gap or authorize candidate citations.
+Every successful enhanced outcome cites assigned operation evidence, including
+grounded rejection and context-dependent needs_review. Candidate identity and its
+host-provided fingerprint must match; risk choices remain restricted to routing.
+Missing grounding after the budget is exhausted becomes a failure, without invented
+labels. Valid peers survive malformed or unsupported outcomes. Example snippets
+cannot fill a grounding gap or authorize candidate citations.
 There is no confidence threshold at this stage.
 
 The prompt requires one sentence in the configured language and forbids invented
 approval, production, backups or hidden behavior; structural validation doesn't
 prove those requirements or citation relevance. Confidence is self-reported,
-not calibrated proof. Invalid responses fail the stage, not a fabricated
-`needs_review` label; earlier invocation evidence remains available.
+not calibrated proof. Expected protocol/grounding failures become explicit outcomes;
+corrupt accounting or upstream identity changes fail the stage. Capacity pauses
+remain operational state. Completed rows are checkpointed before later model turns.
+Failed-row retries retain successful peers. Explicit documentation refresh changes
+the stage generation, but unchanged relevant evidence reuses original row receipts.
+
+## `datasets/proposed_annotations`
+
+**Input:** Current labeling attempts and category rules.
+
+**Goal:** Project only complete, validated successful outcomes.
+
+**Output:** `ProposedAnnotationsTable`, retaining candidate evidence and the
+canonical decision, category/risk, severity/class, description, four confidences,
+rationale and citations. Grounded reject and needs_review labels remain present.
+Original row documentation and inference provenance travel with the projection.
+
+**Gate/inspection:** Success and failure identities must form an exhaustive,
+disjoint partition of eligible inputs. This projection runs no inference and never
+substitutes historical proposals for incomplete current attempts.
+
+## `datasets/labeling_failures`
+
+**Input:** The same current labeling-attempt snapshot.
+
+**Goal:** Expose unsupported and invalid outcomes for audit and targeted repair.
+
+**Output:** `LabelingFailuresTable` with original commands, reason codes, details,
+document hashes and evidence references. It contains no invented label values.
+
+**Gate/inspection:** Failed outcomes cannot enter exact deduplication, final review
+admission or release. Empty failures are valid. Missing environment facts for an
+otherwise grounded operation remain normal needs_review labels rather than being
+misclassified as documentation failures.
 
 ## Historical `datasets/reviewed_annotations`
 

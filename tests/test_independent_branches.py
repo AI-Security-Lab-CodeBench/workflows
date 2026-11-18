@@ -65,9 +65,7 @@ class IndependentBranchDatasetTests(unittest.TestCase):
             planned = plan_dataset(self.spec, stage_configs(self.spec), instance, home=self.home)
             authorizations = dict(planned.source_authorizations)
             stage = "documentation/command_candidates"
-            authorizations[stage] = authorizations[stage].model_copy(
-                update={"inventory_signature": "0" * 64}
-            )
+            authorizations[stage] = authorizations[stage].model_copy(update={"inventory_signature": "0" * 64})
             altered = replace(planned, source_authorizations=authorizations)
             with patch("codebench_pipeline.review_snapshots.plan_dataset", return_value=altered):
                 with self.assertRaises(DatasetViewError) as stale:
@@ -125,7 +123,7 @@ class IndependentBranchDatasetTests(unittest.TestCase):
             assert isinstance(filtered, pd.DataFrame)
             eligible = filtered.loc[filtered["filter_decision"] == "eligible"]
             inferred = [
-                json.loads(call.args[2][call.args[2].index("{"):])["candidate"]
+                json.loads(call.args[2][call.args[2].index("{") :])["candidate"]
                 for call in self.labeler.call_args_list
             ]
             self.assertCountEqual(
@@ -170,7 +168,9 @@ class IndependentBranchDatasetTests(unittest.TestCase):
                 merged.attrs[FINALIZATION_BINDING]["dataset"],
                 {"state": "configured", "digest": candidates.reference.digest},
             )
-            self.assertEqual({identity.split(":")[0] for identity in merged["candidate_id"]}, {"documentation"})
+            self.assertEqual(
+                {identity.split(":")[0] for identity in merged["candidate_id"]}, {"documentation"}
+            )
 
     def test_configured_waiting_branch_cannot_authorize_shared_processing(self) -> None:
         spec = self.spec.model_copy(
@@ -228,7 +228,9 @@ class IndependentBranchDatasetTests(unittest.TestCase):
                 "merged_command_candidates",
                 "filtered_commands",
                 "labeling_documentation",
+                "labeling_attempts",
                 "proposed_annotations",
+                "labeling_failures",
                 "deduplicated_annotations",
                 "category_eligible_annotations",
                 "human_review_queue",
@@ -291,7 +293,7 @@ class IndependentBranchDatasetTests(unittest.TestCase):
         self.assertEqual(self.labeler.call_count, 2)
         self.assertEqual(
             {
-                json.loads(call.args[2][call.args[2].index("{"):])["candidate"]["source_id"]
+                json.loads(call.args[2][call.args[2].index("{") :])["candidate"]["source_id"]
                 for call in self.labeler.call_args_list
             },
             {"documentation:additional-fixture-source"},
@@ -338,7 +340,9 @@ class IndependentBranchDatasetTests(unittest.TestCase):
                 "merged_command_candidates",
                 "filtered_commands",
                 "labeling_documentation",
+                "labeling_attempts",
                 "proposed_annotations",
+                "labeling_failures",
                 "deduplicated_annotations",
                 "category_eligible_annotations",
                 "human_review_queue",
@@ -382,7 +386,9 @@ class IndependentBranchDatasetTests(unittest.TestCase):
             self.assertIsNone(before.publication_state)
             DatasetRegistry(self.home).register(
                 spec.model_copy(
-                    update={"catalog": spec.catalog.model_copy(update={"collection_revision": "changed-dataset"})}
+                    update={
+                        "catalog": spec.catalog.model_copy(update={"collection_revision": "changed-dataset"})
+                    }
                 )
             )
             after = data.query("documentation/command_candidates", query)

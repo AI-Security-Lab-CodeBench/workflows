@@ -197,9 +197,12 @@ README/card and license bodies and origin evidence, retains receipts and holds
 unresolved eligibility. Both collection branches automatically enumerate and load
 complete eligible configured corpora, not bounded inspected-page snapshots.
 Branch extraction outputs converge at `merged_command_candidates` before shared
-filtering and semantic docs. Each eligible command then gets one isolated
-labeling invocation in `proposed_annotations`, followed by conservative exact
-deduplication before the human queue. `reviewed_annotations` is removed from the active graph; historical
+filtering and semantic docs. `labeling_attempts` accounts for each eligible command
+independently, using native single-command inference or bounded similarity batches
+with shared documentation retrieval. Supported labels feed `proposed_annotations`;
+unsupported or invalid outcomes feed the inspectable `labeling_failures` asset and
+cannot enter release. Conservative exact deduplication precedes the human queue.
+`reviewed_annotations` is removed from the active graph; historical
 artifacts remain readable. Don't manufacture `review_verdict` or `review_confidence`
 for current rows.
 `human_source_decisions` is removed from the active graph. Generic stage support

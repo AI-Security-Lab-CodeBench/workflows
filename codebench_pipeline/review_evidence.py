@@ -25,7 +25,10 @@ def _inference(
     """Read this candidate's labels and any retained historical review artifacts."""
     result: dict[str, JsonValue] = {}
     store = ObjectStore(manifest.storage)
-    for stage, invocation in (("proposed_annotations", "label"), ("reviewed_annotations", "review")):
+    label_stage = (
+        "labeling_attempts" if "labeling_attempts" in manifest.references else "proposed_annotations"
+    )
+    for stage, invocation in ((label_stage, "label"), ("reviewed_annotations", "review")):
         shared_review = invocation == "review" and "merged_proposed_annotations" in manifest.references
         shared_label = invocation == "label" and "merged_command_candidates" in manifest.references
         evidence_stage = stage if shared_review or shared_label else f"{branch_prefix}{stage}"
@@ -96,6 +99,10 @@ def review_evidence(
         if doc["utility"] == row["util"]
         or doc["url"] in TypeAdapter(list[str]).validate_python(row["documentation_urls"], strict=True)
     ]
+    if "labeling_attempts" in manifest.references:
+        documentation = TypeAdapter(list[JsonValue]).validate_python(
+            frame.attrs.get("row_documentation", {}).get(candidate_id, [])
+        )
     duplicates = TypeAdapter(list[dict[str, JsonValue]]).validate_python(frame.attrs.get("duplicates", []))
     duplicate_evidence: list[JsonValue] = []
     merged_stage = next(

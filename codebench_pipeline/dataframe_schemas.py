@@ -88,6 +88,24 @@ class DocumentationTable(StrictTable):
     version_limits: Series[str]
 
 
+class LabelingAttemptsTable(CommandCandidatesTable):
+    status: Series[str] = pa.Field(isin=["success", "failure"])
+    label_json: Series[str]
+    failure_code: Series[str]
+    failure_detail: Series[str]
+    row_input_fingerprint: Series[str] = pa.Field(str_matches=r"^[a-f0-9]{64}$")
+    documentation_manifest_digest: Series[str] = pa.Field(str_matches=r"^[a-f0-9]{64}$")
+    documentation_json: Series[str]
+    attempt_evidence_reference: Series[str]
+
+
+class LabelingFailuresTable(LabelingAttemptsTable):
+    status: Series[str] = pa.Field(eq="failure")
+    label_json: Series[str] = pa.Field(eq="")
+    failure_code: Series[str] = pa.Field(str_matches=r"\S")
+    failure_detail: Series[str] = pa.Field(str_matches=r"\S")
+
+
 class ProposedAnnotationsTable(CommandCandidatesTable):
     decision: Series[str] = pa.Field(isin=["accept", "needs_review", "reject"])
     category_id: Series[str]

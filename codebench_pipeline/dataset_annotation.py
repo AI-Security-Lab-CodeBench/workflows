@@ -72,7 +72,14 @@ def request(
         (
             rules.base_prompt or read_prompt(DEFAULT_BASE_PROMPT),
             rules.policy,
-            rules.model_dump_json(exclude={"policy", "base_prompt", "examples"}),
+            rules.model_dump_json(
+                exclude={
+                    "policy": True,
+                    "base_prompt": True,
+                    "examples": True,
+                    "risks": {"__all__": {"command_patterns", "shell_routes"}},
+                }
+            ),
         )
     )
     payload: dict[str, JsonValue] = {
@@ -86,7 +93,8 @@ def request(
             "operation_family": family.operation_family,
             "examples": TypeAdapter(list[JsonValue]).validate_json(family.examples_json),
         }
-        for family in rules.examples if family.risk_id in allowed
+        for family in rules.examples
+        if family.risk_id in allowed
     ]
     if selected:
         payload["examples"] = selected
@@ -102,10 +110,12 @@ def relevant_documentation(candidate: CandidateRecord, docs: list[SemanticSnippe
     operations = command_operations(candidate.candidate_id, candidate.util, candidate.command)
     return sorted(
         (
-            doc for doc in docs
+            doc
+            for doc in docs
             if any(
                 operation.matches(doc.utility, subcommand)
-                for operation in operations for subcommand in doc.subcommands
+                for operation in operations
+                for subcommand in doc.subcommands
             )
         ),
         key=lambda doc: doc.model_dump_json(),
@@ -180,6 +190,7 @@ def annotate(
     labels: list[LabelDecision] = []
     indexed = index_records(candidates)
     packets: list[JsonValue] = []
+
     def requests() -> Iterator[RowRequest]:
         for packet in bounded_packets(
             annotation_requests(candidates, docs, rules, model), 1, maximum_context_characters

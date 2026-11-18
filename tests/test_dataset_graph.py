@@ -140,6 +140,14 @@ class DatasetGraphTests(unittest.TestCase):
                 AssetKey(["datasets", "category_rules"]),
                 assets.get(AssetKey(["datasets", "proposed_annotations"])).parent_keys,
             )
+            self.assertIn(
+                AssetKey(["datasets", "labeling_attempts"]),
+                assets.get(AssetKey(["datasets", "proposed_annotations"])).parent_keys,
+            )
+            self.assertEqual(
+                assets.get(AssetKey(["datasets", "labeling_failures"])).parent_keys,
+                {AssetKey(["datasets", "labeling_attempts"])},
+            )
             self.assertIn("datasets__documentation__source_catalog", {node.name for node in job.nodes})
             self.assertNotIn("datasets__documentation__dataset_release", {node.name for node in job.nodes})
             for branch, job_name in (("dataset", "release_dataset"),):
@@ -184,7 +192,9 @@ class DatasetGraphTests(unittest.TestCase):
                     "merged_command_candidates",
                     "filtered_commands",
                     "labeling_documentation",
+                    "labeling_attempts",
                     "proposed_annotations",
+                    "labeling_failures",
                     "deduplicated_annotations",
                     "category_eligible_annotations",
                     "human_review_queue",
@@ -213,7 +223,7 @@ class DatasetGraphTests(unittest.TestCase):
                 configurations["documentation/source_catalog"].model_dump()["collection_revision"],
                 "docs-only",
             )
-            self.assertIs(configurations["proposed_annotations"], spec.annotation)
+            self.assertIs(configurations["labeling_attempts"], spec.annotation)
             self.assertNotIn("documentation/proposed_annotations", configurations)
             run_config = dataset_run_config(spec, home).to_config_dict()
             self.assertIn("datasets__documentation__source_catalog", run_config["ops"])

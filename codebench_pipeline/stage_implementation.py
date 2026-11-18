@@ -18,7 +18,9 @@ STAGE_ROOTS: Final = {
     "command_candidates": ("dataset_assets_sources", "command_candidates"),
     "filtered_commands": ("dataset_assets_sources", "filtered_commands"),
     "labeling_documentation": ("dataset_assets_sources", "labeling_documentation"),
+    "labeling_attempts": ("dataset_assets_annotations", "labeling_attempts"),
     "proposed_annotations": ("dataset_assets_annotations", "proposed_annotations"),
+    "labeling_failures": ("dataset_assets_annotations", "labeling_failures"),
     "merged_command_candidates": ("dataset_finalization", "merged_command_candidates"),
     "deduplicated_annotations": ("dataset_finalization", "deduplicated_annotations"),
     "category_eligible_annotations": ("dataset_finalization", "category_eligible_annotations"),
@@ -47,10 +49,13 @@ def processing_runtime(value: JsonValue) -> JsonValue:
                 processing_runtime(item)
                 for item in value
                 if not (
-                    isinstance(item, dict) and item.get("name") in REVIEW_DEPENDENCIES
-                    or isinstance(item, dict) and item.get("name") in REVIEW_DECLARATIONS
+                    isinstance(item, dict)
+                    and item.get("name") in REVIEW_DEPENDENCIES
+                    or isinstance(item, dict)
+                    and item.get("name") in REVIEW_DECLARATIONS
                     and "version" not in item
-                    or isinstance(item, str) and re.split(r"[\[<>=!~; ]", item, maxsplit=1)[0]
+                    or isinstance(item, str)
+                    and re.split(r"[\[<>=!~; ]", item, maxsplit=1)[0]
                     in REVIEW_DEPENDENCIES | REVIEW_DECLARATIONS
                 )
             ]
@@ -97,9 +102,7 @@ def processing_versions(stage: str, read_source: Callable[[str], bytes]) -> dict
                 case ast.ImportFrom():
                     if node.level > 1:
                         raise IntegrityError(f"Relative import requires an explicit scope: {filename}")
-                    imported = (
-                        f"codebench_pipeline.{node.module}" if node.level == 1 else node.module
-                    )
+                    imported = f"codebench_pipeline.{node.module}" if node.level == 1 else node.module
                     for alias in node.names:
                         imports[alias.asname or alias.name] = (node, imported, alias.name)
                 case ast.Import():
@@ -120,7 +123,11 @@ def processing_versions(stage: str, read_source: Callable[[str], bytes]) -> dict
         selected = definitions.get(symbol)
         if selected is None and (module, symbol) == STAGE_ROOTS[stage]:
             selected = next(
-                (node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef) and node.name == symbol),
+                (
+                    node
+                    for node in ast.walk(tree)
+                    if isinstance(node, ast.FunctionDef) and node.name == symbol
+                ),
                 None,
             )
             if isinstance(selected, ast.FunctionDef):
@@ -135,9 +142,19 @@ def processing_versions(stage: str, read_source: Callable[[str], bytes]) -> dict
                 if node.id in definitions or node.id in imports:
                     pending.append((module, node.id))
         initialization = [
-            node for node in tree.body if not isinstance(
-                node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Import,
-                       ast.ImportFrom, ast.Assign, ast.AnnAssign)
+            node
+            for node in tree.body
+            if not isinstance(
+                node,
+                (
+                    ast.FunctionDef,
+                    ast.AsyncFunctionDef,
+                    ast.ClassDef,
+                    ast.Import,
+                    ast.ImportFrom,
+                    ast.Assign,
+                    ast.AnnAssign,
+                ),
             )
         ]
         versions[f"{filename}:initialization"] = hashlib.sha256(
@@ -153,7 +170,8 @@ def processing_versions(stage: str, read_source: Callable[[str], bytes]) -> dict
         versions[name] = hashlib.sha256(payload).hexdigest()
     engine = "codebench_pipeline/dataset_engine.py"
     build = next(
-        node for node in ast.walk(ast.parse(read_source(engine)))
+        node
+        for node in ast.walk(ast.parse(read_source(engine)))
         if isinstance(node, ast.FunctionDef) and node.name == "build"
     )
     processing = next(node for node in build.body if isinstance(node, ast.With))

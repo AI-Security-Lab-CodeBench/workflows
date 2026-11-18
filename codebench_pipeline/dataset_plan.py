@@ -40,8 +40,7 @@ INPUT_STAGES: dict[str, dict[str, str]] = {
 INPUT_STAGES.update(
     {
         stage_name(stage, "documentation"): {
-            name: stage_name(parent, "documentation")
-            for name, parent in dependencies.items()
+            name: stage_name(parent, "documentation") for name, parent in dependencies.items()
         }
         for stage, dependencies in tuple(INPUT_STAGES.items())
         if stage != "category_rules"
@@ -59,11 +58,13 @@ INPUT_STAGES.update(
             "category_rules": "category_rules",
         },
         "labeling_documentation": {"commands": "filtered_commands", "category_rules": "category_rules"},
-        "proposed_annotations": {
+        "labeling_attempts": {
             "commands": "filtered_commands",
             "documentation": "labeling_documentation",
             "category_rules": "category_rules",
         },
+        "proposed_annotations": {"attempts": "labeling_attempts", "category_rules": "category_rules"},
+        "labeling_failures": {"attempts": "labeling_attempts"},
         "deduplicated_annotations": {"annotations": "proposed_annotations"},
         "category_eligible_annotations": {
             "annotations": "deduplicated_annotations",
@@ -187,7 +188,11 @@ def plan_dataset(
         if recorded != expected and not (
             stage != "category_rules"
             and legacy_signature_matches(
-                manager, stage.rsplit("/", 1)[-1], configurations[stage], inputs, str(recorded),
+                manager,
+                stage.rsplit("/", 1)[-1],
+                configurations[stage],
+                inputs,
+                str(recorded),
                 evidence=TypeAdapter(dict[str, JsonValue]).validate_python(
                     materialization.metadata["evidence"].value
                 ),
@@ -234,9 +239,7 @@ def plan_dataset(
                 inventory_signature=str(recorded),
             )
         elif stage.rsplit("/", 1)[-1] == "command_candidates" and isinstance(persisted.value, pd.DataFrame):
-            source_authorizations[stage] = frame_inventory_authorization(
-                persisted.value, stage_branch(stage)
-            )
+            source_authorizations[stage] = frame_inventory_authorization(persisted.value, stage_branch(stage))
         unchanged.append(stage)
     return BuildPlan(
         tuple(selected),

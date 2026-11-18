@@ -135,7 +135,9 @@ class IncrementalDatasetTests(unittest.TestCase):
             "merged_command_candidates",
             "filtered_commands",
             "labeling_documentation",
+            "labeling_attempts",
             "proposed_annotations",
+            "labeling_failures",
             "deduplicated_annotations",
             "category_eligible_annotations",
             "human_review_queue",
@@ -160,7 +162,9 @@ class IncrementalDatasetTests(unittest.TestCase):
         self.configuration["revision"] = "label-settings-update"
         changed = self.build()
         expected = {
+            "labeling_attempts",
             "proposed_annotations",
+            "labeling_failures",
             "deduplicated_annotations",
             "category_eligible_annotations",
             "human_review_queue",
@@ -178,7 +182,9 @@ class IncrementalDatasetTests(unittest.TestCase):
             {
                 "category_rules",
                 "labeling_documentation",
+                "labeling_attempts",
                 "proposed_annotations",
+                "labeling_failures",
                 "human_review_queue",
                 "deduplicated_annotations",
                 "category_eligible_annotations",
@@ -196,12 +202,12 @@ class IncrementalDatasetTests(unittest.TestCase):
     def test_registered_metadata_revision_refreshes_only_review_authority(self) -> None:
         before = self.materializations(self.configuration["dataset_id"])
         self.configuration["revision"] = "metadata-only"
-        with patch("codebench_pipeline.dataset_annotation.infer_typed", side_effect=AssertionError("Inference reran")):
+        with patch(
+            "codebench_pipeline.dataset_annotation.infer_typed", side_effect=AssertionError("Inference reran")
+        ):
             self.assertEqual(self.build(), {"human_review_queue": True})
         after = self.materializations(self.configuration["dataset_id"])
-        self.assertEqual(
-            {stage for stage in before if before[stage] != after[stage]}, {"human_review_queue"}
-        )
+        self.assertEqual({stage for stage in before if before[stage] != after[stage]}, {"human_review_queue"})
         with dataset_instance(self.home) as instance:
             data = DatasetDataService(self.home, instance)
             queue = data.read_current(self.configuration["dataset_id"], "human_review_queue").value
@@ -227,7 +233,9 @@ class IncrementalDatasetTests(unittest.TestCase):
         self.assertEqual(
             set(self.build()),
             {
+                "labeling_attempts",
                 "proposed_annotations",
+                "labeling_failures",
                 "deduplicated_annotations",
                 "category_eligible_annotations",
                 "human_review_queue",
@@ -262,7 +270,9 @@ class IncrementalDatasetTests(unittest.TestCase):
         pinned = dataset_run_config(resolved, self.home).to_config_dict()
         self.assertEqual(requests[0].run_config, pinned)
         DatasetRegistry(self.home).register(
-            resolved.model_copy(update={"rules": resolved.rules.model_copy(update={"policy": "Edited policy."})})
+            resolved.model_copy(
+                update={"rules": resolved.rules.model_copy(update={"policy": "Edited policy."})}
+            )
         )
         self.assertEqual(requests[0].run_config, pinned)
         self.assertEqual(
@@ -270,7 +280,9 @@ class IncrementalDatasetTests(unittest.TestCase):
             {
                 AssetKey(["datasets", stage])
                 for stage in (
+                    "labeling_attempts",
                     "proposed_annotations",
+                    "labeling_failures",
                     "deduplicated_annotations",
                     "category_eligible_annotations",
                     "human_review_queue",
@@ -299,7 +311,9 @@ class IncrementalDatasetTests(unittest.TestCase):
         self.assertEqual(
             set(self.build()),
             {
+                "labeling_attempts",
                 "proposed_annotations",
+                "labeling_failures",
                 "deduplicated_annotations",
                 "category_eligible_annotations",
                 "human_review_queue",

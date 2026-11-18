@@ -30,8 +30,9 @@ Both collection branches feed one shared processing flow:
 Existing datasets: source collection -> command_candidates
 Documentation crawl: source collection -> command_candidates
 Both -> merged_command_candidates -> filtered_commands -> labeling_documentation
-     -> proposed_annotations -> conservative exact dedup
+     -> labeling_attempts -> proposed_annotations -> conservative exact dedup
      -> uncertain human queue -> one dataset_release
+        labeling_attempts -> labeling_failures (audit only)
 ```
 
 The local agent discovers sources, reads README/license/origin evidence and
@@ -39,7 +40,11 @@ prepares category-bound manifests outside Dagster. Unresolved eligibility stays
 explicitly withheld in the local inventory. Both branches retrieve complete
 declared files with integrity checks; neither searches for sources nor calls
 source-selector or adapter models.
-Each eligible command gets one isolated LLM labeling invocation with semantic docs.
+Enhanced labeling groups pending commands by vector similarity and shares bounded
+Keenable/Context7 retrieval across batches, preserving independent row judgments.
+Every eligible command receives a typed success or failure outcome; unsupported
+rows remain inspectable in `labeling_failures` and cannot enter release.
+Native single-command labeling remains available for baseline compatibility.
 There is no independent per-command LLM reviewer stage; historical
 `reviewed_annotations` artifacts remain readable. Current rows don't receive
 manufactured `review_verdict` or `review_confidence` fields.

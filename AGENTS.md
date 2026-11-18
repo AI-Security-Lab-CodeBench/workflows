@@ -70,9 +70,12 @@ existing data before replacing it; never overwrite concurrent work.
 - Each branch independently acquires sources, applies adapters and extracts raw
   `command_candidates`. Preserve raw extraction and transformation/exclusion evidence.
 - Converge authorized, current branch candidates at `merged_command_candidates`
-  before shared `filtered_commands`, `labeling_documentation` and `proposed_annotations`.
-  Label each eligible command in one isolated LLM invocation, then apply
-  conservative exact deduplication to the unified annotations.
+  before shared `filtered_commands`, `labeling_documentation` and `labeling_attempts`.
+  Enhanced labeling groups pending commands by vector similarity into bounded
+  multi-turn batches with Keenable/Context7 grounding. Preserve independent row
+  judgments and per-row reuse. Project successful outcomes to `proposed_annotations`
+  and unsupported/invalid outcomes to `labeling_failures`, then apply conservative
+  exact deduplication only to the supported annotations.
   Namespace candidate and source identities by branch and retain original identities.
   There is no independent per-command LLM reviewer stage. `reviewed_annotations`
   is historical and remains readable; never manufacture `review_verdict` or
@@ -138,7 +141,10 @@ existing data before replacing it; never overwrite concurrent work.
   query persisted pages and must not traverse upstream graphs, reload live
   configuration or recreate snapshots. Use per-dataset writer serialization,
   optimistic revisions and durable waiting, not a sleeping compute worker.
-- Bound each command's labeling context and invoke the LLM once per eligible row.
+- Bound complete batch context, output, model turns and documentation-provider calls.
+  Every remote inference turn uses a shared metrics-based admission guard capped
+  at 50% of measured request-slot and token capacity; side load pauses new calls.
+  Missing/stale metrics fail closed. This is not a GPU compute-isolation guarantee.
   Execute only missing or invalidated labels, independently of ordering.
   Preserve original inference receipts and explicit human-decision carry-forward
   provenance. A new release snapshot with a nonempty uncertainty queue still
@@ -163,9 +169,13 @@ existing data before replacing it; never overwrite concurrent work.
 ## Data and review contracts
 
 - Label each record independently from source context and relevant subcommand
-  documentation in one LLM invocation. Local source preparation is separate
+  documentation, sharing retrieval rather than judgments across similarity batches.
+  Native single-command inference remains available for baseline compatibility.
+  Local source preparation is separate
   from command labeling and never supplies a fifth command confidence.
-  Require actual candidate documentation before inference. Few-shot documentation
+  Require actual candidate documentation before a successful enhanced outcome;
+  retrieve missing documentation within the bounded tool loop or retain a failure.
+  Few-shot documentation
   belongs to its example and cannot authorize citations for the candidate.
   Select small operation-family demonstrations, not per-command exception lists.
   Preserve all four label confidences, concise rationales, model
