@@ -70,11 +70,13 @@ Use Python 3.12 or 3.13 and the committed dependency lock:
 uv sync --frozen
 ```
 
-Prepare the ignored business inputs described below before validating or registering:
+Validate the shipped configuration, inspect a stage, or register a snapshot:
 
 ```sh
 uv run python -m codebench_pipeline.dataset_cli validate \
   --config business-configs/datasets/cat3.json
+uv run python -m codebench_pipeline.dataset_cli inspect-config \
+  --config business-configs/datasets/cat3.json --stage labeling_attempts
 uv run python -m codebench_pipeline.dataset_cli register \
   --config business-configs/datasets/cat3.json --home .codebench-datasets
 ```
@@ -103,17 +105,19 @@ register the example config over an existing registered collection merely to
 view it. Build and viewer must use the same home. When reusing an already-built
 bundle, the server also accepts `--bundle /path/to/dagster_ui/build`.
 
-## Local source inputs
+## CAT-3 configuration inputs
 
 Use `skills/codebench-source-preparation/SKILL.md` with the requested category.
-The shipped CAT-3 config expects three ignored files under `business-configs/inputs/cat3/`:
+The branch sections in `business-configs/datasets/cat3.json` select three
+reviewable configuration documents under `business-configs/manifests/cat3/`:
 
 - `datasets.json`: source manifest for existing corpora.
 - `documentation-sources.json`: source manifest for original documentation.
 - `semantics.json`: prepared operation-level references for labeling.
 
-Keep `inventory.json` alongside them with source assessments, complete enumeration,
-exclusions and preparation evidence. These business inputs are not shipped in Git.
+Keep preparation inventories, exclusions, reports and downloaded captures
+in the local preparation workspace. The configuration bundle contains the
+admitted source declarations and labeling references.
 Each source has a local path or exact remote URL, provenance, license, declared
 format and SHA-256 or Git blob SHA-1. Remote acquisition rejects incomplete,
 oversized, mismatched, non-UTF8 or sensitive bodies.

@@ -1,10 +1,9 @@
 from pathlib import Path
-from typing import Literal, assert_never
+from typing import Annotated, Literal, assert_never
 
 from pydantic import ConfigDict, Field, field_validator, model_validator
 
 from codebench_pipeline.batch_labeling_config import BatchLabelingConfig
-from codebench_pipeline.business_config import DEFAULT_BASE_PROMPT, load_business_rules, read_prompt
 from codebench_pipeline.category_rules import CategoryRules, Text
 from codebench_pipeline.dataset_branches import Branch
 from codebench_pipeline.dataset_documentation_config import DocumentationConfig as DocumentationConfig
@@ -17,12 +16,6 @@ from codebench_pipeline.dataset_source_models import is_documentation_source
 from codebench_pipeline.model_config import ModelConfig, ModelRoles
 from codebench_pipeline.models import Identifier
 from codebench_pipeline.object_store import StorageConfig
-from codebench_pipeline.source_manifests import (
-    manifest_documentation,
-    manifest_sources,
-    resolve_source_paths,
-    validate_transformations,
-)
 from codebench_pipeline.typed_config import TypedConfig
 
 
@@ -63,12 +56,27 @@ class DatasetSeeds(CatalogInputs):
 class CatalogConfig(CatalogInputs):
     collection_revision: str = Field(default="1", min_length=1)
     model: ModelConfig | None = None
+    manifest_header_json: str | None = Field(default=None, exclude_if=lambda value: value is None)
+
+    @property
+    def configured(self) -> bool:
+        return bool(self.documents) or self.manifest is not None or self.manifest_header_json is not None
+
+
+SnapshotBytes = Annotated[int, Field(gt=0)]
+SnapshotWorkers = Annotated[int, Field(ge=1, le=16)]
+BundleVersion = Annotated[int, Field(strict=True, ge=1, le=1)]
+
+
+class SnapshotSettings(StrictStageConfig):
+    maximum_bytes: SnapshotBytes = 10_485_760
+    workers: SnapshotWorkers = 8
 
 
 class SnapshotConfig(StrictStageConfig):
-    maximum_bytes: int = Field(default=10_485_760, gt=0)
+    maximum_bytes: SnapshotBytes = 10_485_760
     documents: list[SourceSeed] = Field(default_factory=list)
-    workers: int = Field(default=8, ge=1, le=16)
+    workers: SnapshotWorkers = 8
 
     @field_validator("documents")
     @classmethod
@@ -145,15 +153,6 @@ class DatasetFileConfig(StrictStageConfig):
     def matching_sources(self) -> "DatasetFileConfig":
         if (self.rules is None) == (self.business_config is None):
             raise ValueError("Choose exactly one of rules or business_config")
-        for seeds in (self.seeds, self.documentation_sources):
-            if (
-                seeds is not None
-                and self.rules is not None
-                and seeds.search_request is not None
-                and not {group.risk for group in seeds.search_request.searches}
-                <= {risk.id for risk in self.rules.risks}
-            ):
-                raise ValueError("Discovery query risk is outside the category")
         if self.documentation_sources is not None:
             for document in self.documentation_sources.documents:
                 if not is_documentation_source(document.source_type, document.provenance_type):
@@ -166,6 +165,7 @@ class DatasetFileConfig(StrictStageConfig):
 class DatasetBuildSpec(StrictStageConfig):
     dataset_id: Identifier
     revision: str
+    bundle_version: BundleVersion | None = Field(default=None, exclude_if=lambda value: value is None)
     rules: CategoryRules
     business_config: Text | None = None
     catalog: CatalogConfig
@@ -174,6 +174,10 @@ class DatasetBuildSpec(StrictStageConfig):
     documentation_snapshots: SnapshotConfig = SnapshotConfig()
     adapters: AdapterConfig
     extraction: ExtractionConfig
+    documentation_adapters: AdapterConfig | None = Field(default=None, exclude_if=lambda value: value is None)
+    documentation_extraction: ExtractionConfig | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
     filtering: FilteringConfig
     documentation: DocumentationConfig
     annotation: AnnotationConfig
@@ -201,134 +205,13 @@ def catalog_for_branch(spec: DatasetBuildSpec, branch: Branch) -> CatalogConfig:
 
 
 def snapshots_for_branch(spec: DatasetBuildSpec, branch: Branch) -> SnapshotConfig:
-    match branch:
-        case "dataset":
-            return spec.snapshots
-        case "documentation":
-            return spec.documentation_snapshots
-    assert_never(branch)
+    settings = {"dataset": spec.snapshots, "documentation": spec.documentation_snapshots}[branch]
+    if spec.bundle_version is None:
+        return settings
+    return settings.model_copy(update={"documents": catalog_for_branch(spec, branch).documents})
 
 
 def load_build_config(path: Path, home: Path | None = None) -> DatasetBuildSpec:
-    supplied = DatasetFileConfig.model_validate_json(path.read_bytes())
-    parent = path.resolve().parent
-    business_config = (
-        str((parent / supplied.business_config).resolve()) if supplied.business_config is not None else None
-    )
-    rules = load_business_rules(Path(business_config)) if business_config is not None else supplied.rules
-    assert rules is not None
-    documents = [resolve_source_paths(document, parent) for document in supplied.seeds.documents]
-    documentation_documents = [
-        resolve_source_paths(document, parent)
-        for document in (
-            supplied.documentation_sources.documents if supplied.documentation_sources is not None else []
-        )
-    ]
-    storage = supplied.storage or StorageConfig(
-        local_root=str(((home or Path(".codebench-datasets")) / "dataframes").resolve())
-    )
-    if storage.backend == "local" and not Path(storage.local_root).is_absolute():
-        storage = storage.model_copy(update={"local_root": str((parent / storage.local_root).resolve())})
-    return resolve_business_inputs(
-        DatasetBuildSpec(
-            dataset_id=supplied.dataset_id,
-            revision=supplied.revision,
-            rules=rules,
-            business_config=business_config,
-            catalog=CatalogConfig(
-                collection_revision=supplied.seeds.revision,
-                mode=supplied.seeds.mode,
-                documents=documents,
-                manifest=str((parent / supplied.seeds.manifest).resolve())
-                if supplied.seeds.manifest is not None
-                else None,
-                search_request=supplied.seeds.search_request,
-                model=supplied.models.selector,
-            ),
-            snapshots=SnapshotConfig(
-                maximum_bytes=supplied.snapshot_maximum_bytes,
-                documents=documents,
-            ),
-            documentation_catalog=(
-                CatalogConfig(
-                    collection_revision=supplied.documentation_sources.revision,
-                    mode=supplied.documentation_sources.mode,
-                    documents=documentation_documents,
-                    manifest=str((parent / supplied.documentation_sources.manifest).resolve())
-                    if supplied.documentation_sources.manifest is not None
-                    else None,
-                    search_request=supplied.documentation_sources.search_request,
-                    model=supplied.models.selector,
-                )
-                if supplied.documentation_sources is not None
-                else None
-            ),
-            documentation_snapshots=SnapshotConfig(
-                maximum_bytes=supplied.snapshot_maximum_bytes,
-                documents=documentation_documents,
-            ),
-            adapters=AdapterConfig(
-                model=supplied.models.adapter,
-                mode=supplied.adapters,
-                sample_characters=supplied.adapter_sample_characters,
-            ),
-            extraction=supplied.extraction,
-            filtering=supplied.filtering,
-            documentation=supplied.documentation.model_copy(
-                update={"manifest": str((parent / supplied.documentation.manifest).resolve())}
-                if supplied.documentation.manifest is not None
-                else {}
-            ),
-            annotation=AnnotationConfig(
-                model=supplied.models.labeler,
-                workers=supplied.labeling_workers,
-                batch=supplied.labeling_batch,
-            ),
-            review=None,
-            publication=supplied.publication,
-            storage=storage,
-        )
-    )
+    from codebench_pipeline.dataset_bundle import load_dataset_bundle
 
-
-def resolve_business_inputs(spec: DatasetBuildSpec) -> DatasetBuildSpec:
-    spec = resolve_labeling_inputs(spec)
-    updates: dict[str, CatalogConfig | SnapshotConfig | DocumentationConfig] = {}
-    for catalog_name, snapshot_name in (
-        ("catalog", "snapshots"),
-        ("documentation_catalog", "documentation_snapshots"),
-    ):
-        catalog = spec.catalog if catalog_name == "catalog" else spec.documentation_catalog
-        if catalog is None:
-            continue
-        documents = (
-            manifest_sources(Path(catalog.manifest), spec.rules.category_id)
-            if catalog.manifest is not None
-            else catalog.documents
-        )
-        validate_transformations(documents)
-        if catalog_name == "documentation_catalog" and any(
-            not is_documentation_source(document.source_type, document.provenance_type)
-            for document in documents
-        ):
-            raise ValueError("Documentation manifest cannot contain dataset corpora")
-        updates[catalog_name] = catalog.model_copy(update={"documents": documents})
-        snapshots = spec.snapshots if snapshot_name == "snapshots" else spec.documentation_snapshots
-        updates[snapshot_name] = snapshots.model_copy(update={"documents": documents})
-    if spec.documentation.manifest is not None:
-        updates["documentation"] = spec.documentation.model_copy(
-            update={
-                "snippets": manifest_documentation(Path(spec.documentation.manifest), spec.rules.category_id)
-            }
-        )
-    return spec.model_copy(update=updates)
-
-
-def resolve_labeling_inputs(spec: DatasetBuildSpec) -> DatasetBuildSpec:
-    """Refresh labeling only; keep runtime configuration and collection inputs intact."""
-    rules = (
-        load_business_rules(Path(spec.business_config), spec.rules.category_id)
-        if spec.business_config is not None
-        else spec.rules.model_copy(update={"base_prompt": read_prompt(DEFAULT_BASE_PROMPT)})
-    )
-    return spec.model_copy(update={"rules": rules})
+    return load_dataset_bundle(path, home)

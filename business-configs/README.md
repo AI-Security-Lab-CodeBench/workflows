@@ -19,19 +19,28 @@ binds `../categories/cat3/category.json`. That category file binds the shared
 `../../labeling-base.md`, its local `instructions.md` and its local `examples.json`.
 Preserve these references when moving files.
 
-## Runtime template versus live policy
+## Reading the dataset configuration
 
 `datasets/cat3.json` is a starting template, not an instruction to overwrite a
 registered dataset's settings. It retains the current native labeler,
 `chatgpt-subscription/gpt-6-luna`, its 900-second timeout, four workers, the existing
 limits and the configured source branches.
 
-A registered dataset bound to a business configuration refreshes that policy
-when loaded for current work. Editing the bound category, base prompt,
-instructions or examples changes the compiled labeling input without replacing
-the registered model, workers, caps or source settings. Historical inference
-snapshots remain immutable; a policy edit doesn't rewrite old receipts or
-constitute human approval. Missing or invalid policy files fail explicitly.
+Read the dataset file from top to bottom:
+
+| Section | Stages it configures |
+| --- | --- |
+| `existing_datasets` | Catalog of existing corpora, snapshot retrieval, adapters and raw candidate extraction. |
+| `documentation_crawl` | The same four stages for original documentation, with independent inputs, limits and workers. |
+| `finalization.filtering` | Filtering after the two candidate streams merge. |
+| `finalization.documentation` | Operation evidence supplied to the labeler. This is separate from the documentation crawl. |
+| `finalization.business_config`, `annotation` | Taxonomy, prompts and demonstrations; model, context limit, parallelism and optional batch settings. |
+| `finalization.publication` | Editable human-review columns and the per-risk release cap. |
+| `storage` | Artifact storage; `null` uses the dataset home's local storage. |
+
+Register a new configuration after changing a versioned bundle. Registration
+resolves its policy and manifests into stage inputs. Historical inference
+snapshots and review decisions are not rewritten by editing the template.
 
 Change runtime settings through the normal registration/configuration workflow.
 Editing the template alone doesn't reconfigure an already registered dataset.
@@ -40,12 +49,12 @@ Don't change confidence merely to reduce the human queue.
 
 ## Local inputs and source preparation
 
-`inputs/` under this directory is local-only and ignored. The runtime template
-expects these prepared manifests, none of which is shipped here:
+The runtime template declares three companion config documents. They are
+separate so the main stage settings remain readable:
 
-- `inputs/cat3/datasets.json`
-- `inputs/cat3/documentation-sources.json`
-- `inputs/cat3/semantics.json`
+- `manifests/cat3/datasets.json`
+- `manifests/cat3/documentation-sources.json`
+- `manifests/cat3/semantics.json`
 
 Prepare actual source and semantic manifests through the source-preparation
 workflow, with provenance, reuse eligibility, exact positions, integrity hashes,

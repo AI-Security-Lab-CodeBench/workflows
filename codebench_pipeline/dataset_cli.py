@@ -9,6 +9,7 @@ from codebench_pipeline.dataset_registry import DatasetRegistry
 from codebench_pipeline.dataset_run import run_registered
 from codebench_pipeline.definitions import DEFAULT_HOME
 from codebench_pipeline.runtime_instance import dataset_instance
+from codebench_pipeline.stage_configuration import stage_configs
 from codebench_pipeline.viewer import launch_ui, preview_asset
 
 
@@ -29,7 +30,7 @@ def main() -> None:
         description="Build category-configured datasets as typed DataFrame assets."
     )
     subcommands = parser.add_subparsers(dest="action", required=True)
-    for action in ("build", "register", "validate"):
+    for action in ("build", "register", "validate", "inspect-config"):
         sub = subcommands.add_parser(action)
         if action == "build":
             source = sub.add_mutually_exclusive_group(required=True)
@@ -40,6 +41,8 @@ def main() -> None:
         else:
             sub.add_argument("--config", type=Path, required=True)
         sub.add_argument("--home", type=Path, default=DEFAULT_HOME)
+        if action == "inspect-config":
+            sub.add_argument("--stage", required=True, choices=INPUT_STAGES)
     bind = subcommands.add_parser("bind-business", help="Attach labeling policy to a registered dataset.")
     bind.add_argument("--dataset", required=True)
     bind.add_argument("--business-config", type=Path, required=True)
@@ -80,6 +83,14 @@ def main() -> None:
         execute_build(config, home)
     else:
         spec = load_build_config(config, home)
+        if args.action == "inspect-config":
+            configs = stage_configs(spec)
+            stage = str(args.stage)
+            view = {"stage": stage, "settings": configs[stage].model_dump(mode="json")}
+            if stage == "labeling_attempts":
+                view["policy"] = spec.rules.model_dump(mode="json")
+            print(json.dumps(view, ensure_ascii=False, indent=2))
+            return
         if args.action == "register":
             DatasetRegistry(home).register(spec)
             with dataset_instance(home) as instance:

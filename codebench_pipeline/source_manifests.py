@@ -1,4 +1,5 @@
 from collections.abc import Mapping
+from copy import deepcopy
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
@@ -11,14 +12,17 @@ from codebench_pipeline.source_transforms import transformation_bytes
 from codebench_pipeline.storage import IntegrityError
 
 
-class SourceManifest(BaseModel):
+class ManifestHeader(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
 
     version: Literal[1] = 1
     category_id: Identifier
     revision: str = Field(min_length=1)
-    sources: list[SourceSeed]
     evidence: dict[str, JsonValue] = Field(default_factory=dict)
+
+
+class SourceManifest(ManifestHeader):
+    sources: list[SourceSeed]
 
     @model_validator(mode="after")
     def distinct_sources(self) -> "SourceManifest":
@@ -26,14 +30,8 @@ class SourceManifest(BaseModel):
         return self
 
 
-class DocumentationManifest(BaseModel):
-    model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
-
-    version: Literal[1] = 1
-    category_id: Identifier
-    revision: str = Field(min_length=1)
+class DocumentationManifest(ManifestHeader):
     snippets: list[DocumentationSeed]
-    evidence: dict[str, JsonValue] = Field(default_factory=dict)
 
 
 @lru_cache(maxsize=4)
@@ -46,7 +44,7 @@ def _documentation_manifest(payload: bytes) -> DocumentationManifest:
     return DocumentationManifest.model_validate_json(payload)
 
 
-def manifest_sources(path: Path, category_id: str) -> list[SourceSeed]:
+def load_source_manifest(path: Path, category_id: str) -> SourceManifest:
     manifest = _source_manifest(path.read_bytes())
     if manifest.category_id != category_id:
         raise IntegrityError("Source manifest belongs to another category")
@@ -60,10 +58,19 @@ def manifest_sources(path: Path, category_id: str) -> list[SourceSeed]:
         if value is not None
     }
     resolved_paths = {value: str((path.parent / value).resolve()) for value in declared_paths}
-    return [
-        resolve_source_paths(source, path.parent, resolved_paths=resolved_paths)
-        for source in manifest.sources
-    ]
+    return manifest.model_copy(
+        update={
+            "evidence": deepcopy(manifest.evidence),
+            "sources": [
+                resolve_source_paths(source, path.parent, resolved_paths=resolved_paths)
+                for source in manifest.sources
+            ],
+        },
+    )
+
+
+def manifest_sources(path: Path, category_id: str) -> list[SourceSeed]:
+    return load_source_manifest(path, category_id).sources
 
 
 def resolve_source_paths(
@@ -84,9 +91,7 @@ def resolve_source_paths(
         updates["local_path"] = paths[source.local_path]
     resolved = source.model_copy(update=updates)
     if source.transform is not None:
-        transform = source.transform.model_copy(
-            update={"module_path": paths[source.transform.module_path]}
-        )
+        transform = source.transform.model_copy(update={"module_path": paths[source.transform.module_path]})
         resolved = resolved.model_copy(update={"transform": transform})
     return resolved
 
@@ -94,17 +99,27 @@ def resolve_source_paths(
 def validate_transformations(sources: list[SourceSeed]) -> None:
     modules = {
         (source.transform.module_path, source.transform.sha256): source.transform
-        for source in sources if source.transform is not None
+        for source in sources
+        if source.transform is not None
     }
     for transform in modules.values():
         transformation_bytes(transform)
 
 
-def manifest_documentation(path: Path, category_id: str) -> list[DocumentationSeed]:
+def load_documentation_manifest(path: Path, category_id: str) -> DocumentationManifest:
     manifest = _documentation_manifest(path.read_bytes())
     if manifest.category_id != category_id:
         raise IntegrityError("Documentation manifest belongs to another category")
-    return [
-        snippet.model_copy(update={"subcommands": list(snippet.subcommands)})
-        for snippet in manifest.snippets
-    ]
+    return manifest.model_copy(
+        update={
+            "evidence": deepcopy(manifest.evidence),
+            "snippets": [
+                snippet.model_copy(update={"subcommands": list(snippet.subcommands)})
+                for snippet in manifest.snippets
+            ],
+        }
+    )
+
+
+def manifest_documentation(path: Path, category_id: str) -> list[DocumentationSeed]:
+    return load_documentation_manifest(path, category_id).snippets

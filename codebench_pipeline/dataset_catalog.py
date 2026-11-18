@@ -12,6 +12,7 @@ from codebench_pipeline.dataset_seed_config import SourceSeed
 from codebench_pipeline.dataset_source_models import SourceChoice, is_documentation_source
 from codebench_pipeline.discovery_models import SourceProposal
 from codebench_pipeline.models import SourceDocument
+from codebench_pipeline.source_manifests import ManifestHeader, SourceManifest
 from codebench_pipeline.storage import IntegrityError
 
 
@@ -56,9 +57,13 @@ def catalog_row(
         "sample": sample,
         "captured_content": "",
         "decision": choice.decision if choice is not None else "selected",
-        "analysis": choice.analysis if choice is not None else "Category source manifest input; no model selection.",
+        "analysis": choice.analysis
+        if choice is not None
+        else "Category source manifest input; no model selection.",
         "confidence": choice.confidence if choice is not None else "not_applicable",
-        "rationale": choice.rationale if choice is not None else "Declared provenance and reuse metadata validated.",
+        "rationale": choice.rationale
+        if choice is not None
+        else "Declared provenance and reuse metadata validated.",
     }
 
 
@@ -66,8 +71,7 @@ def build_catalog(
     config: CatalogConfig, rules: CategoryRules, evidence: Path, *, branch: Branch = "dataset"
 ) -> DataFrame[SourceCatalogTable]:
     if branch == "documentation" and any(
-        not is_documentation_source(source.source_type, source.provenance_type)
-        for source in config.documents
+        not is_documentation_source(source.source_type, source.provenance_type) for source in config.documents
     ):
         raise IntegrityError("Dataset corpora cannot enter the documentation branch")
     frame = validated_frame(
@@ -76,7 +80,12 @@ def build_catalog(
     frame.attrs["source_inputs_json"] = json.dumps(
         [source.model_dump(mode="json") for source in config.documents], ensure_ascii=False
     )
-    if config.manifest is not None:
+    if config.manifest_header_json is not None:
+        header = ManifestHeader.model_validate_json(config.manifest_header_json)
+        manifest = SourceManifest(**header.model_dump(), sources=config.documents)
+        evidence.mkdir(parents=True, exist_ok=True)
+        (evidence / "source-manifest.json").write_text(manifest.model_dump_json(indent=2), encoding="utf-8")
+    elif config.manifest is not None:
         evidence.mkdir(parents=True, exist_ok=True)
         (evidence / "source-manifest.json").write_bytes(Path(config.manifest).read_bytes())
     return frame

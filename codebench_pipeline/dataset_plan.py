@@ -27,6 +27,7 @@ from codebench_pipeline.documentation_authorization import (
 from codebench_pipeline.human_review import HumanReviewError
 from codebench_pipeline.human_review_store import HumanReviewStore
 from codebench_pipeline.stage_cache_compatibility import legacy_signature_matches
+from codebench_pipeline.stage_configuration import collection_stage_configs
 from codebench_pipeline.storage import IntegrityError, fingerprint
 
 INPUT_STAGES: dict[str, dict[str, str]] = {
@@ -95,8 +96,10 @@ def unavailable_candidates(
     empty.attrs["branch_state"] = state
     empty.attrs["branch_configuration"] = fingerprint(
         {
-            "catalog": catalog_for_branch(spec, branch).model_dump_json(),
-            "extraction": spec.extraction.model_dump_json(),
+            "stages": {
+                stage: config.model_dump_json()
+                for stage, config in collection_stage_configs(spec, branch).items()
+            },
             "rules": source_scope(spec.rules),
         }
     )
@@ -134,12 +137,7 @@ def plan_dataset(
     source_authorizations: dict[str, SourceInventoryAuthorization] = {}
     branches: tuple[Branch, ...] = ("dataset", "documentation")
     unconfigured: tuple[Branch, ...] = tuple(
-        branch
-        for branch in branches
-        if not (
-            catalog_for_branch(spec, branch).documents
-            or catalog_for_branch(spec, branch).manifest is not None
-        )
+        branch for branch in branches if not catalog_for_branch(spec, branch).configured
     )
     for branch in unconfigured:
         values[stage_name("command_candidates", branch)] = unavailable_candidates(

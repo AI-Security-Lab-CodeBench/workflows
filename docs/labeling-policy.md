@@ -8,7 +8,7 @@ The executable labeling instructions live in `business-configs/`, not this docum
 - `business-configs/categories/cat3/examples.json`: documented, illustrative few-shot examples grouped by operation family. They are not collected dataset rows.
 - `business-configs/datasets/cat3.json`: initial model, worker, source/reference and publication settings.
 
-See `business-configs/README.md` for the editing workflow. Policy files are resolved relative to their declaring file and compiled into the immutable inference snapshot. Registered builds refresh their bound business policy without replacing their runtime settings. Missing or invalid policy files fail explicitly.
+See `business-configs/README.md` for the editing workflow. Versioned dataset configs resolve policy files relative to the declaring file at registration. Edit and register the bundle to change the effective policy. Inspect `labeling_attempts` with `dataset_cli inspect-config` to see the model settings and compiled policy before registration. For batched labeling, `finalization.annotation.batch.instructions` adds operator guidance to the model request; changing that guidance invalidates cached judgments. The tool protocol, evidence checks and output schema still apply.
 
 Each label request contains one real candidate, its relevant semantic documentation, the generic base and category policy, and applicable family examples. Example documentation never substitutes for candidate documentation or expands the candidate citation allowlist. Missing candidate documentation must be resolved before inference.
 

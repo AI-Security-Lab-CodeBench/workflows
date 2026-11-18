@@ -35,7 +35,7 @@ def inventory_authorization(
 ) -> tuple[DataFrame[SourceCatalogTable], SourceInventoryAuthorization]:
     spec = DatasetRegistry(home).get(dataset_id)
     config = catalog_for_branch(spec, branch)
-    if not config.documents and config.manifest is None:
+    if not config.configured:
         raise HumanReviewError("pending", "No source inventory is configured")
     expected = stage_signature("source_catalog", config, {"category_rules": spec.rules})
     key = AssetKey(asset_path("source_catalog", branch))

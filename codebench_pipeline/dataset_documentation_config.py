@@ -14,6 +14,7 @@ class DocumentationConfig(TypedConfig):
 
     mode: Literal["provided_snippets"] = "provided_snippets"
     manifest: str | None = None
+    manifest_header_json: str | None = Field(default=None, exclude_if=lambda value: value is None)
     snippets: list[DocumentationSeed] = Field(default_factory=list)
     search_request: SearchSeeds | None = None
     revision: str = Field(default="1", min_length=1)

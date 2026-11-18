@@ -10,6 +10,7 @@ from codebench_pipeline.dataframe_schemas import DocumentationTable, FilteredCom
 from codebench_pipeline.dataset_documentation_config import DocumentationConfig
 from codebench_pipeline.dataset_documentation_models import coverage, eligible_operations
 from codebench_pipeline.models import SemanticSnippet
+from codebench_pipeline.source_manifests import DocumentationManifest, ManifestHeader
 from codebench_pipeline.storage import IntegrityError
 
 
@@ -40,7 +41,11 @@ def collect_documentation(
     }
     snippets: list[SemanticSnippet] = []
     try:
-        if config.manifest is not None:
+        if config.manifest_header_json is not None:
+            header = ManifestHeader.model_validate_json(config.manifest_header_json)
+            manifest = DocumentationManifest(**header.model_dump(), snippets=config.snippets)
+            _save(evidence / "documentation-manifest.json", manifest.model_dump(mode="json"))
+        elif config.manifest is not None:
             (evidence / "documentation-manifest.json").write_bytes(Path(config.manifest).read_bytes())
         snippets = [seed.to_semantic_snippet() for seed in config.snippets]
         if sum(len(snippet.snippet.encode("utf-8")) for snippet in snippets) > config.maximum_bytes:

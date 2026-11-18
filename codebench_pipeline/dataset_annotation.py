@@ -21,7 +21,6 @@ from codebench_pipeline.annotation_cache import (
     reviewer_cache_lock,
     save_cached_invocation,
 )
-from codebench_pipeline.business_config import DEFAULT_BASE_PROMPT, read_prompt
 from codebench_pipeline.category_rules import CategoryRules
 from codebench_pipeline.dataset_documentation_models import command_operations
 from codebench_pipeline.dataset_records import (
@@ -70,7 +69,7 @@ def request(
     allowed = routing(candidate, rules)
     system = "\n\n".join(
         (
-            rules.base_prompt or read_prompt(DEFAULT_BASE_PROMPT),
+            rules.base_prompt,
             rules.policy,
             rules.model_dump_json(
                 exclude={

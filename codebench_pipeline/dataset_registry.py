@@ -4,15 +4,15 @@ from pathlib import Path
 
 from pydantic import BaseModel, TypeAdapter
 
+from codebench_pipeline.business_config import load_business_rules
 from codebench_pipeline.dataset_config import (
     CatalogConfig,
     DatasetBuildSpec,
     DocumentationConfig,
     SnapshotConfig,
-    resolve_business_inputs,
-    resolve_labeling_inputs,
 )
 from codebench_pipeline.human_review_store import HumanReviewStore
+from codebench_pipeline.legacy_dataset_config import resolve_business_inputs, resolve_labeling_inputs
 from codebench_pipeline.models import Identifier
 from codebench_pipeline.object_store import StorageConfig
 from codebench_pipeline.storage import IntegrityError, exclusive, fingerprint
@@ -80,9 +80,12 @@ class DatasetRegistry:
 
     def get(self, dataset_id: str) -> DatasetBuildSpec:
         spec = self._stored_spec(dataset_id)
+        if spec.bundle_version is not None:
+            return spec.model_copy(deep=True)
         updates: dict[str, CatalogConfig | SnapshotConfig | DocumentationConfig] = {}
         for catalog_name, snapshot_name in (
-            ("catalog", "snapshots"), ("documentation_catalog", "documentation_snapshots")
+            ("catalog", "snapshots"),
+            ("documentation_catalog", "documentation_snapshots"),
         ):
             catalog = spec.catalog if catalog_name == "catalog" else spec.documentation_catalog
             if catalog is not None and catalog.manifest is not None:
@@ -96,9 +99,12 @@ class DatasetRegistry:
     def bind_business(self, dataset_id: str, path: Path) -> DatasetBuildSpec:
         """Attach a category policy without replacing existing runtime settings."""
         spec = self.get_snapshot(dataset_id)
-        updated = resolve_labeling_inputs(
-            spec.model_copy(update={"business_config": str(path.resolve())})
-        )
+        if spec.bundle_version is None:
+            updated = resolve_labeling_inputs(
+                spec.model_copy(update={"business_config": str(path.resolve())})
+            )
+        else:
+            updated = spec.model_copy(update={"rules": load_business_rules(path, spec.rules.category_id)})
         self.register(updated, previous=spec)
         return updated
 

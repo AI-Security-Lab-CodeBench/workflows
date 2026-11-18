@@ -29,8 +29,8 @@ authorization for the combined dataset.
                     one dataset release
 ```
 
-`seeds` configures corpus inputs, `documentation_sources` configures original
-documentation/forum inputs, and `documentation` supplies semantic references for
+`existing_datasets.sources` configures corpus inputs, `documentation_crawl.sources`
+configures original documentation/forum inputs, and `finalization.documentation` supplies semantic references for
 labeling. These are distinct contracts. The local agent reads actual README/card,
 license and origin evidence, enumerates complete scopes and prepares manifests
 outside Dagster. Unresolved sources stay explicitly withheld in the inventory.
