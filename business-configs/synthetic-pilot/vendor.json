@@ -1,0 +1,23 @@
+{
+  "run_name": "cat3_inspection_pilot",
+  "split": "train",
+  "seeds_path": "seeds.jsonl",
+  "prompt": {
+    "template": "prompt.md",
+    "version": "cat3-inspection-v4",
+    "candidates_per_call": 2
+  },
+  "backend": {
+    "provider": "openai_compatible",
+    "timeout": 120,
+    "retries": 0,
+    "json_mode": true
+  },
+  "sampling": {
+    "temperature": 0.35,
+    "top_p": 0.9,
+    "max_tokens": 1536,
+    "seed": 2041,
+    "samples_per_seed": 1
+  }
+}
