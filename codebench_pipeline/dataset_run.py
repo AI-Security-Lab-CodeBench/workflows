@@ -145,8 +145,11 @@ def run_registered(dataset_id: str, home: Path) -> BuildOutcome:
                 )
         primary = branches["documentation"] if "dataset" in current.unconfigured else branches["dataset"]
         status = primary.status
-        if shared_batch is not None and caches:
-            status = "awaiting_human_review" if shared_batch.state == "open" else "review_completed"
+        if shared_batch is not None:
+            if shared_batch.state == "open":
+                status = "awaiting_human_review"
+            elif caches:
+                status = "review_completed"
         release_run_id: str | None = None
         if shared_batch is not None and shared_batch.completion is not None:
             with HumanReviewStore(home).reader() as transaction:

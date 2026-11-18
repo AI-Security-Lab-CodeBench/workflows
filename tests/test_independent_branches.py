@@ -211,6 +211,7 @@ class IndependentBranchDatasetTests(unittest.TestCase):
         self.assertIsNone(repeated.run_id)
         self.assertEqual(repeated.materialized_stages, ())
         self.assertEqual(repeated.branches["documentation"].status, "unchanged")
+        self.assertEqual(repeated.status, "awaiting_human_review")
         self.assertEqual(
             repeated.branches["documentation"].review_snapshot_id,
             initial.branches["documentation"].review_snapshot_id,
