@@ -380,7 +380,7 @@ def _pressure(values: dict[str, JsonValue], config: CapacityConfig, capacity: fl
                     blocked |= usage != 0
                     continue
             elif "mamba" in name:
-                blocked |= usage != 0
+                blocked |= usage >= config.max_fraction
                 continue
             elif name not in {"full_token_usage", "prealloc_full_token_usage"}:
                 blocked |= usage != 0
@@ -439,7 +439,11 @@ def _snapshot(
     )
     usage = max(
         [load.token_usage for load in loads.loads]
-        + [metric.value for metric in metrics if metric.name == "token_usage"]
+        + [
+            metric.value
+            for metric in metrics
+            if metric.name in {"token_usage", "full_token_usage", "swa_token_usage", "mamba_usage"}
+        ]
     )
     if usage > 1 or tokens > capacity:
         raise CapacityUnavailable("inconsistent_token_metrics")
@@ -450,13 +454,13 @@ def _snapshot(
         rank_values = {metric.name: metric.value for metric in metrics if metric.rank == rank}
         if not {"token_usage", "num_used_tokens"} <= rank_values.keys():
             continue
-        if (
-            abs(
-                rank_values["token_usage"]
-                - rank_values["num_used_tokens"] / rank_values["max_total_num_tokens"]
-            )
-            > 0.005000001
-        ):
+        expected_usage = max(
+            rank_values["num_used_tokens"] / rank_values["max_total_num_tokens"],
+            rank_values.get("full_token_usage", 0),
+            rank_values.get("swa_token_usage", 0),
+            rank_values.get("mamba_usage", 0),
+        )
+        if abs(rank_values["token_usage"] - expected_usage) > 0.005000001:
             raise CapacityUnavailable("inconsistent_token_metrics")
     values: dict[str, JsonValue] = {}
     sources: list[dict[str, JsonValue]] = [load.model_dump(mode="json") for load in loads.loads]

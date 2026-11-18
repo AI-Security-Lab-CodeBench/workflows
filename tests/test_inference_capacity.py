@@ -125,6 +125,13 @@ class _Observation:
             used = self.rank_used[rank] if self.rank_used else self.used
             running = self.rank_running[rank] if self.rank_running else self.running
             capacity = self.rank_capacity[rank] if self.rank_capacity else self.capacity
+            auxiliary = dict(self.extra)
+            pool_usage = max(
+                used / capacity,
+                auxiliary.get("full_token_usage", 0),
+                auxiliary.get("swa_token_usage", 0),
+                auxiliary.get("mamba_usage", 0),
+            )
             values = {
                 "num_running_reqs": running,
                 "num_queue_reqs": self.queued,
@@ -133,9 +140,9 @@ class _Observation:
                 "token_usage": (
                     0.0
                     if self.inconsistent_usage
-                    else round(used / capacity, 2)
+                    else round(pool_usage, 2)
                     if self.rounded_usage
-                    else used / capacity
+                    else pool_usage
                 ),
                 **dict(self.extra),
             }
@@ -408,6 +415,22 @@ class InferenceCapacityTests(unittest.TestCase):
             self.call()
         self.assertEqual(len(self.backend.generations), 1)
 
+    def test_hybrid_aggregate_usage_includes_live_mamba_states_without_requiring_idle_server(self) -> None:
+        self.backend.info["enable_metrics_for_all_schedulers"] = False
+        self.backend.observations = [
+            _Observation(
+                used=10000,
+                leader_only_metrics=True,
+                rounded_usage=True,
+                extra=(("full_token_usage", 10000 / CAPACITY), ("mamba_usage", 8 / 230)),
+            )
+        ]
+        with _wire(self.backend):
+            self.call()
+        admission = next(event for event in self.events() if event["event"] == "admission")
+        self.assertEqual(admission["observed_tokens"], 30306)
+        self.assertEqual(len(self.backend.generations), 1)
+
     def test_worst_rank_pressure_minimum_capacity_and_queues_block(self) -> None:
         for observation in (
             _Observation(rank_used=(0, 0, 0, 0, 0, 0, 0, 173505)),
@@ -484,7 +507,7 @@ class InferenceCapacityTests(unittest.TestCase):
             (("num_prefill_inflight_queue_reqs", 1.0),),
             (("pending_prealloc_token_usage", 0.01),),
             (("full_token_usage", 0.3),),
-            (("mamba_usage", 0.01),),
+            (("mamba_usage", 0.51),),
             (("swa_token_usage", 0.1), ("max_total_num_tokens_swa", 300000.0)),
             (("swa_token_usage", 0.1),),
         ):
