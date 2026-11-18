@@ -6,6 +6,7 @@ from codebench_pipeline.typed_config import TypedConfig
 
 
 class BatchLabelingConfig(TypedConfig):
+    instructions: str = Field(default="", max_length=16000)
     batch_size: int = Field(default=25, ge=1, le=50)
     reasoning_effort: str | None = Field(default=None, pattern=r"^(low|high|max)$")
     maximum_model_turns: int = Field(default=4, ge=2, le=8)

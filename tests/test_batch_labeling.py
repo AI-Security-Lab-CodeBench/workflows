@@ -109,6 +109,35 @@ class _DocOpener:
 
 
 class BatchLabelingTests(unittest.TestCase):
+    def test_changed_batch_instructions_reach_provider_and_invalidate_cache(self) -> None:
+        prompts = []
+
+        def provider(base_url, body, key, timeout, config, out):
+            messages = json.loads(body)["messages"]
+            prompts.append(messages[0]["content"])
+            rows = json.loads(messages[1]["content"])["records"]
+            return tool_reply(
+                "submit_labels", {"outcomes": [submitted(row, row["evidence_ids"]) for row in rows]}
+            )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with patch("codebench_pipeline.batch_labeling.guarded_complete", side_effect=provider):
+                for i, note in enumerate(("Explain units.", "Explain units.", "Describe timeouts.")):
+                    results = annotate_batches(
+                        [make_candidate("one")],
+                        documentation(),
+                        make_rules(),
+                        remote_model(),
+                        batch_config(root).model_copy(update={"instructions": note}),
+                        root / str(i),
+                        cache=root / "cache",
+                    )
+                    self.assertEqual(results[0].status, "success")
+        self.assertEqual(len(prompts), 2)
+        self.assertIn("Explain units.", prompts[0])
+        self.assertIn("Describe timeouts.", prompts[1])
+
     def test_reasoning_effort_reaches_template_and_invalidates_cached_judgment(self) -> None:
         efforts = []
 
