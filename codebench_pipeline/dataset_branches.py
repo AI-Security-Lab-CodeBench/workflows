@@ -71,7 +71,7 @@ FINALIZATION_GROUPS: Final = {
     "labeling_attempts": "labeling",
     "proposed_annotations": "labeling",
     "labeling_failures": "dataset_audit",
-    "deduplicated_annotations": "dataset_release",
+    "deduplicated_annotations": "deduplication",
     "category_eligible_annotations": "dataset_release",
     "human_review_queue": "dataset_release",
     "human_review_decisions": "dataset_release",

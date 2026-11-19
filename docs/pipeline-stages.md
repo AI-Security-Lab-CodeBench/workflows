@@ -62,8 +62,9 @@ The following reference describes independent dataset and documentation collecti
 and one shared finalization path. In both graph variants, `dataset_configuration`
 contains only `global_config` and `category_rules`. Each mapping appears in the
 same group as its consumers. `filtering` contains candidate merging and filtering;
-`labeling` contains labeling inputs, attempts and supported proposals. `dataset_release`
-contains deduplication, category eligibility, human review and release. Inspect
+`labeling` contains labeling inputs, attempts and supported proposals. `deduplication`
+contains `deduplicated_annotations` and can be selected without running review or release.
+`dataset_release` consumes its output for category eligibility, human review and release. Inspect
 labeling failures alongside the BashGuard syntax audit in `dataset_audit`.
 Each dataset has its own `dataset_builds` partition.
 Run `refresh_dataset_configuration` for a dataset partition to materialize just

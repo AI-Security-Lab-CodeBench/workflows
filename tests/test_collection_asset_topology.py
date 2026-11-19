@@ -105,6 +105,10 @@ class CollectionAssetTopologyTests(unittest.TestCase):
         self.assertEqual(graph.get(key("labeling_failures")).group_name, "dataset_audit")
         self.assertEqual(graph.get(key("filtered_commands")).group_name, "filtering")
         self.assertEqual(graph.get(key("labeling_attempts")).group_name, "labeling")
+        self.assertEqual(
+            {node for node in graph.get_all_asset_keys() if graph.get(node).group_name == "deduplication"},
+            {key("deduplicated_annotations")},
+        )
         for stage in ("human_review_queue", "human_review_decisions", "dataset_release"):
             self.assertEqual(graph.get(key(stage)).group_name, "dataset_release")
         for prefix in ("", "documentation/", "keenable/"):

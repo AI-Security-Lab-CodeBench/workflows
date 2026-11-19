@@ -45,7 +45,7 @@ In the browser:
 
 1. Open **Catalog**, then **datasets / dataset_release** for the combined dataset.
    Native lineage groups distinguish `existing_datasets`, `documentation_crawl`,
-   `filtering`, `labeling`, `dataset_release`, `dataset_audit` and `dataset_configuration`.
+   `filtering`, `labeling`, `deduplication`, `dataset_release`, `dataset_audit` and `dataset_configuration`.
 2. The Overview shows the latest materialization and its category partition.
    To choose a particular category, open **Partitions**, click the name
    `cloud_infrastructure_commands`, and open
