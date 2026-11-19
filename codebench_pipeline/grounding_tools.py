@@ -8,7 +8,7 @@ from email.message import Message
 from http.client import HTTPException
 from pathlib import Path
 from threading import RLock
-from typing import IO, Literal, assert_never
+from typing import IO, Final, Literal, assert_never
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, urlsplit, urlunsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
@@ -17,7 +17,10 @@ from pydantic import BaseModel, ConfigDict, Field, JsonValue, TypeAdapter, Valid
 
 from scripts.dataset_schema import SECRET_PATTERNS
 
+from .grounding_policy import OperationGrant
 from .typed_config import TypedConfig
+
+MAXIMUM_BATCH_PROVIDER_CALLS: Final = 10
 
 
 class _Frozen(BaseModel):
@@ -53,6 +56,17 @@ class GroundingConfig(TypedConfig):
     allowed_domains: list[str] = Field(default_factory=list)
     trusted_url_prefixes: list[str] = Field(default_factory=list)
     pinned_library_ids: list[str] = Field(default_factory=list)
+    operation_grants_json: str = Field(default="", exclude_if=lambda grants: not grants)
+
+    @property
+    def provider_call_limit(self) -> int:
+        return min(self.maximum_provider_calls, MAXIMUM_BATCH_PROVIDER_CALLS)
+
+    @property
+    def operation_grants(self) -> tuple[OperationGrant, ...]:
+        if not self.operation_grants_json:
+            return ()
+        return TypeAdapter(tuple[OperationGrant, ...]).validate_json(self.operation_grants_json)
 
     @model_validator(mode="after")
     def explicit_trust(self) -> GroundingConfig:
@@ -64,6 +78,9 @@ class GroundingConfig(TypedConfig):
         for prefix in self.trusted_url_prefixes:
             if urlsplit(_url(prefix)).query or urlsplit(prefix).fragment:
                 raise ValueError("Trusted prefixes cannot contain queries or fragments")
+        for grant in self.operation_grants:
+            if grant.library_id is not None and grant.library_id not in self.pinned_library_ids:
+                raise ValueError("An operation grant must name a pinned Context7 library")
         return self
 
 
@@ -248,12 +265,15 @@ def _persist(path: Path, body: bytes) -> None:
 class GroundingBroker:
     """One batch's serialized call budget, discovery permissions and bounded evidence."""
 
-    def __init__(self, config: GroundingConfig, out: Path, cache: Path | None = None) -> None:
+    def __init__(
+        self, config: GroundingConfig, out: Path, cache: Path | None = None, *, retain_responses: bool = True
+    ) -> None:
         self.config = config.model_copy(deep=True)
         self.out = out
         self.cache = cache
-        self.provider_calls = 0
-        self.response_bytes = 0
+        self.retain_responses = retain_responses
+        self._provider_calls = 0
+        self._response_bytes = 0
         self.evidence_bytes = 0
         self._lock = RLock()
         self._results: dict[str, GroundingResult] = {}
@@ -262,6 +282,34 @@ class GroundingBroker:
         self._evidence_ids: set[str] = set()
         self._response_hashes: dict[str, str] = {}
         self._history: list[GroundingReceipt] = []
+
+    @property
+    def provider_calls(self) -> int:
+        with self._lock:
+            return self._provider_calls
+
+    @property
+    def response_bytes(self) -> int:
+        with self._lock:
+            return self._response_bytes
+
+    def reserve_origin_request(self, maximum_bytes: int) -> bool:
+        """Charge a direct origin attempt and its maximum response before transport."""
+        with self._lock:
+            if maximum_bytes < 1 or self._response_bytes + maximum_bytes > (
+                self.config.maximum_total_response_bytes
+            ):
+                return False
+            if not self._reserve_provider_call():
+                return False
+            self._response_bytes += maximum_bytes
+            return True
+
+    def _reserve_provider_call(self) -> bool:
+        if self._provider_calls >= self.config.provider_call_limit:
+            return False
+        self._provider_calls += 1
+        return True
 
     @property
     def query_history(self) -> tuple[GroundingReceipt, ...]:
@@ -347,10 +395,11 @@ class GroundingBroker:
                 self._authorize(result)
                 if cached is not None:
                     self._response_hashes[request_hash] = cached.response_sha256
-                    _persist(
-                        self.out / "responses" / (cached.response_sha256 + ".json"), cached.body.encode()
-                    )
-                    if self.cache is not None:
+                    if self.retain_responses:
+                        _persist(
+                            self.out / "responses" / (cached.response_sha256 + ".json"), cached.body.encode()
+                        )
+                    if self.retain_responses and self.cache is not None:
                         _persist(self.cache / (request_hash + ".json"), cached.model_dump_json().encode())
             self._results[request_hash] = result.model_copy(deep=True)
             return self._receipt(query, request_hash, result)
@@ -395,7 +444,7 @@ class GroundingBroker:
         api_key = os.environ.get(environment)
         if not api_key:
             return GroundingResult(error=GroundingError(code="missing_api_key")), None
-        if self.provider_calls >= self.config.maximum_provider_calls:
+        if self.provider_calls >= self.config.provider_call_limit:
             return GroundingResult(error=GroundingError(code="provider_budget_exhausted")), None
         remaining = self.config.maximum_total_response_bytes - self.response_bytes
         if remaining <= 0:
@@ -434,12 +483,13 @@ class GroundingBroker:
         )
         request = Request(endpoint + ("?" + urlencode(params) if params else ""), data=body, headers=headers)
         maximum = min(self.config.maximum_response_bytes, remaining)
-        self.provider_calls += 1
+        if not self._reserve_provider_call():
+            return GroundingResult(error=GroundingError(code="provider_budget_exhausted")), None
         try:
             with build_opener(_NoRedirect()).open(request, timeout=self.config.timeout) as response:
                 raw: bytes = response.read(maximum + 1)
                 final_url: str = response.geturl()
-            self.response_bytes += len(raw)
+            self._response_bytes += len(raw)
             if final_url != request.full_url:
                 return GroundingResult(error=GroundingError(code="redirect_denied"), provider_calls=1), None
             if len(raw) > maximum:
@@ -459,8 +509,8 @@ class GroundingBroker:
             cached = _Cached(
                 request_sha256=key, response_sha256=_digest(raw), retrieved_at=retrieved_at, body=text
             )
-            raw_path = self.out / "responses" / (cached.response_sha256 + ".json")
-            _persist(raw_path, raw)
+            if self.retain_responses:
+                _persist(self.out / "responses" / (cached.response_sha256 + ".json"), raw)
             return result, cached
         except HTTPError as error:
             retry = error.headers.get("Retry-After")
@@ -563,9 +613,10 @@ class GroundingBroker:
             return GroundingResult(error=GroundingError(code="evidence_budget_exhausted"))
         self.evidence_bytes += retained
         self._evidence_ids.update(new_documents)
-        for doc in documents:
-            artifact = doc.model_dump_json().encode()
-            _persist(self.out / "documents" / (_digest(artifact) + ".json"), artifact)
+        if self.retain_responses:
+            for doc in documents:
+                artifact = doc.model_dump_json().encode()
+                _persist(self.out / "documents" / (_digest(artifact) + ".json"), artifact)
         return GroundingResult(documents=documents, discovery_results=hits)
 
     def _document(

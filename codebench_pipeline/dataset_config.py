@@ -5,6 +5,7 @@ from pydantic import ConfigDict, Field, field_validator, model_validator
 
 from codebench_pipeline.batch_labeling_config import BatchLabelingConfig
 from codebench_pipeline.category_rules import CategoryRules, Text
+from codebench_pipeline.collection_config import DeclaredCollection
 from codebench_pipeline.dataset_branches import Branch
 from codebench_pipeline.dataset_documentation_config import DocumentationConfig as DocumentationConfig
 from codebench_pipeline.dataset_seed_config import (
@@ -65,7 +66,6 @@ class CatalogConfig(CatalogInputs):
 
 SnapshotBytes = Annotated[int, Field(gt=0)]
 SnapshotWorkers = Annotated[int, Field(ge=1, le=16)]
-BundleVersion = Annotated[int, Field(strict=True, ge=1, le=1)]
 
 
 class SnapshotSettings(StrictStageConfig):
@@ -102,7 +102,7 @@ class FilteringConfig(StrictStageConfig):
 class AnnotationConfig(StrictStageConfig):
     model: ModelConfig
     maximum_context_characters: int = Field(default=131072, ge=1024, le=1048576)
-    workers: int = Field(default=1, ge=1, le=8)
+    workers: int = Field(default=1, ge=1, le=16)
     batch: BatchLabelingConfig | None = None
 
     @model_validator(mode="after")
@@ -165,7 +165,7 @@ class DatasetFileConfig(StrictStageConfig):
 class DatasetBuildSpec(StrictStageConfig):
     dataset_id: Identifier
     revision: str
-    bundle_version: BundleVersion | None = Field(default=None, exclude_if=lambda value: value is None)
+    refresh_external_inputs: bool = False
     rules: CategoryRules
     business_config: Text | None = None
     catalog: CatalogConfig
@@ -179,11 +179,34 @@ class DatasetBuildSpec(StrictStageConfig):
         default=None, exclude_if=lambda value: value is None
     )
     filtering: FilteringConfig
-    documentation: DocumentationConfig
+    documentation: DocumentationConfig | None = Field(default=None, exclude_if=lambda value: value is None)
+    declared_collection: DeclaredCollection | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
     annotation: AnnotationConfig
     review: ReviewConfig | None = None
     publication: PublicationConfig
     storage: StorageConfig
+
+    @property
+    def has_declared_collection(self) -> bool:
+        return self.declared_collection is not None
+
+    @model_validator(mode="after")
+    def matching_collection_inputs(self) -> "DatasetBuildSpec":
+        if self.has_declared_collection:
+            if "documentation" in self.model_fields_set or self.refresh_external_inputs:
+                raise ValueError("Declared collection requires pinned inputs and no labeling documentation")
+            if (
+                self.catalog.configured
+                or self.documentation_catalog is not None
+                or (self.snapshots.documents or self.documentation_snapshots.documents)
+            ):
+                raise ValueError("Declared collection cannot include prepared source inventories")
+            require_guarded_annotation(self.annotation)
+        elif self.documentation is None:
+            raise ValueError("Prepared source inputs require labeling documentation")
+        return self
 
     @field_validator("business_config")
     @classmethod
@@ -201,12 +224,14 @@ def catalog_for_branch(spec: DatasetBuildSpec, branch: Branch) -> CatalogConfig:
             return spec.documentation_catalog or CatalogConfig(
                 mode="provided_sources", model=spec.catalog.model
             )
+        case "keenable":
+            return CatalogConfig()
     assert_never(branch)
 
 
 def snapshots_for_branch(spec: DatasetBuildSpec, branch: Branch) -> SnapshotConfig:
     settings = {"dataset": spec.snapshots, "documentation": spec.documentation_snapshots}[branch]
-    if spec.bundle_version is None:
+    if spec.refresh_external_inputs:
         return settings
     return settings.model_copy(update={"documents": catalog_for_branch(spec, branch).documents})
 
@@ -215,3 +240,13 @@ def load_build_config(path: Path, home: Path | None = None) -> DatasetBuildSpec:
     from codebench_pipeline.dataset_bundle import load_dataset_bundle
 
     return load_dataset_bundle(path, home)
+
+
+def require_guarded_annotation(annotation: AnnotationConfig) -> None:
+    batch = annotation.batch
+    if annotation.model.provider != "openai_compatible" or batch is None:
+        raise ValueError("Declared collection requires guarded OpenAI-compatible batch labeling")
+    if not batch.backend_revision.strip() or not Path(batch.capacity.state_directory).is_absolute():
+        raise ValueError(
+            "Guarded labeling requires a pinned backend revision and absolute shared capacity directory"
+        )

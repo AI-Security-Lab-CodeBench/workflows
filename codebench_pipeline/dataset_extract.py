@@ -1,6 +1,7 @@
 import csv
 import hashlib
 import io
+import json
 import re
 import shlex
 from collections.abc import Iterator
@@ -16,7 +17,6 @@ from codebench_pipeline.dataframe_schemas import (
     FilteredCommandsTable,
     SourceDocumentsTable,
     frame_records,
-    model_records,
     validated_frame,
 )
 from codebench_pipeline.dataset_config import ExtractionConfig, FilteringConfig
@@ -96,16 +96,20 @@ def canonical_rows(
             TypeAdapter(dict[str, JsonValue]).validate_json(source.transform.options_json),
         )
         for row in transformed_rows(source.transform, source_rows(content, adapter.format), context):
-            yield row.model_copy(update={"transformations": [
-                f"trusted_python:{source.transform.sha256}:{source.transform.entrypoint}",
-                *row.transformations,
-            ]})
+            yield row.model_copy(
+                update={
+                    "transformations": [
+                        f"trusted_python:{source.transform.sha256}:{source.transform.entrypoint}",
+                        *row.transformations,
+                    ]
+                }
+            )
         return
     for location, text, context in text_records(content, adapter):
         for command, start, end, transformations in text_commands(text):
             yield CanonicalSourceRow(
                 command=command,
-                context=context + "\n" + text[max(0, start - context_characters):end + context_characters],
+                context=context + "\n" + text[max(0, start - context_characters) : end + context_characters],
                 source_position=f"{location}; characters {start}:{end}",
                 transformations=transformations,
             )
@@ -162,22 +166,46 @@ def extract_candidates(
     return validated_frame(records, CommandCandidatesTable)
 
 
+def unresolved_template(command: str) -> bool:
+    if re.search(r"\{\{|<[A-Za-z_][A-Za-z0-9_.|:/-]*>|(?:^|\s)\.\.\.(?:\s|$)|…", command):
+        return True
+    if "}}" not in command:
+        return False
+    try:
+        words = shlex.split(command)
+    except ValueError:
+        return True
+    structural_closers = 0
+    for word in words:
+        if "}}" not in word:
+            continue
+        word = re.sub(r"^--?[A-Za-z0-9][A-Za-z0-9_-]*=", "", word, count=1)
+        if not word.startswith(("{", "[")):
+            return True
+        try:
+            json.loads(word)
+        except (ValueError, RecursionError):
+            return True
+        if any("}}" in string for string in re.findall(r'"(?:[^"\\]|\\.)*"', word)):
+            return True
+        structural_closers += word.count("}}")
+    return structural_closers != command.count("}}")
+
+
 @pa.check_types
 def filter_candidates(
     raw: DataFrame[CommandCandidatesTable], rules: CategoryRules, config: FilteringConfig
 ) -> DataFrame[FilteredCommandsTable]:
     rows: list[dict[str, JsonValue]] = []
-    for candidate in model_records(raw, CandidateRecord):
+    for row in frame_records(raw):
+        candidate = CandidateRecord.model_validate({name: row[name] for name in CandidateRecord.model_fields})
         reason = ""
         risks = rules.matching_risks(candidate.command)
         if not risks:
             reason = "outside_configured_command_families"
         elif len(candidate.command) > config.maximum_command_characters or "\x00" in candidate.command:
             reason = "oversized_or_control_character"
-        elif re.search(
-            r"\{\{|\}\}|<[A-Za-z_][A-Za-z0-9_.|:/-]*>|(?:^|\s)\.\.\.(?:\s|$)|…",
-            candidate.command,
-        ):
+        elif unresolved_template(candidate.command):
             reason = "unresolved_template"
         elif config.quarantine_dynamic_shell and any(
             token in candidate.command for token in ("$(", "`", "<<")
@@ -190,7 +218,7 @@ def filter_candidates(
                 reason = "unbalanced_shell_quotes"
         rows.append(
             {
-                **candidate.model_dump(mode="json"),
+                **row,
                 "risk_candidates": [risk for risk in risks],
                 "filter_decision": "needs_review" if reason else "eligible",
                 "filter_reason": reason,

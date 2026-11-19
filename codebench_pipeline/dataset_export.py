@@ -30,6 +30,7 @@ def prepare_dataset(
     limit_per_risk: int,
     *,
     approved_ids: frozenset[str] | None = None,
+    selected_ids: frozenset[str] | None = None,
 ) -> Publication:
     if type(limit_per_risk) is not int or limit_per_risk < 0:
         raise ValueError("Per-risk limit must be a nonnegative integer")
@@ -66,7 +67,10 @@ def prepare_dataset(
                 reason = "human review required"
             elif candidate.candidate_id not in approved_ids:
                 reason = "human review excluded"
-        if not reason and counts[label.risk_id] >= limit_per_risk:
+        if not reason and (
+            counts[label.risk_id] >= limit_per_risk
+            or (selected_ids is not None and candidate.candidate_id not in selected_ids)
+        ):
             reason = "per-risk cap reached"
         row = {
             "command": candidate.command,
@@ -196,8 +200,13 @@ def prepare_dataset(
         "Category policy is preserved in rules.json.\n\n"
         "## Coverage and limitations\n\n"
         "statistics.json reports per-risk counts, class, severity, utilities, deficits and source coverage. "
-        "The cap is independent per risk and selects in input order; no random sampling or split "
-        "is performed. Duplicate command text remains distinct by candidate identity. "
+        + (
+            "The cap is independent per risk and selects in input order; no random sampling or split is performed. "
+            if selected_ids is None
+            else "The cap is independent per risk. Required source contributions are reserved first, then the "
+            "remaining slots rotate across branches and origins. The proposal records exact coverage. "
+        )
+        + "Duplicate command text remains distinct by candidate identity. "
         "No linking, pairing, deduplication, synthesis or command execution is performed.\n\n"
         "Source eligibility, licensing and reuse evidence are owned by the upstream source_catalog; "
         "this export does not approve them. Consult that catalog before reuse. Structural validation "

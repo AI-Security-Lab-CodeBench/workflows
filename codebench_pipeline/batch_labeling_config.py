@@ -1,3 +1,5 @@
+from typing import Literal
+
 from pydantic import Field
 
 from codebench_pipeline.grounding_tools import GroundingConfig
@@ -13,5 +15,8 @@ class BatchLabelingConfig(TypedConfig):
     maximum_grounding_rounds: int = Field(default=2, ge=0, le=4)
     retry_revision: str = Field(default="1", min_length=1)
     backend_revision: str = Field(min_length=1)
+    inference_mode: Literal["guarded", "plain"] = Field(
+        default="guarded", exclude_if=lambda mode: mode == "guarded"
+    )
     grounding: GroundingConfig
     capacity: CapacityConfig

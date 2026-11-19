@@ -8,6 +8,8 @@ from dagster import AssetKey, AssetRecordsFilter, Config, DagsterInstance, build
 from pydantic import JsonValue, TypeAdapter
 
 from codebench_pipeline.category_rules import CategoryRules
+from codebench_pipeline.collection_config import DeclaredSourceStageConfig
+from codebench_pipeline.config_assets import configured_selection
 from codebench_pipeline.dataframe_io import (
     REVIEW_PREPARATION,
     AssetReference,
@@ -16,9 +18,24 @@ from codebench_pipeline.dataframe_io import (
 )
 from codebench_pipeline.dataframe_schemas import CommandCandidatesTable, validated_frame
 from codebench_pipeline.dataset_asset_types import DATASET_PARTITIONS
-from codebench_pipeline.dataset_branches import FINALIZATION_STAGES, Branch, stage_branch, stage_name
+from codebench_pipeline.dataset_branches import (
+    FINALIZATION_STAGES,
+    Branch,
+    collection_branches,
+    stage_branch,
+    stage_name,
+)
 from codebench_pipeline.dataset_catalog import source_scope
 from codebench_pipeline.dataset_config import DatasetBuildSpec, catalog_for_branch
+from codebench_pipeline.dataset_dependencies import (
+    DECLARED_INPUT_STAGES,
+    INPUT_STAGES,
+    KNOWN_STAGES,
+    PREPARATION_STAGES,
+    RELEASE_STAGES,
+    collection_selection,
+    preparation_stages,
+)
 from codebench_pipeline.dataset_engine import stage_signature
 from codebench_pipeline.documentation_authorization import (
     SourceInventoryAuthorization,
@@ -26,72 +43,30 @@ from codebench_pipeline.documentation_authorization import (
 )
 from codebench_pipeline.human_review import HumanReviewError
 from codebench_pipeline.human_review_store import HumanReviewStore
+from codebench_pipeline.source_evidence import require_source_rights, validate_source_receipt
 from codebench_pipeline.stage_cache_compatibility import legacy_signature_matches
-from codebench_pipeline.stage_configuration import collection_stage_configs
+from codebench_pipeline.stage_configuration import collection_stage_configs, stage_configs
 from codebench_pipeline.storage import IntegrityError, fingerprint
 
-INPUT_STAGES: dict[str, dict[str, str]] = {
-    "category_rules": {},
-    "source_catalog": {"category_rules": "category_rules"},
-    "source_documents": {"source_catalog": "source_catalog"},
-    "document_adapters": {"source_documents": "source_documents"},
-    "command_candidates": {"source_documents": "source_documents", "adapters": "document_adapters"},
-}
+BranchUnavailable = Literal["waiting", "unconfigured", "failed", "stale"]
 
-INPUT_STAGES.update(
-    {
-        stage_name(stage, "documentation"): {
-            name: stage_name(parent, "documentation") for name, parent in dependencies.items()
-        }
-        for stage, dependencies in tuple(INPUT_STAGES.items())
-        if stage != "category_rules"
-    }
-)
-
-INPUT_STAGES.update(
-    {
-        "merged_command_candidates": {
-            "dataset_candidates": "command_candidates",
-            "documentation_candidates": "documentation/command_candidates",
-        },
-        "filtered_commands": {
-            "command_candidates": "merged_command_candidates",
-            "category_rules": "category_rules",
-        },
-        "labeling_documentation": {"commands": "filtered_commands", "category_rules": "category_rules"},
-        "labeling_attempts": {
-            "commands": "filtered_commands",
-            "documentation": "labeling_documentation",
-            "category_rules": "category_rules",
-        },
-        "proposed_annotations": {"attempts": "labeling_attempts", "category_rules": "category_rules"},
-        "labeling_failures": {"attempts": "labeling_attempts"},
-        "deduplicated_annotations": {"annotations": "proposed_annotations"},
-        "category_eligible_annotations": {
-            "annotations": "deduplicated_annotations",
-            "category_rules": "category_rules",
-        },
-        "human_review_queue": {
-            "annotations": "category_eligible_annotations",
-            "category_rules": "category_rules",
-        },
-        "human_review_decisions": {
-            "human_review_queue": "human_review_queue",
-        },
-        "dataset_release": {
-            "category_eligible_annotations": "category_eligible_annotations",
-            "human_review_decisions": "human_review_decisions",
-            "category_rules": "category_rules",
-        },
-    }
-)
-RELEASE_STAGES = ("human_review_decisions", "dataset_release")
-PREPARATION_STAGES = tuple(stage for stage in INPUT_STAGES if stage not in RELEASE_STAGES)
+__all__ = [
+    "INPUT_STAGES",
+    "KNOWN_STAGES",
+    "PREPARATION_STAGES",
+    "RELEASE_STAGES",
+    "DECLARED_INPUT_STAGES",
+    "BuildPlan",
+    "BranchUnavailable",
+    "collection_selection",
+    "graph_materialization_stale",
+    "plan_dataset",
+    "preparation_stages",
+    "unavailable_candidates",
+]
 
 
-def unavailable_candidates(
-    spec: DatasetBuildSpec, branch: Branch, state: Literal["waiting", "unconfigured"]
-) -> pd.DataFrame:
+def unavailable_candidates(spec: DatasetBuildSpec, branch: Branch, state: BranchUnavailable) -> pd.DataFrame:
     empty = validated_frame([], CommandCandidatesTable)
     empty.attrs["branch_state"] = state
     empty.attrs["branch_configuration"] = fingerprint(
@@ -120,11 +95,16 @@ class BuildPlan:
 
     @property
     def asset_selection(self) -> list[AssetKey]:
-        return [AssetKey(["datasets", *stage.split("/")]) for stage in self.selected]
+        return configured_selection(AssetKey(["datasets", *stage.split("/")]) for stage in self.selected)
 
 
 def plan_dataset(
-    spec: DatasetBuildSpec, configurations: Mapping[str, Config], instance: DagsterInstance, *, home: Path
+    spec: DatasetBuildSpec,
+    configurations: Mapping[str, Config],
+    instance: DagsterInstance,
+    *,
+    home: Path,
+    through: str | None = None,
 ) -> BuildPlan:
     manager = DataFrameIOManager(storage=spec.storage)
     selected: dict[str, str] = {}
@@ -135,16 +115,28 @@ def plan_dataset(
     source_revision: str | None = None
     references: dict[str, AssetReference] = {}
     source_authorizations: dict[str, SourceInventoryAuthorization] = {}
-    branches: tuple[Branch, ...] = ("dataset", "documentation")
     unconfigured: tuple[Branch, ...] = tuple(
-        branch for branch in branches if not catalog_for_branch(spec, branch).configured
+        branch.namespace
+        for branch in collection_branches(declared=spec.has_declared_collection)
+        if not spec.has_declared_collection and not catalog_for_branch(spec, branch.namespace).configured
     )
     for branch in unconfigured:
         values[stage_name("command_candidates", branch)] = unavailable_candidates(
             spec, branch, "unconfigured"
         )
-    for stage, dependencies in INPUT_STAGES.items():
-        if stage not in PREPARATION_STAGES:
+    dependencies_by_stage = DECLARED_INPUT_STAGES if spec.has_declared_collection else INPUT_STAGES
+    needed: set[str] = set()
+    if through is not None:
+        pending = [through]
+        while pending:
+            stage = pending.pop()
+            if stage not in needed:
+                needed.add(stage)
+                pending.extend(dependencies_by_stage[stage].values())
+    for stage, dependencies in dependencies_by_stage.items():
+        if stage in RELEASE_STAGES:
+            continue
+        if through is not None and stage not in needed:
             continue
         if stage not in ("category_rules", *FINALIZATION_STAGES) and stage_branch(stage) in unconfigured:
             continue
@@ -157,6 +149,21 @@ def plan_dataset(
             blocked.append(stage)
             if stage.rsplit("/", 1)[-1] == "command_candidates":
                 values[stage] = unavailable_candidates(spec, stage_branch(stage), "waiting")
+            continue
+        config = configurations[stage]
+        if isinstance(config, DeclaredSourceStageConfig):
+            try:
+                require_source_rights(config)
+            except HumanReviewError:
+                blocked.append(stage)
+                waiting_for = "sources"
+                continue
+        if (
+            spec.has_declared_collection
+            and stage == "merged_command_candidates"
+            and any(parent in blocked for parent in dependencies.values())
+        ):
+            blocked.append(stage)
             continue
         key = AssetKey(["datasets", *stage.split("/")])
         records = instance.fetch_materializations(
@@ -172,7 +179,7 @@ def plan_dataset(
         expected = (
             fingerprint(spec.rules.model_dump_json())
             if stage == "category_rules"
-            else stage_signature(stage.rsplit("/", 1)[-1], configurations[stage], inputs)
+            else stage_signature(stage.rsplit("/", 1)[-1], config, inputs)
         )
         materialization = records[0].asset_materialization
         if materialization is None:
@@ -184,11 +191,12 @@ def plan_dataset(
             else materialization.metadata[metadata_key].value
         )
         if recorded != expected and not (
-            stage != "category_rules"
+            not spec.has_declared_collection
+            and stage != "category_rules"
             and legacy_signature_matches(
                 manager,
                 stage.rsplit("/", 1)[-1],
-                configurations[stage],
+                config,
                 inputs,
                 str(recorded),
                 evidence=TypeAdapter(dict[str, JsonValue]).validate_python(
@@ -211,6 +219,13 @@ def plan_dataset(
             continue
         if materialization.metadata["codebench/content_digest"].value != persisted.reference.digest:
             raise IntegrityError("Current output differs from its recorded materialization")
+        if isinstance(config, DeclaredSourceStageConfig) and isinstance(persisted.value, pd.DataFrame):
+            try:
+                validate_source_receipt(persisted.value, config, manager)
+            except (FileNotFoundError, HumanReviewError):
+                blocked.append(stage)
+                waiting_for = "sources"
+                continue
         if stage == "human_review_queue":
             try:
                 with HumanReviewStore(home).reader() as transaction:
@@ -250,3 +265,16 @@ def plan_dataset(
         references,
         source_authorizations,
     )
+
+
+def graph_materialization_stale(
+    spec: DatasetBuildSpec, instance: DagsterInstance, *, home: Path, stage: str
+) -> bool | None:
+    if not spec.has_declared_collection:
+        return True if stage.startswith("keenable/") else None
+    if stage in {"semantic_evidence", "labeling_documentation"}:
+        return True
+    if stage not in DECLARED_INPUT_STAGES or stage in RELEASE_STAGES:
+        return None
+    plan = plan_dataset(spec, stage_configs(spec), instance, home=home, through=stage)
+    return stage not in plan.unchanged

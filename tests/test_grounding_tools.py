@@ -314,6 +314,29 @@ class GroundingToolsTests(unittest.TestCase):
             self.assertNotIn("fixture-context-key", text)
             self.assertNotIn("private body", text)
 
+    def test_provider_and_direct_origin_share_atomic_call_and_byte_reservations(self) -> None:
+        wire = self.wire(*([{"results": []}, b"origin"] * 6))
+        config = self.config.model_copy(update={"maximum_provider_calls": 20})
+        broker = self.broker(config)
+
+        self.assertFalse(broker.reserve_origin_request(config.maximum_total_response_bytes + 1))
+        for index in range(6):
+            result = broker.execute(self.query(query=f"volume operation {index}"))
+            if index == 5:
+                self.assertEqual(result.error.code if result.error else None, "provider_budget_exhausted")
+            else:
+                self.assertIsNone(result.error)
+            if broker.reserve_origin_request(64):
+                with wire.open(Request(f"https://docs.example.org/volume/{index}"), 1) as response:
+                    response.read(64)
+
+        self.assertEqual(
+            [urlsplit(request.full_url).hostname for request in wire.requests],
+            ["api.keenable.ai", "docs.example.org"] * 5,
+        )
+        self.assertEqual(broker.provider_calls, 10)
+        self.assertEqual(broker.response_bytes, 5 * (64 + len(b'{"results": []}')))
+
     def test_raw_response_and_query_receipts_are_hashed_without_auth(self) -> None:
         self.wire(self.search_page())
         self.broker().execute(self.query())

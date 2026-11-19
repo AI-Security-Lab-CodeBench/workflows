@@ -286,6 +286,13 @@ class IncrementalDatasetTests(unittest.TestCase):
                     "deduplicated_annotations",
                     "category_eligible_annotations",
                     "human_review_queue",
+                    "global_config",
+                    "map_labeling_attempts_config",
+                    "map_proposed_annotations_config",
+                    "map_labeling_failures_config",
+                    "map_deduplicated_annotations_config",
+                    "map_category_eligible_annotations_config",
+                    "map_human_review_queue_config",
                 )
             },
         )

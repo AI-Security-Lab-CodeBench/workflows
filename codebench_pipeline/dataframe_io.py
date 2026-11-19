@@ -210,7 +210,7 @@ class DataFrameIOManager(ConfigurableIOManager):
                                 raise IntegrityError("Finalization outputs must be tables")
                             case _:
                                 assert_never(obj)
-                    if context.asset_key.path[-1] in SOURCE_GATED_STAGES:
+                    if context.asset_key.path[-1] in SOURCE_GATED_STAGES | {"source_catalog"}:
                         match obj:
                             case pd.DataFrame():
                                 authorize_output(context, self, obj)
@@ -290,7 +290,7 @@ class DataFrameIOManager(ConfigurableIOManager):
             context.asset_key.path[-1] == "command_candidates"
             and self.review_home is not None
             and context.has_input_name
-            and context.name in {"dataset_candidates", "documentation_candidates"}
+            and context.name == f"{asset_branch(context.asset_key.path)}_candidates"
         ):
             from codebench_pipeline.data_views import DatasetDataService
             from codebench_pipeline.dataset_finalization import available_candidates
@@ -299,7 +299,8 @@ class DataFrameIOManager(ConfigurableIOManager):
             frames, _ = available_candidates(
                 home, DatasetDataService(home, context.instance), context.asset_partition_key
             )
-            return frames[asset_branch(context.asset_key.path)]
+            branch = asset_branch(context.asset_key.path)
+            return frames[branch]
         snapshot = self.read_current(context)
         if snapshot.publication_state in {"stale", "legacy_unreviewed"}:
             from codebench_pipeline.human_review import HumanReviewError

@@ -8,7 +8,12 @@ from codebench_pipeline.category_rules import CategoryRules
 from codebench_pipeline.dataframe_io import AssetSnapshot, DataFrameIOManager
 from codebench_pipeline.dataset_engine import implementation_signature
 from codebench_pipeline.models import Digest
-from codebench_pipeline.stage_implementation import STAGE_ROOTS, ProcessingChanged, verify_processing
+from codebench_pipeline.stage_implementation import (
+    STAGE_ROOTS,
+    ProcessingChanged,
+    ProcessingReceiptIncomplete,
+    verify_processing,
+)
 
 
 def legacy_signature_matches(
@@ -23,7 +28,9 @@ def legacy_signature_matches(
         return False
     if evidence is not None and "stage_implementation" in evidence:
         implementation = TypeAdapter(dict[str, Digest]).validate_python(evidence["implementation"])
-        stage_implementation = TypeAdapter(dict[str, Digest]).validate_python(evidence["stage_implementation"])
+        stage_implementation = TypeAdapter(dict[str, Digest]).validate_python(
+            evidence["stage_implementation"]
+        )
     else:
         try:
             payload = storage.read_evidence(f"legacy-implementations/{recorded}.json")
@@ -35,6 +42,6 @@ def legacy_signature_matches(
         return False
     try:
         verify_processing(stage, implementation, storage.read_evidence)
-    except ProcessingChanged:
+    except (ProcessingChanged, ProcessingReceiptIncomplete):
         return False
     return True

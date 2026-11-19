@@ -43,6 +43,7 @@ def resolve_legacy_file(
         DatasetBuildSpec(
             dataset_id=supplied.dataset_id,
             revision=supplied.revision,
+            refresh_external_inputs=True,
             rules=rules,
             business_config=business_config,
             catalog=_legacy_catalog(supplied.seeds, parent, supplied.models.selector),
@@ -100,17 +101,16 @@ def resolve_business_inputs(spec: DatasetBuildSpec) -> DatasetBuildSpec:
         updates[catalog_name] = catalog.model_copy(update={"documents": documents})
         snapshots = spec.snapshots if snapshot_name == "snapshots" else spec.documentation_snapshots
         updates[snapshot_name] = snapshots.model_copy(update={"documents": documents})
-    if spec.documentation.manifest is not None:
-        updates["documentation"] = spec.documentation.model_copy(
-            update={
-                "snippets": manifest_documentation(Path(spec.documentation.manifest), spec.rules.category_id)
-            }
+    documentation = spec.documentation
+    if documentation is not None and documentation.manifest is not None:
+        updates["documentation"] = documentation.model_copy(
+            update={"snippets": manifest_documentation(Path(documentation.manifest), spec.rules.category_id)}
         )
     return spec.model_copy(update=updates)
 
 
 def resolve_labeling_inputs(spec: DatasetBuildSpec) -> DatasetBuildSpec:
-    """Refresh the policy for an unversioned registered specification."""
+    """Refresh the policy for a registration with live inputs."""
     rules = (
         load_business_rules(Path(spec.business_config), spec.rules.category_id)
         if spec.business_config is not None

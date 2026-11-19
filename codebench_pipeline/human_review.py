@@ -244,6 +244,7 @@ class PublicationPayload(ReviewModel):
     csv_reference: Text
     bundle_reference: Text
     dagster_run_id: Text
+    proposal_digest: Digest | None = Field(default=None, exclude_if=lambda value: value is None)
 
 
 class PublicationReference(PublicationPayload):

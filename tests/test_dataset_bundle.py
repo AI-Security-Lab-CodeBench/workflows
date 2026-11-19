@@ -29,7 +29,6 @@ def write_bundle(root: Path, **updates: JsonValue) -> Path:
     fixture = example_config()
     assert fixture.rules is not None
     contents: dict[str, JsonValue] = {
-        "version": 1,
         "dataset_id": fixture.dataset_id,
         "revision": "bundle-fixture",
         "finalization": {
@@ -196,15 +195,14 @@ class DatasetBundleTests(unittest.TestCase):
                 table["snippet"].tolist(), [seed.snippet for seed in fixture.documentation.snippets]
             )
 
-    def test_bundle_rejects_unknown_version_competing_inputs_and_foreign_category(self) -> None:
+    def test_bundle_rejects_version_selectors_competing_inputs_and_foreign_category(self) -> None:
         fixture = example_config()
         assert fixture.documentation_sources is not None
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             for updates in (
+                {"version": 1},
                 {"version": 2},
-                {"version": True},
-                {"version": 1.0},
                 {"documentation_crawl": {"snapshot": {"workers": "2"}}},
                 {
                     "documentation_crawl": {

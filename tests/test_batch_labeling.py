@@ -2,11 +2,20 @@ import json
 import os
 import tempfile
 import unittest
+from collections import Counter
+from collections.abc import Sequence
+from concurrent.futures import ThreadPoolExecutor
 from io import BytesIO
 from pathlib import Path
+from threading import Barrier
 from unittest.mock import patch
+from urllib.error import URLError
+from urllib.parse import parse_qs, urlsplit
 from urllib.request import Request
 
+import numpy as np
+from jsonschema import validate
+from numpy.typing import NDArray
 from test_dataset_annotation import documentation
 from test_dataset_rules import make_candidate, make_label, make_rules
 
@@ -14,7 +23,8 @@ from codebench_pipeline.batch_labeling import annotate_batches
 from codebench_pipeline.batch_labeling_config import BatchLabelingConfig
 from codebench_pipeline.dataset_records import CandidateRecord
 from codebench_pipeline.grounding_tools import GroundingConfig
-from codebench_pipeline.inference_capacity import CapacityConfig, CapacityUnavailable
+from codebench_pipeline.inference_capacity import CapacityConfig, CapacityUnavailable, ContextBudgetExceeded
+from codebench_pipeline.labeling_outcomes import LabelingAttempt
 from codebench_pipeline.model_config import ModelConfig
 from codebench_pipeline.openai_transport import HTTPResponse
 
@@ -109,6 +119,116 @@ class _DocOpener:
 
 
 class BatchLabelingTests(unittest.TestCase):
+    def test_plain_inference_submits_directly_without_reserving_capacity(self) -> None:
+        def provider(url, body, key, timeout):
+            self.assertEqual(url, "http://fixture/v1/chat/completions")
+            records = json.loads(json.loads(body)["messages"][1]["content"])["records"]
+            return tool_reply(
+                "submit_labels", {"outcomes": [submitted(r, r["evidence_ids"]) for r in records]}
+            )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with patch("codebench_pipeline.batch_labeling.plain_complete", side_effect=provider):
+                outcomes = annotate_batches(
+                    [make_candidate("one")],
+                    documentation(),
+                    make_rules(),
+                    remote_model(),
+                    batch_config(root).model_copy(update={"inference_mode": "plain"}),
+                    root / "run",
+                )
+            self.assertEqual([row.status for row in outcomes], ["success"])
+            self.assertFalse((root / "capacity").exists())
+
+    def test_disjoint_cached_rows_overlap_and_identical_rows_reuse_original_receipt(self) -> None:
+        arrivals = Barrier(2)
+
+        def provider(_url: str, body: bytes, _key: str | None, _timeout: float) -> HTTPResponse:
+            (row,) = json.loads(json.loads(body)["messages"][1]["content"])["records"]
+            arrivals.wait(timeout=10)
+            return tool_reply("submit_labels", {"outcomes": [submitted(row, row["evidence_ids"])]})
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config = batch_config(root).model_copy(update={"inference_mode": "plain"})
+
+            def annotate(candidate: CandidateRecord, name: str) -> LabelingAttempt:
+                return annotate_batches(
+                    [candidate],
+                    documentation(),
+                    make_rules(),
+                    remote_model(),
+                    config,
+                    root / name,
+                    cache=root / "cache",
+                )[0]
+
+            one, two = make_candidate("one"), make_candidate("two")
+            with (
+                patch("codebench_pipeline.batch_labeling.plain_complete", side_effect=provider) as inference,
+                ThreadPoolExecutor(3) as workers,
+            ):
+                first = workers.submit(annotate, one, "first")
+                duplicate = workers.submit(annotate, one, "duplicate")
+                disjoint = workers.submit(annotate, two, "disjoint")
+                original, reused, other = [job.result(timeout=15) for job in (first, duplicate, disjoint)]
+
+            self.assertEqual([original.status, reused.status, other.status], ["success"] * 3)
+            self.assertEqual(inference.call_count, 2)
+            receipts = [
+                next((root / name).glob("label/*/receipt.json")).read_bytes()
+                for name in ("first", "duplicate")
+            ]
+            self.assertEqual(receipts[0], receipts[1])
+
+    def test_compact_submission_binds_identity_and_rejects_conflicting_explicit_identity(self) -> None:
+        def provider(
+            _base_url: str,
+            body: bytes,
+            _key: str | None,
+            _timeout: float,
+            _config: CapacityConfig,
+            _out: Path,
+        ) -> HTTPResponse:
+            wire = json.loads(body)
+            records = json.loads(wire["messages"][1]["content"])["records"]
+            by_id = {row["candidate"]["candidate_id"]: row for row in records}
+            compact = submitted(by_id["one"], by_id["one"]["evidence_ids"])
+            del compact["label"]["candidate_id"]
+            del compact["label"]["util"]
+            parameters = wire["tools"][0]["function"]["parameters"]
+            validate({"outcomes": [compact]}, parameters)
+            invalid = submitted(by_id["two"], by_id["two"]["evidence_ids"])
+            invalid["label"]["candidate_id"] = "one"
+            return tool_reply("submit_labels", {"outcomes": [compact, invalid]})
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with patch("codebench_pipeline.batch_labeling.guarded_complete", side_effect=provider):
+                valid, invalid = annotate_batches(
+                    [make_candidate("one"), make_candidate("two")],
+                    documentation(),
+                    make_rules(),
+                    remote_model(),
+                    batch_config(root),
+                    root / "run",
+                )
+            self.assertEqual(valid.status, "success")
+            self.assertIsNotNone(valid.label_json)
+            self.assertEqual(json.loads(valid.label_json)["candidate_id"], "one")
+            self.assertEqual(json.loads(valid.label_json)["util"], valid.util)
+            self.assertEqual(invalid.status, "failure")
+            self.assertIn("Label identity differs from candidate", invalid.failure_detail)
+
+    def setUp(self) -> None:
+        def fixture_vectors(commands: Sequence[str]) -> NDArray[np.float32]:
+            return np.ones((len(commands), 1), dtype=np.float32)
+
+        encoder = patch("codebench_pipeline.command_batches.encode_commands", side_effect=fixture_vectors)
+        encoder.start()
+        self.addCleanup(encoder.stop)
+
     def test_changed_batch_instructions_reach_provider_and_invalidate_cache(self) -> None:
         prompts = []
 
@@ -313,11 +433,18 @@ class BatchLabelingTests(unittest.TestCase):
             feedback = [message for message in messages if message["role"] == "tool"]
             if not feedback:
                 outcome["decision"] = outcome["label"].pop("decision")
-                outcome["label"].pop("candidate_id")
+                outcome["label"]["candidate_id"] = 1
             else:
                 errors = json.loads(feedback[-1]["content"])["errors"]
-                locations = {tuple(issue["loc"]) for issue in errors[0]["issues"]}
-                self.assertEqual(locations, {("label", "candidate_id"), ("label", "decision"), ("decision",)})
+                issues = {(tuple(issue["loc"]), issue["type"]) for issue in errors[0]["issues"]}
+                self.assertEqual(
+                    issues,
+                    {
+                        (("label", "candidate_id"), "string_type"),
+                        (("label", "decision"), "missing"),
+                        (("decision",), "extra_forbidden"),
+                    },
+                )
             return tool_reply("submit_labels", {"outcomes": [outcome]})
 
         with tempfile.TemporaryDirectory() as temporary:
@@ -394,6 +521,70 @@ class BatchLabelingTests(unittest.TestCase):
             self.assertEqual(inference.call_count, 2)
             self.assertIn("Inspect reads metadata.", first[0].documentation_json)
 
+    def test_stale_refresh_shares_provider_budget_with_new_judgments(self) -> None:
+        def complete(
+            base_url: str, body: bytes, key: str | None, timeout: float, capacity: CapacityConfig, path: Path
+        ) -> HTTPResponse:
+            messages = json.loads(body)["messages"]
+            records = json.loads(messages[1]["content"])["records"]
+            if not any(message["role"] == "tool" for message in messages):
+                identities = [record["candidate"]["candidate_id"] for record in records]
+                return tool_reply(
+                    "request_documentation",
+                    {
+                        "queries": [
+                            {
+                                "action": "context7_context",
+                                "query": f"{identity}-{index}",
+                                "candidate_ids": [identity],
+                                "library_id": "/fixture/docs",
+                            }
+                            for identity in identities
+                            for index in range(3 if identity == "new" else 1)
+                        ]
+                    },
+                )
+            return tool_reply(
+                "submit_labels",
+                {"outcomes": [submitted(record, record["evidence_ids"]) for record in records]},
+            )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config = batch_config(root)
+            grounding = config.grounding.model_copy(update={"maximum_provider_calls": 3})
+            candidates = [make_candidate("old-a"), make_candidate("old-b"), make_candidate("new")]
+            runs = []
+            queries: list[str] = []
+
+            def wire(request: Request, timeout: float) -> _DocResponse:
+                queries.append(parse_qs(urlsplit(request.full_url).query)["query"][0])
+                return _DocResponse(request.full_url, "Inspect reads metadata.")
+
+            with (
+                patch.dict(os.environ, {"CONTEXT7_API_KEY": "fixture-context-key"}),
+                patch("codebench_pipeline.grounding_tools.build_opener") as opener,
+                patch("codebench_pipeline.batch_labeling.guarded_complete", side_effect=complete),
+            ):
+                opener.return_value.open.side_effect = wire
+                for revision, rows in (("1", candidates[:2]), ("2", candidates)):
+                    runs.append(
+                        annotate_batches(
+                            rows,
+                            documentation(),
+                            make_rules(),
+                            remote_model(),
+                            config.model_copy(
+                                update={"grounding": grounding.model_copy(update={"revision": revision})}
+                            ),
+                            root / revision,
+                            cache=root / "cache",
+                        )
+                    )
+            self.assertEqual(queries, ["old-a-0", "old-b-0", "old-a-0", "old-b-0", "new-0"])
+            self.assertEqual(runs[1][:2], runs[0])
+            self.assertEqual([row.status for row in runs[1]], ["success"] * 3)
+
     def test_capacity_pause_does_not_manufacture_failed_label(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -441,6 +632,88 @@ class BatchLabelingTests(unittest.TestCase):
             self.assertEqual([row.status for row in results], ["success", "success", "success"])
             self.assertEqual(calls.call_count, 3)
 
+    def test_provider_budget_isolated_by_logical_batch_and_survives_context_splits(self) -> None:
+        for configured, split, expected in ((22, False, 10), (22, True, 10), (3, False, 3)):
+            with self.subTest(configured=configured, split=split), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                defaults = batch_config(root)
+                config = defaults.model_copy(
+                    update={
+                        "batch_size": 2,
+                        "maximum_model_turns": 3,
+                        "maximum_grounding_rounds": 2,
+                        "grounding": defaults.grounding.model_copy(
+                            update={"maximum_provider_calls": configured}
+                        ),
+                    }
+                )
+                batches: dict[str, str] = {}
+                outbound: Counter[str] = Counter()
+                retried: set[str] = set()
+
+                def wire(request: Request, timeout: float) -> _DocResponse:
+                    query = parse_qs(urlsplit(request.full_url).query)["query"][0]
+                    outbound[query.split(":")[0]] += 1
+                    raise URLError("fixture transport failure")
+
+                def complete(
+                    base_url: str,
+                    body: bytes,
+                    key: str | None,
+                    timeout: float,
+                    capacity: CapacityConfig,
+                    path: Path,
+                ) -> HTTPResponse:
+                    messages = json.loads(body)["messages"]
+                    records = json.loads(messages[1]["content"])["records"]
+                    identities = [record["candidate"]["candidate_id"] for record in records]
+                    rounds = sum(message["role"] == "tool" for message in messages)
+                    if len(identities) == 2:
+                        for identity in identities:
+                            batches[identity] = identities[0]
+                        if split and rounds:
+                            retried.add(identities[0])
+                            raise ContextBudgetExceeded("fixture accumulated context")
+                    if rounds < 2:
+                        return tool_reply(
+                            "request_documentation",
+                            {
+                                "queries": [
+                                    {
+                                        "action": "context7_context",
+                                        "query": f"{batches[identity]}:{identity}:{len(identities)}:{rounds}:{index}",
+                                        "candidate_ids": [identity],
+                                        "library_id": "/fixture/docs",
+                                    }
+                                    for index in range(7)
+                                    for identity in [identities[index % len(identities)]]
+                                ]
+                            },
+                        )
+                    return tool_reply(
+                        "submit_labels",
+                        {"outcomes": [submitted(record, record["evidence_ids"]) for record in records]},
+                    )
+
+                with (
+                    patch.dict(os.environ, {"CONTEXT7_API_KEY": "fixture-context-key"}),
+                    patch("codebench_pipeline.grounding_tools.build_opener") as opener,
+                    patch("codebench_pipeline.batch_labeling.guarded_complete", side_effect=complete),
+                ):
+                    opener.return_value.open.side_effect = wire
+                    results = annotate_batches(
+                        [make_candidate(str(index)) for index in range(4)],
+                        documentation(),
+                        make_rules(),
+                        remote_model(),
+                        config,
+                        root / "run",
+                    )
+                self.assertEqual(len(set(batches.values())), 2)
+                self.assertEqual(outbound, {batch: expected for batch in set(batches.values())})
+                self.assertEqual(retried, set(batches.values()) if split else set())
+                self.assertEqual([row.status for row in results], ["success"] * 4)
+
     def test_single_oversized_record_has_a_failure_without_model_submission(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -459,6 +732,47 @@ class BatchLabelingTests(unittest.TestCase):
                 )
             self.assertEqual(results[0].failure_code, "context_limit")
             self.assertEqual(results[0].label_json, "")
+
+    def test_truncated_output_does_not_consume_the_repair_context_budget(self) -> None:
+        truncated = tool_reply("submit_labels", {"outcomes": []}, finish_reason="length")
+        envelope = json.loads(truncated.body)
+        envelope["choices"][0]["message"]["reasoning"] = "reasoning " * 6000
+        truncated = HTTPResponse(json.dumps(envelope).encode(), "fixture-truncated")
+
+        def complete(
+            _base_url: str, body: bytes, _key: str | None, _timeout: float, _config: CapacityConfig, out: Path
+        ) -> HTTPResponse:
+            request = json.loads(body)
+            if out.parent.name == "turn-00":
+                self.assertNotIn("chat_template_kwargs", request)
+                return truncated
+            self.assertEqual(request["chat_template_kwargs"], {"enable_thinking": False})
+            self.assertEqual(request["max_completion_tokens"], remote_model().max_output_tokens)
+            messages = request["messages"]
+            (row,) = json.loads(messages[1]["content"])["records"]
+            self.assertEqual([message["role"] for message in messages], ["system", "user", "user"])
+            return tool_reply(
+                "submit_labels", {"outcomes": [submitted(row, row["evidence_ids"])]}, finish_reason="stop"
+            )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with patch(
+                "codebench_pipeline.batch_labeling.guarded_complete", side_effect=complete
+            ) as provider:
+                (result,) = annotate_batches(
+                    [make_candidate("one")],
+                    documentation(),
+                    make_rules(),
+                    remote_model(),
+                    batch_config(root).model_copy(update={"backend_revision": "qwen38-27b-fp8"}),
+                    root / "run",
+                    maximum_context_characters=50000,
+                )
+            self.assertEqual(result.status, "success", result.failure_detail)
+            self.assertEqual(provider.call_count, 2)
+            raw_response = next((root / "run").glob("batches/*/turn-00/raw_response.json"))
+            self.assertEqual(json.loads(raw_response.read_text()), envelope)
 
     def test_capacity_pause_after_partial_submission_preserves_completed_peer(self) -> None:
         calls = 0

@@ -1,21 +1,37 @@
+import json
+
 from dagster import Config
 
 from codebench_pipeline.category_rules import CategoryRulesConfig
-from codebench_pipeline.dataset_branches import Branch, stage_name
+from codebench_pipeline.collection_config import CollectionMergeConfig, DeclaredSourceStageConfig
+from codebench_pipeline.dataset_branches import Branch, collection_branches, stage_name
 from codebench_pipeline.dataset_config import (
     DatasetBuildSpec,
     catalog_for_branch,
     snapshots_for_branch,
 )
+from codebench_pipeline.keenable_policy import KeenableDeclaration
+from codebench_pipeline.repository_config import RepositoryConfig
 from codebench_pipeline.review_config import HumanReviewConfig
+from codebench_pipeline.storage import IntegrityError, fingerprint
 from codebench_pipeline.typed_config import TypedConfig
 
 
 def finalization_stage_configs(spec: DatasetBuildSpec) -> dict[str, Config]:
+    merge: TypedConfig = TypedConfig()
+    if spec.declared_collection is not None:
+        collection = spec.declared_collection
+        dataset = RepositoryConfig.model_validate(collection.existing_datasets.declaration)
+        docs = RepositoryConfig.model_validate(collection.documentation_crawl.declaration)
+        if dataset.keenable_source_weight != docs.keenable_source_weight or max(
+            dataset.source_weight("dataset", origin.origin_id) for origin in dataset.dataset
+        ) >= min(docs.source_weight("documentation", origin.origin_id) for origin in docs.documentation):
+            raise IntegrityError("Collection declarations disagree on source trust tiers")
+        merge = CollectionMergeConfig(keenable_source_weight=dataset.keenable_source_weight)
     return {
-        "merged_command_candidates": TypedConfig(),
+        "merged_command_candidates": merge,
         "filtered_commands": spec.filtering,
-        "labeling_documentation": spec.documentation,
+        **({"labeling_documentation": spec.documentation} if spec.documentation is not None else {}),
         "labeling_attempts": spec.annotation,
         "proposed_annotations": TypedConfig(),
         "labeling_failures": TypedConfig(),
@@ -28,6 +44,12 @@ def finalization_stage_configs(spec: DatasetBuildSpec) -> dict[str, Config]:
 
 
 def collection_stage_configs(spec: DatasetBuildSpec, branch: Branch) -> dict[str, Config]:
+    if spec.declared_collection is not None:
+        config = declared_source_config(spec, branch)
+        return {
+            stage_name(name, branch): config
+            for name in ("source_catalog", "source_documents", "document_adapters", "command_candidates")
+        }
     adapters, extraction = {
         "dataset": (spec.adapters, spec.extraction),
         "documentation": (
@@ -49,7 +71,32 @@ def collection_stage_configs(spec: DatasetBuildSpec, branch: Branch) -> dict[str
 def stage_configs(spec: DatasetBuildSpec) -> dict[str, Config]:
     return {
         "category_rules": CategoryRulesConfig.model_validate_json(spec.rules.model_dump_json()),
-        **collection_stage_configs(spec, "dataset"),
-        **collection_stage_configs(spec, "documentation"),
+        **{
+            stage: config
+            for branch in collection_branches(declared=spec.has_declared_collection)
+            for stage, config in collection_stage_configs(spec, branch.namespace).items()
+        },
         **finalization_stage_configs(spec),
     }
+
+
+def declared_source_config(spec: DatasetBuildSpec, branch: Branch) -> DeclaredSourceStageConfig:
+    if spec.declared_collection is None:
+        raise IntegrityError("Registered dataset has no collection declarations")
+    source = spec.declared_collection.for_branch(branch)
+    if branch == "keenable" and source.declaration.get("search_plan") is not None:
+        declaration = KeenableDeclaration.model_validate_json(json.dumps(source.declaration))
+        if declaration.search_plan is not None and declaration.search_plan.mode == "adaptive":
+            model, batch = spec.annotation.model, spec.annotation.batch
+            if model.provider != "openai_compatible" or model.base_url is None or batch is None:
+                raise IntegrityError(
+                    "Adaptive discovery requires a registered remote model and capacity settings"
+                )
+            return DeclaredSourceStageConfig(
+                branch=branch,
+                source=source,
+                planner_binding=fingerprint(
+                    [model.base_url, model.model, batch.capacity.model_dump_json(), batch.backend_revision]
+                ),
+            )
+    return DeclaredSourceStageConfig(branch=branch, source=source)

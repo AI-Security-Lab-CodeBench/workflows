@@ -1,5 +1,5 @@
 from collections.abc import Sequence
-from typing import TypeVar
+from typing import Optional, TypeVar
 
 import pandas as pd
 import pandera.pandas as pa
@@ -72,6 +72,11 @@ class CommandCandidatesTable(StrictTable):
     source_position: Series[str]
     transformations: Series[list[str]]
     risk_candidates: Series[list[str]]
+    source_weight: Optional[Series[float]] = pa.Field(
+        ge=0,
+        le=1,
+        description="Collection source trust used to rank labeling; independent of label confidence.",
+    )
 
 
 class FilteredCommandsTable(CommandCandidatesTable):
@@ -167,12 +172,21 @@ Record = TypeVar("Record", bound=BaseModel)
 
 
 def validated_frame(rows: Sequence[dict[str, JsonValue]], schema: type[Schema]) -> DataFrame[Schema]:
-    frame = pd.DataFrame(list(rows), columns=list(schema.to_schema().columns))
+    columns = [
+        name
+        for name, column in schema.to_schema().columns.items()
+        if column.required or any(name in row for row in rows)
+    ]
+    frame = pd.DataFrame(list(rows), columns=columns)
     return schema.validate(frame)
 
 
 def frame_records(frame: pd.DataFrame) -> list[dict[str, JsonValue]]:
-    return TypeAdapter(list[dict[str, JsonValue]]).validate_json(frame.to_json(orient="records"))
+    rows = TypeAdapter(list[dict[str, JsonValue]]).validate_json(frame.to_json(orient="records"))
+    if "source_weight" in frame:
+        for row, weight in zip(rows, frame["source_weight"], strict=True):
+            row["source_weight"] = weight
+    return rows
 
 
 def model_records(frame: pd.DataFrame, model: type[Record]) -> list[Record]:

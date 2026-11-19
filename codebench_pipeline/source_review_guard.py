@@ -9,12 +9,15 @@ from pydantic import ValidationError
 from codebench_pipeline.category_rules import CategoryRules
 from codebench_pipeline.dataframe_io import DataFrameIOManager
 from codebench_pipeline.dataset_branches import asset_branch
+from codebench_pipeline.dataset_registry import DatasetRegistry
 from codebench_pipeline.documentation_authorization import (
     SourceInventoryAuthorization,
     frame_inventory_authorization,
     inventory_authorization,
 )
 from codebench_pipeline.human_review import CompletionToken, HumanReviewError
+from codebench_pipeline.source_evidence import require_source_rights, validate_source_receipt
+from codebench_pipeline.stage_configuration import declared_source_config
 
 SOURCE_BINDING: Final = "codebench_source_review"
 SOURCE_GATED_STAGES: Final = frozenset(
@@ -63,8 +66,16 @@ def authorize_output(
     if manager.review_home is None:
         raise HumanReviewError("pending", "A registered source inventory is required")
     branch = asset_branch(context.asset_key.path)
+    home = Path(manager.review_home)
+    spec = DatasetRegistry(home).get_snapshot(context.asset_partition_key)
+    if spec.has_declared_collection:
+        config = declared_source_config(spec, branch)
+        require_source_rights(config)
+        validate_source_receipt(frame, config, manager)
+    if context.asset_key.path[-1] == "source_catalog":
+        return
     _, binding = inventory_authorization(
-        Path(manager.review_home), context.step_context.instance, context.asset_partition_key, branch
+        home, context.step_context.instance, context.asset_partition_key, branch
     )
     if frame_inventory_authorization(frame, branch) != binding:
         raise HumanReviewError("stale", "Source inventory changed during computation")

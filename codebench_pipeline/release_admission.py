@@ -18,7 +18,11 @@ from codebench_pipeline.dataframe_io import (
 from codebench_pipeline.dataframe_schemas import CommandsTable, frame_records, validated_frame
 from codebench_pipeline.dataset_branches import Branch, asset_branch
 from codebench_pipeline.dataset_export import csv_text
+from codebench_pipeline.dataset_registry import DatasetRegistry
 from codebench_pipeline.dataset_tables import publication
+from codebench_pipeline.guarded_publication import ReleaseInputs, prepare_guarded_release
+from codebench_pipeline.guarded_publication_controls import require_proposal_authorized
+from codebench_pipeline.guarded_publication_runtime import require_current_release
 from codebench_pipeline.human_review import CompletionToken, HumanReviewError, PublicationPayload
 from codebench_pipeline.human_review_store import HumanReviewStore
 from codebench_pipeline.label_corrections import apply_label_corrections
@@ -75,24 +79,38 @@ def write_review_output(
             manager.publish_reference(context, reference)
             record_review(context, token)
             return reference
-        approved = frozenset(row.candidate_id for row in decisions if row.decision == "approve")
-        prepared = publication(
-            apply_label_corrections(resolved.reviewed, decisions, resolved.rules),
-            resolved.rules,
-            resolved.manifest.publication,
-            approved_ids=approved,
-        )
-        expected = validated_frame(
-            [{key: value for key, value in row.items()} for row in prepared.commands], CommandsTable
-        )
+        spec = DatasetRegistry(home).get_snapshot(context.asset_partition_key)
+        proposal = None
+        if spec.has_declared_collection:
+            proposal = prepare_guarded_release(
+                ReleaseInputs(snapshots, resolved, token, decisions), home, spec
+            )
+            require_proposal_authorized(tx, spec.dataset_id, proposal)
+            expected = proposal.output
+            prepared = proposal.publication
+        else:
+            approved = frozenset(row.candidate_id for row in decisions if row.decision == "approve")
+            prepared = publication(
+                apply_label_corrections(resolved.reviewed, decisions, resolved.rules),
+                resolved.rules,
+                resolved.manifest.publication,
+                approved_ids=approved,
+            )
+            expected = validated_frame(
+                [{key: value for key, value in row.items()} for row in prepared.commands], CommandsTable
+            )
         if not frame.equals(expected):
             raise HumanReviewError("stale", "Release rows differ from approved eligible records")
         expected.attrs[REVIEW_BINDING] = token.model_dump(mode="json")
         reference = manager.persist_value(expected)
+        if proposal is not None and reference.digest != proposal.manifest["parquet_sha256"]:
+            raise IntegrityError("Persisted release table differs from its attested bytes")
         prefix = f"releases/{resolved.snapshot.dataset_id}/{branch}/{context.run_id}"
         store = ObjectStore(manager.storage)
         for name, text in prepared.files.items():
             store.write(f"{prefix}/{name}", text.encode())
+        if proposal is not None:
+            store.write(f"{prefix}/proposal-manifest.json", proposal.body)
         store.write(
             f"{prefix}/deduplication.json",
             json.dumps(
@@ -132,6 +150,7 @@ def write_review_output(
                 csv_reference=f"{prefix}/commands.csv",
                 bundle_reference=prefix,
                 dagster_run_id=context.run_id,
+                proposal_digest=proposal.digest if proposal is not None else None,
             ),
         )
         record_review(context, token, registered.publication_id)
@@ -147,10 +166,13 @@ def read_publication(
             published = tx.last_publication(dataset_id, branch=branch)
             if published is not None:
                 try:
-                    resolved = ReviewSnapshots(home, DatasetDataService(home, instance), branch).current(
-                        dataset_id
-                    )
-                    authorize_publication(resolved, published.authorization, tx)
+                    snapshots = ReviewSnapshots(home, DatasetDataService(home, instance), branch)
+                    if snapshots.data.specification(dataset_id).has_declared_collection:
+                        require_current_release(snapshots, published, tx)
+                    elif published.proposal_digest is not None:
+                        state = "stale"
+                    else:
+                        authorize_publication(snapshots.current(dataset_id), published.authorization, tx)
                 except (HumanReviewError, DatasetViewError):
                     state = "stale"
     except HumanReviewError as error:

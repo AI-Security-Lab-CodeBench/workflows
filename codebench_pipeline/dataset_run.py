@@ -1,20 +1,24 @@
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict
 
-from codebench_pipeline.dataset_branches import FINALIZATION_STAGES, Branch, stage_branch
+from codebench_pipeline.dataset_branches import FINALIZATION_STAGES, Branch, collection_branches, stage_branch
 from codebench_pipeline.dataset_plan import plan_dataset
 from codebench_pipeline.dataset_registry import DatasetRegistry
 from codebench_pipeline.definitions import build_definitions, dataset_run_config
+from codebench_pipeline.human_review import HumanReviewError
 from codebench_pipeline.human_review_store import HumanReviewStore
 from codebench_pipeline.release_runner import ReleaseRunner
 from codebench_pipeline.runtime_instance import dataset_instance
 from codebench_pipeline.stage_configuration import stage_configs
-from codebench_pipeline.storage import exclusive
+from codebench_pipeline.storage import IntegrityError, exclusive
 
 BuildStatus = Literal[
     "unconfigured",
+    "prepared",
+    "waiting_for_sources",
     "awaiting_human_review",
     "reviewed",
     "review_completed",
@@ -39,6 +43,7 @@ class BuildOutcome(BaseModel):
     model_config = ConfigDict(frozen=True)
     run_id: str | None
     release_run_id: str | None = None
+    publication_waiting_reason: str | None = None
     job: str = "build_dataset"
     dataset: str
     category: str
@@ -55,20 +60,25 @@ class BuildOutcome(BaseModel):
     branches: dict[Branch, BranchOutcome]
 
 
-def run_registered(dataset_id: str, home: Path) -> BuildOutcome:
+def run_registered(dataset_id: str, home: Path, *, prepare_only: bool = False) -> BuildOutcome:
     spec = DatasetRegistry(home).get(dataset_id)
+    if prepare_only and not spec.has_declared_collection:
+        raise IntegrityError("Preparation-only builds require a declared collection")
+    through = "filtered_commands" if prepare_only else None
+    job_name = "prepare_dataset" if prepare_only else "build_dataset"
     with exclusive(home / "build-locks" / f"{spec.dataset_id}.lock"), dataset_instance(home) as instance:
         instance.add_dynamic_partitions("dataset_builds", [spec.dataset_id])
-        plan = plan_dataset(spec, stage_configs(spec), instance, home=home)
+        configs = stage_configs(spec)
+        plan = plan_dataset(spec, configs, instance, home=home, through=through)
         caches: dict[str, bool] = {}
         run_id: str | None = None
         if plan.selected:
-            job = build_definitions(home).resolve_job_def("build_dataset")
+            job = build_definitions(home, specification=spec).resolve_job_def(job_name)
             result = job.execute_in_process(
                 instance=instance,
                 partition_key=spec.dataset_id,
                 asset_selection=plan.asset_selection,
-                run_config=dataset_run_config(spec, home),
+                run_config=dataset_run_config(spec, home, prepare_only=prepare_only),
             )
             if not result.success:
                 raise RuntimeError(f"Dataset job failed: {result.run_id}")
@@ -80,17 +90,18 @@ def run_registered(dataset_id: str, home: Path) -> BuildOutcome:
                 if len(materializations) != 1:
                     raise RuntimeError(f"Missing planned materialization: {stage}")
                 caches[stage] = materializations[0].metadata["cache_hit"].value is True
-        current = plan_dataset(spec, stage_configs(spec), instance, home=home)
+        current = plan_dataset(spec, configs, instance, home=home, through=through)
         branches: dict[Branch, BranchOutcome] = {}
-        branch_names: tuple[Branch, ...] = ("dataset", "documentation")
-        with HumanReviewStore(home).transaction(dataset_id=dataset_id) as transaction:
+        review = nullcontext() if prepare_only else HumanReviewStore(home).transaction(dataset_id=dataset_id)
+        with review as transaction:
             shared_batch = (
                 transaction.get_current_batch(dataset_id, "annotations")
-                if not current.selected and not current.blocked
+                if transaction is not None and not current.selected and not current.blocked
                 else None
             )
             if (
                 shared_batch is not None
+                and transaction is not None
                 and not shared_batch.snapshot.candidate_ids
                 and shared_batch.completion is None
             ):
@@ -98,7 +109,8 @@ def run_registered(dataset_id: str, home: Path) -> BuildOutcome:
                     shared_batch.snapshot, shared_batch, reviewer="automatic low-uncertainty policy"
                 )
                 shared_batch = transaction.get_batch(shared_batch.batch_id)
-            for branch in branch_names:
+            for descriptor in collection_branches(declared=spec.has_declared_collection):
+                branch = descriptor.namespace
                 materialized = tuple(
                     stage
                     for stage in caches
@@ -124,8 +136,12 @@ def run_registered(dataset_id: str, home: Path) -> BuildOutcome:
                     continue
                 batch = shared_batch
                 status: BuildStatus = (
-                    "unchanged"
+                    "waiting_for_sources"
+                    if blocked
+                    else "unchanged"
                     if not materialized
+                    else "prepared"
+                    if prepare_only
                     else "reviewed"
                     if batch is None
                     else "awaiting_human_review"
@@ -137,31 +153,43 @@ def run_registered(dataset_id: str, home: Path) -> BuildOutcome:
                     skipped_stages=skipped,
                     blocked_stages=blocked,
                     status=status,
-                    review_stage="annotations"
-                    if batch is not None
-                    else None,
+                    review_stage="annotations" if batch is not None else None,
                     review_batch_id=batch.batch_id if batch is not None else None,
                     review_snapshot_id=batch.snapshot.snapshot_id if batch is not None else None,
                 )
         primary = branches["documentation"] if "dataset" in current.unconfigured else branches["dataset"]
         status = primary.status
+        if current.waiting_for == "sources":
+            status = "waiting_for_sources"
+        elif prepare_only and caches:
+            status = "prepared"
         if shared_batch is not None:
             if shared_batch.state == "open":
                 status = "awaiting_human_review"
             elif caches:
                 status = "review_completed"
         release_run_id: str | None = None
+        publication_waiting_reason: str | None = None
         if shared_batch is not None and shared_batch.completion is not None:
             with HumanReviewStore(home).reader() as transaction:
                 previous = transaction.last_publication(dataset_id)
-            published = ReleaseRunner(home, instance)(shared_batch.completion)
-            if previous != published:
-                release_run_id = published.dagster_run_id
-                caches.update({"human_review_decisions": False, "dataset_release": False})
-                status = "published"
+            try:
+                published = ReleaseRunner(home, instance)(shared_batch.completion)
+            except HumanReviewError as error:
+                if not spec.has_declared_collection or error.code != "pending":
+                    raise
+                status = "prepared"
+                publication_waiting_reason = error.detail
+            else:
+                if previous != published:
+                    release_run_id = published.dagster_run_id
+                    caches.update({"human_review_decisions": False, "dataset_release": False})
+                    status = "published"
         outcome = BuildOutcome(
             run_id=run_id,
             release_run_id=release_run_id,
+            publication_waiting_reason=publication_waiting_reason,
+            job=job_name,
             dataset=dataset_id,
             category=spec.rules.category_id,
             storage=spec.storage.backend,

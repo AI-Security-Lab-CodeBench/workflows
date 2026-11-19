@@ -2,6 +2,7 @@ from pathlib import Path
 
 from dagster import (
     AssetExecutionContext,
+    AssetIn,
     AssetsDefinition,
     DataVersion,
     MetadataValue,
@@ -11,7 +12,8 @@ from dagster import (
 )
 from pandera.typing import DataFrame
 
-from codebench_pipeline.category_rules import CategoryRules, CategoryRulesConfig
+from codebench_pipeline.category_rules import CategoryRules
+from codebench_pipeline.config_assets import COLLECTION_SCOPES, GLOBAL_CONFIG, mapped_rules, policy_input
 from codebench_pipeline.dataframe_io import DataFrameIOManager
 from codebench_pipeline.dataframe_schemas import (
     CommandCandidatesTable,
@@ -25,7 +27,6 @@ from codebench_pipeline.dataset_asset_types import (
     DATASET_PARTITIONS,
     RULES_TYPE,
     TABLE_TYPES,
-    rules_input,
     table_input,
 )
 from codebench_pipeline.dataset_branches import Branch, asset_path
@@ -33,6 +34,7 @@ from codebench_pipeline.dataset_catalog import build_catalog
 from codebench_pipeline.dataset_config import (
     AdapterConfig,
     CatalogConfig,
+    DatasetBuildSpec,
     DocumentationConfig,
     ExtractionConfig,
     FilteringConfig,
@@ -55,23 +57,25 @@ def source_assets(branch: Branch = "dataset") -> list[AssetsDefinition]:
         partitions_def=DATASET_PARTITIONS,
         io_manager_key="dataset_io_manager",
         dagster_type=RULES_TYPE,
+        ins={"registered": AssetIn(key=GLOBAL_CONFIG)},
     )
     def category_rules(
-        config: CategoryRulesConfig,
+        registered: str,
         dataset_io_manager: ResourceParam[DataFrameIOManager],
     ) -> Output[CategoryRules]:
-        version = fingerprint(config.model_dump_json())
+        rules = DatasetBuildSpec.model_validate_json(registered).rules
+        version = fingerprint(rules.model_dump_json())
         key = f"category-rules/{version}"
         hit = dataset_io_manager.exists(key)
-        dataset_io_manager.write_evidence(key, config.model_dump_json(indent=2).encode())
+        dataset_io_manager.write_evidence(key, rules.model_dump_json(indent=2).encode())
         return Output(
-            CategoryRules.model_validate_json(config.model_dump_json()),
+            rules,
             data_version=DataVersion(version),
             metadata={
                 "cache_hit": hit,
-                "category": config.canonical,
-                "version": config.version,
-                "rules": MetadataValue.json(config.model_dump(mode="json")),
+                "category": rules.canonical,
+                "version": rules.version,
+                "rules": MetadataValue.json(rules.model_dump(mode="json")),
             },
         )
 
@@ -81,14 +85,15 @@ def source_assets(branch: Branch = "dataset") -> list[AssetsDefinition]:
         partitions_def=DATASET_PARTITIONS,
         io_manager_key="dataset_io_manager",
         dagster_type=TABLE_TYPES[SourceCatalogTable],
-        ins={"category_rules": rules_input()},
+        ins={"mapped_config": policy_input(COLLECTION_SCOPES[branch])},
     )
     def source_catalog(
         context: AssetExecutionContext,
         config: CatalogConfig,
-        category_rules: CategoryRules,
+        mapped_config: str,
         dataset_io_manager: ResourceParam[DataFrameIOManager],
     ) -> Output[DataFrame[SourceCatalogTable]]:
+        category_rules = mapped_rules(mapped_config)
         return cached_table(
             context,
             dataset_io_manager,
@@ -124,7 +129,8 @@ def source_assets(branch: Branch = "dataset") -> list[AssetsDefinition]:
                 source_catalog,
                 config,
                 cache=Path(dataset_io_manager.review_home) / "source-downloads"
-                if dataset_io_manager.review_home is not None else None,
+                if dataset_io_manager.review_home is not None
+                else None,
                 evidence=evidence / "retrieval",
             ),
         )
@@ -197,16 +203,17 @@ def processing_assets() -> list[AssetsDefinition]:
         dagster_type=TABLE_TYPES[FilteredCommandsTable],
         ins={
             "command_candidates": table_input("merged_command_candidates", CommandCandidatesTable),
-            "category_rules": rules_input(),
+            "mapped_config": policy_input("filtered_commands"),
         },
     )
     def filtered_commands(
         context: AssetExecutionContext,
         config: FilteringConfig,
         command_candidates: DataFrame[CommandCandidatesTable],
-        category_rules: CategoryRules,
+        mapped_config: str,
         dataset_io_manager: ResourceParam[DataFrameIOManager],
     ) -> Output[DataFrame[FilteredCommandsTable]]:
+        category_rules = mapped_rules(mapped_config)
         return cached_table(
             context,
             dataset_io_manager,
@@ -224,16 +231,17 @@ def processing_assets() -> list[AssetsDefinition]:
         dagster_type=TABLE_TYPES[DocumentationTable],
         ins={
             "filtered_commands": table_input("filtered_commands", FilteredCommandsTable),
-            "category_rules": rules_input(),
+            "mapped_config": policy_input("labeling_documentation"),
         },
     )
     def labeling_documentation(
         context: AssetExecutionContext,
         config: DocumentationConfig,
         filtered_commands: DataFrame[FilteredCommandsTable],
-        category_rules: CategoryRules,
+        mapped_config: str,
         dataset_io_manager: ResourceParam[DataFrameIOManager],
     ) -> Output[DataFrame[DocumentationTable]]:
+        category_rules = mapped_rules(mapped_config)
         return cached_table(
             context,
             dataset_io_manager,

@@ -10,7 +10,6 @@ from codebench_pipeline.dataframe_schemas import (
     FilteredCommandsTable,
     ProposedAnnotationsTable,
     ReviewQueueTable,
-    frame_records,
     model_records,
     validated_frame,
 )
@@ -83,9 +82,7 @@ def publication(
 ) -> Publication:
     candidates = model_records(annotations, CandidateRecord)
     labels = model_records(annotations, LabelDecision)
-    return prepare_dataset(
-        candidates, labels, rules, config.limit_per_risk, approved_ids=approved_ids
-    )
+    return prepare_dataset(candidates, labels, rules, config.limit_per_risk, approved_ids=approved_ids)
 
 
 @pa.check_types
@@ -109,16 +106,10 @@ def review_queue(
     prepared = publication(annotations, rules, config)
     eligible = set(prepared.eligible_ids)
     reasons = {row["candidate_id"]: row["exclusion_reason"] for row in prepared.pending}
-    rows = [
-        {
-            **row,
-            "exclusion_reason": ""
-            if str(row["candidate_id"]) in eligible
-            else reasons[str(row["candidate_id"])],
-        }
-        for row in frame_records(annotations)
-        if str(row["candidate_id"]) in prepared.human_review_ids
+    queue = annotations.loc[annotations["candidate_id"].isin(prepared.human_review_ids)].reset_index(
+        drop=True
+    )
+    queue["exclusion_reason"] = [
+        "" if identity in eligible else reasons[identity] for identity in queue["candidate_id"]
     ]
-    frame = validated_frame(rows, ReviewQueueTable)
-    frame.attrs = dict(annotations.attrs)
-    return frame
+    return ReviewQueueTable.validate(queue)

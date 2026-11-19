@@ -15,7 +15,9 @@ from codebench_pipeline.dataset_engine import stage_signature
 from codebench_pipeline.dataset_registry import DatasetRegistry
 from codebench_pipeline.human_review import HumanReviewError
 from codebench_pipeline.models import Digest, Identifier
+from codebench_pipeline.source_evidence import require_source_rights, validate_source_receipt
 from codebench_pipeline.stage_cache_compatibility import legacy_signature_matches
+from codebench_pipeline.stage_configuration import declared_source_config
 
 DOCUMENTATION_BINDING: Final = "codebench_documentation_sources"
 INVENTORY_BINDING: Final = "codebench_dataset_sources"
@@ -34,9 +36,13 @@ def inventory_authorization(
     home: Path, instance: DagsterInstance, dataset_id: str, branch: Branch
 ) -> tuple[DataFrame[SourceCatalogTable], SourceInventoryAuthorization]:
     spec = DatasetRegistry(home).get(dataset_id)
-    config = catalog_for_branch(spec, branch)
-    if not config.configured:
-        raise HumanReviewError("pending", "No source inventory is configured")
+    if spec.has_declared_collection:
+        config = declared_source_config(spec, branch)
+        require_source_rights(config)
+    else:
+        config = catalog_for_branch(spec, branch)
+        if not config.configured:
+            raise HumanReviewError("pending", "No source inventory is configured")
     expected = stage_signature("source_catalog", config, {"category_rules": spec.rules})
     key = AssetKey(asset_path("source_catalog", branch))
     records = instance.fetch_materializations(
@@ -46,8 +52,11 @@ def inventory_authorization(
         raise HumanReviewError("pending", "Materialize the source manifest catalog before processing it")
     manager = DataFrameIOManager(storage=spec.storage)
     recorded = str(records[0].asset_materialization.metadata["input_fingerprint"].value)
-    if recorded != expected and not legacy_signature_matches(
-        manager, "source_catalog", config, {"category_rules": spec.rules}, recorded
+    if recorded != expected and (
+        spec.has_declared_collection
+        or not legacy_signature_matches(
+            manager, "source_catalog", config, {"category_rules": spec.rules}, recorded
+        )
     ):
         raise HumanReviewError("stale", "Source inventory changed")
     with build_input_context(
@@ -62,13 +71,19 @@ def inventory_authorization(
     value = manager.read_version(reference)
     if not isinstance(value, pd.DataFrame):
         raise HumanReviewError("conflict", "Source catalog is not a table")
+    if spec.has_declared_collection:
+        validate_source_receipt(value, declared_source_config(spec, branch), manager)
     return SourceCatalogTable.validate(value), SourceInventoryAuthorization(
         dataset_id=dataset_id, branch=branch, catalog_digest=reference.digest, inventory_signature=recorded
     )
 
 
 def inventory_binding(branch: Branch) -> str:
-    return DOCUMENTATION_BINDING if branch == "documentation" else INVENTORY_BINDING
+    return {
+        "dataset": INVENTORY_BINDING,
+        "documentation": DOCUMENTATION_BINDING,
+        "keenable": "codebench_keenable_sources",
+    }[branch]
 
 
 def frame_inventory_authorization(frame: pd.DataFrame, branch: Branch) -> SourceInventoryAuthorization:

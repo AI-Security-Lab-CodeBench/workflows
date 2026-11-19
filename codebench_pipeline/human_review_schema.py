@@ -68,6 +68,14 @@ MIGRATIONS: Final[tuple[tuple[LiteralString, ...], ...]] = (
         """UPDATE review_batches SET invalidated='Review schema changed; prepare current inputs again'
             WHERE current AND prepared IS NOT NULL""",
     ),
+    (
+        """CREATE TABLE v2_publication_controls (
+            sequence bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+            dataset_id text NOT NULL, action text NOT NULL,
+            proposal text NOT NULL, actor_uid bigint NOT NULL, recorded_at text NOT NULL)""",
+        """CREATE INDEX v2_publication_controls_dataset
+            ON v2_publication_controls(dataset_id, action, sequence DESC)""",
+    ),
 )
 
 COMPACT_DATA: Final = """data || jsonb_build_object('snapshot',
@@ -75,9 +83,7 @@ COMPACT_DATA: Final = """data || jsonb_build_object('snapshot',
 
 
 def initialize(connection: Connection[dict[str, JsonValue]], schema: str) -> None:
-    exists = connection.execute(
-        "SELECT 1 FROM pg_namespace WHERE nspname = %s", (schema,)
-    ).fetchone()
+    exists = connection.execute("SELECT 1 FROM pg_namespace WHERE nspname = %s", (schema,)).fetchone()
     if exists:
         connection.execute(sql.SQL("SET search_path TO {}").format(sql.Identifier(schema)))
         row = connection.execute("SELECT max(version) AS version FROM review_schema_versions").fetchone()
@@ -89,7 +95,9 @@ def initialize(connection: Connection[dict[str, JsonValue]], schema: str) -> Non
     connection.execute(
         "CREATE TABLE IF NOT EXISTS review_schema_versions(version integer PRIMARY KEY, applied_at text NOT NULL)"
     )
-    row = connection.execute("SELECT coalesce(max(version), 0) AS version FROM review_schema_versions").fetchone()
+    row = connection.execute(
+        "SELECT coalesce(max(version), 0) AS version FROM review_schema_versions"
+    ).fetchone()
     version = TypeAdapter(int).validate_python(row["version"]) if row else 0
     if version > len(MIGRATIONS):
         raise HumanReviewError("conflict", "Review schema is newer than this implementation")
@@ -97,9 +105,7 @@ def initialize(connection: Connection[dict[str, JsonValue]], schema: str) -> Non
         if index > version:
             for statement in migration:
                 connection.execute(statement)
-            connection.execute(
-                "INSERT INTO review_schema_versions VALUES (%s, %s)", (index, timestamp())
-            )
+            connection.execute("INSERT INTO review_schema_versions VALUES (%s, %s)", (index, timestamp()))
 
 
 def timestamp() -> str:
@@ -108,7 +114,11 @@ def timestamp() -> str:
 
 class ReviewRepository:
     def __init__(
-        self, connection: Connection[dict[str, JsonValue]], *, namespace: str = "", timeout: float = 0,
+        self,
+        connection: Connection[dict[str, JsonValue]],
+        *,
+        namespace: str = "",
+        timeout: float = 0,
     ) -> None:
         self.connection = connection
         self._namespace = namespace
@@ -117,11 +127,18 @@ class ReviewRepository:
         if connection.read_only:
             row = connection.execute("SELECT max(version) AS version FROM review_schema_versions").fetchone()
             if row is None or row["version"] != len(MIGRATIONS):
-                raise HumanReviewError("stale", "Review storage schema changed; prepare inputs to apply migration")
+                raise HumanReviewError(
+                    "stale", "Review storage schema changed; prepare inputs to apply migration"
+                )
 
     def get_current_batch(
-        self, dataset_id: str, review_stage: str = "annotations", *, compact: bool = False,
-        artifact_id: str = "", scope_id: str = "",
+        self,
+        dataset_id: str,
+        review_stage: str = "annotations",
+        *,
+        compact: bool = False,
+        artifact_id: str = "",
+        scope_id: str = "",
     ) -> ReviewBatch:
         projection = COMPACT_DATA if compact else "data"
         row = self.connection.execute(
@@ -162,7 +179,8 @@ class ReviewRepository:
         return tuple(
             ReviewDecision.model_validate(row["data"]).model_copy(
                 update={"batch_id": batch_id, "candidate_id": row["candidate_id"]}
-            ) for row in rows
+            )
+            for row in rows
         )
 
     def counts(self, batch_id: str) -> ReviewCounts:
@@ -177,13 +195,15 @@ class ReviewRepository:
                 coalesce(sum((SELECT count(*) FROM review_rows r WHERE r.batch_id=i.batch_id
                     AND r.record_hash=i.record_hash)) FILTER(WHERE i.data->>'decision'='approve'),0)::bigint
                     AS approved_occurrences
-                FROM review_items i WHERE i.batch_id = %s""", (batch_id,),
+                FROM review_items i WHERE i.batch_id = %s""",
+            (batch_id,),
         ).fetchone()
         return ReviewCounts.model_validate(row)
 
     def history(self, dataset_id: str) -> tuple[ReviewHistoryEntry, ...]:
         return tuple(
-            ReviewHistoryEntry.model_validate_json(json.dumps(row["data"])) for row in self.connection.execute(
+            ReviewHistoryEntry.model_validate_json(json.dumps(row["data"]))
+            for row in self.connection.execute(
                 "SELECT data FROM review_history WHERE dataset_id = %s ORDER BY sequence", (dataset_id,)
             )
         )
@@ -198,37 +218,63 @@ class ReviewRepository:
 
     def list_publications(self, dataset_id: str) -> tuple[PublicationReference, ...]:
         return tuple(
-            PublicationReference.model_validate(row["data"]) for row in self.connection.execute(
+            PublicationReference.model_validate(row["data"])
+            for row in self.connection.execute(
                 "SELECT data FROM review_publications WHERE dataset_id = %s ORDER BY sequence", (dataset_id,)
             )
         )
 
     def last_publication(
-        self, dataset_id: str, review_stage: str | None = None, *, branch: Branch = "dataset",
-        artifact_id: str = "", scope_id: str = "",
+        self,
+        dataset_id: str,
+        review_stage: str | None = None,
+        *,
+        branch: Branch = "dataset",
+        artifact_id: str = "",
+        scope_id: str = "",
     ) -> PublicationReference | None:
         row = self.connection.execute(
             """SELECT p.data FROM review_publications p JOIN review_batches b USING(batch_id)
                 WHERE p.dataset_id = %s AND b.artifact_id=%s AND b.scope_id=%s AND
                 ((%s::text IS NULL AND b.review_stage IN (%s, %s)) OR b.review_stage = %s)
                 ORDER BY p.sequence DESC LIMIT 1""",
-            (dataset_id, artifact_id, scope_id, review_stage,
-             annotation_stage_id(branch), automatic_stage_id(branch), review_stage),
+            (
+                dataset_id,
+                artifact_id,
+                scope_id,
+                review_stage,
+                annotation_stage_id(branch),
+                automatic_stage_id(branch),
+                review_stage,
+            ),
         ).fetchone()
         return PublicationReference.model_validate(row["data"]) if row else None
 
     def insert_batch(
-        self, batch: ReviewBatch, binding: str, prepared_metadata: dict[str, JsonValue] | None = None,
-        *, current: bool = True, invalidated: str | None = None,
+        self,
+        batch: ReviewBatch,
+        binding: str,
+        prepared_metadata: dict[str, JsonValue] | None = None,
+        *,
+        current: bool = True,
+        invalidated: str | None = None,
     ) -> None:
         self.connection.execute(
             """INSERT INTO review_batches
                 (batch_id,dataset_id,review_stage,current,invalidated,binding,data,prepared,artifact_id,scope_id)
                 VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
-            (batch.batch_id, batch.snapshot.dataset_id, batch.snapshot.review_stage, current,
-             invalidated, binding, Jsonb(batch.model_dump(mode="json")),
-             Jsonb(prepared_metadata) if prepared_metadata is not None else None,
-             batch.snapshot.artifact_id, batch.snapshot.scope_id),
+            (
+                batch.batch_id,
+                batch.snapshot.dataset_id,
+                batch.snapshot.review_stage,
+                current,
+                invalidated,
+                binding,
+                Jsonb(batch.model_dump(mode="json")),
+                Jsonb(prepared_metadata) if prepared_metadata is not None else None,
+                batch.snapshot.artifact_id,
+                batch.snapshot.scope_id,
+            ),
         )
 
     def _write_batch(self, batch: ReviewBatch, *, current: bool = True) -> None:

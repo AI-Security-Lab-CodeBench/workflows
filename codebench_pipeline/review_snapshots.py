@@ -14,11 +14,17 @@ from codebench_pipeline.data_views import DatasetDataService
 from codebench_pipeline.dataframe_io import AssetReference, DataFrameIOManager
 from codebench_pipeline.dataframe_schemas import ProposedAnnotationsTable, frame_records
 from codebench_pipeline.dataset_asset_types import DATASET_PARTITIONS
-from codebench_pipeline.dataset_branches import FINALIZATION_STAGES, Branch, stage_name
+from codebench_pipeline.dataset_branches import (
+    FINALIZATION_STAGES,
+    Branch,
+    collection_branches,
+    stage_branch,
+    stage_name,
+)
 from codebench_pipeline.dataset_config import PublicationConfig
 from codebench_pipeline.dataset_export import Publication
 from codebench_pipeline.dataset_finalization import FINALIZATION_BINDING
-from codebench_pipeline.dataset_plan import PREPARATION_STAGES, plan_dataset
+from codebench_pipeline.dataset_plan import plan_dataset, preparation_stages
 from codebench_pipeline.dataset_tables import publication
 from codebench_pipeline.human_review import ReviewModel, ReviewSnapshot
 from codebench_pipeline.human_review_store import HumanReviewStore
@@ -127,23 +133,26 @@ class ReviewSnapshots:
             )
         input_stages = tuple(
             stage
-            for stage in PREPARATION_STAGES
+            for stage in preparation_stages(declared=spec.has_declared_collection)
             if stage != "human_review_queue"
             if stage in ("category_rules", *FINALIZATION_STAGES)
-            or ("documentation" if stage.startswith("documentation/") else "dataset") not in plan.unconfigured
+            or stage_branch(stage) not in plan.unconfigured
         )
         if set(plan.selected) - {"human_review_queue"} or plan.blocked:
             raise DatasetViewError("not_ready", "Preparation is incomplete or changed")
         manager = DataFrameIOManager(storage=spec.storage)
         binding: dict[str, JsonValue] = {}
-        branches: tuple[Branch, ...] = ("dataset", "documentation")
-        for branch in branches:
+        for descriptor in collection_branches(declared=spec.has_declared_collection):
+            branch = descriptor.namespace
             if branch in plan.unconfigured:
                 binding[branch] = {"state": "unconfigured"}
                 continue
             stage = stage_name("command_candidates", branch)
             catalog = stage_name("source_catalog", branch)
-            if plan.source_authorizations[stage] != plan.source_authorizations[catalog]:
+            if (
+                not spec.has_declared_collection
+                and plan.source_authorizations[stage] != plan.source_authorizations[catalog]
+            ):
                 raise DatasetViewError("not_ready", "Collection inputs changed during snapshot capture")
             binding[branch] = {"state": "configured", "digest": plan.references[stage].digest}
         match manager.read_version(plan.references["category_eligible_annotations"]):
@@ -197,8 +206,7 @@ class ReviewSnapshots:
         package = Path(__file__).parent
         implementation = {name: digest(package / name) for name in REVIEW_POLICY_FILES}
         record_fingerprints = {
-            str(row["candidate_id"]): review_identity(row, review_columns)
-            for row in frame_records(reviewed)
+            str(row["candidate_id"]): review_identity(row, review_columns) for row in frame_records(reviewed)
         }
         manifest = ReviewManifest(
             dataset_id=dataset_id,
@@ -258,7 +266,10 @@ class ReviewSnapshots:
         if (
             resolved.rules != spec.rules
             or resolved.manifest.publication != spec.publication
-            or any(plan.references.get(stage) != reference for stage, reference in resolved.manifest.references.items())
+            or any(
+                plan.references.get(stage) != reference
+                for stage, reference in resolved.manifest.references.items()
+            )
         ):
             raise DatasetViewError("not_ready", "Publication inputs differ from prepared review")
         return resolved

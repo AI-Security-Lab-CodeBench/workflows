@@ -7,6 +7,7 @@ from urllib.request import Request, urlopen
 from dagster import AssetKey, DagsterInstance, RunsFilter
 from pydantic import BaseModel, Field, JsonValue, TypeAdapter
 
+from codebench_pipeline.config_assets import configured_selection
 from codebench_pipeline.dataset_branches import FINALIZATION_STAGES
 from codebench_pipeline.dataset_plan import plan_dataset
 from codebench_pipeline.dataset_registry import DatasetRegistry
@@ -107,7 +108,7 @@ class SourceReviewRunner:
                     "repositoryLocationName": "Dataset building",
                     "repositoryName": "__repository__",
                     "jobName": "build_dataset",
-                    "assetSelection": [{"path": key.path} for key in selected],
+                    "assetSelection": [{"path": key.path} for key in configured_selection(selected)],
                 },
                 "runConfigData": dataset_run_config(spec, self.home).to_config_dict(),
                 "executionMetadata": {

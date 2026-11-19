@@ -20,7 +20,7 @@ from codebench_pipeline.dataset_artifacts import DatasetArtifactCatalog
 from codebench_pipeline.dataset_asset_types import DATASET_PARTITIONS
 from codebench_pipeline.dataset_branches import HISTORICAL_PROCESSING_STAGES
 from codebench_pipeline.dataset_config import DatasetBuildSpec
-from codebench_pipeline.dataset_plan import INPUT_STAGES
+from codebench_pipeline.dataset_plan import KNOWN_STAGES
 from codebench_pipeline.dataset_registry import DatasetRegistry
 from codebench_pipeline.human_review import HumanReviewError
 from codebench_pipeline.table_query import TableQueryError, query_table
@@ -42,7 +42,9 @@ class DatasetDataService:
         self.registry = DatasetRegistry(home)
         self.home = home.resolve()
         self.instance = instance
-        self.artifacts = ArtifactDataService(DatasetArtifactCatalog(self.home), build_definitions(self.home))
+        self.artifacts = ArtifactDataService(
+            DatasetArtifactCatalog(self.home, instance), build_definitions(self.home)
+        )
 
     def datasets(self) -> DatasetList:
         specs = [self.registry.get_snapshot(key) for key in self.registry.keys()]
@@ -75,7 +77,7 @@ class DatasetDataService:
             "documentation/human_review_decisions",
             "documentation/dataset_release",
         }
-        if stage not in INPUT_STAGES and stage not in historical:
+        if stage not in KNOWN_STAGES and stage not in historical:
             raise DatasetViewError("not_found", "Unknown dataset stage")
         spec = self.specification(dataset_id)
         manager = DataFrameIOManager(storage=spec.storage, review_home=str(self.home))

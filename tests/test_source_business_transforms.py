@@ -43,14 +43,16 @@ class SourceBusinessTransformationTests(unittest.TestCase):
             [row.command for row in rows],
             ["probe inspect \\\n  --value '  kept  '", "probe inspect \\\\"],
         )
-        self.assertEqual([row.source_position for row in rows], ["document; lines 2:3", "document; lines 4:4"])
+        self.assertEqual(
+            [row.source_position for row in rows], ["document; lines 2:3", "document; lines 4:4"]
+        )
 
     def test_aws_rst_keeps_continuations_and_quoted_values_without_output_rows(self) -> None:
         text = (
             "Example::\n\n"
             "    aws cloudformation delete-stack \\\n"
             "        --stack-name '  example  '\n\n"
-            "Output::\n\n    {\"StackId\": \"example\"}\n"
+            'Output::\n\n    {"StackId": "example"}\n'
         )
         rows = self.transform("aws_rst.py", "AwsExamples", text)
         self.assertEqual(
@@ -70,3 +72,26 @@ class SourceBusinessTransformationTests(unittest.TestCase):
         self.assertEqual(list(filtered["filter_decision"]), ["needs_review", "eligible"])
         self.assertEqual(list(filtered["filter_reason"]), ["unresolved_template", ""])
         self.assertEqual(list(filtered["command"]), [row.command for row in examples])
+
+    def test_json_object_closers_are_not_template_markers(self) -> None:
+        cases = [
+            ("""probe inspect --data '{"filter":{"enabled":true}}'""", "eligible"),
+            ("""probe inspect --data='{"filter":{"enabled":true}}'""", "eligible"),
+            ("""probe inspect --data='{"filter":{"enabled":true}}' 'tail}}'""", "needs_review"),
+            ("""probe inspect --data '[{"name":{"id":1}}]' 'tail}}'""", "needs_review"),
+            ("""probe inspect --data '{"filter":{"name":"value}}"}}'""", "needs_review"),
+            ("""probe inspect --data '{"filter":{"name":"<resource>"}}'""", "needs_review"),
+            ("""probe inspect --data '{"invalid":}}'""", "needs_review"),
+        ]
+        rows = [
+            make_candidate(str(index)).model_copy(update={"command": command}).model_dump(mode="json")
+            for index, (command, _) in enumerate(cases)
+        ]
+        result = filter_candidates(
+            validated_frame(rows, CommandCandidatesTable), make_rules(), FilteringConfig()
+        )
+        self.assertEqual(list(result["filter_decision"]), [decision for _, decision in cases])
+        self.assertEqual(
+            list(result["filter_reason"]),
+            ["" if decision == "eligible" else "unresolved_template" for _, decision in cases],
+        )

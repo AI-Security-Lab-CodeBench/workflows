@@ -1,7 +1,7 @@
 import hashlib
 import json
 import uuid
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Collection, Mapping
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import TypeVar
@@ -13,6 +13,7 @@ from pandera.typing import DataFrame
 from pydantic import JsonValue, TypeAdapter
 
 from codebench_pipeline.category_rules import CategoryRules
+from codebench_pipeline.collection_config import DeclaredSourceStageConfig
 from codebench_pipeline.dataframe_io import AssetSnapshot, DataFrameIOManager, frame_bytes
 from codebench_pipeline.dataset_branches import asset_branch, stage_name
 from codebench_pipeline.dataset_catalog import source_scope
@@ -32,6 +33,15 @@ def code_versions(stage: str | None = None) -> dict[str, str]:
         *package.glob("dataset_*.py"),
         *package.glob("dataframe_*.py"),
         *package.glob("source_*.py"),
+        *package.glob("repository*.py"),
+        *package.glob("keenable*.py"),
+        *package.glob("grounding*.py"),
+        *package.glob("guarded_publication*.py"),
+        package / "collection_config.py",
+        package / "collection_descriptions.py",
+        package / "collection_merge.py",
+        package / "declared_dataset_bundle.py",
+        package / "declared_source_assets.py",
         *package.glob("discovery*.py"),
         package / "annotation_cache.py",
         package / "publication_authorization.py",
@@ -59,11 +69,33 @@ def code_versions(stage: str | None = None) -> dict[str, str]:
     return {str(path.relative_to(package.parent)): digest(path) for path in paths if path.is_file()}
 
 
+def receipt_source_versions(scoped: Mapping[str, str]) -> dict[str, str]:
+    """Capture whole source files for every scoped implementation dependency."""
+    root = Path(__file__).parent.parent
+    versions = code_versions()
+    for name in {entry.split(":", 1)[0] for entry in scoped} - versions.keys():
+        versions[name] = digest(root / name)
+    return versions
+
+
 def stage_signature(
     stage: str, config: Config, inputs: Mapping[str, pd.DataFrame | CategoryRules | AssetSnapshot]
 ) -> str:
     """Fingerprint inputs; snapshots must be unmodified, integrity-verified storage reads."""
-    return implementation_signature(stage, config, inputs, code_versions(stage))
+    return implementation_signature(stage, config, inputs, stage_code_versions(stage, config, inputs.keys()))
+
+
+def stage_code_versions(stage: str, config: Config, inputs: Collection[str]) -> dict[str, str]:
+    if stage == "labeling_attempts" and "commands" in inputs and "documentation" not in inputs:
+        versions = code_versions("guarded_labeling_attempts")
+    else:
+        versions = code_versions(stage)
+    if isinstance(config, DeclaredSourceStageConfig):
+        package = Path(__file__).parent
+        pattern = "keenable*" if config.branch == "keenable" else "repository*"
+        for path in (*package.glob(f"{pattern}.py"), package / "declared_source_assets.py"):
+            versions[f"codebench_pipeline/{path.name}"] = digest(path)
+    return versions
 
 
 def implementation_signature(
@@ -73,7 +105,11 @@ def implementation_signature(
     implementation: Mapping[str, str],
 ) -> str:
     values: dict[str, JsonValue] = {
-        "configuration": config.model_dump_json(),
+        "configuration": (
+            {"branch": config.branch, "declaration": config.declaration_digest}
+            if isinstance(config, DeclaredSourceStageConfig)
+            else config.model_dump_json()
+        ),
         "implementation": dict(implementation),
     }
     if stage in {"human_review_queue", "automatic_dataset_release"}:
@@ -106,12 +142,11 @@ def implementation_signature(
     if isinstance(config, (CatalogConfig, SnapshotConfig)):
         transforms = {
             (source.transform.module_path, source.transform.sha256): source.transform
-            for source in config.documents if source.transform is not None
+            for source in config.documents
+            if source.transform is not None
         }
         values["transformation_code"] = {
-            f"{path}:{expected}": hashlib.sha256(
-                transformation_bytes(transform)
-            ).hexdigest()
+            f"{path}:{expected}": hashlib.sha256(transformation_bytes(transform)).hexdigest()
             for (path, expected), transform in transforms.items()
         }
         values["sources"] = {
@@ -147,9 +182,9 @@ def verified_legacy_table(
         raise IntegrityError("Legacy fingerprint does not match current inputs and configuration")
 
     verify_processing(stage, implementation, storage.read_evidence)
-    if TypeAdapter(dict[str, JsonValue]).validate_json(
-        storage.read_evidence(f"{key}/evidence-index.json")
-    )["config"] != config.model_dump(mode="json"):
+    if TypeAdapter(dict[str, JsonValue]).validate_json(storage.read_evidence(f"{key}/evidence-index.json"))[
+        "config"
+    ] != config.model_dump(mode="json"):
         raise IntegrityError("Legacy evidence configuration differs from current configuration")
     if TypeAdapter(JsonValue).validate_json(storage.read_evidence(f"{key}/stage-config.json")) != (
         config.model_dump(mode="json")
@@ -176,11 +211,13 @@ def cached_table(
     from codebench_pipeline.dataset_branches import FINALIZATION_STAGES
     from codebench_pipeline.dataset_finalization import FINALIZATION_BINDING, authorize_finalization_output
     from codebench_pipeline.documentation_authorization import inventory_binding
+    from codebench_pipeline.source_evidence import retain_source_receipt, validate_source_receipt
     from codebench_pipeline.source_review_guard import SOURCE_GATED_STAGES, authorize_compute
 
     stage = context.asset_key.path[-1]
     shared_inputs = [
-        value for value in inputs.values()
+        value
+        for value in inputs.values()
         if isinstance(value, pd.DataFrame) and FINALIZATION_BINDING in value.attrs
     ]
     if stage in FINALIZATION_STAGES and stage != "merged_command_candidates":
@@ -191,10 +228,11 @@ def cached_table(
                 Path(storage.review_home), context.instance, context.partition_key, value, complete=True
             )
     source_token = authorize_compute(context, storage, inputs) if stage in SOURCE_GATED_STAGES else None
-    signature = stage_signature(stage, config, inputs)
+    scoped_versions = stage_code_versions(stage, config, inputs.keys())
+    signature = implementation_signature(stage, config, inputs, scoped_versions)
     branch = asset_branch(context.asset_key.path)
     key = f"{context.partition_key}/{stage_name(stage, branch)}/{signature}"
-    versions = code_versions()
+    versions = receipt_source_versions(scoped_versions)
 
     def build() -> pd.DataFrame:
         attempt = uuid.uuid4().hex
@@ -211,6 +249,8 @@ def cached_table(
                     }
                 if source_token is not None:
                     frame.attrs[inventory_binding(branch)] = source_token.model_dump(mode="json")
+                if isinstance(config, DeclaredSourceStageConfig):
+                    retain_source_receipt(frame, config, storage)
             finally:
                 receipts: dict[str, JsonValue] = {}
                 for path in sorted(evidence.rglob("*")):
@@ -244,7 +284,7 @@ def cached_table(
                         "receipts": receipts,
                         "config": config.model_dump(mode="json"),
                         "implementation": versions,
-                        "stage_implementation": code_versions(stage),
+                        "stage_implementation": scoped_versions,
                     },
                     ensure_ascii=False,
                 ).encode(),
@@ -252,6 +292,8 @@ def cached_table(
             return frame
 
     frame, hit = storage.cached_frame(key, build)
+    if isinstance(config, DeclaredSourceStageConfig):
+        validate_source_receipt(frame, config, storage)
     validated = schema.validate(frame)
     evidence_index = TypeAdapter(dict[str, JsonValue]).validate_json(
         storage.read_evidence(f"{key}/evidence-index.json")

@@ -6,6 +6,8 @@ from dagster import InputContext
 from codebench_pipeline.category_rules import CategoryRules
 from codebench_pipeline.data_view_models import DatasetViewError
 from codebench_pipeline.dataset_branches import asset_branch
+from codebench_pipeline.dataset_plan import KNOWN_STAGES, graph_materialization_stale
+from codebench_pipeline.dataset_registry import DatasetRegistry
 from codebench_pipeline.documentation_authorization import (
     frame_inventory_authorization,
     inventory_authorization,
@@ -20,6 +22,12 @@ def materialization_stale(home: Path, context: InputContext, value: pd.DataFrame
     stage = context.asset_key.path[-1]
     if not isinstance(value, pd.DataFrame):
         return False
+    name = "/".join(context.asset_key.path[1:])
+    if name in KNOWN_STAGES or name == "semantic_evidence":
+        spec = DatasetRegistry(home).get_snapshot(context.asset_partition_key)
+        state = graph_materialization_stale(spec, context.instance, home=home, stage=name)
+        if state is not None:
+            return state
     try:
         from codebench_pipeline.dataset_branches import FINALIZATION_STAGES
 
@@ -37,9 +45,7 @@ def materialization_stale(home: Path, context: InputContext, value: pd.DataFrame
         if stage in SOURCE_GATED_STAGES:
             branch = asset_branch(context.asset_key.path)
             actual = frame_inventory_authorization(value, branch)
-            _, current = inventory_authorization(
-                home, context.instance, context.asset_partition_key, branch
-            )
+            _, current = inventory_authorization(home, context.instance, context.asset_partition_key, branch)
             return actual != current
         if stage in {"human_review_decisions", "automatic_dataset_release"}:
             from codebench_pipeline.data_views import DatasetDataService

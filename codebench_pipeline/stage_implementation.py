@@ -19,6 +19,7 @@ STAGE_ROOTS: Final = {
     "filtered_commands": ("dataset_assets_sources", "filtered_commands"),
     "labeling_documentation": ("dataset_assets_sources", "labeling_documentation"),
     "labeling_attempts": ("dataset_assets_annotations", "labeling_attempts"),
+    "guarded_labeling_attempts": ("dataset_assets_annotations", "guarded_labeling_attempts"),
     "proposed_annotations": ("dataset_assets_annotations", "proposed_annotations"),
     "labeling_failures": ("dataset_assets_annotations", "labeling_failures"),
     "merged_command_candidates": ("dataset_finalization", "merged_command_candidates"),
@@ -69,6 +70,10 @@ class ProcessingChanged(IntegrityError):
     pass
 
 
+class ProcessingReceiptIncomplete(IntegrityError):
+    pass
+
+
 def processing_versions(stage: str, read_source: Callable[[str], bytes]) -> dict[str, str]:
     """Resolve stage code statically; retained sources are parsed, never imported."""
     pending = [STAGE_ROOTS[stage]]
@@ -93,6 +98,8 @@ def processing_versions(stage: str, read_source: Callable[[str], bytes]) -> dict
             match node:
                 case ast.FunctionDef() | ast.AsyncFunctionDef() | ast.ClassDef():
                     definitions[node.name] = node
+                case ast.TypeAlias(name=ast.Name(id=name)):
+                    definitions[name] = node
                 case ast.Assign() | ast.AnnAssign():
                     targets = node.targets if isinstance(node, ast.Assign) else [node.target]
                     for target in targets:
@@ -154,6 +161,7 @@ def processing_versions(stage: str, read_source: Callable[[str], bytes]) -> dict
                     ast.ImportFrom,
                     ast.Assign,
                     ast.AnnAssign,
+                    ast.TypeAlias,
                 ),
             )
         ]
@@ -196,7 +204,7 @@ def verify_processing(
 ) -> None:
     def retained(name: str) -> bytes:
         if name not in implementation:
-            raise IntegrityError(f"Legacy implementation receipt is missing: {name}")
+            raise ProcessingReceiptIncomplete(f"Legacy implementation receipt is missing: {name}")
         expected = implementation[name]
         payload = read_evidence(f"implementation/{expected}/{name}")
         if hashlib.sha256(payload).hexdigest() != expected:

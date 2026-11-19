@@ -1,9 +1,76 @@
 # Dataset pipeline stages
 
-This guide describes independent dataset and documentation collection branches
+## Source-driven collection
+
+The graph has three independently selectable branches. Existing
+datasets use unprefixed collection keys; documentation uses `documentation/`;
+Keenable uses `keenable/`. Each branch owns the following four artifacts:
+
+| Stage | Why it exists | What to inspect before labeling |
+| --- | --- | --- |
+| `source_catalog` | Establish the exact scope before downloading it. Repository branches enumerate pinned trees; Keenable records ranked leads from its configured queries. | Selected and excluded entries, scope completeness and reasons. A lead is not permission to copy a page. |
+| `source_documents` | Preserve what the parser actually read, independently of what discovery returned. | Original captured bytes, hashes, source permissions and receipts. An empty capture cannot stand in for a failed download. |
+| `document_adapters` | Bind a captured source to the reviewed parser that understands its format. | Parser identity and digest. A parser is trusted configuration; commands in source documents are inert data. |
+| `command_candidates` | Extract command occurrences while their original context and location are available. | Trace a candidate back to its source and exact byte range; inspect exclusions and parser transformations. |
+
+`merged_command_candidates` joins the configured branches and retains original
+identities. `filtered_commands` applies the common eligibility filters. The
+`prepare_dataset` job (CLI: `build --prepare-only`) stops here; inspect branch
+yields and source spans before spending model capacity.
+
+`datasets/bashguard_syntax_audit` is an optional side output of the merge.
+Its independent `audit_bashguard_syntax` job inspects the original command text
+as data. Each row links a candidate to its source position and records the
+parser outcome and observed syntax features. A flag such as `pipeline` can
+describe ordinary shell usage; it is not a judgment about intent. Filtering,
+labeling and release do not consume this table.
+
+Keenable's catalog can run a fixed search plan or a separate adaptive
+generation. The adaptive planner uses the registered model's shared inference
+guard to choose among reviewed documentation queries. Its feedback counts
+returned, eligible and newly discovered URLs; those counts are not estimates
+of new command texts or releasable rows. Inspect the catalog and the downstream
+candidate rows separately. A failed guard does not fall back to unguarded
+inference.
+
+`labeling_attempts` consumes filtered candidates directly. The Keenable branch
+owns the source scopes, discovery and capture. Labeling uses verified passages
+from the frozen acquisition; a missing passage is not permission to launch a
+second Keenable crawl. The candidate's source span establishes provenance;
+support for the operation must also be verified.
+
+`source_weight` is a number from 0 to 1 recording trust in the command's
+source. It is separate from the model's four confidence ratings. All
+documentation origins rank above all dataset origins, and all dataset origins
+rank above Keenable. Labeling considers the highest weights first. A subrisk
+closes at 250 distinct eligible commands with all four confidences high, or
+reports a confirmed deficit when its applicable input is exhausted. If evidence,
+routing, or inference remains unresolved, the receipt reports `scope_blocked`,
+the remaining target, and no confirmed shortage. A quota deferral
+is separate from an unsupported attempt. Inspect the source weight and
+citation or deferral on each row. `semantic_evidence` and `labeling_documentation` are
+not active assets. The existing supported/failure split, exact deduplication,
+category eligibility, uncertainty queue and single release follow labeling.
+No configuration receipt or successful model response constitutes human approval.
+
+## V1: prepared-source collection
+
+The following reference describes independent dataset and documentation collection branches
 and one shared finalization path. Native lineage groups are `existing_datasets`,
 `documentation_crawl`, `dataset_finalization` and `dataset_configuration`.
 Each dataset has its own `dataset_builds` partition.
+The `dataset_configuration` group can be materialized with its upstream
+`category_rules` asset. Its `global_config` outputs the validated dataset build spec
+as JSON. Each mapping outputs JSON keyed by stage: collection mappings contain
+only their branch's settings (documentation keys use `documentation/<stage>`),
+and finalization mappings contain one stage's settings. An empty settings object
+means the stage has no operator settings. Policy consumers also get a top-level
+`category_rules` object, the full serialized `CategoryRules`, through their own
+mapping. The policy is checked against the run's config snapshot before projection.
+Named jobs and planned selective runs include their config assets. When manually
+selecting a policy consumer, also select its mapping and `global_config`; include
+`category_rules` if it has not been materialized for this policy. Config JSON is
+stored by run ID, so a missing same-run mapping fails rather than using old JSON.
 See [orchestration](orchestration.md) for configuration, launch and storage setup.
 The implementation is in `dataset_assets_sources.py`,
 `dataset_assets_annotations.py` and their helpers under `codebench_pipeline/`.

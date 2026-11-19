@@ -2,13 +2,33 @@ from typing import Protocol
 
 from dagster import AssetKey, AssetSpec
 
-from codebench_pipeline.dataset_branches import FINALIZATION_STAGES
+from codebench_pipeline.bashguard_audit import AUDIT_STAGE
+from codebench_pipeline.collection_descriptions import (
+    FINALIZATION_DESCRIPTIONS,
+    PROVIDER_DESCRIPTIONS,
+    REPOSITORY_DESCRIPTIONS,
+)
+from codebench_pipeline.dataset_branches import COLLECTION_BRANCHES, FINALIZATION_STAGES, asset_branch
 
 DESCRIPTIONS: dict[str, str] = {
+    AUDIT_STAGE: """
+**How it works:** BashGuard parses the inert text in each saved merged candidate and
+walks the syntax tree for features such as pipelines, redirects and substitutions.
+The audit keeps the merged candidate ID and original source and candidate IDs so each
+result can be traced to the original row. It counts candidates by parser outcome and
+counts the number of candidates containing each flag.
+
+**Input:** The previously materialized merged candidate table for this partition.
+**Output:** A `BashGuardAuditTable` with one row per candidate and aggregate metrics.
+Unparseable or oversized text remains in the table with its parser outcome and no
+flags. An unavailable analyzer or invalid analyzer response fails only this audit.
+The parser never executes Bash or decodes payloads. Flags do not assign labels or
+change eligibility, review or publication.
+""",
     "category_rules": """
 **How it works:** The configured category, taxonomy and labeling instructions are validated
 and saved together as one policy snapshot. A fingerprint of that configuration identifies
-the version, so downstream stages share the same rules and can detect changes. Command
+the version. Each policy mapping forwards the rules to its consumer. Command
 patterns help route records to relevant risks; they do not decide whether a command is safe.
 
 **Input:** The category's inline taxonomy, version, policy, command families and language.
@@ -18,7 +38,7 @@ patterns help route records to relevant risks; they do not decide whether a comm
 **Why:** Category policy must be explicit and inspectable, not hidden in Python or prompts.
 
 **Output:** A validated `CategoryRules` value stored as JSON, with rule/version metadata.
-This is the only non-table asset; inspect its `rules` metadata rather than a row sample.
+Inspect its `rules` metadata rather than a row sample.
 Patterns route candidates but never assign safety labels.
 """,
     "source_catalog": """
@@ -335,8 +355,23 @@ class DescribedAsset(Protocol):
     def replace_attributes(self, *, description: str, group_name: str) -> AssetSpec: ...
 
 
-def describe_stage(spec: DescribedAsset) -> AssetSpec:
+def describe_stage(spec: DescribedAsset, *, declared: bool = False) -> AssetSpec:
     stage = spec.key.path[-1]
+    if declared:
+        branch = asset_branch(spec.key.path)
+        if stage in REPOSITORY_DESCRIPTIONS:
+            descriptions = PROVIDER_DESCRIPTIONS if branch == "keenable" else REPOSITORY_DESCRIPTIONS
+            group = next(
+                descriptor.group for descriptor in COLLECTION_BRANCHES if descriptor.namespace == branch
+            )
+            return spec.replace_attributes(
+                description=f"**How it works:** {descriptions[stage]}", group_name=group
+            )
+        if stage in FINALIZATION_DESCRIPTIONS:
+            return spec.replace_attributes(
+                description=f"**How it works:** {FINALIZATION_DESCRIPTIONS[stage]}",
+                group_name="dataset_finalization",
+            )
     description = DESCRIPTIONS[stage].strip()
     group_name = "existing_datasets"
     if stage == "category_rules":

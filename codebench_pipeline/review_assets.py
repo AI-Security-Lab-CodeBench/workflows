@@ -13,7 +13,7 @@ from dagster import (
 from pandera.typing import DataFrame
 from pydantic import ValidationError
 
-from codebench_pipeline.category_rules import CategoryRules
+from codebench_pipeline.config_assets import mapped_rules, mapped_settings, policy_input
 from codebench_pipeline.data_views import DatasetDataService
 from codebench_pipeline.dataframe_io import REVIEW_PREPARATION, DataFrameIOManager
 from codebench_pipeline.dataframe_schemas import (
@@ -23,9 +23,11 @@ from codebench_pipeline.dataframe_schemas import (
     ReviewQueueTable,
     validated_frame,
 )
-from codebench_pipeline.dataset_asset_types import DATASET_PARTITIONS, TABLE_TYPES, rules_input, table_input
+from codebench_pipeline.dataset_asset_types import DATASET_PARTITIONS, TABLE_TYPES, table_input
 from codebench_pipeline.dataset_branches import Branch, asset_branch, asset_path
+from codebench_pipeline.dataset_registry import DatasetRegistry
 from codebench_pipeline.dataset_tables import publication
+from codebench_pipeline.guarded_publication import ReleaseInputs, prepare_guarded_release
 from codebench_pipeline.human_review import CompletionToken, HumanReviewError, ReviewDecision
 from codebench_pipeline.human_review_store import HumanReviewStore
 from codebench_pipeline.label_corrections import apply_label_corrections
@@ -73,15 +75,22 @@ def human_assets(branch: Branch = "dataset") -> list[AssetsDefinition]:
         dagster_type=TABLE_TYPES[HumanReviewDecisionsTable],
         ins={
             "human_review_queue": table_input("human_review_queue", ReviewQueueTable, branch),
+            "mapped_config": policy_input("human_review_decisions"),
         },
     )
     def human_review_decisions(
         context: AssetExecutionContext,
         config: HumanReviewConfig,
         human_review_queue: DataFrame[ReviewQueueTable],
+        mapped_config: str,
         dataset_io_manager: ResourceParam[DataFrameIOManager],
     ) -> Output[DataFrame[HumanReviewDecisionsTable]]:
-        approved = authorized_review(context, config, dataset_io_manager)
+        settings = mapped_settings(mapped_config, "human_review_decisions", HumanReviewConfig)
+        if settings.authorization:
+            raise HumanReviewError("stale", "Scoped review settings cannot supply run authorization")
+        approved = authorized_review(
+            context, settings.model_copy(update={"authorization": config.authorization}), dataset_io_manager
+        )
         if human_review_queue.attrs.get(REVIEW_PREPARATION) != {
             "batch_id": approved.token.batch_id,
             "snapshot_id": approved.token.snapshot_id,
@@ -91,7 +100,7 @@ def human_assets(branch: Branch = "dataset") -> list[AssetsDefinition]:
             approved.resolved.reviewed["candidate_id"].isin(approved.resolved.snapshot.candidate_ids)
         ].reset_index(drop=True)
         queue = ReviewQueueTable.validate(human_review_queue)
-        if not queue.loc[:, reviewed.columns].equals(reviewed):
+        if not queue.drop(columns="exclusion_reason").equals(reviewed):
             raise HumanReviewError("stale", "Review queue differs from the completed snapshot")
         version = fingerprint(approved.token.model_dump(mode="json"))
         return Output(
@@ -118,7 +127,7 @@ def human_assets(branch: Branch = "dataset") -> list[AssetsDefinition]:
             "human_review_decisions": table_input(
                 "human_review_decisions", HumanReviewDecisionsTable, branch
             ),
-            "category_rules": rules_input(),
+            "mapped_config": policy_input("dataset_release"),
         },
     )
     def dataset_release(
@@ -126,13 +135,16 @@ def human_assets(branch: Branch = "dataset") -> list[AssetsDefinition]:
         config: HumanReviewConfig,
         category_eligible_annotations: DataFrame[ProposedAnnotationsTable],
         human_review_decisions: DataFrame[HumanReviewDecisionsTable],
-        category_rules: CategoryRules,
+        mapped_config: str,
         dataset_io_manager: ResourceParam[DataFrameIOManager],
     ) -> Output[DataFrame[CommandsTable]]:
         approved = authorized_review(context, config, dataset_io_manager)
         require_decision_frame(human_review_decisions, approved.decisions)
+        category_rules = mapped_rules(mapped_config)
         if (
-            not ProposedAnnotationsTable.validate(category_eligible_annotations).equals(approved.resolved.reviewed)
+            not ProposedAnnotationsTable.validate(category_eligible_annotations).equals(
+                approved.resolved.reviewed
+            )
             or category_rules != approved.resolved.rules
         ):
             raise HumanReviewError("stale", "Release inputs differ from the completed snapshot")
@@ -142,17 +154,23 @@ def human_assets(branch: Branch = "dataset") -> list[AssetsDefinition]:
                 approved.decisions["human_decision"] == "approve", "candidate_id"
             ]
         )
-        prepared = publication(
-            apply_label_corrections(
-                approved.resolved.reviewed, approved.records, approved.resolved.rules
-            ),
-            approved.resolved.rules,
-            approved.resolved.manifest.publication,
-            approved_ids=identities,
-        )
-        frame = validated_frame(
-            [{key: value for key, value in row.items()} for row in prepared.commands], CommandsTable
-        )
+        home = Path(dataset_io_manager.review_home or "")
+        spec = DatasetRegistry(home).get_snapshot(context.partition_key)
+        if spec.has_declared_collection:
+            snapshots = ReviewSnapshots(home, DatasetDataService(home, context.instance), branch)
+            frame = prepare_guarded_release(
+                ReleaseInputs(snapshots, approved.resolved, approved.token, approved.records), home, spec
+            ).output
+        else:
+            prepared = publication(
+                apply_label_corrections(approved.resolved.reviewed, approved.records, category_rules),
+                category_rules,
+                approved.resolved.manifest.publication,
+                approved_ids=identities,
+            )
+            frame = validated_frame(
+                [{key: value for key, value in row.items()} for row in prepared.commands], CommandsTable
+            )
         version = fingerprint(approved.token.model_dump(mode="json"))
         return Output(
             frame,

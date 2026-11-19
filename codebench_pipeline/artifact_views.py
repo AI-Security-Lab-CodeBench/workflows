@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Annotated, Literal, Protocol, assert_never
 
 from dagster import Definitions
@@ -10,6 +11,7 @@ from codebench_pipeline.artifact_schemas import (
     rules_artifact_schema,
     table_artifact_schema,
 )
+from codebench_pipeline.config_artifact_preview import read_config_preview
 from codebench_pipeline.dataframe_io import AssetReference, read_frame
 from codebench_pipeline.human_review import HumanReviewError
 from codebench_pipeline.models import Digest
@@ -51,6 +53,7 @@ class ArtifactJSON(ArtifactTarget):
     snapshot_id: Digest
     value: JsonValue
     data_schema: ArtifactSchema
+    publication_state: PublicationState | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,10 +63,16 @@ class ArtifactBinding:
     publication_state: PublicationState | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class RunConfigBinding:
+    path: Path
+    publication_state: PublicationState | None = None
+
+
 class ArtifactCatalog(Protocol):
     def partitions(self, key: ArtifactKey) -> ArtifactPartitions: ...
 
-    def resolve(self, target: ArtifactTarget) -> ArtifactBinding: ...
+    def resolve(self, target: ArtifactTarget) -> ArtifactBinding | RunConfigBinding: ...
 
 
 class ArtifactDataService:
@@ -78,6 +87,19 @@ class ArtifactDataService:
 
     def query(self, request: ArtifactQuery) -> ArtifactTable | ArtifactJSON:
         binding = self.catalog.resolve(request)
+        if not isinstance(binding, ArtifactBinding):
+            query = request.query
+            if query.search or query.filters or query.sort or query.offset:
+                raise TableQueryError("query", "JSON artifacts are not queryable tables")
+            preview = read_config_preview(binding.path, request.snapshot_id)
+            return ArtifactJSON(
+                asset_key=request.asset_key,
+                partition_key=request.partition_key,
+                snapshot_id=preview.digest,
+                value=preview.value,
+                data_schema=ArtifactSchema(source="storage", schema=preview.schema),
+                publication_state=binding.publication_state,
+            )
         if request.snapshot_id is not None and request.snapshot_id != binding.reference.digest:
             raise HumanReviewError("stale", "The artifact changed; refresh before continuing")
         suffix = "parquet" if binding.reference.format == "parquet" else "json"

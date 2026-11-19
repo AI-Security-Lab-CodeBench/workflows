@@ -10,7 +10,6 @@ from codebench_pipeline.dataset_branches import Branch
 from codebench_pipeline.dataset_config import (
     AdapterConfig,
     AnnotationConfig,
-    BundleVersion,
     CatalogConfig,
     DatasetBuildSpec,
     DatasetFileConfig,
@@ -24,6 +23,7 @@ from codebench_pipeline.dataset_config import (
 )
 from codebench_pipeline.dataset_documentation_config import DocumentationConfig
 from codebench_pipeline.dataset_source_models import is_documentation_source
+from codebench_pipeline.declared_dataset_bundle import DeclaredDatasetBundle
 from codebench_pipeline.legacy_dataset_config import resolve_legacy_file
 from codebench_pipeline.model_config import ModelConfig
 from codebench_pipeline.models import Identifier
@@ -128,7 +128,6 @@ class FinalizationSection(StrictStageConfig):
 
 
 class DatasetBundleConfig(StrictStageConfig):
-    version: BundleVersion
     dataset_id: Identifier
     revision: str = Field(min_length=1)
     existing_datasets: CollectionSection = CollectionSection()
@@ -157,7 +156,6 @@ class DatasetBundleConfig(StrictStageConfig):
         return DatasetBuildSpec(
             dataset_id=self.dataset_id,
             revision=self.revision,
-            bundle_version=self.version,
             rules=rules,
             catalog=catalog,
             snapshots=snapshots,
@@ -175,7 +173,7 @@ class DatasetBundleConfig(StrictStageConfig):
         )
 
 
-class DatasetFile(RootModel[DatasetBundleConfig | DatasetFileConfig]):
+class DatasetFile(RootModel[DeclaredDatasetBundle | DatasetBundleConfig | DatasetFileConfig]):
     pass
 
 
@@ -192,4 +190,6 @@ def load_dataset_bundle(path: Path, home: Path | None) -> DatasetBuildSpec:
             return resolve_legacy_file(supplied, parent, storage)
         case DatasetBundleConfig():
             return supplied.resolve(parent, storage)
+        case DeclaredDatasetBundle():
+            return supplied.resolve(parent, storage, home=home)
     assert_never(supplied)

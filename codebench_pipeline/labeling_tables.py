@@ -92,11 +92,13 @@ def proposed_from_attempts(
     validate_attempts(candidates, outcomes, rules)
     rows: list[dict[str, JsonValue]] = []
     documentation: dict[str, JsonValue] = {}
-    for attempt in outcomes:
+    for attempt, row in zip(outcomes, frame_records(attempts), strict=True):
         if attempt.status != "success":
             continue
         label = LabelDecision.model_validate_json(attempt.label_json)
         original = attempt.model_dump(mode="json", include=set(CandidateRecord.model_fields))
+        if "source_weight" in row:
+            original["source_weight"] = row["source_weight"]
         rows.append({**original, **label.model_dump(mode="json", by_alias=True)})
         documentation[attempt.candidate_id] = [
             doc.model_dump(mode="json")

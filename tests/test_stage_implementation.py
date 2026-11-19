@@ -7,13 +7,19 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pandas as pd
+from dagster import AssetExecutionContext, Output, StaticPartitionsDefinition, asset, materialize
+from pandera.typing import DataFrame
 from pydantic import JsonValue
 
 from codebench_pipeline.dataframe_io import DataFrameIOManager, frame_bytes
+from codebench_pipeline.dataframe_schemas import SourceCatalogTable, validated_frame
+from codebench_pipeline.dataset_asset_types import TABLE_TYPES
 from codebench_pipeline.dataset_config import ExtractionConfig
 from codebench_pipeline.dataset_engine import (
+    cached_table,
     code_versions,
     implementation_signature,
+    receipt_source_versions,
     stage_signature,
     verified_legacy_table,
 )
@@ -43,7 +49,7 @@ class StageImplementationTests(unittest.TestCase):
                 {"name": "jsonschema", "version": "4"},
                 {"name": "codebench", "dependencies": [{"name": "psycopg"}, {"name": "jsonschema"}]},
                 {"name": "psycopg", "version": "3.3"},
-            ]
+            ],
         }
         changed = {
             **base,
@@ -82,7 +88,9 @@ class StageImplementationTests(unittest.TestCase):
                 tree = ast.parse(payload)
                 for node in tree.body:
                     if isinstance(node, ast.FunctionDef) and node.name in {
-                        "review_queue", "prepare_dataset", "requires_human_review",
+                        "review_queue",
+                        "prepare_dataset",
+                        "requires_human_review",
                     }:
                         node.body = [ast.Return(value=ast.Constant(value=None))]
                 return ast.unparse(tree).encode()
@@ -123,7 +131,9 @@ class StageImplementationTests(unittest.TestCase):
 
         self.assertNotEqual(
             before,
-            stage_signature("command_candidates", config, {"source": pd.DataFrame({"command": ["git diff"]})}),
+            stage_signature(
+                "command_candidates", config, {"source": pd.DataFrame({"command": ["git diff"]})}
+            ),
         )
         self.assertNotEqual(
             before,
@@ -133,10 +143,64 @@ class StageImplementationTests(unittest.TestCase):
     def test_legacy_equivalent_receipts_reuse_cache_without_processing(self) -> None:
         self.check_legacy("downstream", accepted=True)
 
+    def test_cached_table_retains_scoped_files_and_reuses_after_unrelated_edit(self) -> None:
+        stage = "source_catalog"
+        config = TypedConfig()
+        source = "codebench_pipeline/config_assets.py"
+        original = Path.read_bytes
+        with tempfile.TemporaryDirectory() as temporary:
+            manager = DataFrameIOManager(storage=StorageConfig(local_root=temporary))
+
+            @asset(
+                key=["datasets", stage],
+                partitions_def=StaticPartitionsDefinition(["fixture"]),
+                dagster_type=TABLE_TYPES[SourceCatalogTable],
+            )
+            def catalog(context: AssetExecutionContext) -> Output[DataFrame[SourceCatalogTable]]:
+                return cached_table(
+                    context,
+                    manager,
+                    config,
+                    {},
+                    SourceCatalogTable,
+                    lambda _: validated_frame([], SourceCatalogTable),
+                )
+
+            run = materialize([catalog], partition_key="fixture")
+            (first,) = run.asset_materializations_for_node("datasets__source_catalog")
+            evidence = first.metadata["evidence"].value
+            expected = hashlib.sha256((ROOT / source).read_bytes()).hexdigest()
+            self.assertEqual(evidence["implementation"][source], expected)
+            self.assertEqual(
+                manager.read_evidence(f"implementation/{expected}/{source}"), (ROOT / source).read_bytes()
+            )
+            self.assertFalse(first.metadata["cache_hit"].value)
+            self.assertTrue(
+                legacy_signature_matches(
+                    manager, stage, config, {}, first.metadata["input_fingerprint"].value, evidence
+                )
+            )
+
+            def changed(path: Path) -> bytes:
+                payload = original(path)
+                return payload + b"\nUNRELATED_REVISION = 2\n" if path.name == "dataset_plan.py" else payload
+
+            with patch.object(Path, "read_bytes", changed):
+                repeated = materialize([catalog], partition_key="fixture")
+            (second,) = repeated.asset_materializations_for_node("datasets__source_catalog")
+            self.assertTrue(second.metadata["cache_hit"].value)
+            self.assertEqual(second.metadata["input_fingerprint"], first.metadata["input_fingerprint"])
+            self.assertEqual(second.metadata["evidence"], first.metadata["evidence"])
+
     def test_scoped_receipt_reuses_unchanged_processing_after_runtime_boundary_change(self) -> None:
         stage = "category_eligible_annotations"
-        implementation = code_versions()
-        scoped = {**code_versions(stage), "codebench_pipeline/stage_implementation.py": "f" * 64}
+        current = code_versions(stage)
+        implementation = receipt_source_versions(current)
+        runtime = "codebench_pipeline/stage_implementation.py"
+        historical_runtime = (ROOT / runtime).read_bytes() + b"\n"
+        historical_digest = hashlib.sha256(historical_runtime).hexdigest()
+        implementation[runtime] = historical_digest
+        scoped = {**current, runtime: historical_digest}
         inputs = {"annotations": pd.DataFrame({"command": ["git status"]})}
         config = TypedConfig()
         recorded = implementation_signature(stage, config, inputs, scoped)
@@ -146,8 +210,16 @@ class StageImplementationTests(unittest.TestCase):
         }
         with tempfile.TemporaryDirectory() as temporary:
             manager = DataFrameIOManager(storage=StorageConfig(local_root=temporary))
+            with self.assertRaises(FileNotFoundError):
+                legacy_signature_matches(manager, stage, config, inputs, recorded, evidence)
             for name, expected in implementation.items():
-                manager.write_evidence(f"implementation/{expected}/{name}", (ROOT / name).read_bytes())
+                payload = historical_runtime if name == runtime else (ROOT / name).read_bytes()
+                manager.write_evidence(f"implementation/{expected}/{name}", payload)
+            incomplete: dict[str, JsonValue] = {
+                **evidence,
+                "implementation": {name: value for name, value in code_versions().items()},
+            }
+            self.assertFalse(legacy_signature_matches(manager, stage, config, inputs, recorded, incomplete))
             self.assertTrue(legacy_signature_matches(manager, stage, config, inputs, recorded, evidence))
             changed = {"annotations": pd.DataFrame({"command": ["git diff"]})}
             self.assertFalse(legacy_signature_matches(manager, stage, config, changed, recorded, evidence))
@@ -177,7 +249,7 @@ class StageImplementationTests(unittest.TestCase):
         stage = "deduplicated_annotations"
         config = TypedConfig()
         inputs = {"annotations": pd.DataFrame({"command": ["git status"]})}
-        implementation = code_versions()
+        implementation = receipt_source_versions(code_versions(stage))
         sources = {name: (ROOT / name).read_bytes() for name in implementation}
         filename = "codebench_pipeline/dataset_finalization.py"
         if change == "processing":
@@ -190,9 +262,7 @@ class StageImplementationTests(unittest.TestCase):
                 b'frame.attrs["codebench_source_inventory"]',
                 b'frame.attrs["different_inventory_binding"]',
             )
-        implementation = {
-            name: hashlib.sha256(payload).hexdigest() for name, payload in sources.items()
-        }
+        implementation = {name: hashlib.sha256(payload).hexdigest() for name, payload in sources.items()}
         signature = implementation_signature(stage, config, inputs, implementation)
         key = f"synthetic/{stage}/{signature}"
         frame = pd.DataFrame({"command": ["git status"], "class": ["allow"]})
@@ -221,7 +291,11 @@ class StageImplementationTests(unittest.TestCase):
             )
             if accepted:
                 result = verified_legacy_table(
-                    manager, key, stage=stage, config=requested, inputs=inputs,
+                    manager,
+                    key,
+                    stage=stage,
+                    config=requested,
+                    inputs=inputs,
                     implementation=implementation,
                     content_digest=content_digest,
                 )
@@ -237,14 +311,21 @@ class StageImplementationTests(unittest.TestCase):
                 )
                 self.assertFalse(
                     legacy_signature_matches(
-                        manager, stage, config,
-                        {"annotations": pd.DataFrame({"command": ["git diff"]})}, signature,
+                        manager,
+                        stage,
+                        config,
+                        {"annotations": pd.DataFrame({"command": ["git diff"]})},
+                        signature,
                     )
                 )
             else:
                 with self.assertRaises((IntegrityError, FileNotFoundError)):
                     verified_legacy_table(
-                        manager, key, stage=stage, config=requested, inputs=inputs,
+                        manager,
+                        key,
+                        stage=stage,
+                        config=requested,
+                        inputs=inputs,
                         implementation=implementation,
                         content_digest=content_digest,
                     )

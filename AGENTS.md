@@ -8,6 +8,11 @@ branch is `master`, tracking `origin/master` at
 Run development commands from this checkout, not the legacy sibling `CodeBench`.
 Keep legacy data, strategy files and runtime evidence outside this repository.
 
+Maintain one source implementation for each pipeline operation, including
+configuration-owned parsers. Update the canonical module and its callers;
+do not maintain parallel `v2` or `v3` modules. Git history preserves older
+implementations. Keep historical receipts and their original hashes intact.
+
 Work directly on `master`; do not create feature branches or linked worktrees
 unless the user explicitly requests them. Preserve unrelated working changes.
 When a commit is authorized, verify the relevant changes, create an atomic commit,
@@ -19,6 +24,52 @@ authorize unrelated commits, force-pushes or history rewrites.
 Preserve the user's primary author identity. Never add `Co-authored-by` trailers,
 AI attribution or assistant signatures to commits, including amended commits.
 This explicit repository policy overrides attribution defaults in agent skills.
+
+## Docker Compose execution, code delivery and uptime
+
+Use one shared `codebench` Compose deployment on the designated server from
+both devices. Both checkouts must point `REMOTE_COMPOSE_DIR` at that same
+server-side runtime directory in the gitignored `.env` (see `.env.example`).
+Control this deployment through the Docker Engine socket. On the Compose host,
+use the local Unix socket. From a workstation, use SSH to reach the Docker
+socket on the designated host; keep UI port forwarding loopback-only. SSH is
+for transport, not for running pipeline Python on the server. Do not expose
+an unauthenticated Docker TCP endpoint or start a second Compose stack.
+Use unquoted values and keep real addresses and paths out of tracked files.
+
+Run pipeline commands inside the existing Compose service with
+`docker compose exec -T`, using the shared project's Compose configuration.
+This includes registration, labeling, materialization, and inspection of
+persisted outputs. Use the service's environment, network and volume paths.
+Do not run the pipeline from a host virtualenv, recreate container paths
+with `bwrap` or host aliases, or open the backing registry or database
+directly from the host. The Docker socket belongs to the operator; do not
+mount it into pipeline containers.
+
+Deliver business code and configuration through a read-only Compose bind
+mount. When shared materialization needs isolation from development, mount
+a separate, clean Git checkout pinned to the intended commit on the Docker
+host. Never deploy a copied source tree or overlay loose files. Before a
+run, record the checkout's commit, verify it is clean, and confirm each
+consuming service sees that checkout's files read-only. Keep writable
+dataset and review storage on separate volumes. Do not
+patch a running container's writable layer or rebuild an image to deliver
+business code. If the expected mount is absent or stale, stop before
+registration or materialization and report the mismatch.
+
+Run `make remote-up` before any Dagster work and whenever
+`http://localhost:3041` stops responding. It starts missing or stopped
+services without recreating existing containers, waits for health checks,
+and verifies the UI. If recovery fails, inspect the shared stack and report
+the failure rather than starting a replacement. Leave the shared stack
+running after work; do not stop it, bring it down, or remove its volumes
+without explicit user authorization. Keep Docker enabled at boot and retain
+the `unless-stopped` restart policy for the webserver, daemon, and review database.
+
+On a host without an existing CodeBench webserver container, provision
+`CONTEXT7_API_KEY` and `KEENABLE_API_KEY` in the remote SSH environment or in
+`.codebench-runtime/grounding.env` under the remote Compose directory before
+running the target. Keep that file on the server and outside version control.
 
 ## Publication scope
 
@@ -56,7 +107,22 @@ existing data before replacing it; never overwrite concurrent work.
 - Maintain independently executable **Existing datasets** and **Documentation
   crawl** collection branches. Show each as a named surrounding group in Dagster
   lineage, with a separately named shared finalization group.
-- The local agent discovers and assesses sources outside Dagster, reading actual
+- For declared sources, the independently executable Existing datasets, Documentation
+  crawl and Keenable use-case branches own acquisition. The config declares
+  corpus scopes, pins, parser trust, and search budgets; the assets persist
+  enumerations, verified origin bytes, rights decisions and exclusion receipts.
+  Only the Keenable catalog may search for new origins. Never execute downloaded
+  code or commands. Only explicitly reviewed, hash-pinned configuration-owned
+  ETL modules may run. The declared Keenable branch acquires each authorized
+  source once; guarded labeling verifies applicable passages against the same
+  captures. It must not independently crawl Keenable or require per-operation
+  grants for a current source-scoped declaration.
+  Schedule eligible rows by source trust: documentation above datasets above
+  Keenable. Stop inference for a subrisk at 250 distinct eligible, all-high
+  labels or when applicable input is exhausted. Report deferrals and deficits.
+  The two-branch prepared-source and labeling-documentation rules remain in
+  force for historical prepared manifests. See `docs/architecture/cat3-collection-increment.md`.
+- For prepared manifests, the local agent discovers and assesses sources outside Dagster, reading actual
   README/license/origin evidence and enumerating complete declared scopes.
   Follow `skills/codebench-source-preparation/SKILL.md`; preserve evidence and
   unresolved exclusions in local inventories. Dagster accepts category-bound
@@ -198,7 +264,7 @@ existing data before replacing it; never overwrite concurrent work.
   conventions; keep stages parameterized, not tied to machine paths or accounts.
 - Assign parallel workers disjoint files. One owner integrates graph contracts,
   shared ledgers and final artifacts. Preserve unrelated working-tree changes.
-- Run `python3 -B -m unittest discover -s tests -v` and relevant frontend
+- Inside the Compose test environment, run `python3 -B -m unittest discover -s tests -v` and relevant frontend
   tests/type/lint/build checks. Never execute dataset fields as a smoke test.
 - Prove graph changes with actual Dagster materialization and prove UI changes
   in the native UI and selected category partition. Capture lineage, data and

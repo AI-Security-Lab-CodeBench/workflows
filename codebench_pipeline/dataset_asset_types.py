@@ -2,6 +2,7 @@ import pandera.pandas as pa
 from dagster import AssetIn, AssetKey, DagsterType, DynamicPartitionsDefinition, TypeCheckContext
 from dagster_pandera import pandera_schema_to_dagster_type
 
+from codebench_pipeline.bashguard_audit import BashGuardAuditTable
 from codebench_pipeline.category_rules import CategoryRules
 from codebench_pipeline.dataframe_schemas import (
     CommandCandidatesTable,
@@ -28,6 +29,7 @@ TABLE_TYPES: dict[type[pa.DataFrameModel], DagsterType] = {
         SourceDocumentsTable,
         DocumentAdaptersTable,
         CommandCandidatesTable,
+        BashGuardAuditTable,
         FilteredCommandsTable,
         DocumentationTable,
         LabelingAttemptsTable,

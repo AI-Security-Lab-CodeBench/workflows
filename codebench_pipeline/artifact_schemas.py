@@ -44,9 +44,10 @@ def declared_artifact_schemas(definitions: Definitions) -> dict[tuple[str, ...],
 def declared_table_schema(model: type[pa.DataFrameModel]) -> dict[str, JsonValue]:
     table = model.to_schema()
     annotations = {
-        str(getattr(model, name)): get_args(annotation)[0]
+        str(getattr(model, name)): get_args(series)[0]
         for name, annotation in get_type_hints(model).items()
-        if get_origin(annotation) is Series
+        for series in (annotation, *get_args(annotation))
+        if get_origin(series) is Series
     }
     properties: dict[str, JsonValue] = {}
     for name, column in table.columns.items():
@@ -62,6 +63,8 @@ def declared_table_schema(model: type[pa.DataFrameModel]) -> dict[str, JsonValue
                     field["const"] = statistics["value"]
                 case "greater_than_or_equal_to":
                     field["minimum"] = statistics["min_value"]
+                case "less_than_or_equal_to":
+                    field["maximum"] = statistics["max_value"]
                 case "str_matches":
                     field["pattern"] = statistics["pattern"]
         if column.description:
@@ -95,7 +98,11 @@ def storage_field_schema(field: arrow.Field) -> dict[str, JsonValue]:
         schema = {"type": "string"}
     elif arrow.types.is_null(dtype):
         return {"type": "null"}
-    elif arrow.types.is_list(dtype) or arrow.types.is_large_list(dtype) or arrow.types.is_fixed_size_list(dtype):
+    elif (
+        arrow.types.is_list(dtype)
+        or arrow.types.is_large_list(dtype)
+        or arrow.types.is_fixed_size_list(dtype)
+    ):
         schema = {"type": "array", "items": storage_field_schema(dtype.value_field)}
         if arrow.types.is_fixed_size_list(dtype):
             schema.update(minItems=dtype.list_size, maxItems=dtype.list_size)
@@ -117,7 +124,13 @@ def table_artifact_schema(
     payload: bytes, columns: tuple[str, ...], declared: dict[str, JsonValue] | None
 ) -> ArtifactSchema:
     properties = declared.get("properties") if declared is not None else None
-    if declared is not None and isinstance(properties, dict) and set(columns) == set(properties):
+    required = declared.get("required") if declared is not None else None
+    if (
+        declared is not None
+        and isinstance(properties, dict)
+        and isinstance(required, list)
+        and set(required) <= set(columns) <= properties.keys()
+    ):
         return ArtifactSchema(source="declared", schema=declared)
     stored = parquet.read_schema(BytesIO(payload))
     return ArtifactSchema(

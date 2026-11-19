@@ -12,8 +12,9 @@ from pydantic import BaseModel, ConfigDict, Field, JsonValue, TypeAdapter
 
 from codebench_pipeline.batch_labeling import annotate_batches
 from codebench_pipeline.dataframe_io import AssetReference
-from codebench_pipeline.dataset_config import AnnotationConfig, DatasetBuildSpec
+from codebench_pipeline.dataset_config import AnnotationConfig
 from codebench_pipeline.dataset_records import CandidateRecord, LabelDecision
+from codebench_pipeline.dataset_registry import read_registered_spec
 from codebench_pipeline.labeling_outcomes import LabelingAttempt
 from codebench_pipeline.model_config import ModelConfig
 from codebench_pipeline.models import SemanticSnippet
@@ -190,7 +191,7 @@ def run_evaluation(
     if batch_size is not None:
         batch = batch.model_copy(update={"batch_size": batch_size})
         config = config.model_copy(update={"batch": batch})
-    spec = DatasetBuildSpec.model_validate_json((cohort_path.parent / "spec.json").read_bytes())
+    spec = read_registered_spec((cohort_path.parent / "spec.json").read_bytes())
     rules = spec.rules
     records = [record for record in cohort.records if split == "all" or record.split == split]
     candidates = [record.candidate() for record in records]

@@ -8,6 +8,8 @@ from codebench_pipeline.data_views import DatasetDataService
 from codebench_pipeline.dataset_branches import Branch
 from codebench_pipeline.dataset_registry import DatasetRegistry
 from codebench_pipeline.definitions import build_definitions, release_run_config
+from codebench_pipeline.guarded_publication_controls import require_proposal_authorized
+from codebench_pipeline.guarded_publication_runtime import current_proposal, require_current_release
 from codebench_pipeline.human_review import (
     CompletionEffect,
     CompletionToken,
@@ -31,12 +33,26 @@ class ReleaseContinuation:
 
     def __call__(self, token: CompletionToken) -> CompletionEffect:
         with exclusive(self.home / "release-locks" / f"{token.dataset_id}.lock"):
-            with HumanReviewStore(self.home).reader() as tx:
+            spec = DatasetRegistry(self.home).get(token.dataset_id)
+            with HumanReviewStore(self.home).transaction(dataset_id=token.dataset_id) as tx:
                 batch = tx.get_current_batch(token.dataset_id, token.review_stage)
                 tx.authorize_completion(batch.snapshot, token)
                 previous = tx.last_publication(token.dataset_id)
+                if spec.has_declared_collection:
+                    snapshots = ReviewSnapshots(self.home, DatasetDataService(self.home, self.instance))
+                    try:
+                        proposal = current_proposal(snapshots, token, tx)
+                        require_proposal_authorized(tx, token.dataset_id, proposal)
+                        if previous is not None and previous.proposal_digest == proposal.digest:
+                            require_current_release(snapshots, previous, tx, proposal=proposal)
+                            return CompletionEffect(publication=previous, run_id=previous.dagster_run_id)
+                    except HumanReviewError as error:
+                        if error.code == "pending":
+                            return CompletionEffect()
+                        raise
                 if previous is not None and previous.authorization == token:
-                    return CompletionEffect(publication=previous, run_id=previous.dagster_run_id)
+                    if not spec.has_declared_collection and previous.proposal_digest is None:
+                        return CompletionEffect(publication=previous, run_id=previous.dagster_run_id)
             tags = {
                 "dagster/partition": token.dataset_id,
                 "human_review/completion": fingerprint(token.model_dump(mode="json")),
@@ -44,7 +60,6 @@ class ReleaseContinuation:
             runs = self.instance.get_runs(filters=RunsFilter(job_name="release_dataset", tags=tags), limit=1)
             if runs and not runs[0].is_finished:
                 return CompletionEffect(run_id=runs[0].run_id)
-            spec = DatasetRegistry(self.home).get_snapshot(token.dataset_id)
             params = {
                 "selector": {
                     "repositoryLocationName": "Dataset building",
@@ -72,16 +87,23 @@ class ReleaseRunner:
             return self._release(token)
 
     def _release(self, token: CompletionToken) -> PublicationReference:
-        with HumanReviewStore(self.home).reader() as tx:
-            resolved = ReviewSnapshots(self.home, DatasetDataService(self.home, self.instance)).current(
-                token.dataset_id
-            )
+        snapshots = ReviewSnapshots(self.home, DatasetDataService(self.home, self.instance))
+        with HumanReviewStore(self.home).transaction(dataset_id=token.dataset_id) as tx:
+            spec = DatasetRegistry(self.home).get(token.dataset_id)
+            resolved = snapshots.current(token.dataset_id)
             authorize_publication(resolved, token, tx)
             previous = tx.last_publication(token.dataset_id)
-            if previous is not None and previous.authorization == token:
+            if spec.has_declared_collection:
+                proposal = current_proposal(snapshots, token, tx)
+                require_proposal_authorized(tx, token.dataset_id, proposal)
+                if previous is not None and previous.proposal_digest == proposal.digest:
+                    require_current_release(snapshots, previous, tx, proposal=proposal)
+                    return previous
+            elif (
+                previous is not None and previous.authorization == token and previous.proposal_digest is None
+            ):
                 return previous
-        spec = DatasetRegistry(self.home).get(token.dataset_id)
-        job = build_definitions(self.home).resolve_job_def("release_dataset")
+        job = build_definitions(self.home, specification=spec).resolve_job_def("release_dataset")
         try:
             result = job.execute_in_process(
                 instance=self.instance,

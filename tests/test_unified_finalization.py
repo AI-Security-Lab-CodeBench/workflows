@@ -65,6 +65,25 @@ class UnifiedDeduplicationTests(unittest.TestCase):
         queue = review_queue(retained, make_rules(), PublicationConfig())
         self.assertEqual(queue["candidate_id"].tolist(), list(fields))
 
+    def test_review_queue_preserves_optional_source_weight_even_when_empty(self) -> None:
+        for weight in (None, 0.8123456789012345):
+            for confidence in ("high", "medium"):
+                with self.subTest(weight=weight, confidence=confidence):
+                    source = {} if weight is None else {"source_weight": weight}
+                    original = annotations(reviewed_row("candidate", risk_confidence=confidence, **source))
+
+                    queue = review_queue(original, make_rules(), PublicationConfig())
+
+                    self.assertEqual(
+                        queue["candidate_id"].tolist(), ["candidate"] if confidence == "medium" else []
+                    )
+                    if weight is None:
+                        self.assertNotIn("source_weight", queue)
+                    else:
+                        self.assertEqual(
+                            queue["source_weight"].tolist(), [weight] if confidence == "medium" else []
+                        )
+
     def test_category_filter_accepts_empty_and_all_excluded_tables(self) -> None:
         for original in (annotations(), annotations(reviewed_row("low", category_confidence="low"))):
             with self.subTest(rows=len(original)):
@@ -75,9 +94,7 @@ class UnifiedDeduplicationTests(unittest.TestCase):
     def test_branch_collisions_retain_original_identity_and_duplicate_mapping(self) -> None:
         merged = merge_candidates(
             validated_frame([make_candidate("one").model_dump(mode="json")], CommandCandidatesTable),
-            validated_frame(
-                [make_candidate("one").model_dump(mode="json")], CommandCandidatesTable
-            ),
+            validated_frame([make_candidate("one").model_dump(mode="json")], CommandCandidatesTable),
         )
         self.assertEqual(merged["candidate_id"].tolist(), ["dataset:one", "documentation:one"])
         self.assertEqual(
@@ -151,3 +168,19 @@ class UnifiedDeduplicationTests(unittest.TestCase):
             deduplicate_annotations(reviewed)["candidate_id"].tolist(),
             ["one", "three", "four"],
         )
+
+    def test_exact_duplicate_retains_strongest_source_in_either_order(self) -> None:
+        low = reviewed_row("dataset:low", source_weight=0.55)
+        high = reviewed_row("documentation:high", source_weight=0.95)
+        disagreement = reviewed_row("keenable:disagreement", source_weight=0.3, severity="high")
+        for order in ((low, high), (high, low)):
+            with self.subTest(order=[row["candidate_id"] for row in order]):
+                result = deduplicate_annotations(annotations(*order, disagreement))
+                self.assertEqual(
+                    result["candidate_id"].tolist(), ["documentation:high", "keenable:disagreement"]
+                )
+                self.assertEqual(result["source_weight"].tolist(), [0.95, 0.3])
+                self.assertEqual(
+                    [(row["duplicate_id"], row["survivor_id"]) for row in result.attrs["duplicates"]],
+                    [("dataset:low", "documentation:high")],
+                )

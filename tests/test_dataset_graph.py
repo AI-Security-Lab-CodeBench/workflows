@@ -13,6 +13,7 @@ from dagster._core.workspace.context import BaseWorkspaceRequestContext
 from pandera.errors import SchemaError
 from pydantic import ValidationError
 
+from codebench_pipeline.config_assets import configured_selection
 from codebench_pipeline.dataframe_io import AssetSnapshot, DataFrameIOManager
 from codebench_pipeline.dataframe_schemas import CommandsTable
 from codebench_pipeline.dataset_config import AnnotationConfig, FilteringConfig, load_build_config
@@ -88,17 +89,21 @@ class DatasetGraphTests(unittest.TestCase):
             )
             self.assertEqual(
                 assets.get_all_asset_keys(),
-                {AssetKey(["datasets", *name.split("/")]) for name in INPUT_STAGES},
+                set(configured_selection(AssetKey(["datasets", *name.split("/")]) for name in INPUT_STAGES))
+                | {AssetKey(["datasets", "bashguard_syntax_audit"])},
             )
             self.assertEqual(
                 assets.get(AssetKey(["datasets", "deduplicated_annotations"])).parent_keys,
-                {AssetKey(["datasets", "proposed_annotations"])},
+                {
+                    AssetKey(["datasets", name])
+                    for name in ("proposed_annotations", "map_deduplicated_annotations_config")
+                },
             )
             self.assertEqual(
                 assets.get(AssetKey(["datasets", "category_eligible_annotations"])).parent_keys,
                 {
                     AssetKey(["datasets", "deduplicated_annotations"]),
-                    AssetKey(["datasets", "category_rules"]),
+                    AssetKey(["datasets", "map_category_eligible_annotations_config"]),
                 },
             )
             self.assertIn(
@@ -107,7 +112,10 @@ class DatasetGraphTests(unittest.TestCase):
             )
             self.assertEqual(
                 assets.get(AssetKey(["datasets", "human_review_decisions"])).parent_keys,
-                {AssetKey(["datasets", "human_review_queue"])},
+                {
+                    AssetKey(["datasets", name])
+                    for name in ("human_review_queue", "map_human_review_decisions_config")
+                },
             )
             self.assertNotIn(AssetKey(["datasets", "human_review_snapshot"]), assets.get_all_asset_keys())
             self.assertEqual(
@@ -115,18 +123,19 @@ class DatasetGraphTests(unittest.TestCase):
                 {
                     AssetKey(["datasets", "command_candidates"]),
                     AssetKey(["datasets", "documentation", "command_candidates"]),
+                    AssetKey(["datasets", "map_merged_command_candidates_config"]),
                 },
             )
             self.assertEqual(
                 assets.get(AssetKey(["datasets", "filtered_commands"])).parent_keys,
                 {
                     AssetKey(["datasets", "merged_command_candidates"]),
-                    AssetKey(["datasets", "category_rules"]),
+                    AssetKey(["datasets", "map_filtered_commands_config"]),
                 },
             )
             self.assertEqual(
                 assets.get(AssetKey(["datasets", "source_documents"])).parent_keys,
-                {AssetKey(["datasets", "source_catalog"])},
+                {AssetKey(["datasets", name]) for name in ("source_catalog", "map_existing_datasets_config")},
             )
             self.assertIn(
                 AssetKey(["datasets", "filtered_commands"]),
@@ -134,10 +143,13 @@ class DatasetGraphTests(unittest.TestCase):
             )
             self.assertEqual(
                 assets.get(AssetKey(["datasets", "documentation", "source_documents"])).parent_keys,
-                {AssetKey(["datasets", "documentation", "source_catalog"])},
+                {
+                    AssetKey(["datasets", "documentation", "source_catalog"]),
+                    AssetKey(["datasets", "map_documentation_crawl_config"]),
+                },
             )
             self.assertIn(
-                AssetKey(["datasets", "category_rules"]),
+                AssetKey(["datasets", "map_proposed_annotations_config"]),
                 assets.get(AssetKey(["datasets", "proposed_annotations"])).parent_keys,
             )
             self.assertIn(
@@ -146,23 +158,32 @@ class DatasetGraphTests(unittest.TestCase):
             )
             self.assertEqual(
                 assets.get(AssetKey(["datasets", "labeling_failures"])).parent_keys,
-                {AssetKey(["datasets", "labeling_attempts"])},
+                {
+                    AssetKey(["datasets", name])
+                    for name in ("labeling_attempts", "map_labeling_failures_config")
+                },
             )
             self.assertIn("datasets__documentation__source_catalog", {node.name for node in job.nodes})
             self.assertNotIn("datasets__documentation__dataset_release", {node.name for node in job.nodes})
-            for branch, job_name in (("dataset", "release_dataset"),):
-                release = definitions.resolve_job_def(job_name)
-                prefix = "datasets__documentation__" if branch == "documentation" else "datasets__"
-                self.assertEqual(
-                    {node.name for node in release.nodes},
-                    {f"{prefix}human_review_decisions", f"{prefix}dataset_release"},
-                )
+            release = definitions.resolve_job_def("release_dataset")
+            self.assertEqual(
+                {node.name for node in release.nodes},
+                {
+                    key.to_python_identifier()
+                    for key in configured_selection(
+                        AssetKey(["datasets", name]) for name in ("human_review_decisions", "dataset_release")
+                    )
+                },
+            )
             for node in job.nodes:
                 with self.subTest(node=node.name):
+                    if node.name.startswith(("datasets__map_", "datasets__global_config")):
+                        continue
                     for output in node.definition.output_defs:
                         self.assertNotEqual(output.dagster_type.key, "String")
                     for incoming in node.definition.input_defs:
-                        self.assertNotEqual(incoming.dagster_type.key, "String")
+                        if incoming.name not in {"mapped_config", "registered"}:
+                            self.assertNotEqual(incoming.dagster_type.key, "String")
 
     def test_both_configured_branches_plan_without_source_approval(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
