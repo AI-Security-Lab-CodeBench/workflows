@@ -21,6 +21,7 @@ from codebench_pipeline.category_rules import CategoryRules
 from codebench_pipeline.dataset_asset_types import DATASET_PARTITIONS, rules_input
 from codebench_pipeline.dataset_branches import (
     COLLECTION_BRANCHES,
+    FINALIZATION_GROUPS,
     FINALIZATION_STAGES,
     Branch,
     collection_branches,
@@ -190,7 +191,7 @@ def configuration_assets(home: Path, *, declared: bool = False) -> list[AssetsDe
         return asset(
             key=mapping_key(scope),
             partitions_def=DATASET_PARTITIONS,
-            group_name="dataset_configuration",
+            group_name=scope if scope in COLLECTION_SCOPES.values() else FINALIZATION_GROUPS[scope],
             io_manager_key="config_run_io_manager",
             dagster_type=_contract_type(contract),
             ins={

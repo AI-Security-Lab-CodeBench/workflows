@@ -64,19 +64,20 @@ HISTORICAL_PROCESSING_STAGES = (
     "documentation/labeling_documentation",
     "documentation/proposed_annotations",
 )
-FINALIZATION_STAGES = (
-    "merged_command_candidates",
-    "filtered_commands",
-    "labeling_documentation",
-    "labeling_attempts",
-    "proposed_annotations",
-    "labeling_failures",
-    "deduplicated_annotations",
-    "category_eligible_annotations",
-    "human_review_queue",
-    "human_review_decisions",
-    "dataset_release",
-)
+FINALIZATION_GROUPS: Final = {
+    "merged_command_candidates": "filtering",
+    "filtered_commands": "filtering",
+    "labeling_documentation": "labeling",
+    "labeling_attempts": "labeling",
+    "proposed_annotations": "labeling",
+    "labeling_failures": "dataset_audit",
+    "deduplicated_annotations": "dataset_release",
+    "category_eligible_annotations": "dataset_release",
+    "human_review_queue": "dataset_release",
+    "human_review_decisions": "dataset_release",
+    "dataset_release": "dataset_release",
+}
+FINALIZATION_STAGES = tuple(FINALIZATION_GROUPS)
 
 
 def stage_name(stage: str, branch: Branch = "dataset") -> str:

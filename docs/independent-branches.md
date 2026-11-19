@@ -113,7 +113,7 @@ publication, not unrelated branch collection or unchanged record decisions.
 ## Viewing
 
 Use native lineage groups `existing_datasets`, `documentation_crawl`,
-`dataset_finalization` and `dataset_configuration`. Collection assets retain their
+`filtering`, `labeling`, `dataset_release`, `dataset_audit` and `dataset_configuration`. Collection assets retain their
 `datasets/<stage>` and `datasets/documentation/<stage>` keys. The final Review
 tab belongs to the shared finalization assets, with a single `annotations` stage.
 Preserve the category `partition` query parameter in native links.

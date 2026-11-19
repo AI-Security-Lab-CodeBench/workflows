@@ -59,8 +59,12 @@ No configuration receipt or successful model response constitutes human approval
 ## V1: prepared-source collection
 
 The following reference describes independent dataset and documentation collection branches
-and one shared finalization path. Native lineage groups are `existing_datasets`,
-`documentation_crawl`, `dataset_finalization` and `dataset_configuration`.
+and one shared finalization path. In both graph variants, `dataset_configuration`
+contains only `global_config` and `category_rules`. Each mapping appears in the
+same group as its consumers. `filtering` contains candidate merging and filtering;
+`labeling` contains labeling inputs, attempts and supported proposals. `dataset_release`
+contains deduplication, category eligibility, human review and release. Inspect
+labeling failures alongside the BashGuard syntax audit in `dataset_audit`.
 Each dataset has its own `dataset_builds` partition.
 Run `refresh_dataset_configuration` for a dataset partition to materialize just
 its configuration assets and `category_rules`. `global_config` outputs a validated Pydantic model:

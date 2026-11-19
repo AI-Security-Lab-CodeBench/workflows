@@ -54,6 +54,7 @@ class CollectionAssetTopologyTests(unittest.TestCase):
                 job = definitions.resolve_job_def(job_name)
                 validate_run_config(job, dataset_run_config(spec, home, branch).to_config_dict())
                 mapping = key(f"map_{group}_config")
+                self.assertEqual(graph.get(mapping).group_name, group)
                 self.assertEqual(
                     {node.name for node in job.nodes},
                     {
@@ -93,6 +94,19 @@ class CollectionAssetTopologyTests(unittest.TestCase):
             {"datasets__labeling_attempts", "datasets__human_review_queue"}
             & {node.name for node in definitions.resolve_job_def("prepare_dataset").nodes}
         )
+        for asset_key in graph.get_all_asset_keys():
+            if asset_key.path[-1].startswith("map_"):
+                mapping_node = graph.get(asset_key)
+                self.assertEqual(
+                    {graph.get(child).group_name for child in mapping_node.child_keys},
+                    {mapping_node.group_name},
+                    asset_key,
+                )
+        self.assertEqual(graph.get(key("labeling_failures")).group_name, "dataset_audit")
+        self.assertEqual(graph.get(key("filtered_commands")).group_name, "filtering")
+        self.assertEqual(graph.get(key("labeling_attempts")).group_name, "labeling")
+        for stage in ("human_review_queue", "human_review_decisions", "dataset_release"):
+            self.assertEqual(graph.get(key(stage)).group_name, "dataset_release")
         for prefix in ("", "documentation/", "keenable/"):
             for stage in ("source_catalog", "source_documents", "document_adapters"):
                 self.assertNotIn(key(f"{prefix}{stage}"), graph.get_all_asset_keys())

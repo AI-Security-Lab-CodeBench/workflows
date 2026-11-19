@@ -7,7 +7,7 @@ from codebench_pipeline.collection_descriptions import (
     DECLARED_COLLECTION_DESCRIPTIONS,
     FINALIZATION_DESCRIPTIONS,
 )
-from codebench_pipeline.dataset_branches import BRANCH_BY_NAMESPACE, FINALIZATION_STAGES, asset_branch
+from codebench_pipeline.dataset_branches import BRANCH_BY_NAMESPACE, FINALIZATION_GROUPS, asset_branch
 
 DESCRIPTIONS: dict[str, str] = {
     AUDIT_STAGE: """
@@ -368,14 +368,14 @@ def describe_stage(spec: DescribedAsset, *, declared: bool = False) -> AssetSpec
         if stage in FINALIZATION_DESCRIPTIONS:
             return spec.replace_attributes(
                 description=f"**How it works:** {FINALIZATION_DESCRIPTIONS[stage]}",
-                group_name="dataset_finalization",
+                group_name=FINALIZATION_GROUPS[stage],
             )
     description = DESCRIPTIONS[stage].strip()
     group_name = "existing_datasets"
     if stage == "category_rules":
         group_name = "dataset_configuration"
-    elif len(spec.key.path) == 2 and stage in FINALIZATION_STAGES:
-        group_name = "dataset_finalization"
+    elif len(spec.key.path) == 2 and stage in FINALIZATION_GROUPS:
+        group_name = FINALIZATION_GROUPS[stage]
     if len(spec.key.path) == 3 and spec.key.path[1] == "documentation":
         group_name = "documentation_crawl"
         if stage == "source_catalog":
