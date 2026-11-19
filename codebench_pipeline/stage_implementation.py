@@ -4,6 +4,8 @@ import json
 import re
 import tomllib
 from collections.abc import Callable, Mapping
+from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 from typing import Final, assert_never
 
@@ -37,6 +39,7 @@ BOUNDARIES: Final = {
 }
 WHOLE_MODULES: Final = frozenset({"object_store", "storage"})
 RUNTIME_FILES: Final = ("pyproject.toml", "uv.lock", "scripts/dataset_schema.py")
+ENGINE_FILE: Final = "codebench_pipeline/dataset_engine.py"
 REVIEW_DEPENDENCIES: Final = frozenset({"psycopg", "psycopg-binary"})
 REVIEW_DECLARATIONS: Final = frozenset({"jsonschema"})
 
@@ -74,12 +77,99 @@ class ProcessingReceiptIncomplete(IntegrityError):
     pass
 
 
+@dataclass(frozen=True, slots=True)
+class _ModuleIndex:
+    definitions: Mapping[str, ast.AST]
+    imports: Mapping[str, tuple[ast.AST, str | None, str]]
+    initialization: str
+    nested_root: ast.FunctionDef | None
+
+
+@lru_cache(maxsize=128)
+def _module_index(filename: str, payload: bytes, root_symbol: str | None) -> _ModuleIndex:
+    """Index exact source bytes without importing or executing the source."""
+    tree = ast.parse(payload, filename=filename)
+    definitions: dict[str, ast.AST] = {}
+    imports: dict[str, tuple[ast.AST, str | None, str]] = {}
+    initialization: list[ast.stmt] = []
+    for node in tree.body:
+        match node:
+            case ast.FunctionDef() | ast.AsyncFunctionDef() | ast.ClassDef():
+                definitions[node.name] = node
+            case ast.TypeAlias(name=ast.Name(id=name)):
+                definitions[name] = node
+            case ast.Assign() | ast.AnnAssign():
+                targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+                for target in targets:
+                    for name in ast.walk(target):
+                        if isinstance(name, ast.Name):
+                            definitions[name.id] = node
+            case ast.ImportFrom():
+                if node.level > 1:
+                    raise IntegrityError(f"Relative import requires an explicit scope: {filename}")
+                imported = f"codebench_pipeline.{node.module}" if node.level == 1 else node.module
+                for alias in node.names:
+                    imports[alias.asname or alias.name] = (node, imported, alias.name)
+            case ast.Import():
+                for alias in node.names:
+                    imports[alias.asname or alias.name.split(".")[0]] = (node, None, alias.name)
+            case ast.stmt():
+                initialization.append(node)
+    nested_root = None
+    if root_symbol is not None and root_symbol not in definitions and root_symbol not in imports:
+        nested_root = next(
+            (
+                node
+                for node in ast.walk(tree)
+                if isinstance(node, ast.FunctionDef) and node.name == root_symbol
+            ),
+            None,
+        )
+        if nested_root is not None:
+            nested_root.decorator_list = []
+    digest = _node_digest(ast.Module(body=initialization, type_ignores=[]))
+    return _ModuleIndex(definitions, imports, digest, nested_root)
+
+
+def _node_digest(node: ast.AST) -> str:
+    return hashlib.sha256(ast.dump(node, include_attributes=False).encode()).hexdigest()
+
+
+@lru_cache(maxsize=4096)
+def _symbol_version(node: ast.AST) -> tuple[str, tuple[str, ...]]:
+    return _node_digest(node), tuple(
+        child.id
+        for child in ast.walk(node)
+        if isinstance(child, ast.Name) and isinstance(child.ctx, ast.Load)
+    )
+
+
+@lru_cache(maxsize=16)
+def _runtime_version(name: str, payload: bytes) -> str:
+    if name == ENGINE_FILE:
+        build = next(
+            node
+            for node in ast.walk(ast.parse(payload))
+            if isinstance(node, ast.FunctionDef) and node.name == "build"
+        )
+        processing = next(node for node in build.body if isinstance(node, ast.With))
+        invocation = next(node for node in processing.body if isinstance(node, ast.Try))
+        return _node_digest(ast.Module(body=invocation.body, type_ignores=[]))
+    if name in {"pyproject.toml", "uv.lock"}:
+        parsed = TypeAdapter(dict[str, JsonValue]).validate_python(tomllib.loads(payload.decode()))
+        if name == "uv.lock":
+            parsed.pop("revision", None)
+        payload = json.dumps(processing_runtime(parsed), sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(payload).hexdigest()
+
+
 def processing_versions(stage: str, read_source: Callable[[str], bytes]) -> dict[str, str]:
-    """Resolve stage code statically; retained sources are parsed, never imported."""
-    pending = [STAGE_ROOTS[stage]]
+    """Read current or retained bytes on every call, reusing only their static analysis."""
+    root = STAGE_ROOTS[stage]
+    pending = [root]
     visited: set[tuple[str, str]] = set()
     versions: dict[str, str] = {}
-    modules: dict[str, ast.Module] = {}
+    modules: dict[str, _ModuleIndex] = {}
     while pending:
         module, symbol = pending.pop()
         if (module, symbol) in visited or (module, symbol) in BOUNDARIES:
@@ -90,35 +180,12 @@ def processing_versions(stage: str, read_source: Callable[[str], bytes]) -> dict
             versions[filename] = hashlib.sha256(read_source(filename)).hexdigest()
             continue
         if module not in modules:
-            modules[module] = ast.parse(read_source(filename), filename=filename)
-        tree = modules[module]
-        definitions: dict[str, ast.AST] = {}
-        imports: dict[str, tuple[ast.AST, str | None, str]] = {}
-        for node in tree.body:
-            match node:
-                case ast.FunctionDef() | ast.AsyncFunctionDef() | ast.ClassDef():
-                    definitions[node.name] = node
-                case ast.TypeAlias(name=ast.Name(id=name)):
-                    definitions[name] = node
-                case ast.Assign() | ast.AnnAssign():
-                    targets = node.targets if isinstance(node, ast.Assign) else [node.target]
-                    for target in targets:
-                        for name in ast.walk(target):
-                            if isinstance(name, ast.Name):
-                                definitions[name.id] = node
-                case ast.ImportFrom():
-                    if node.level > 1:
-                        raise IntegrityError(f"Relative import requires an explicit scope: {filename}")
-                    imported = f"codebench_pipeline.{node.module}" if node.level == 1 else node.module
-                    for alias in node.names:
-                        imports[alias.asname or alias.name] = (node, imported, alias.name)
-                case ast.Import():
-                    for alias in node.names:
-                        imports[alias.asname or alias.name.split(".")[0]] = (node, None, alias.name)
-                case ast.stmt():
-                    continue
-        if symbol in imports:
-            node, imported, original = imports[symbol]
+            modules[module] = _module_index(
+                filename, read_source(filename), root[1] if module == root[0] else None
+            )
+        index = modules[module]
+        if symbol in index.imports:
+            node, imported, original = index.imports[symbol]
             versions[f"{filename}:{symbol}"] = hashlib.sha256(
                 repr((type(node).__name__, imported, original, symbol)).encode()
             ).hexdigest()
@@ -127,66 +194,18 @@ def processing_versions(stage: str, read_source: Callable[[str], bytes]) -> dict
             elif original.startswith("codebench_pipeline"):
                 raise IntegrityError(f"Module import requires an explicit scope: {filename}:{symbol}")
             continue
-        selected = definitions.get(symbol)
-        if selected is None and (module, symbol) == STAGE_ROOTS[stage]:
-            selected = next(
-                (
-                    node
-                    for node in ast.walk(tree)
-                    if isinstance(node, ast.FunctionDef) and node.name == symbol
-                ),
-                None,
-            )
-            if isinstance(selected, ast.FunctionDef):
-                selected.decorator_list = []
+        selected = index.definitions.get(symbol)
+        if selected is None and (module, symbol) == root:
+            selected = index.nested_root
         if selected is None:
             raise IntegrityError(f"Missing implementation symbol: {filename}:{symbol}")
-        versions[f"{filename}:{symbol}"] = hashlib.sha256(
-            ast.dump(selected, include_attributes=False).encode()
-        ).hexdigest()
-        for node in ast.walk(selected):
-            if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load):
-                if node.id in definitions or node.id in imports:
-                    pending.append((module, node.id))
-        initialization = [
-            node
-            for node in tree.body
-            if not isinstance(
-                node,
-                (
-                    ast.FunctionDef,
-                    ast.AsyncFunctionDef,
-                    ast.ClassDef,
-                    ast.Import,
-                    ast.ImportFrom,
-                    ast.Assign,
-                    ast.AnnAssign,
-                    ast.TypeAlias,
-                ),
-            )
-        ]
-        versions[f"{filename}:initialization"] = hashlib.sha256(
-            ast.dump(ast.Module(body=initialization, type_ignores=[]), include_attributes=False).encode()
-        ).hexdigest()
+        version, names = _symbol_version(selected)
+        versions[f"{filename}:{symbol}"] = version
+        pending.extend((module, name) for name in names if name in index.definitions or name in index.imports)
+        versions[f"{filename}:initialization"] = index.initialization
     for name in RUNTIME_FILES:
-        payload = read_source(name)
-        if name in {"pyproject.toml", "uv.lock"}:
-            parsed = TypeAdapter(dict[str, JsonValue]).validate_python(tomllib.loads(payload.decode()))
-            if name == "uv.lock":
-                parsed.pop("revision", None)
-            payload = json.dumps(processing_runtime(parsed), sort_keys=True, separators=(",", ":")).encode()
-        versions[name] = hashlib.sha256(payload).hexdigest()
-    engine = "codebench_pipeline/dataset_engine.py"
-    build = next(
-        node
-        for node in ast.walk(ast.parse(read_source(engine)))
-        if isinstance(node, ast.FunctionDef) and node.name == "build"
-    )
-    processing = next(node for node in build.body if isinstance(node, ast.With))
-    invocation = next(node for node in processing.body if isinstance(node, ast.Try))
-    versions[f"{engine}:frame_processing"] = hashlib.sha256(
-        ast.dump(ast.Module(body=invocation.body, type_ignores=[]), include_attributes=False).encode()
-    ).hexdigest()
+        versions[name] = _runtime_version(name, read_source(name))
+    versions[f"{ENGINE_FILE}:frame_processing"] = _runtime_version(ENGINE_FILE, read_source(ENGINE_FILE))
     return versions
 
 

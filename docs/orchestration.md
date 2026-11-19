@@ -433,10 +433,13 @@ Do not confuse historical replay or its optional discovery branch with this new
 full configured job. Existing source data, root CSVs and `strategy/` are preserved.
 
 ```sh
-uv run python -B -m unittest discover -s tests -v
+make test-suite
 uv run basedpyright
 uv run ruff check codebench_pipeline tests/test_dataset*.py tests/test_dataframe_io.py
 ```
+
+See [Isolated unittest suite](test-suite.md) for the runtime requirements and
+the suite's deadline and count checks.
 
 The locked dagster-pandera integration emits its upstream beta warning; validation
 is still enforced. Dagster's own UI is desktop-oriented; its mobile layout clips

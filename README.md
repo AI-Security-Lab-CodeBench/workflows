@@ -143,7 +143,7 @@ viewing does not require running inference again.
 ## Verify
 
 ```sh
-uv run python -B -m unittest discover -s tests -v
+make test-suite
 uv run basedpyright
 ```
 

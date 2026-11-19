@@ -280,8 +280,11 @@ existing data before replacing it; never overwrite concurrent work.
   conventions; keep stages parameterized, not tied to machine paths or accounts.
 - Assign parallel workers disjoint files. One owner integrates graph contracts,
   shared ledgers and final artifacts. Preserve unrelated working-tree changes.
-- Inside the Compose test environment, run `python3 -B -m unittest discover -s tests -v` and relevant frontend
-  tests/type/lint/build checks. Never execute dataset fields as a smoke test.
+- Inside the Compose test environment, run `make test-suite` for full isolated
+  unittest discovery and the relevant frontend tests/type/lint/build checks.
+  The entire suite, including setup, must finish within 600 seconds. A timeout,
+  skipped work or incomplete result is not a pass. Never execute dataset fields
+  as a smoke test.
 - Prove graph changes with actual Dagster materialization and prove UI changes
   in the native UI and selected category partition. Capture lineage, data and
   review-state evidence, including invalidation and unchanged-input reuse.
