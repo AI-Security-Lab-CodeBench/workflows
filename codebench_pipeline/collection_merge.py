@@ -1,13 +1,13 @@
 from dagster import AssetExecutionContext, AssetsDefinition, Output, ResourceParam, asset
 from pandera.typing import DataFrame
 
-from codebench_pipeline.collection_config import CollectionMergeConfig
-from codebench_pipeline.config_assets import mapped_settings, policy_input
+from codebench_pipeline.config_assets import mapped_input
 from codebench_pipeline.dataframe_io import DataFrameIOManager
 from codebench_pipeline.dataframe_schemas import CommandCandidatesTable
 from codebench_pipeline.dataset_asset_types import DATASET_PARTITIONS, TABLE_TYPES, table_input
 from codebench_pipeline.dataset_branches import COLLECTION_BRANCHES
 from codebench_pipeline.dataset_finalization import merge_output
+from codebench_pipeline.stage_configuration import DeclaredMergeConfig
 
 
 def collection_merge_asset() -> AssetsDefinition:
@@ -18,7 +18,7 @@ def collection_merge_asset() -> AssetsDefinition:
         io_manager_key="dataset_io_manager",
         dagster_type=TABLE_TYPES[CommandCandidatesTable],
         ins={
-            "mapped_config": policy_input("merged_command_candidates"),
+            "mapped_config": mapped_input("merged_command_candidates", DeclaredMergeConfig),
             **{
                 f"{branch.namespace}_candidates": table_input(
                     "command_candidates", CommandCandidatesTable, branch.namespace
@@ -32,7 +32,7 @@ def collection_merge_asset() -> AssetsDefinition:
         dataset_candidates: DataFrame[CommandCandidatesTable],
         documentation_candidates: DataFrame[CommandCandidatesTable],
         keenable_candidates: DataFrame[CommandCandidatesTable],
-        mapped_config: str,
+        mapped_config: DeclaredMergeConfig,
         dataset_io_manager: ResourceParam[DataFrameIOManager],
     ) -> Output[DataFrame[CommandCandidatesTable]]:
         return merge_output(
@@ -43,7 +43,7 @@ def collection_merge_asset() -> AssetsDefinition:
                 "keenable": keenable_candidates,
             },
             dataset_io_manager,
-            mapped_settings(mapped_config, "merged_command_candidates", CollectionMergeConfig),
+            mapped_config.merged_command_candidates,
         )
 
     return merged_command_candidates

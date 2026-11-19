@@ -25,12 +25,34 @@ from dagster import (
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, TypeAdapter
 
 from codebench_pipeline.category_rules import CategoryRules
+from codebench_pipeline.dataframe_schemas import current_labeling_attempts
 from codebench_pipeline.dataset_branches import asset_branch
+from codebench_pipeline.dataset_records import LabelDecision
 from codebench_pipeline.human_review_store import HumanReviewStore
+from codebench_pipeline.models import SemanticSnippet
 from codebench_pipeline.object_store import ObjectStore, StorageConfig, sha256
 from codebench_pipeline.storage import IntegrityError
 
 REVIEW_PREPARATION: Final = "codebench_review_preparation"
+_LABELING_NESTED_TYPES: Final = {
+    "label": pyarrow.struct(
+        [
+            (
+                field.alias or name,
+                pyarrow.list_(pyarrow.string()) if name == "documentation_urls" else pyarrow.string(),
+            )
+            for name, field in LabelDecision.model_fields.items()
+        ]
+    ),
+    "documentation": pyarrow.list_(
+        pyarrow.struct(
+            [
+                (name, pyarrow.list_(pyarrow.string()) if name == "subcommands" else pyarrow.string())
+                for name in SemanticSnippet.model_fields
+            ]
+        )
+    ),
+}
 
 
 def asset_storage_key(asset_key: Sequence[str], partition_key: str | None) -> str:
@@ -87,19 +109,24 @@ def frame_bytes(frame: pd.DataFrame) -> bytes:
             raise ValueError("Reserved Parquet category metadata")
         attributes = {**attributes, "_codebench_categories": categories}
     arrow = pyarrow.Table.from_pandas(table)
+    if {"documentation_manifest_digest", *_LABELING_NESTED_TYPES} <= set(table.columns):
+        for name, dtype in _LABELING_NESTED_TYPES.items():
+            arrow = arrow.set_column(
+                arrow.schema.get_field_index(name), name, pyarrow.array(table[name].tolist(), type=dtype)
+            )
     if attributes:
-        metadata = arrow.schema.metadata
+        metadata = arrow.schema.metadata or {}
         pandas_metadata = TypeAdapter(dict[str, JsonValue]).validate_json(metadata[b"pandas"])
-        pandas_metadata["attributes"] = attributes
         arrow = arrow.replace_schema_metadata(
             {
                 **metadata,
-                b"pandas": json.dumps(pandas_metadata).encode(),
+                b"pandas": json.dumps({**pandas_metadata, "attributes": attributes}).encode(),
                 b"PANDAS_ATTRS": json.dumps(attributes).encode(),
             }
         )
     with BytesIO() as output:
-        parquet.write_table(arrow, output, compression="snappy")
+        with parquet.ParquetWriter(output, arrow.schema, compression="snappy") as writer:
+            writer.write_table(arrow)
         return output.getvalue()
 
 
@@ -284,7 +311,7 @@ class DataFrameIOManager(ConfigurableIOManager):
             raise IntegrityError("Asset reference content mismatch")
         match reference.format:
             case "parquet":
-                return read_frame(payload)
+                return current_labeling_attempts(read_frame(payload))
             case "rules":
                 return CategoryRules.model_validate_json(payload)
             case _:

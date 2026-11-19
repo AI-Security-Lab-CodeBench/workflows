@@ -146,7 +146,7 @@ class StageImplementationTests(unittest.TestCase):
     def test_cached_table_retains_scoped_files_and_reuses_after_unrelated_edit(self) -> None:
         stage = "source_catalog"
         config = TypedConfig()
-        source = "codebench_pipeline/config_assets.py"
+        source = "codebench_pipeline/stage_configuration.py"
         original = Path.read_bytes
         with tempfile.TemporaryDirectory() as temporary:
             manager = DataFrameIOManager(storage=StorageConfig(local_root=temporary))

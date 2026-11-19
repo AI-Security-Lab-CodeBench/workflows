@@ -4,12 +4,13 @@ import re
 from pathlib import Path
 from typing import Final, Literal
 
-from pydantic import Field, JsonValue, TypeAdapter, model_validator
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, TypeAdapter, model_validator
+from pydantic_core import PydanticCustomError
 
 from codebench_pipeline.category_rules import Text
 from codebench_pipeline.discovery_models import Risk, SearchRequest, is_http_url
 from codebench_pipeline.models import Digest, SemanticSnippet, SourceDocument
-from codebench_pipeline.source_transform_contract import SourceTransformConfig
+from codebench_pipeline.source_transform_contract import PreparedSourceTransform, SourceTransformConfig
 from codebench_pipeline.storage import IntegrityError, digest
 from codebench_pipeline.typed_config import TypedConfig
 from scripts.dataset_schema import SECRET_PATTERNS
@@ -57,16 +58,14 @@ class SourceSeed(TypedConfig):
         """Convert metadata through the existing source eligibility boundary."""
         if self.local_path is None:
             raise IntegrityError("A remote source has no local SourceDocument")
-        metadata = self.model_dump(exclude={
-            "provenance_evidence_json", "local_path", "git_blob_sha1", "transform"
-        })
+        metadata = self.model_dump(
+            exclude={"provenance_evidence_json", "local_path", "git_blob_sha1", "transform"}
+        )
         document = SourceDocument.model_validate(
             {
                 **metadata,
                 "local_path": Path(self.local_path),
-                "provenance_evidence": PROVENANCE.validate_json(
-                    self.provenance_evidence_json, strict=True
-                ),
+                "provenance_evidence": PROVENANCE.validate_json(self.provenance_evidence_json, strict=True),
             }
         )
         if any(pattern.search(document.model_dump_json()) for pattern in SECRET_PATTERNS):
@@ -81,7 +80,8 @@ class SourceSeed(TypedConfig):
         if any(word in lower for word in ("agent", "synthetic", "generated", "sft")):
             raise ValueError("Agent results and synthetic/SFT sources are excluded")
         if any(word in lower for word in ("dataset", "corpus", "benchmark")) and self.provenance_type not in {
-            "human_authored", "human_collected"
+            "human_authored",
+            "human_collected",
         }:
             raise ValueError("Dataset origin requires inspected human provenance")
         if not is_http_url(self.url) or not is_http_url(self.license_url):
@@ -105,6 +105,81 @@ class SourceSeed(TypedConfig):
         if document.sha256 is not None and actual != document.sha256:
             raise IntegrityError(f"Source checksum changed: {document.source_id}")
         return document.model_copy(update={"local_path": local, "sha256": actual})
+
+
+class PreparedSourceSeed(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    source_id: Text
+    url: str = Field(pattern=r"^https?://")
+    local_path: Text | None = None
+    license: Text
+    license_url: str = Field(pattern=r"^https?://")
+    source_type: Text
+    accessibility: Literal["accessible"]
+    reuse_decision: Literal["permitted"]
+    commands_present: bool
+    origin_revision: Text
+    retrieved_at: Text
+    provenance_type: str | None = None
+    format: Literal["text", "markdown", "json", "jsonl", "csv"] = "text"
+    text_field: str = "$"
+    context_field: str = Field(default="", pattern=r"^(?:[A-Za-z_][A-Za-z_0-9]*)?$")
+    source_locator: str = ""
+    sha256: Digest | None = None
+    git_blob_sha1: str | None = Field(default=None, pattern=r"^[a-f0-9]{40}$")
+    upstream_sha256: Digest | None = None
+    prior_transformations: list[str] = Field(default_factory=list)
+    inventory_id: str = ""
+    attribution: str = ""
+    provenance_evidence: dict[str, JsonValue] = Field(default_factory=dict)
+    raw_format: str = ""
+    transform: PreparedSourceTransform | None = None
+
+    @model_validator(mode="after")
+    def effective_selectors(self) -> PreparedSourceSeed:
+        structured = self.format in {"csv", "json", "jsonl"}
+        if (not structured or self.transform is not None) and (
+            {"text_field", "context_field"} & self.model_fields_set
+        ):
+            raise PydanticCustomError(
+                "unused_source_selector", "Field selectors require a built-in structured decoder"
+            )
+        if not structured and self.transform is not None and "batch_size" in self.transform.model_fields_set:
+            raise PydanticCustomError(
+                "unused_transform_batch_size",
+                "Transform batch size requires a format that can decode multiple rows",
+            )
+        return self
+
+    def runtime_config(self) -> SourceSeed:
+        return SourceSeed(
+            source_id=self.source_id,
+            url=self.url,
+            local_path=self.local_path,
+            license=self.license,
+            license_url=self.license_url,
+            source_type=self.source_type,
+            accessibility=self.accessibility,
+            reuse_decision=self.reuse_decision,
+            commands_present=self.commands_present,
+            revision=self.origin_revision,
+            retrieved_at=self.retrieved_at,
+            provenance_type=self.provenance_type,
+            format=self.format,
+            text_field=self.text_field,
+            context_field=self.context_field,
+            source_locator=self.source_locator,
+            sha256=self.sha256,
+            git_blob_sha1=self.git_blob_sha1,
+            upstream_sha256=self.upstream_sha256,
+            transformations=self.prior_transformations,
+            inventory_id=self.inventory_id,
+            attribution=self.attribution,
+            provenance_evidence_json=PROVENANCE.dump_json(self.provenance_evidence).decode("utf-8"),
+            raw_format=self.raw_format,
+            transform=self.transform.runtime_config() if self.transform is not None else None,
+        )
 
 
 class RiskSearchSeeds(TypedConfig):
@@ -157,6 +232,27 @@ class DocumentationSeed(TypedConfig):
 
     def to_semantic_snippet(self) -> SemanticSnippet:
         return SemanticSnippet.model_validate(self.model_dump())
+
+
+class PreparedDocumentationSeed(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    utility: Text
+    operation_selectors: list[Text] = Field(min_length=1)
+    url: str = Field(pattern=r"^https?://")
+    retrieved_at: Text
+    snippet: Text
+    applicability_notes: Text
+
+    def runtime_config(self) -> DocumentationSeed:
+        return DocumentationSeed(
+            utility=self.utility,
+            subcommands=self.operation_selectors,
+            url=self.url,
+            retrieved_at=self.retrieved_at,
+            snippet=self.snippet,
+            version_limits=self.applicability_notes,
+        )
 
 
 def unique_sources(documents: list[SourceSeed]) -> list[SourceSeed]:

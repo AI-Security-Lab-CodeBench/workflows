@@ -20,7 +20,6 @@ from codebench_pipeline.dataframe_schemas import ProposedAnnotationsTable, valid
 from codebench_pipeline.dataset_config import load_build_config
 from codebench_pipeline.dataset_records import CandidateRecord, LabelDecision
 from codebench_pipeline.dataset_registry import DatasetRegistry
-from codebench_pipeline.dataset_tables import publication
 from codebench_pipeline.human_review import (
     CompletionEffect,
     DecisionChange,
@@ -118,10 +117,13 @@ class LabelCorrectionTests(unittest.TestCase):
             [{**self.candidate.model_dump(), **self.label.model_dump(by_alias=True)}],
             ProposedAnnotationsTable,
         )
-        original = {**self.candidate.model_dump(mode="json"), **self.label.model_dump(mode="json", by_alias=True)}
-        self.snapshot = self.snapshot.model_copy(update={
-            "record_fingerprints": {"first": review_identity(original, self.snapshot.review_columns)}
-        })
+        original = {
+            **self.candidate.model_dump(mode="json"),
+            **self.label.model_dump(mode="json", by_alias=True),
+        }
+        self.snapshot = self.snapshot.model_copy(
+            update={"record_fingerprints": {"first": review_identity(original, self.snapshot.review_columns)}}
+        )
         self.prepared = PreparedReview(
             snapshot=self.snapshot,
             id_column="candidate_id",
@@ -154,18 +156,30 @@ class LabelCorrectionTests(unittest.TestCase):
         self.assertEqual(change.model_dump(mode="json")["edits"]["class"], "deny")
         self.assertEqual(self.change("fixture", edits={}).edits, {})
         legacy = ReviewDecision(
-            batch_id="legacy", candidate_id="first", decision="approve",
-            reviewer="original human", row_revision=1,
-            created_at="2026-11-14", updated_at="2026-11-14", label_corrections=self.corrections,
+            batch_id="legacy",
+            candidate_id="first",
+            decision="approve",
+            reviewer="original human",
+            row_revision=1,
+            created_at="2026-11-14",
+            updated_at="2026-11-14",
+            label_corrections=self.corrections,
         )
         self.assertEqual(ReviewDecision.model_validate_json(legacy.model_dump_json()), legacy)
 
     def test_selected_high_confidence_fields_and_command_remain_editable(self) -> None:
-        row = {**self.prepared.rows[0], **{
-            field: "high" for field in (
-                "category_confidence", "risk_confidence", "severity_confidence", "class_confidence"
-            )
-        }}
+        row = {
+            **self.prepared.rows[0],
+            **{
+                field: "high"
+                for field in (
+                    "category_confidence",
+                    "risk_confidence",
+                    "severity_confidence",
+                    "class_confidence",
+                )
+            },
+        }
         prepared = self.prepared.model_copy(update={"rows": (row,)})
         with self.store.transaction() as tx:
             batch = tx.prepare(prepared)
@@ -174,18 +188,44 @@ class LabelCorrectionTests(unittest.TestCase):
             self.assertEqual(saved.edits, edits)
             self.assertEqual(tx.prepared(batch.batch_id).rows, (row,))
 
+    def test_read_only_command_blocks_carried_approval_without_losing_history(self) -> None:
+        with self.store.transaction() as tx:
+            batch = tx.prepare(self.prepared)
+            saved = tx.save_decision(
+                self.snapshot, self.change(batch.batch_id, edits={"command": "printf revised"})
+            )
+            snapshot = self.snapshot.model_copy(update={"snapshot_id": "d" * 64})
+            restricted = self.prepared.model_copy(
+                update={"snapshot": snapshot, "column_schema": {"command": {"editable": False}}}
+            )
+            current = tx.prepare(restricted)
+            carried = tx.list_decisions(current.batch_id)[0]
+            self.assertEqual(carried.carried_from_batch_id, batch.batch_id)
+            self.assertEqual(tx.counts(current.batch_id).blocked, 1)
+            with self.assertRaises(HumanReviewError) as blocked:
+                tx.complete(snapshot, current, "synthetic QA completer")
+            self.assertEqual(blocked.exception.code, "ineligible")
+            self.assertEqual(tx.list_decisions(batch.batch_id), (saved,))
+
     def test_save_rejects_nonselected_writes_invalid_types_taxonomy_and_routing(self) -> None:
         invalid: tuple[dict[str, JsonValue], ...] = (
-            {"description": "invented"}, {"decision": "accept"},
-            {"risk_id": None}, {"risk_id": 3}, {"severity": "urgent"}, {"class": "modify"},
-            {"category_id": "CAT-98"}, {"risk_id": "CAT-98.1"}, {"command": ""},
+            {"description": "invented"},
+            {"decision": "accept"},
+            {"risk_id": None},
+            {"risk_id": 3},
+            {"severity": "urgent"},
+            {"class": "modify"},
+            {"category_id": "CAT-98"},
+            {"risk_id": "CAT-98.1"},
+            {"command": ""},
         )
         with self.store.transaction() as tx:
             batch = tx.prepare(self.prepared)
             for edits in invalid:
                 with self.subTest(edits=edits), self.assertRaises(HumanReviewError):
                     tx.save_decision(
-                        self.snapshot, self.change(batch.batch_id, edits=edits),
+                        self.snapshot,
+                        self.change(batch.batch_id, edits=edits),
                     )
             self.assertEqual(tx.list_decisions(batch.batch_id)[0].row_revision, 0)
             self.assertEqual([entry.event for entry in tx.history(self.snapshot.dataset_id)], ["created"])
@@ -195,18 +235,27 @@ class LabelCorrectionTests(unittest.TestCase):
             ({"category_id": "CAT-98"}, self.rules, {"category_id": "CAT-99"}),
             ({"documentation_urls": []}, self.rules, {"severity": "high"}),
             ({"decision": "reject"}, self.rules, {"severity": "high"}),
-            ({}, self.rules.model_copy(update={"severities": [self.rules.severities[0]]}), {"severity": "critical"}),
+            (
+                {},
+                self.rules.model_copy(update={"severities": [self.rules.severities[0]]}),
+                {"severity": "critical"},
+            ),
         )
         for index, (updates, rules, edits) in enumerate(cases):
             row = {**self.prepared.rows[0], **updates}
-            snapshot = self.snapshot.model_copy(update={
-                "dataset_id": f"invalid-{index}",
-                "record_fingerprints": {"first": review_identity(row, self.snapshot.review_columns)},
-            })
-            prepared = self.prepared.model_copy(update={
-                "snapshot": snapshot, "rows": (row,),
-                "validation": annotation_review_validation(rules),
-            })
+            snapshot = self.snapshot.model_copy(
+                update={
+                    "dataset_id": f"invalid-{index}",
+                    "record_fingerprints": {"first": review_identity(row, self.snapshot.review_columns)},
+                }
+            )
+            prepared = self.prepared.model_copy(
+                update={
+                    "snapshot": snapshot,
+                    "rows": (row,),
+                    "validation": annotation_review_validation(rules),
+                }
+            )
             with self.subTest(index=index), self.store.transaction() as tx:
                 batch = tx.prepare(prepared)
                 with self.assertRaises(HumanReviewError):
@@ -250,13 +299,17 @@ class LabelCorrectionTests(unittest.TestCase):
                     "candidate_ids": ("first", "neighbor"),
                     "eligible_candidate_ids": ("first", "neighbor"),
                     "record_fingerprints": {
-                        **self.snapshot.record_fingerprints, "neighbor": neighbor_fingerprint,
+                        **self.snapshot.record_fingerprints,
+                        "neighbor": neighbor_fingerprint,
                     },
                 }
             )
-            neighbors = self.prepared.model_copy(update={
-                "snapshot": neighbor, "rows": (*self.prepared.rows, neighbor_row),
-            })
+            neighbors = self.prepared.model_copy(
+                update={
+                    "snapshot": neighbor,
+                    "rows": (*self.prepared.rows, neighbor_row),
+                }
+            )
             carried_batch = tx.prepare(neighbors)
             carried = tx.list_decisions(carried_batch.batch_id)[0]
             self.assertEqual(carried.edits, saved.edits)
@@ -271,7 +324,9 @@ class LabelCorrectionTests(unittest.TestCase):
                     },
                 }
             )
-            current = tx.prepare(neighbors.model_copy(update={"snapshot": changed, "rows": (changed_row, neighbor_row)}))
+            current = tx.prepare(
+                neighbors.model_copy(update={"snapshot": changed, "rows": (changed_row, neighbor_row)})
+            )
             invalidated = tx.list_decisions(current.batch_id)[0]
             self.assertEqual(invalidated.decision, "pending")
             self.assertEqual(invalidated.edits, {})
@@ -349,7 +404,8 @@ class LabelCorrectionTests(unittest.TestCase):
             self.assertIsNone(retracted.label_corrections)
             self.assertEqual(retracted.edits, {})
             self.assertEqual(
-                tx.history(self.snapshot.dataset_id)[1].decision.edits, self.corrections.model_dump(by_alias=True)
+                tx.history(self.snapshot.dataset_id)[1].decision.edits,
+                self.corrections.model_dump(by_alias=True),
             )
 
     def test_service_saves_and_returns_corrected_approved_records_with_original_evidence(self) -> None:
@@ -365,10 +421,12 @@ class LabelCorrectionTests(unittest.TestCase):
             [{**candidate.model_dump(), **label.model_dump(by_alias=True)}], ProposedAnnotationsTable
         )
         original = {**candidate.model_dump(mode="json"), **label.model_dump(mode="json", by_alias=True)}
-        snapshot = self.snapshot.model_copy(update={
-            "dataset_id": spec.dataset_id,
-            "record_fingerprints": {"first": review_identity(original, self.snapshot.review_columns)},
-        })
+        snapshot = self.snapshot.model_copy(
+            update={
+                "dataset_id": spec.dataset_id,
+                "record_fingerprints": {"first": review_identity(original, self.snapshot.review_columns)},
+            }
+        )
         manifest = ReviewManifest(
             dataset_id=spec.dataset_id,
             storage=spec.storage,
@@ -377,30 +435,27 @@ class LabelCorrectionTests(unittest.TestCase):
             evidence={},
             implementation={},
         )
-        resolved = ResolvedReview(
-            manifest,
-            snapshot,
-            annotations,
-            spec.rules,
-            publication(annotations, spec.rules, spec.publication),
-        )
+        resolved = ResolvedReview(manifest, snapshot, annotations, spec.rules)
         self.enterContext(patch.object(ReviewSnapshots, "capture", return_value=resolved))
         service = ReviewService(home, data, lambda token: CompletionEffect())
         service.prepare(spec.dataset_id)
         batch = service.view(DatasetQueryRequest(dataset_id=spec.dataset_id)).batch
         with self.assertRaises(HumanReviewError) as unrouted:
-            service.decide(DecisionRequest(
-                dataset_id=spec.dataset_id,
-                snapshot_id=snapshot.snapshot_id,
-                change=self.change(batch.batch_id, edits={"command": "git diff"}),
-            ))
+            service.decide(
+                DecisionRequest(
+                    dataset_id=spec.dataset_id,
+                    snapshot_id=snapshot.snapshot_id,
+                    change=self.change(batch.batch_id, edits={"command": "git diff"}),
+                )
+            )
         self.assertEqual(unrouted.exception.code, "ineligible")
         saved = service.decide(
             DecisionRequest(
                 dataset_id=spec.dataset_id,
                 snapshot_id=snapshot.snapshot_id,
                 change=self.change(
-                    batch.batch_id, edits={"command": "git status --short", "severity": "high", "class": "deny"},
+                    batch.batch_id,
+                    edits={"command": "git status --short", "severity": "high", "class": "deny"},
                 ),
             )
         )

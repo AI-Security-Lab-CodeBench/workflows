@@ -222,8 +222,9 @@ class PreparedReview(ReviewModel):
         captured: dict[str, dict[str, JsonValue]] = {}
         for column in self.columns:
             declared = self.column_schema.get(column, {})
-            editable = column in self.snapshot.review_columns
-            if "editable" in declared and declared["editable"] != editable:
+            selected = column in self.snapshot.review_columns
+            editable = declared.get("editable", selected)
+            if type(editable) is not bool or (editable and not selected):
                 raise ValueError("Only selected review columns may be editable")
             types: list[JsonValue] = [
                 name for name in sorted({json_type(row[column]) for row in self.rows if column in row})

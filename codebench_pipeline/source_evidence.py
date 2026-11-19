@@ -1,4 +1,3 @@
-import json
 from datetime import UTC, datetime
 from hashlib import sha256
 from typing import Final
@@ -8,7 +7,7 @@ import pandas as pd
 from codebench_pipeline.collection_config import DeclaredSourceStageConfig
 from codebench_pipeline.dataframe_io import DataFrameIOManager
 from codebench_pipeline.human_review import HumanReviewError
-from codebench_pipeline.keenable_policy import KeenableDeclaration, KeenableError
+from codebench_pipeline.keenable_policy import KeenableError
 from codebench_pipeline.storage import IntegrityError
 
 SOURCE_RECEIPT: Final = "codebench_source_receipt"
@@ -17,7 +16,7 @@ _HISTORICAL_SOURCE_RECEIPT: Final = "codebench_v2_source_receipt"
 
 def require_source_rights(config: DeclaredSourceStageConfig) -> None:
     if config.branch == "keenable":
-        declaration = KeenableDeclaration.model_validate_json(json.dumps(config.source.declaration))
+        declaration = config.source.keenable_config()
         try:
             declaration.check_current(datetime.now(UTC))
         except KeenableError as error:

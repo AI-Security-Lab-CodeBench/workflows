@@ -165,6 +165,9 @@ class DatasetBundleTests(unittest.TestCase):
             registered = registry.get(spec.dataset_id)
             self.assertEqual(registered.rules.base_prompt, "  Preserve this exact prompt.\n")
             catalog = catalog_for_branch(registered, "documentation")
+            self.assertEqual(catalog.collection_revision, "inventory-v2")
+            assert registered.documentation is not None
+            self.assertEqual(registered.documentation.revision, "references-v2")
             self.assertEqual(
                 stage_signature("source_catalog", catalog, {"category_rules": registered.rules}),
                 signature,

@@ -25,12 +25,13 @@ The parser never executes Bash or decodes payloads. Flags do not assign labels o
 change eligibility, review or publication.
 """,
     "category_rules": """
-**How it works:** The configured category, taxonomy and labeling instructions are validated
-and saved together as one policy snapshot. A fingerprint of that configuration identifies
-the version. Each policy mapping forwards the rules to its consumer. Command
-patterns help route records to relevant risks; they do not decide whether a command is safe.
+**How it works:** Registration combines the shared labeling policy with the selected
+category's taxonomy, instructions and examples. This asset reads that registered
+snapshot for the dataset partition. Each consumer receives the same resolved rules.
+Command patterns route records to risks; they do not assign labels.
 
-**Input:** The category's inline taxonomy, version, policy, command families and language.
+**Input:** Registered shared instructions, class and severity definitions, output language,
+and the selected category's membership rules, routing, defaults and examples.
 
 **Goal:** Preserve the exact rules used by selection, labeling, review and publication.
 

@@ -13,8 +13,14 @@ from pandera.typing import DataFrame
 from pydantic import JsonValue
 
 from codebench_pipeline.category_eligibility import category_eligible_annotations as filter_category
+from codebench_pipeline.category_rules import CategoryRules
 from codebench_pipeline.collection_config import CollectionMergeConfig
-from codebench_pipeline.config_assets import mapped_rules, mapped_settings, policy_input
+from codebench_pipeline.config_assets import (
+    RegisteredConfig,
+    mapped_input,
+    registered_input,
+    require_registered_rules,
+)
 from codebench_pipeline.data_views import DatasetDataService
 from codebench_pipeline.dataframe_io import DataFrameIOManager, frame_bytes
 from codebench_pipeline.dataframe_schemas import (
@@ -24,7 +30,7 @@ from codebench_pipeline.dataframe_schemas import (
     frame_records,
     validated_frame,
 )
-from codebench_pipeline.dataset_asset_types import DATASET_PARTITIONS, TABLE_TYPES, table_input
+from codebench_pipeline.dataset_asset_types import DATASET_PARTITIONS, TABLE_TYPES, rules_input, table_input
 from codebench_pipeline.dataset_branches import Branch
 from codebench_pipeline.dataset_collection_binding import (
     FINALIZATION_BINDING,
@@ -39,6 +45,10 @@ from codebench_pipeline.human_review import HumanReviewError
 from codebench_pipeline.object_store import sha256
 from codebench_pipeline.repository_config import DEFAULT_SOURCE_WEIGHTS, SourceWeight
 from codebench_pipeline.review_preparation import prepare_review_queue
+from codebench_pipeline.stage_configuration import (
+    ReviewQueueConfig,
+    require_mapped_config,
+)
 from codebench_pipeline.typed_config import TypedConfig
 
 __all__ = [
@@ -219,15 +229,11 @@ def finalization_assets(*, declared: bool = False) -> list[AssetsDefinition]:
         partitions_def=DATASET_PARTITIONS,
         io_manager_key="dataset_io_manager",
         dagster_type=TABLE_TYPES[ProposedAnnotationsTable],
-        ins={
-            "proposed_annotations": table_input("proposed_annotations", ProposedAnnotationsTable),
-            "mapped_config": policy_input("deduplicated_annotations"),
-        },
+        ins={"proposed_annotations": table_input("proposed_annotations", ProposedAnnotationsTable)},
     )
     def deduplicated_annotations(
         context: AssetExecutionContext,
         proposed_annotations: DataFrame[ProposedAnnotationsTable],
-        mapped_config: str,
         dataset_io_manager: ResourceParam[DataFrameIOManager],
     ) -> Output[DataFrame[ProposedAnnotationsTable]]:
         def compute(evidence: Path) -> DataFrame[ProposedAnnotationsTable]:
@@ -238,7 +244,7 @@ def finalization_assets(*, declared: bool = False) -> list[AssetsDefinition]:
         return cached_table(
             context,
             dataset_io_manager,
-            mapped_settings(mapped_config, "deduplicated_annotations", TypedConfig),
+            TypedConfig(),
             {"annotations": proposed_annotations},
             ProposedAnnotationsTable,
             compute,
@@ -252,17 +258,18 @@ def finalization_assets(*, declared: bool = False) -> list[AssetsDefinition]:
         dagster_type=TABLE_TYPES[ProposedAnnotationsTable],
         ins={
             "deduplicated_annotations": table_input("deduplicated_annotations", ProposedAnnotationsTable),
-            "mapped_config": policy_input("category_eligible_annotations"),
+            "category_rules": rules_input(),
+            "registered": registered_input(),
         },
     )
     def category_eligible_annotations(
         context: AssetExecutionContext,
-        config: TypedConfig,
         deduplicated_annotations: DataFrame[ProposedAnnotationsTable],
-        mapped_config: str,
+        category_rules: CategoryRules,
+        registered: RegisteredConfig,
         dataset_io_manager: ResourceParam[DataFrameIOManager],
     ) -> Output[DataFrame[ProposedAnnotationsTable]]:
-        category_rules = mapped_rules(mapped_config)
+        require_registered_rules(registered, category_rules)
 
         def compute(evidence: Path) -> DataFrame[ProposedAnnotationsTable]:
             frame = filter_category(deduplicated_annotations, category_rules)
@@ -274,7 +281,7 @@ def finalization_assets(*, declared: bool = False) -> list[AssetsDefinition]:
         return cached_table(
             context,
             dataset_io_manager,
-            config,
+            TypedConfig(),
             {"annotations": deduplicated_annotations, "category_rules": category_rules},
             ProposedAnnotationsTable,
             compute,
@@ -290,24 +297,27 @@ def finalization_assets(*, declared: bool = False) -> list[AssetsDefinition]:
             "category_eligible_annotations": table_input(
                 "category_eligible_annotations", ProposedAnnotationsTable
             ),
-            "mapped_config": policy_input("human_review_queue"),
+            "mapped_config": mapped_input("human_review_queue", ReviewQueueConfig),
         },
     )
     def human_review_queue(
         context: AssetExecutionContext,
         config: PublicationConfig,
         category_eligible_annotations: DataFrame[ProposedAnnotationsTable],
-        mapped_config: str,
+        mapped_config: ReviewQueueConfig,
         dataset_io_manager: ResourceParam[DataFrameIOManager],
     ) -> Output[DataFrame[ReviewQueueTable]]:
-        category_rules = mapped_rules(mapped_config)
+        settings = require_mapped_config(context.asset_key, config, mapped_config.human_review_queue)
+        category_rules = mapped_config.category_rules
         result = cached_table(
             context,
             dataset_io_manager,
-            config,
+            settings,
             {"annotations": category_eligible_annotations, "category_rules": category_rules},
             ReviewQueueTable,
-            lambda evidence: review_queue(category_eligible_annotations, category_rules, config),
+            lambda evidence: review_queue(
+                category_eligible_annotations, category_rules, settings.review_columns
+            ),
         )
         return Output(
             prepare_review_queue(context, dataset_io_manager, result.value),

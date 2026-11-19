@@ -5,9 +5,10 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
-from test_repository import repository_config_fixture
+from test_repository import COLLECTION, repository_config_fixture
 
 from codebench_pipeline import repository_etl
+from codebench_pipeline.repository_branch_config import DeclaredRepositoryOrigin, load_repository_branch
 from codebench_pipeline.repository_etl import authorize_adapter, repository_rows, source_span
 from codebench_pipeline.source_transform_contract import (
     TRANSFORM_OPTIONS,
@@ -39,6 +40,16 @@ def extract(text: str, transform: SourceTransformConfig) -> tuple[CanonicalSourc
 
 
 class RepositoryMarkdownShellTests(unittest.TestCase):
+    def test_authored_context_radius_reaches_the_pinned_markdown_parser(self) -> None:
+        template = load_repository_branch(COLLECTION / "existing-datasets.json").origins[1]
+        payload = template.model_dump(mode="json")
+        payload["parser"]["options"]["context_characters"] = 1
+        transform = DeclaredRepositoryOrigin.model_validate(payload).runtime().transform
+
+        (row,) = extract("```bash\n$ kubectl get pods\n```\n", transform)
+
+        self.assertEqual(row.context, " kubectl get pods\n")
+
     def test_single_line_origins_keep_their_utility_lists_and_exact_byte_spans(self) -> None:
         text = (
             "Café\r\n"

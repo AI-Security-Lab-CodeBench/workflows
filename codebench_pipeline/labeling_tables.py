@@ -1,7 +1,7 @@
 from pathlib import Path
 
 from pandera.typing import DataFrame
-from pydantic import JsonValue, TypeAdapter
+from pydantic import JsonValue
 
 from codebench_pipeline.annotation_cache import invocation_version
 from codebench_pipeline.batch_labeling import annotate_batches
@@ -12,7 +12,6 @@ from codebench_pipeline.dataframe_schemas import (
     LabelingAttemptsTable,
     LabelingFailuresTable,
     ProposedAnnotationsTable,
-    frame_records,
     model_records,
     validated_frame,
 )
@@ -38,7 +37,8 @@ def labeling_attempts_table(
     *,
     cache: Path | None = None,
 ) -> DataFrame[LabelingAttemptsTable]:
-    candidates = model_records(commands.loc[commands["filter_decision"] == "eligible"], CandidateRecord)
+    eligible = commands.loc[commands["filter_decision"] == "eligible"]
+    candidates = model_records(eligible, CandidateRecord)
     docs = model_records(documentation, SemanticSnippet)
     if config.batch is not None:
         attempts = annotate_batches(
@@ -49,7 +49,7 @@ def labeling_attempts_table(
             config.batch,
             evidence,
             cache=cache,
-            maximum_context_characters=config.maximum_context_characters,
+            maximum_context_characters=config.max_request_bytes,
         )
     else:
         labeled = proposed_annotations(commands, documentation, rules, config, evidence, cache=cache)
@@ -71,7 +71,21 @@ def labeling_attempts_table(
             for candidate in candidates
         ]
     validate_attempts(candidates, attempts, rules)
-    frame = validated_frame([attempt.model_dump(mode="json") for attempt in attempts], LabelingAttemptsTable)
+    weights = (
+        dict(zip(eligible["candidate_id"], eligible["source_weight"], strict=True))
+        if "source_weight" in eligible
+        else None
+    )
+    frame = validated_frame(
+        [
+            {
+                **attempt.model_dump(mode="json"),
+                **({"source_weight": weights[attempt.candidate_id]} if weights is not None else {}),
+            }
+            for attempt in attempts
+        ],
+        LabelingAttemptsTable,
+    )
     frame.attrs = {
         **commands.attrs,
         "labeling_coverage": {
@@ -92,18 +106,19 @@ def proposed_from_attempts(
     validate_attempts(candidates, outcomes, rules)
     rows: list[dict[str, JsonValue]] = []
     documentation: dict[str, JsonValue] = {}
-    for attempt, row in zip(outcomes, frame_records(attempts), strict=True):
-        if attempt.status != "success":
+    weights = (
+        dict(zip(attempts["candidate_id"], attempts["source_weight"], strict=True))
+        if "source_weight" in attempts
+        else None
+    )
+    for attempt in outcomes:
+        if attempt.label is None:
             continue
-        label = LabelDecision.model_validate_json(attempt.label_json)
         original = attempt.model_dump(mode="json", include=set(CandidateRecord.model_fields))
-        if "source_weight" in row:
-            original["source_weight"] = row["source_weight"]
-        rows.append({**original, **label.model_dump(mode="json", by_alias=True)})
-        documentation[attempt.candidate_id] = [
-            doc.model_dump(mode="json")
-            for doc in TypeAdapter(list[SemanticSnippet]).validate_json(attempt.documentation_json)
-        ]
+        if weights is not None:
+            original["source_weight"] = weights[attempt.candidate_id]
+        rows.append({**original, **attempt.label.model_dump(mode="json", by_alias=True)})
+        documentation[attempt.candidate_id] = [doc.model_dump(mode="json") for doc in attempt.documentation]
     frame = validated_frame(rows, ProposedAnnotationsTable)
     frame.attrs = {**attempts.attrs, "row_documentation": documentation}
     return frame
@@ -111,9 +126,7 @@ def proposed_from_attempts(
 
 def failures_from_attempts(attempts: DataFrame[LabelingAttemptsTable]) -> DataFrame[LabelingFailuresTable]:
     outcomes = model_records(attempts, LabelingAttempt)
-    failed_ids = {outcome.candidate_id for outcome in outcomes if outcome.status == "failure"}
-    frame = validated_frame(
-        frame_records(attempts.loc[attempts["candidate_id"].isin(failed_ids)]), LabelingFailuresTable
-    )
+    failed = attempts.loc[[outcome.status == "failure" for outcome in outcomes]].reset_index(drop=True)
+    frame = LabelingFailuresTable.validate(failed)
     frame.attrs = dict(attempts.attrs)
     return frame

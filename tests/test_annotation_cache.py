@@ -137,7 +137,9 @@ class AnnotationCacheTests(unittest.TestCase):
         )
         self.assertEqual(self.calls, [("label", ("one",)), ("review", ("one",))])
 
-    def test_business_edits_invalidate_labels_but_unselected_examples_and_neighbors_reuse_receipts(self) -> None:
+    def test_business_edits_invalidate_labels_but_unselected_examples_and_neighbors_reuse_receipts(
+        self,
+    ) -> None:
         business = write_business(self.root / "business")
         candidate = make_candidate("one")
         cache = self.root / "cache"
@@ -149,28 +151,55 @@ class AnnotationCacheTests(unittest.TestCase):
         examples[1]["examples"][0]["expected"]["rationale"] = "Changed unrelated example judgment."
         examples_file.write_text(json.dumps(examples))
         annotate(
-            [candidate, make_candidate("neighbor")], documentation(), load_business_rules(business),
-            config(), self.root / "neighbor", cache=cache,
+            [candidate, make_candidate("neighbor")],
+            documentation(),
+            load_business_rules(business),
+            config(),
+            self.root / "neighbor",
+            cache=cache,
         )
         self.assertEqual(self.calls, [("label", ("one",)), ("label", ("neighbor",))])
         reused = invocation_path(self.root / "neighbor", "label", "one")
         self.assertEqual((reused / "receipt.json").read_bytes(), receipt)
         self.assertTrue(json.loads((reused / "reuse.json").read_text())["cache_hit"])
-        for index, file in enumerate((business.parent / "base.md", business.parent / "instructions.md")):
-            file.write_text(file.read_text() + "\nEdited business instructions.")
+        shared = self.root / "business" / "labeling"
+        policy = shared / "policy.json"
+        settings = json.loads(policy.read_bytes())
+        settings["description_language"] = "French"
+        policy.write_text(json.dumps(settings), encoding="utf-8")
+        annotate(
+            [candidate],
+            documentation(),
+            load_business_rules(business),
+            config(),
+            self.root / "shared-policy",
+            cache=cache,
+        )
+        for index, file in enumerate((shared / "instructions.md", business.parent / "instructions.md")):
+            file.write_text(
+                file.read_text(encoding="utf-8") + "\nEdited business instructions.", encoding="utf-8"
+            )
             annotate(
-                [candidate], documentation(), load_business_rules(business), config(),
-                self.root / f"policy-{index}", cache=cache,
+                [candidate],
+                documentation(),
+                load_business_rules(business),
+                config(),
+                self.root / f"policy-{index}",
+                cache=cache,
             )
         examples[0]["examples"][0]["expected"]["rationale"] = "Changed selected example judgment."
         examples_file.write_text(json.dumps(examples))
         annotate(
-            [candidate], documentation(), load_business_rules(business), config(),
-            self.root / "selected", cache=cache,
+            [candidate],
+            documentation(),
+            load_business_rules(business),
+            config(),
+            self.root / "selected",
+            cache=cache,
         )
         self.assertEqual(
             self.calls,
-            [("label", ("one",)), ("label", ("neighbor",))] + [("label", ("one",))] * 3,
+            [("label", ("one",)), ("label", ("neighbor",))] + [("label", ("one",))] * 4,
         )
 
     def test_reviewer_packets_limit_actual_request_count_and_serialized_context(self) -> None:

@@ -12,7 +12,7 @@ from codebench_pipeline.category_rules import CategoryRules
 from codebench_pipeline.data_view_models import DatasetViewError
 from codebench_pipeline.data_views import DatasetDataService
 from codebench_pipeline.dataframe_io import AssetReference, DataFrameIOManager
-from codebench_pipeline.dataframe_schemas import ProposedAnnotationsTable, frame_records
+from codebench_pipeline.dataframe_schemas import ProposedAnnotationsTable, frame_records, model_records
 from codebench_pipeline.dataset_asset_types import DATASET_PARTITIONS
 from codebench_pipeline.dataset_branches import (
     FINALIZATION_STAGES,
@@ -22,10 +22,10 @@ from codebench_pipeline.dataset_branches import (
     stage_name,
 )
 from codebench_pipeline.dataset_config import PublicationConfig
-from codebench_pipeline.dataset_export import Publication
 from codebench_pipeline.dataset_finalization import FINALIZATION_BINDING
 from codebench_pipeline.dataset_plan import plan_dataset, preparation_stages
-from codebench_pipeline.dataset_tables import publication
+from codebench_pipeline.dataset_records import CandidateRecord
+from codebench_pipeline.dataset_tables import review_queue
 from codebench_pipeline.human_review import ReviewModel, ReviewSnapshot
 from codebench_pipeline.human_review_store import HumanReviewStore
 from codebench_pipeline.models import Digest, Identifier
@@ -99,7 +99,6 @@ class ResolvedReview:
     snapshot: ReviewSnapshot
     reviewed: DataFrame[ProposedAnnotationsTable]
     rules: CategoryRules
-    prepared: Publication
 
 
 def manifest_store(home: Path) -> ObjectStore:
@@ -155,24 +154,26 @@ class ReviewSnapshots:
             ):
                 raise DatasetViewError("not_ready", "Collection inputs changed during snapshot capture")
             binding[branch] = {"state": "configured", "digest": plan.references[stage].digest}
-        match manager.read_version(plan.references["category_eligible_annotations"]):
-            case pd.DataFrame() as value:
-                if value.attrs.get(FINALIZATION_BINDING) != binding:
+        annotations = manager.read_version(plan.references["category_eligible_annotations"])
+        match annotations:
+            case pd.DataFrame():
+                if annotations.attrs.get(FINALIZATION_BINDING) != binding:
                     raise DatasetViewError("not_ready", "Annotations belong to different collection inputs")
-                annotation_metadata = value.attrs
-                reviewed = ProposedAnnotationsTable.validate(pd.DataFrame(value))
+                annotation_metadata = annotations.attrs
+                reviewed = ProposedAnnotationsTable.validate(pd.DataFrame(annotations))
             case CategoryRules():
                 raise IntegrityError("Annotations are not a table")
-            case other:
-                assert_never(other)
-        match manager.read_version(plan.references["category_rules"]):
-            case CategoryRules() as rules:
+            case _:
+                assert_never(annotations)
+        rules = manager.read_version(plan.references["category_rules"])
+        match rules:
+            case CategoryRules():
                 if rules != spec.rules:
                     raise DatasetViewError("not_ready", "Stored rules differ from registered rules")
             case pd.DataFrame():
                 raise IntegrityError("Category rules are not a taxonomy")
-            case other:
-                assert_never(other)
+            case _:
+                assert_never(rules)
         references: dict[str, AssetReference] = {}
         for stage in input_stages:
             with build_input_context(
@@ -221,20 +222,21 @@ class ReviewSnapshots:
         )
         payload = manifest.payload()
         snapshot_id = sha256(payload)
-        prepared = publication(reviewed, rules, spec.publication)
+        queue = review_queue(reviewed, rules, review_columns)
+        candidate_ids = tuple(candidate.candidate_id for candidate in model_records(queue, CandidateRecord))
+        eligible_candidate_ids = tuple(
+            candidate.candidate_id
+            for candidate in model_records(queue.loc[queue["exclusion_reason"] == ""], CandidateRecord)
+        )
         reviewed.attrs = annotation_metadata
         snapshot = ReviewSnapshot(
             dataset_id=dataset_id,
             review_stage="annotations",
             snapshot_id=snapshot_id,
-            candidate_ids=prepared.human_review_ids,
-            record_fingerprints={
-                identifier: record_fingerprints[identifier] for identifier in prepared.human_review_ids
-            },
+            candidate_ids=candidate_ids,
+            record_fingerprints={identifier: record_fingerprints[identifier] for identifier in candidate_ids},
             review_columns=review_columns,
-            eligible_candidate_ids=tuple(
-                identifier for identifier in prepared.eligible_ids if identifier in prepared.human_review_ids
-            ),
+            eligible_candidate_ids=eligible_candidate_ids,
         )
         self.store.write(f"{snapshot_id}.json", payload)
         for name, expected in implementation.items():
@@ -242,7 +244,7 @@ class ReviewSnapshots:
             if sha256(source) != expected:
                 raise IntegrityError("Review implementation changed during snapshot capture")
             self.store.write(f"implementation/{expected}/{name}", source)
-        return ResolvedReview(manifest, snapshot, reviewed, rules, prepared)
+        return ResolvedReview(manifest, snapshot, reviewed, rules)
 
     def current(self, dataset_id: str) -> ResolvedReview:
         with HumanReviewStore(self.home).reader() as tx:
@@ -253,9 +255,7 @@ class ReviewSnapshots:
         rules = manager.read_version(manifest.references["category_rules"])
         if not isinstance(rules, CategoryRules):
             raise IntegrityError("Prepared review rules are not a taxonomy")
-        return ResolvedReview(
-            manifest, snapshot, reviewed, rules, publication(reviewed, rules, manifest.publication)
-        )
+        return ResolvedReview(manifest, snapshot, reviewed, rules)
 
     def authoritative(self, dataset_id: str) -> ResolvedReview:
         resolved = self.current(dataset_id)

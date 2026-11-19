@@ -12,7 +12,7 @@ from test_keenable import DECLARATION, result
 from codebench_pipeline.inference_capacity import CapacityConfig, CapacityUnavailable
 from codebench_pipeline.keenable import KeenableCollection, KeenableError, load_declaration
 from codebench_pipeline.keenable_planner import GuardedSearchPlanner
-from codebench_pipeline.keenable_policy import KeenableDeclaration, digest
+from codebench_pipeline.keenable_policy import digest, parse_declaration
 from codebench_pipeline.keenable_transport import DirectResponse, Request
 from codebench_pipeline.openai_transport import HTTPResponse
 
@@ -42,7 +42,7 @@ class AdministrativeSearchTests(unittest.TestCase):
         values = self.fixed.model_dump(mode="json")
         values["generation"] = "adaptive-fixture"
         values["search_plan"]["mode"] = "adaptive"
-        self.adaptive = KeenableDeclaration.model_validate_json(json.dumps(values))
+        self.adaptive = parse_declaration(json.dumps(values))
         self.planner = GuardedSearchPlanner(
             endpoint="https://model.example:443/v1",
             model="test-model",
@@ -184,4 +184,4 @@ class AdministrativeSearchTests(unittest.TestCase):
         values = self.fixed.model_dump(mode="json")
         values["search_plan"]["scopes"][0]["reviewed_urls"] = list(self.urls[1])
         with self.assertRaisesRegex(ValidationError, "within the discovery scope"):
-            KeenableDeclaration.model_validate_json(json.dumps(values))
+            parse_declaration(json.dumps(values))

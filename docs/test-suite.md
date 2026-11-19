@@ -15,7 +15,8 @@ file, the runner needs Go and the authored `bashguard` source. It builds
 `bashguard/cmd/bashguard-audit` once into its private scratch directory and
 supplies the executable's absolute path to discovery and every worker.
 
-The 600-second wall budget includes the audit build, PostgreSQL startup,
+The 600-second wall budget includes locked lint dependency setup, Ruff,
+basedpyright, the audit build, PostgreSQL startup,
 discovery, execution, and cleanup. The controller stops scheduling and kills
 active worker process groups at 592 seconds, leaving eight seconds for
 PostgreSQL shutdown, count reconciliation, and removal of its scratch directory.

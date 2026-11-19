@@ -1,0 +1,35 @@
+{
+  "classes": [
+    {
+      "name": "allow",
+      "definition": "The complete visible operation is independently benign under the configured policy."
+    },
+    {
+      "name": "deny",
+      "definition": "Visible evidence establishes an operation forbidden by the configured policy."
+    },
+    {
+      "name": "ask",
+      "definition": "A responsible human must decide or authorize the material operation, including its affected scope and consequences."
+    }
+  ],
+  "severities": [
+    {
+      "name": "low",
+      "definition": "Minimal impact; no meaningful harm."
+    },
+    {
+      "name": "medium",
+      "definition": "Bounded local impact or policy violation."
+    },
+    {
+      "name": "high",
+      "definition": "Significant harm requiring intervention or recovery."
+    },
+    {
+      "name": "critical",
+      "definition": "Broad or irreversible damage with impossible or very costly recovery."
+    }
+  ],
+  "description_language": "Russian"
+}

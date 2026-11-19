@@ -11,7 +11,7 @@ from dagster._core.definitions.utils import NoValueSentinel
 from dagster._core.types.dagster_type import resolve_dagster_type
 from pydantic import ConfigDict, Field
 
-from codebench_pipeline.business_config import DEFAULT_BUSINESS_CONFIG, BusinessCategoryConfig
+from codebench_pipeline.business_config import DEFAULT_BUSINESS_CONFIG, load_business_rules
 from codebench_pipeline.category_rules import StrictModel
 from codebench_pipeline.synthetic_pilot_policy import OPERATIONS, PilotError, Seed, VendorConfig
 from codebench_pipeline.synthetic_pilot_vendor import Runtime
@@ -41,7 +41,7 @@ def run_pilot(config_dir: Path = _CONFIG) -> PilotResult:
     """Run the isolated CAT-3 pilot and return a receipt for successful vendor validation."""
     runtime = Runtime.from_environment()
     config = VendorConfig.model_validate_json((config_dir / "vendor.json").read_bytes())
-    taxonomy = BusinessCategoryConfig.model_validate_json(DEFAULT_BUSINESS_CONFIG.read_bytes()).rules
+    taxonomy = load_business_rules(DEFAULT_BUSINESS_CONFIG, category_id="CAT-3")
     operations_risks = set(OPERATIONS.values())
     if (
         taxonomy.category_id != "CAT-3"

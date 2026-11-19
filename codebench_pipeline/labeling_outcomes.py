@@ -1,7 +1,7 @@
 from collections.abc import Sequence
 from typing import Literal
 
-from pydantic import Field, TypeAdapter, model_validator
+from pydantic import Field, JsonValue, TypeAdapter, model_validator
 
 from codebench_pipeline.category_rules import CategoryRules
 from codebench_pipeline.dataset_records import CandidateRecord, LabelDecision, index_records, validate_label
@@ -11,30 +11,46 @@ from codebench_pipeline.storage import fingerprint
 
 class LabelingAttempt(CandidateRecord):
     status: Literal["success", "failure"]
-    label_json: str = ""
+    label: LabelDecision | None
     failure_code: str = ""
     failure_detail: str = ""
     row_input_fingerprint: str = Field(pattern=r"^[a-f0-9]{64}$")
     documentation_manifest_digest: str = Field(pattern=r"^[a-f0-9]{64}$")
-    documentation_json: str
+    documentation: list[SemanticSnippet]
     attempt_evidence_reference: str = Field(min_length=1)
 
     @model_validator(mode="after")
     def valid_outcome(self) -> "LabelingAttempt":
-        docs = TypeAdapter(list[SemanticSnippet]).validate_json(self.documentation_json)
-        if fingerprint([doc.model_dump(mode="json") for doc in docs]) != self.documentation_manifest_digest:
+        if (
+            fingerprint([doc.model_dump(mode="json") for doc in self.documentation])
+            != self.documentation_manifest_digest
+        ):
             raise ValueError("Labeling documentation manifest digest mismatch")
         match self.status:
             case "success":
-                label = LabelDecision.model_validate_json(self.label_json)
-                if label.candidate_id != self.candidate_id or label.util != self.util:
+                if self.label is None:
+                    raise ValueError("Successful attempts require a label")
+                if self.label.candidate_id != self.candidate_id or self.label.util != self.util:
                     raise ValueError("Successful label identity differs from its attempt")
                 if self.failure_code or self.failure_detail:
                     raise ValueError("Successful attempts cannot carry a failure")
             case "failure":
-                if self.label_json or not self.failure_code.strip() or not self.failure_detail.strip():
+                if self.label is not None or not self.failure_code.strip() or not self.failure_detail.strip():
                     raise ValueError("Failed attempts require a reason and cannot carry a label")
         return self
+
+
+def historical_attempt_cells(row: dict[str, JsonValue]) -> dict[str, JsonValue]:
+    """Decode cells from the historical labeling table without rewriting evidence."""
+    payload = dict(row)
+    label = TypeAdapter(str).validate_python(payload.pop("label_json"), strict=True)
+    docs = TypeAdapter(str).validate_python(payload.pop("documentation_json"), strict=True)
+    payload["label"] = LabelDecision.model_validate_json(label).model_dump(mode="json") if label else None
+    payload["documentation"] = [
+        doc.model_dump(mode="json")
+        for doc in TypeAdapter(list[SemanticSnippet]).validate_json(docs, strict=True)
+    ]
+    return payload
 
 
 def validate_attempts(
@@ -52,13 +68,12 @@ def validate_attempts(
         )
         if original != expected[identity]:
             raise ValueError("Labeling attempt changed original candidate evidence")
-        if attempt.status == "success":
-            docs = TypeAdapter(list[SemanticSnippet]).validate_json(attempt.documentation_json)
+        if attempt.label is not None:
             validate_label(
                 original,
-                LabelDecision.model_validate_json(attempt.label_json),
+                attempt.label,
                 rules,
-                {doc.url for doc in docs},
+                {doc.url for doc in attempt.documentation},
             )
 
 
@@ -72,9 +87,9 @@ def label_attempt(
     return LabelingAttempt(
         **candidate.model_dump(),
         status="success",
-        label_json=label.model_dump_json(by_alias=True),
+        label=label,
         row_input_fingerprint=row_fingerprint,
-        documentation_json=TypeAdapter(list[SemanticSnippet]).dump_json(docs).decode(),
+        documentation=docs,
         documentation_manifest_digest=fingerprint([doc.model_dump(mode="json") for doc in docs]),
         attempt_evidence_reference=evidence_reference,
     )
@@ -91,10 +106,11 @@ def failed_attempt(
     return LabelingAttempt(
         **candidate.model_dump(),
         status="failure",
+        label=None,
         failure_code=code,
         failure_detail=detail,
         row_input_fingerprint=row_fingerprint,
-        documentation_json=TypeAdapter(list[SemanticSnippet]).dump_json(docs).decode(),
+        documentation=docs,
         documentation_manifest_digest=fingerprint([doc.model_dump(mode="json") for doc in docs]),
         attempt_evidence_reference=evidence_reference,
     )

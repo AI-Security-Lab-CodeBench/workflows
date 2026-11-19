@@ -21,7 +21,7 @@ from test_repository import (
 )
 
 from codebench_pipeline.artifact_views import ArtifactJSON, ArtifactQuery, ArtifactTable
-from codebench_pipeline.collection_config import CAT3_DATASET_ID
+from codebench_pipeline.collection_config import CAT3_DATASET_ID, SourceDeclaration
 from codebench_pipeline.config_assets import configured_selection
 from codebench_pipeline.data_views import DatasetDataService
 from codebench_pipeline.dataframe_schemas import frame_records
@@ -31,12 +31,12 @@ from codebench_pipeline.dataset_finalization import available_candidates
 from codebench_pipeline.dataset_plan import plan_dataset
 from codebench_pipeline.dataset_registry import DatasetRegistry
 from codebench_pipeline.dataset_run import run_registered
-from codebench_pipeline.declared_dataset_bundle import DeclaredDatasetBundle, source_declaration
+from codebench_pipeline.declared_dataset_bundle import DeclaredDatasetBundle, DeclaredLabeling
 from codebench_pipeline.definitions import build_definitions, dataset_run_config
 from codebench_pipeline.human_review import HumanReviewError
-from codebench_pipeline.keenable_policy import CASES, KeenableDeclaration
+from codebench_pipeline.keenable_policy import CASES, Declaration, KeenableDeclaration
 from codebench_pipeline.keenable_transport import DirectResponse
-from codebench_pipeline.object_store import StorageConfig
+from codebench_pipeline.repository_branch_config import RepositoryBranchDeclaration
 from codebench_pipeline.repository_receipts import RepositoryReceipt
 from codebench_pipeline.runtime_instance import dataset_instance
 from codebench_pipeline.stage_configuration import stage_configs
@@ -45,9 +45,10 @@ from codebench_pipeline.storage import IntegrityError, fingerprint
 BUNDLE = Path("business-configs/datasets/cat3.json")
 
 
-def guarded_fixture(home: Path) -> AnnotationConfig:
-    return AnnotationConfig.model_validate(
+def declared_labeling_fixture(home: Path) -> DeclaredLabeling:
+    return DeclaredLabeling.model_validate(
         {
+            "max_request_bytes": 65536,
             "model": {
                 "provider": "openai_compatible",
                 "model": "fixture/guarded",
@@ -65,18 +66,20 @@ def guarded_fixture(home: Path) -> AnnotationConfig:
     )
 
 
+def guarded_fixture(home: Path) -> AnnotationConfig:
+    return declared_labeling_fixture(home).registered()
+
+
 def fixture_spec(home: Path) -> DatasetBuildSpec:
     bundle = DeclaredDatasetBundle.model_validate_json(BUNDLE.read_bytes())
-    configured = bundle.model_copy(
-        update={"finalization": bundle.finalization.model_copy(update={"annotation": guarded_fixture(home)})}
-    )
-    return configured.resolve(BUNDLE.resolve().parent, StorageConfig(local_root=str(home / "tables")))
+    configured = bundle.model_copy(update={"labeling": declared_labeling_fixture(home), "storage": None})
+    return configured.resolve(BUNDLE.resolve().parent, home=home)
 
 
-def with_keenable_declaration(spec: DatasetBuildSpec, declaration: KeenableDeclaration) -> DatasetBuildSpec:
+def with_keenable_declaration(spec: DatasetBuildSpec, declaration: Declaration) -> DatasetBuildSpec:
     collection = spec.declared_collection
     assert collection is not None
-    source = source_declaration(declaration.model_dump_json())
+    source = SourceDeclaration.from_declaration(declaration)
     return spec.model_copy(
         update={"declared_collection": collection.model_copy(update={"keenable_use_cases": source})}
     )
@@ -92,7 +95,7 @@ class DeclaredDatasetGraphTests(unittest.TestCase):
             home = Path(directory)
             spec = fixture_spec(home)
             fixed = declared_source_config(spec, "keenable")
-            declaration = KeenableDeclaration.model_validate_json(json.dumps(fixed.source.declaration))
+            declaration = fixed.source.keenable_config()
             assert declaration.search_plan is not None
             adaptive = with_keenable_declaration(
                 spec,
@@ -119,7 +122,7 @@ class DeclaredDatasetGraphTests(unittest.TestCase):
     def test_declared_collection_requires_guarded_batch_and_rejects_local_documentation(self) -> None:
         payload = json.loads(BUNDLE.read_bytes())
         forbidden = json.loads(BUNDLE.read_bytes())
-        forbidden["finalization"]["documentation"] = {"snippets": []}
+        forbidden["documentation"] = {"snippets": []}
         with self.assertRaises(ValidationError):
             DeclaredDatasetBundle.model_validate(forbidden)
 
@@ -129,10 +132,14 @@ class DeclaredDatasetGraphTests(unittest.TestCase):
             self.assertNotIn("documentation", spec.model_dump(mode="json"))
             with self.assertRaisesRegex(IntegrityError, "requires existing registered annotation"):
                 load_build_config(BUNDLE, home)
-            payload["finalization"]["annotation"] = guarded_fixture(home).model_dump(mode="json")
-            payload["finalization"]["annotation"]["batch"] = None
-            with self.assertRaisesRegex(ValidationError, "requires guarded"):
-                DeclaredDatasetBundle.model_validate(payload).resolve(BUNDLE.resolve().parent, spec.storage)
+            payload["labeling"] = declared_labeling_fixture(home).model_dump(mode="json")
+            payload["labeling"]["batch"] = None
+            with self.assertRaises(ValidationError) as invalid:
+                DeclaredDatasetBundle.model_validate(payload)
+            self.assertIn(
+                ("labeling", "batch", "model_type"),
+                {(error["loc"][0], error["loc"][-1], error["type"]) for error in invalid.exception.errors()},
+            )
 
     def test_historical_declared_snapshot_stays_readable_and_digest_checked(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -216,12 +223,14 @@ class DeclaredDatasetGraphTests(unittest.TestCase):
 
             collection = spec.declared_collection
             assert collection is not None
-            settings = collection.existing_datasets
-            adjusted = {**settings.declaration}
-            origins = adjusted["origins"]
-            assert isinstance(origins, list) and isinstance(origins[0], dict)
-            adjusted["origins"] = [{**origins[0], "attribution": "Updated fixture attribution"}]
-            revised_source = source_declaration(json.dumps(adjusted))
+            declaration = collection.existing_datasets.declaration
+            assert isinstance(declaration, RepositoryBranchDeclaration)
+            origin, *remaining = declaration.origins
+            rights = origin.rights.model_copy(update={"attribution": "Updated fixture attribution"})
+            revised = declaration.model_copy(
+                update={"origins": (origin.model_copy(update={"rights": rights}), *remaining)}
+            )
+            revised_source = SourceDeclaration.from_declaration(revised)
             changed = spec.model_copy(
                 update={
                     "declared_collection": collection.model_copy(update={"existing_datasets": revised_source})
@@ -317,7 +326,7 @@ class DeclaredDatasetGraphTests(unittest.TestCase):
                     instance=instance,
                     partition_key=spec.dataset_id,
                     asset_selection=configured_selection(
-                        [AssetKey(["datasets", "merged_command_candidates"])]
+                        [AssetKey(["datasets", "merged_command_candidates"])], declared=True
                     ),
                 )
 
@@ -423,11 +432,11 @@ class DeclaredDatasetGraphTests(unittest.TestCase):
             update={
                 "declared_collection": collection.model_copy(
                     update={
-                        "existing_datasets": source_declaration(
-                            repository_branch_fixture("dataset", (docker,)).model_dump_json()
+                        "existing_datasets": SourceDeclaration.from_declaration(
+                            repository_branch_fixture("dataset", (docker,))
                         ),
-                        "documentation_crawl": source_declaration(
-                            repository_branch_fixture("documentation", (tldr,)).model_dump_json()
+                        "documentation_crawl": SourceDeclaration.from_declaration(
+                            repository_branch_fixture("documentation", (tldr,))
                         ),
                         "merge_keenable_weight": 0.24,
                     }

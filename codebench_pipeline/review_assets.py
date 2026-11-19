@@ -13,7 +13,8 @@ from dagster import (
 from pandera.typing import DataFrame
 from pydantic import ValidationError
 
-from codebench_pipeline.config_assets import mapped_rules, mapped_settings, policy_input
+from codebench_pipeline.category_rules import CategoryRules
+from codebench_pipeline.config_assets import RegisteredConfig, registered_input, require_registered_rules
 from codebench_pipeline.data_views import DatasetDataService
 from codebench_pipeline.dataframe_io import REVIEW_PREPARATION, DataFrameIOManager
 from codebench_pipeline.dataframe_schemas import (
@@ -23,7 +24,7 @@ from codebench_pipeline.dataframe_schemas import (
     ReviewQueueTable,
     validated_frame,
 )
-from codebench_pipeline.dataset_asset_types import DATASET_PARTITIONS, TABLE_TYPES, table_input
+from codebench_pipeline.dataset_asset_types import DATASET_PARTITIONS, TABLE_TYPES, rules_input, table_input
 from codebench_pipeline.dataset_branches import Branch, asset_branch, asset_path
 from codebench_pipeline.dataset_registry import DatasetRegistry
 from codebench_pipeline.dataset_tables import publication
@@ -73,24 +74,15 @@ def human_assets(branch: Branch = "dataset") -> list[AssetsDefinition]:
         partitions_def=DATASET_PARTITIONS,
         io_manager_key="dataset_io_manager",
         dagster_type=TABLE_TYPES[HumanReviewDecisionsTable],
-        ins={
-            "human_review_queue": table_input("human_review_queue", ReviewQueueTable, branch),
-            "mapped_config": policy_input("human_review_decisions"),
-        },
+        ins={"human_review_queue": table_input("human_review_queue", ReviewQueueTable, branch)},
     )
     def human_review_decisions(
         context: AssetExecutionContext,
         config: HumanReviewConfig,
         human_review_queue: DataFrame[ReviewQueueTable],
-        mapped_config: str,
         dataset_io_manager: ResourceParam[DataFrameIOManager],
     ) -> Output[DataFrame[HumanReviewDecisionsTable]]:
-        settings = mapped_settings(mapped_config, "human_review_decisions", HumanReviewConfig)
-        if settings.authorization:
-            raise HumanReviewError("stale", "Scoped review settings cannot supply run authorization")
-        approved = authorized_review(
-            context, settings.model_copy(update={"authorization": config.authorization}), dataset_io_manager
-        )
+        approved = authorized_review(context, config, dataset_io_manager)
         if human_review_queue.attrs.get(REVIEW_PREPARATION) != {
             "batch_id": approved.token.batch_id,
             "snapshot_id": approved.token.snapshot_id,
@@ -127,7 +119,8 @@ def human_assets(branch: Branch = "dataset") -> list[AssetsDefinition]:
             "human_review_decisions": table_input(
                 "human_review_decisions", HumanReviewDecisionsTable, branch
             ),
-            "mapped_config": policy_input("dataset_release"),
+            "category_rules": rules_input(),
+            "registered": registered_input(),
         },
     )
     def dataset_release(
@@ -135,12 +128,13 @@ def human_assets(branch: Branch = "dataset") -> list[AssetsDefinition]:
         config: HumanReviewConfig,
         category_eligible_annotations: DataFrame[ProposedAnnotationsTable],
         human_review_decisions: DataFrame[HumanReviewDecisionsTable],
-        mapped_config: str,
+        category_rules: CategoryRules,
+        registered: RegisteredConfig,
         dataset_io_manager: ResourceParam[DataFrameIOManager],
     ) -> Output[DataFrame[CommandsTable]]:
         approved = authorized_review(context, config, dataset_io_manager)
         require_decision_frame(human_review_decisions, approved.decisions)
-        category_rules = mapped_rules(mapped_config)
+        require_registered_rules(registered, category_rules)
         if (
             not ProposedAnnotationsTable.validate(category_eligible_annotations).equals(
                 approved.resolved.reviewed

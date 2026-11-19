@@ -32,6 +32,8 @@ class Taxonomy:
     category_name: str
     risks: tuple[Risk, ...]
     description_language: str
+    classes: tuple[str, ...]
+    severities: tuple[str, ...]
 
     @property
     def canonical(self) -> str:
@@ -77,26 +79,102 @@ def category_document(path: Path) -> tuple[Path, dict[str, JsonValue]]:
     return path, document
 
 
+def _business_paths(category: Path, document: dict[str, JsonValue]) -> tuple[Path, ...]:
+    if "base_prompt_file" in document:
+        paths = [category]
+        for field in ("base_prompt_file", "instructions_file", "examples_file"):
+            reference = document.get(field)
+            if not isinstance(reference, str) or not reference.strip():
+                raise CategoryConfigError(f"Missing business file reference: {field}")
+            paths.append((category.parent / reference).resolve())
+        return tuple(paths)
+    shared = category.resolve().parents[2] / "labeling"
+    return (
+        category,
+        shared / "policy.json",
+        shared / "instructions.md",
+        category.with_name("instructions.md"),
+        category.with_name("examples.json"),
+    )
+
+
 def business_paths(path: Path = DEFAULT_CATEGORY_CONFIG) -> tuple[Path, ...]:
-    path, document = category_document(path)
-    paths = [path]
-    for field in ("base_prompt_file", "instructions_file", "examples_file"):
-        reference = document.get(field)
-        if not isinstance(reference, str) or not reference.strip():
-            raise CategoryConfigError(f"Missing business file reference: {field}")
-        paths.append((path.parent / reference).resolve())
-    return tuple(paths)
+    """Return the authored inputs after resolving any category reference."""
+    category, document = category_document(path)
+    return _business_paths(category, document)
+
+
+def _effective_rules(path: Path, document: dict[str, JsonValue]) -> dict[str, JsonValue]:
+    rules = document.get("rules")
+    if not isinstance(rules, dict):
+        raise CategoryConfigError("Missing category rules")
+    if "policy" in rules or "base_prompt_file" in document:
+        return rules
+    if set(document) != {"rules"} or set(rules) - {
+        "category_id",
+        "category_name",
+        "version",
+        "risks",
+        "allowed_severities",
+    }:
+        raise CategoryConfigError("Authored category declarations contain category rules only")
+    policy_path = _business_paths(path, document)[1]
+    policy: JsonValue = json.loads(policy_path.read_text(encoding="utf-8"))
+    if not isinstance(policy, dict) or set(policy) != {"classes", "severities", "description_language"}:
+        raise CategoryConfigError("Expected shared classes, severities and description language")
+    effective = {key: value for key, value in rules.items() if key != "allowed_severities"}
+    if "allowed_severities" in rules:
+        allowed = rules["allowed_severities"]
+        if (
+            not isinstance(allowed, list)
+            or not allowed
+            or not all(isinstance(value, str) for value in allowed)
+        ):
+            raise CategoryConfigError("Expected a nonempty list of allowed severity names")
+        names = _label_names(policy, "severities")
+        if len(allowed) != len(set(allowed)) or any(name not in names for name in allowed):
+            raise CategoryConfigError("Allowed severities must be unique and defined by the shared policy")
+        severities = policy["severities"]
+        if not isinstance(severities, list):
+            raise CategoryConfigError("Expected severity definitions")
+        selected = [rule for name, rule in zip(names, severities, strict=True) if name in allowed]
+        return {**effective, **policy, "severities": selected}
+    return {**effective, **policy}
+
+
+def _label_names(rules: dict[str, JsonValue], field: str) -> tuple[str, ...]:
+    values = rules.get(field)
+    if not isinstance(values, list) or not values:
+        raise CategoryConfigError(f"Missing label definitions: {field}")
+    names: list[str] = []
+    for item in values:
+        if not isinstance(item, dict):
+            raise CategoryConfigError(f"Invalid label definition: {field}")
+        name, definition = item.get("name"), item.get("definition")
+        if (
+            not isinstance(name, str)
+            or not name.strip()
+            or not isinstance(definition, str)
+            or not definition.strip()
+        ):
+            raise CategoryConfigError(f"Invalid label definition: {field}")
+        names.append(name)
+    if len(set(names)) != len(names):
+        raise CategoryConfigError(f"Duplicate label definitions: {field}")
+    return tuple(names)
 
 
 def load_labeling_prompt(commands: list[str], path: Path = DEFAULT_CATEGORY_CONFIG) -> str:
     path, document = category_document(path)
-    _, base, instructions, examples_path = business_paths(path)
+    *_, base, instructions, examples_path = _business_paths(path, document)
     texts = [file.read_text(encoding="utf-8") for file in (base, instructions)]
     if any(not text.strip() for text in texts):
         raise CategoryConfigError("Empty labeling instructions")
-    taxonomy = load_taxonomy(path)
+    rules = _effective_rules(path, document)
+    taxonomy = _taxonomy(rules)
     allowed = {
-        risk.id for risk in taxonomy.risks
+        risk.id
+        for risk in taxonomy.risks
         if any(re.search(pattern, command) for pattern in risk.patterns for command in commands)
     }
     examples: JsonValue = json.loads(examples_path.read_text(encoding="utf-8"))
@@ -108,19 +186,22 @@ def load_labeling_prompt(commands: list[str], path: Path = DEFAULT_CATEGORY_CONF
             raise CategoryConfigError("Invalid example family")
         if family["risk_id"] in allowed:
             selected.append(family)
-    return "\n\n".join([
-        *texts,
-        json.dumps(document["rules"], ensure_ascii=False, allow_nan=False),
-        json.dumps({"examples": selected}, ensure_ascii=False, allow_nan=False),
-    ])
+    return "\n\n".join(
+        [
+            *texts,
+            json.dumps(rules, ensure_ascii=False, allow_nan=False),
+            json.dumps({"examples": selected}, ensure_ascii=False, allow_nan=False),
+        ]
+    )
 
 
 def load_taxonomy(path: Path = DEFAULT_CATEGORY_CONFIG) -> Taxonomy:
     """Read category-owned taxonomy without opening collection source manifests."""
-    _, document = category_document(path)
-    rules = document.get("rules")
-    if not isinstance(rules, dict):
-        raise CategoryConfigError("Missing category rules")
+    category, document = category_document(path)
+    return _taxonomy(_effective_rules(category, document))
+
+
+def _taxonomy(rules: dict[str, JsonValue]) -> Taxonomy:
     category_id, category_name = rules.get("category_id"), rules.get("category_name")
     if not isinstance(category_id, str) or not re.fullmatch(r"CAT-[1-9]\d*", category_id):
         raise CategoryConfigError("Invalid category identifier")
@@ -166,4 +247,11 @@ def load_taxonomy(path: Path = DEFAULT_CATEGORY_CONFIG) -> Taxonomy:
         or len({risk.name for risk in risks}) != len(risks)
     ):
         raise CategoryConfigError("Missing or duplicate taxonomy identifiers or names")
-    return Taxonomy(category_id, category_name, tuple(risks), language)
+    return Taxonomy(
+        category_id,
+        category_name,
+        tuple(risks),
+        language,
+        _label_names(rules, "classes"),
+        _label_names(rules, "severities"),
+    )

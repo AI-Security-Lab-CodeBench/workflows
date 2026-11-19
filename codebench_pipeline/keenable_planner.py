@@ -13,7 +13,7 @@ from pydantic import ValidationError
 from .agent_events import InferenceError, parse_json
 from .inference_capacity import CapacityConfig, CapacityQuarantined, guarded_complete
 from .keenable_ledger import PLAN_RESPONSE_BYTES, Ledger, SlotIdentity
-from .keenable_policy import MAX_SEARCH, QUERIES, Case, KeenableDeclaration, KeenableError, digest
+from .keenable_policy import MAX_SEARCH, QUERIES, Case, Declaration, KeenableError, digest
 from .keenable_receipts import CallReceipt, Lead, SearchDecision, SearchFeedback, SearchPlanReceipt
 from .keenable_transport import search_payload
 from .openai_transport import parse_completion
@@ -159,7 +159,7 @@ class _SearchState(TypedDict):
 @dataclass(frozen=True, slots=True)
 class SearchSession:
     ledger: Ledger
-    declaration: KeenableDeclaration
+    declaration: Declaration
     planner: GuardedSearchPlanner | None
 
     def run(

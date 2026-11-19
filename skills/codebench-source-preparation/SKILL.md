@@ -3,7 +3,15 @@ name: codebench-source-preparation
 description: Discover, inspect and prepare category-specific dataset and documentation sources for CodeBench. Use before building a category from new or refreshed sources. Produces provenance inventories, pinned source manifests, semantic-reference manifests and reviewed hash-pinned Python batch transformations; never labels commands or executes collected content.
 ---
 
-# Prepare sources outside Dagster
+# Prepare source declarations and interpret historical manifests
+
+For source-driven collection, prepare only the category's source declarations,
+reviewed parser identities and admissible rights evidence. Dataset and
+documentation branches enumerate and capture their configured pinned scopes;
+the Keenable branch owns bounded discovery and verified origin capture.
+Do not prebuild per-file inventories or semantic snippets for the labeler.
+Never execute acquired content or grant source rights on a reviewer's behalf.
+The remaining workflow describes historical prepared manifests.
 
 The local agent owns source discovery and basic source assessment. Dagster must
 not search for sources, follow search results, infer source selection or infer

@@ -43,7 +43,9 @@ class HumanReviewTransaction(ReviewLifecycle):
         if prepared.id_column not in prepared.columns or set(prepared.columns).intersection(
             {"human_decision", "human_reviewer", "human_notes", "human_edits"}
         ):
-            raise HumanReviewError("conflict", "Prepared columns conflict with review metadata or lack the identity")
+            raise HumanReviewError(
+                "conflict", "Prepared columns conflict with review metadata or lack the identity"
+            )
         try:
             for schema in prepared.column_schema.values():
                 Draft202012Validator.check_schema(schema)
@@ -62,7 +64,9 @@ class HumanReviewTransaction(ReviewLifecycle):
             try:
                 json.dumps(row, allow_nan=False)
             except ValueError as error:
-                raise HumanReviewError("ineligible", "Prepared rows must contain finite JSON values") from error
+                raise HumanReviewError(
+                    "ineligible", "Prepared rows must contain finite JSON values"
+                ) from error
             review_identity(row, snapshot.review_columns)
             ids.append(candidate_id)
         if tuple(ids) != snapshot.candidate_ids:
@@ -90,12 +94,16 @@ class HumanReviewTransaction(ReviewLifecycle):
         return self._activate(snapshot, rows, "candidate_id", None)
 
     def _activate(
-        self, snapshot: ReviewSnapshot, rows: tuple[dict[str, JsonValue], ...],
-        id_column: str, metadata: dict[str, JsonValue] | None,
+        self,
+        snapshot: ReviewSnapshot,
+        rows: tuple[dict[str, JsonValue], ...],
+        id_column: str,
+        metadata: dict[str, JsonValue] | None,
     ) -> ReviewBatch:
         self.lock_dataset(snapshot.dataset_id)
-        binding = fingerprint({"snapshot": snapshot.model_dump(mode="json"), "rows": list(rows),
-                               "metadata": metadata})
+        binding = fingerprint(
+            {"snapshot": snapshot.model_dump(mode="json"), "rows": list(rows), "metadata": metadata}
+        )
         current_row = self.connection.execute(
             "SELECT batch_id,binding,invalidated,prepared FROM review_batches "
             "WHERE dataset_id=%s AND review_stage=%s AND artifact_id=%s AND scope_id=%s AND current",
@@ -105,23 +113,34 @@ class HumanReviewTransaction(ReviewLifecycle):
             current = self._full_batch(TypeAdapter(str).validate_python(current_row["batch_id"]))
             if current_row["binding"] == binding and current_row["invalidated"] is None:
                 return current
-            previous_metadata = TypeAdapter(dict[str, JsonValue] | None).validate_python(current_row["prepared"])
+            previous_metadata = TypeAdapter(dict[str, JsonValue] | None).validate_python(
+                current_row["prepared"]
+            )
             schema_upgrade = (
                 current_row["invalidated"] is not None
-                and previous_metadata is not None and "column_schema" not in previous_metadata
+                and previous_metadata is not None
+                and "column_schema" not in previous_metadata
             )
             if (
                 current.snapshot.snapshot_id == snapshot.snapshot_id
-                and current_row["binding"] != binding and not schema_upgrade
+                and current_row["binding"] != binding
+                and not schema_upgrade
             ):
                 raise HumanReviewError("conflict", "Snapshot digest has a different identity binding")
             superseded = current.model_copy(update={"state": "superseded", "updated_at": timestamp()})
             self._write_batch(superseded, current=False)
-            self.audit(ReviewHistoryEntry(event="superseded", batch=superseded, recorded_at=superseded.updated_at))
+            self.audit(
+                ReviewHistoryEntry(event="superseded", batch=superseded, recorded_at=superseded.updated_at)
+            )
         now = timestamp()
         batch = ReviewBatch(
-            batch_id=uuid4().hex, snapshot=snapshot, generation=1, batch_revision=0,
-            state="open", created_at=now, updated_at=now,
+            batch_id=uuid4().hex,
+            snapshot=snapshot,
+            generation=1,
+            batch_revision=0,
+            state="open",
+            created_at=now,
+            updated_at=now,
         )
         self.insert_batch(batch, binding, metadata)
         eligible = set(snapshot.eligible_candidate_ids)
@@ -129,7 +148,8 @@ class HumanReviewTransaction(ReviewLifecycle):
         for index, row in enumerate(rows):
             identifier = TypeAdapter(str).validate_python(row[id_column], strict=True)
             record_hash = (
-                review_identity(row, snapshot.review_columns) if metadata is not None
+                review_identity(row, snapshot.review_columns)
+                if metadata is not None
                 else snapshot.record_fingerprints.get(identifier)
                 or fingerprint({"snapshot": snapshot.snapshot_id, "candidate": identifier})
             )
@@ -140,7 +160,13 @@ class HumanReviewTransaction(ReviewLifecycle):
             for row in self.connection.execute(
                 "SELECT record_hash,data FROM review_heads WHERE dataset_id=%s AND review_stage=%s "
                 "AND artifact_id=%s AND scope_id=%s AND record_hash=ANY(%s)",
-                (snapshot.dataset_id, snapshot.review_stage, snapshot.artifact_id, snapshot.scope_id, list(grouped)),
+                (
+                    snapshot.dataset_id,
+                    snapshot.review_stage,
+                    snapshot.artifact_id,
+                    snapshot.scope_id,
+                    list(grouped),
+                ),
             )
         }
         items: list[tuple[str, str, Jsonb, Jsonb]] = []
@@ -149,16 +175,26 @@ class HumanReviewTransaction(ReviewLifecycle):
             previous = heads.get(record_hash)
             identifier = occurrences[0][1]
             if previous is not None:
-                decision = previous.model_copy(update={
-                    "batch_id": batch.batch_id, "candidate_id": identifier,
-                    "carried_from_batch_id": previous.batch_id,
-                })
+                decision = previous.model_copy(
+                    update={
+                        "batch_id": batch.batch_id,
+                        "candidate_id": identifier,
+                        "carried_from_batch_id": previous.batch_id,
+                    }
+                )
                 carried.append(decision)
             else:
-                decision = ReviewDecision(batch_id=batch.batch_id, candidate_id=identifier,
-                                          created_at=now, updated_at=now)
-            items.append((batch.batch_id, record_hash, Jsonb(decision.model_dump(mode="json")),
-                          Jsonb(row_cells(decision_values(decision)))))
+                decision = ReviewDecision(
+                    batch_id=batch.batch_id, candidate_id=identifier, created_at=now, updated_at=now
+                )
+            items.append(
+                (
+                    batch.batch_id,
+                    record_hash,
+                    Jsonb(decision.model_dump(mode="json")),
+                    Jsonb(row_cells(decision_values(decision))),
+                )
+            )
             for index, candidate_id, row in occurrences:
                 blocked_reason = None if candidate_id in eligible else "Machine-ineligible occurrence"
                 if decision.decision == "approve":
@@ -166,10 +202,18 @@ class HumanReviewTransaction(ReviewLifecycle):
                         self._validate_edits(row, decision.edits, snapshot.review_columns, metadata)
                     except HumanReviewError as error:
                         blocked_reason = error.detail
-                occurrences_to_insert.append((
-                    batch.batch_id, candidate_id, index, record_hash, candidate_id in eligible,
-                    json.dumps(row, ensure_ascii=False, allow_nan=False), Jsonb(row_cells(row)), blocked_reason,
-                ))
+                occurrences_to_insert.append(
+                    (
+                        batch.batch_id,
+                        candidate_id,
+                        index,
+                        record_hash,
+                        candidate_id in eligible,
+                        json.dumps(row, ensure_ascii=False, allow_nan=False),
+                        Jsonb(row_cells(row)),
+                        blocked_reason,
+                    )
+                )
         with self.connection.cursor() as cursor:
             cursor.executemany(
                 "INSERT INTO review_items(batch_id,record_hash,data,cells) VALUES(%s,%s,%s,%s)", items
@@ -187,7 +231,10 @@ class HumanReviewTransaction(ReviewLifecycle):
         return batch
 
     def _validate_edits(
-        self, row: dict[str, JsonValue], edits: dict[str, JsonValue], columns: tuple[str, ...],
+        self,
+        row: dict[str, JsonValue],
+        edits: dict[str, JsonValue],
+        columns: tuple[str, ...],
         metadata: dict[str, JsonValue] | None,
     ) -> None:
         if metadata is None:
@@ -198,6 +245,10 @@ class HumanReviewTransaction(ReviewLifecycle):
             raise HumanReviewError("ineligible", "Edits must be limited to selected review columns")
         schemas = TypeAdapter(dict[str, dict[str, JsonValue]]).validate_python(metadata["column_schema"])
         for column in columns:
+            if schemas[column].get("editable") is False and column in edits and edits[column] != row[column]:
+                raise HumanReviewError(
+                    "ineligible", f"Reviewed value for {column} must retain its original value"
+                )
             try:
                 schema_validator(schemas[column]).validate(edits.get(column, row[column]))
             except ValidationError as error:
@@ -216,8 +267,13 @@ class HumanReviewTransaction(ReviewLifecycle):
                     raise HumanReviewError("ineligible", f"Invalid reviewed row: {error.message}") from error
 
     def invalidate(
-        self, dataset_id: str, reason: str, *, review_stage: str | None = None,
-        artifact_id: str = "", scope_id: str = "",
+        self,
+        dataset_id: str,
+        reason: str,
+        *,
+        review_stage: str | None = None,
+        artifact_id: str = "",
+        scope_id: str = "",
     ) -> None:
         self.lock_dataset(dataset_id)
         reason = TypeAdapter(Text).validate_python(reason)
@@ -228,13 +284,16 @@ class HumanReviewTransaction(ReviewLifecycle):
         )
 
     def save_decision(
-        self, snapshot: ReviewSnapshot, change: DecisionChange,
+        self,
+        snapshot: ReviewSnapshot,
+        change: DecisionChange,
     ) -> ReviewDecision:
         batch = self._bound(snapshot, change.batch_id, change.generation)
         batch.require_open()
         row = self.connection.execute(
             """SELECT i.data,r.record_hash FROM review_rows r JOIN review_items i USING(batch_id,record_hash)
-                WHERE r.batch_id=%s AND r.candidate_id=%s""", (batch.batch_id, change.candidate_id)
+                WHERE r.batch_id=%s AND r.candidate_id=%s""",
+            (batch.batch_id, change.candidate_id),
         ).fetchone()
         if row is None:
             raise HumanReviewError("not_found", "Candidate is not in this batch")
@@ -254,15 +313,26 @@ class HumanReviewTransaction(ReviewLifecycle):
                 raise HumanReviewError("ineligible", "Human approval cannot override eligibility")
         now = timestamp()
         decision = ReviewDecision(
-            batch_id=batch.batch_id, candidate_id=previous.candidate_id, decision=change.decision,
-            edits=change.edits, notes=change.notes, reviewer=change.reviewer,
-            row_revision=previous.row_revision + 1, created_at=previous.created_at, updated_at=now,
+            batch_id=batch.batch_id,
+            candidate_id=previous.candidate_id,
+            decision=change.decision,
+            edits=change.edits,
+            notes=change.notes,
+            reviewer=change.reviewer,
+            row_revision=previous.row_revision + 1,
+            created_at=previous.created_at,
+            updated_at=now,
         )
         result = self.connection.execute(
             """UPDATE review_items SET data=%s,cells=%s WHERE batch_id=%s AND record_hash=%s
                 AND (data->>'row_revision')::bigint=%s""",
-            (Jsonb(decision.model_dump(mode="json")), Jsonb(row_cells(decision_values(decision))),
-             batch.batch_id, row["record_hash"], change.expected_row_revision),
+            (
+                Jsonb(decision.model_dump(mode="json")),
+                Jsonb(row_cells(decision_values(decision))),
+                batch.batch_id,
+                row["record_hash"],
+                change.expected_row_revision,
+            ),
         )
         if result.rowcount != 1:
             raise HumanReviewError("stale", "Decision row revision changed")
@@ -271,8 +341,14 @@ class HumanReviewTransaction(ReviewLifecycle):
                 VALUES(%s,%s,%s,%s,%s,%s)
                 ON CONFLICT(dataset_id,review_stage,artifact_id,scope_id,record_hash)
                 DO UPDATE SET data=excluded.data""",
-            (snapshot.dataset_id, snapshot.review_stage, row["record_hash"], Jsonb(decision.model_dump(mode="json")),
-             snapshot.artifact_id, snapshot.scope_id),
+            (
+                snapshot.dataset_id,
+                snapshot.review_stage,
+                row["record_hash"],
+                Jsonb(decision.model_dump(mode="json")),
+                snapshot.artifact_id,
+                snapshot.scope_id,
+            ),
         )
         if change.decision == "approve":
             self.connection.execute(

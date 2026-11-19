@@ -4,7 +4,7 @@ from unittest import TestCase
 from unittest.mock import patch
 
 from pydantic import ValidationError
-from test_repository import TLDR, RepositoryFixture, repository_config_fixture
+from test_repository import TLDR, RepositoryFixture, repository_branch_fixture, repository_config_fixture
 
 from codebench_pipeline.repository import (
     RepositoryRun,
@@ -13,6 +13,7 @@ from codebench_pipeline.repository import (
     repository_catalog,
     repository_documents,
 )
+from codebench_pipeline.repository_branch_config import RepositoryBranchDeclaration
 from codebench_pipeline.repository_config import RepositoryConfig
 from codebench_pipeline.storage import IntegrityError, digest
 
@@ -26,6 +27,7 @@ class RepositoryCurrentnessTests(TestCase):
         cheat.file("docker", b"docker ps --all\n")
         docs = RepositoryFixture(shipped.documentation[0])
         docs.file("pages/common/docker.md", TLDR)
+        self.docs = docs
         self.config = shipped.model_copy(
             update={
                 "dataset": (cheat.declaration(),),
@@ -56,6 +58,38 @@ class RepositoryCurrentnessTests(TestCase):
                 side_effect=wire,
             )
         )
+
+    def test_refresh_revision_invalidates_receipts_without_changing_the_selected_files(self) -> None:
+        declaration = repository_branch_fixture("documentation", (self.docs,))
+        config = declaration.runtime("documentation")
+        catalog = repository_catalog(config, "documentation", self.run_context)
+        refreshed = declaration.model_copy(update={"refresh_revision": "force-refresh"}).runtime(
+            "documentation"
+        )
+
+        with self.assertRaisesRegex(IntegrityError, "catalog is stale"):
+            repository_documents(catalog, refreshed, self.run_context)
+
+    def test_capture_obeys_the_authored_byte_limit(self) -> None:
+        declaration = repository_branch_fixture("documentation", (self.docs,))
+        payload = {**declaration.model_dump(mode="json"), "maximum_file_bytes": len(TLDR) - 1}
+        config = RepositoryBranchDeclaration.model_validate(payload).runtime("documentation")
+        catalog = repository_catalog(config, "documentation", self.run_context)
+
+        with self.assertRaisesRegex(IntegrityError, "exceeds the configured size: pages/common/docker.md"):
+            repository_documents(catalog, config, self.run_context)
+
+    def test_catalog_blocks_an_unverified_tree_or_an_exclusion_outside_the_selector(self) -> None:
+        declaration = repository_branch_fixture("documentation", (self.docs,))
+        origin = declaration.origins[0]
+        for change, reason in (
+            ({"tree_digest": "0" * 64}, "Tree contents differ from approved inventory"),
+            ({"excluded_paths": ("pages/common/missing.md",)}, r"exclusions.*pages/common/missing.md"),
+        ):
+            with self.subTest(change=change):
+                revised = declaration.model_copy(update={"origins": (origin.model_copy(update=change),)})
+                with self.assertRaisesRegex(IntegrityError, reason):
+                    repository_catalog(revised.runtime("documentation"), "documentation", self.run_context)
 
     def test_docs_rights_change_invalidates_only_documentation_receipts(self) -> None:
         run = self.run_context

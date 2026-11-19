@@ -62,18 +62,23 @@ The following reference describes independent dataset and documentation collecti
 and one shared finalization path. Native lineage groups are `existing_datasets`,
 `documentation_crawl`, `dataset_finalization` and `dataset_configuration`.
 Each dataset has its own `dataset_builds` partition.
-The `dataset_configuration` group can be materialized with its upstream
-`category_rules` asset. Its `global_config` outputs the validated dataset build spec
-as JSON. Each mapping outputs JSON keyed by stage: collection mappings contain
-only their branch's settings (documentation keys use `documentation/<stage>`),
-and finalization mappings contain one stage's settings. An empty settings object
-means the stage has no operator settings. Policy consumers also get a top-level
-`category_rules` object, the full serialized `CategoryRules`, through their own
-mapping. The policy is checked against the run's config snapshot before projection.
+Run `refresh_dataset_configuration` for a dataset partition to materialize just
+its configuration assets and `category_rules`. `global_config` outputs a validated Pydantic model:
+declared runs carry pinned, path-free settings grouped by scope; prepared-source
+runs carry the registered build spec. Each mapping passes a strict Pydantic contract
+with settings for its branch or finalization stage. A stage with no settings has
+no mapping. Policy-only consumers receive `CategoryRules` directly; consumers with
+scoped settings receive the corresponding typed input. Policy is checked against the run's config snapshot
+before projection. When a stage also accepts its settings in launch config,
+the stage rejects disagreements with the mapping before consulting the cache.
+The mapped value drives both computation and the cache signature. Completion
+authorization and runner-local paths remain separate from declared mappings.
 Named jobs and planned selective runs include their config assets. When manually
-selecting a policy consumer, also select its mapping and `global_config`; include
-`category_rules` if it has not been materialized for this policy. Config JSON is
-stored by run ID, so a missing same-run mapping fails rather than using old JSON.
+selecting a policy consumer, also select its mapping if it has one, and `global_config`; include
+`category_rules` if it has not been materialized for this policy. The IO manager
+stores inspectable JSON by run ID and validates it against the receiving contract
+when loading it. A missing same-run mapping fails; existing JSON remains readable
+in the artifact inspector.
 See [orchestration](orchestration.md) for configuration, launch and storage setup.
 The implementation is in `dataset_assets_sources.py`,
 `dataset_assets_annotations.py` and their helpers under `codebench_pipeline/`.
@@ -126,9 +131,15 @@ than promising behavior from a proposed design.
 
 ## `datasets/category_rules`
 
-**Input:** Inline rules from the dataset configuration: category identity and
-version, policy, risks and command patterns, class and severity definitions,
-and description language.
+**How it works:** Registration combines the shared labeling instructions, label
+definitions and description language with the selected category's taxonomy,
+membership rules and examples. The asset reads the resulting registered
+snapshot for this dataset partition; editing an authoring file does not change
+a previously registered snapshot.
+
+**Input:** The registered policy from `global_config`. The shared policy owns
+class and severity meanings. The category owns routing, domain defaults,
+exceptions and any restriction on which severities it uses.
 
 **Goal:** Produce the exact taxonomy and policy snapshot used downstream.
 
@@ -137,6 +148,8 @@ contract rather than hidden category-specific defaults.
 
 **Output:** A `CategoryRules` value with a content-derived data version, immutable
 rules evidence and `rules`, `category`, `version` and `cache_hit` metadata.
+For split declarations, the persisted rules include separate shared and
+category policy digests. Historical snapshots do not invent missing digests.
 This asset has no DataFrame row count or table sample.
 
 **Gate/inspection:** Strict model validation rejects unknown fields, duplicate

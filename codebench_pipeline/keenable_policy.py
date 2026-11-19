@@ -2,10 +2,18 @@ from datetime import datetime
 from hashlib import sha256
 from pathlib import Path
 from re import fullmatch
-from typing import Annotated, Final, Literal
+from typing import Annotated, ClassVar, Final, Literal, Self, assert_never
 from urllib.parse import urlsplit, urlunsplit
 
-from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, StringConstraints, model_validator
+from pydantic import (
+    AwareDatetime,
+    BaseModel,
+    ConfigDict,
+    Field,
+    RootModel,
+    StringConstraints,
+    model_validator,
+)
 
 type Case = Literal["plan", "workloads", "containers", "storage_sql", "rollout"]
 type Digest = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
@@ -155,17 +163,40 @@ class PagePermission(Record):
         return self
 
 
-class PublicLicense(Record):
+class LicenseReference(Record):
     identifier: Literal["CC-BY-4.0", "Apache-2.0", "PostgreSQL"]
     evidence_url: str
     license_url: str
-    notice: str | None = Field(default=None, min_length=1, max_length=256)
 
     @model_validator(mode="after")
-    def evidence_urls(self) -> "PublicLicense":
+    def evidence_urls(self) -> Self:
         if any(canonical_url(url) != url for url in (self.evidence_url, self.license_url)):
             raise ValueError("Public license requires canonical HTTPS evidence and license URLs")
         return self
+
+
+class PublicLicense(LicenseReference):
+    notice: str | None = Field(default=None, min_length=1, max_length=256)
+
+
+class PinnedLicenseFile(LicenseReference):
+    kind: Literal["pinned_license_file"]
+    evidence_sha256: Digest
+
+
+class PageNotice(LicenseReference):
+    kind: Literal["page_notice"]
+    declared_evidence_sha256: Digest
+    required_page_notice: str = Field(min_length=1, max_length=256)
+
+
+class StewardGrant(Record):
+    kind: Literal["steward_decision"]
+    steward_decision: Identity
+    declared_evidence_sha256: Digest
+
+
+type SourceRights = Annotated[PinnedLicenseFile | PageNotice | StewardGrant, Field(discriminator="kind")]
 
 
 class SourcePermission(Record):
@@ -184,61 +215,140 @@ class SourcePermission(Record):
 
     @model_validator(mode="after")
     def approved_scope(self) -> "SourcePermission":
-        if (
-            (self.url_prefix is None and not self.exact_urls)
-            or (self.steward_decision is None) == (self.public_license is None)
-            or not self.attribution.strip()
-            or len(set(self.cases)) != len(self.cases)
-        ):
+        if (self.steward_decision is None) == (self.public_license is None):
             raise ValueError("Expected one HTTPS source scope and one rights authority")
-        if self.url_prefix is not None and (
-            canonical_url(self.url_prefix) != self.url_prefix
-            or urlsplit(self.url_prefix).path == "/"
-            or not self.url_prefix.endswith("/")
-        ):
-            raise ValueError("Expected a canonical bounded HTTPS path prefix")
-        if self.discover and self.url_prefix is None:
-            raise ValueError("Discovery requires a bounded HTTPS path prefix")
-        if len(set(self.exact_urls)) != len(self.exact_urls) or any(
-            canonical_url(url) != url or (self.url_prefix is not None and not url.startswith(self.url_prefix))
-            for url in self.exact_urls
-        ):
-            raise ValueError("Expected unique canonical HTTPS reference URLs")
-        if (license_ := self.public_license) is not None:
-            if license_.notice is None:
-                repository = (self.url_prefix or "").split("/")[:6]
-                if (
-                    self.media_type != "text/plain"
-                    or len(repository) != 6
-                    or repository[2] != "raw.githubusercontent.com"
-                    or not fullmatch(r"[0-9a-f]{40}", repository[5])
-                    or self.url_prefix == "/".join(repository) + "/"
-                    or not license_.evidence_url.startswith("/".join(repository) + "/")
-                    or license_.evidence_url in self.exact_urls
-                ):
-                    raise ValueError(
-                        "Raw references and rights must be at the same immutable repository commit"
-                    )
-            elif (
-                self.media_type != "text/html"
-                or license_.identifier != "CC-BY-4.0"
-                or self.permitted_use != "fetch_retain_quote"
-                or self.discover
-                or not self.exact_urls
-            ):
-                raise ValueError("An HTML notice must identify the declared documentation license")
+        _validate_source(self)
         return self
 
-    def covers(self, url: str, case: Case) -> bool:
-        return case in self.cases and self.covers_url(url)
+    @property
+    def allow_discovery(self) -> bool:
+        return self.discover or not self.exact_urls
 
-    def covers_url(self, url: str) -> bool:
-        return url in self.exact_urls or (
-            self.url_prefix is not None
-            and (self.discover or not self.exact_urls)
-            and url.startswith(self.url_prefix)
-            and (self.public_license is None or urlsplit(url).path.endswith((".md", ".mdx", ".sgml")))
-        )
+    @property
+    def page_notice(self) -> str | None:
+        return self.public_license.notice if self.public_license is not None else None
+
+    def covers(self, url: str, case: Case) -> bool:
+        return case in self.cases and _covers_url(self, url)
+
+
+class CurrentSourcePermission(Record):
+    origin_id: Identity
+    url_prefix: str | None = Field(default=None, exclude_if=lambda prefix: prefix is None)
+    exact_urls: tuple[str, ...] = Field(default=(), max_length=64, exclude_if=lambda urls: not urls)
+    cases: tuple[Case, ...] = Field(min_length=1, max_length=len(CASES))
+    media_type: Media
+    valid_until: AwareDatetime
+    attribution: str = Field(min_length=1, max_length=256)
+    permitted_use: Literal["fetch_retain_quote", "fetch_retain_extract_quote"]
+    allow_discovery: bool
+    rights: SourceRights
+
+    @model_validator(mode="after")
+    def approved_scope(self) -> Self:
+        if self.exact_urls and len(self.cases) != 1:
+            raise ValueError("Exact seed references require a single case")
+        _validate_source(self)
+        return self
+
+    @property
+    def public_license(self) -> PinnedLicenseFile | PageNotice | None:
+        match self.rights:
+            case PinnedLicenseFile() | PageNotice() as license_:
+                return license_
+            case StewardGrant():
+                return None
+        assert_never(self.rights)
+
+    @property
+    def rights_evidence_sha256(self) -> str:
+        match self.rights:
+            case PinnedLicenseFile(evidence_sha256=value):
+                return value
+            case PageNotice(declared_evidence_sha256=value) | StewardGrant(declared_evidence_sha256=value):
+                return value
+        assert_never(self.rights)
+
+    @property
+    def page_notice(self) -> str | None:
+        match self.rights:
+            case PageNotice(required_page_notice=notice):
+                return notice
+            case PinnedLicenseFile() | StewardGrant():
+                return None
+        assert_never(self.rights)
+
+    def covers(self, url: str, case: Case) -> bool:
+        return case in self.cases and _covers_url(self, url)
+
+
+type SourceGrant = SourcePermission | CurrentSourcePermission
+type Permission = PagePermission | SourceGrant
+
+
+def _validate_source(source: SourceGrant) -> None:
+    prefix = source.url_prefix
+    if (
+        (prefix is None and not source.exact_urls)
+        or not source.attribution.strip()
+        or len(set(source.cases)) != len(source.cases)
+    ):
+        raise ValueError("Expected one HTTPS source scope and one rights authority")
+    if prefix is not None and (
+        canonical_url(prefix) != prefix or urlsplit(prefix).path == "/" or not prefix.endswith("/")
+    ):
+        raise ValueError("Expected a canonical bounded HTTPS path prefix")
+    if source.allow_discovery and prefix is None:
+        raise ValueError("Discovery requires a bounded HTTPS path prefix")
+    if len(set(source.exact_urls)) != len(source.exact_urls) or any(
+        canonical_url(url) != url or (prefix is not None and not url.startswith(prefix))
+        for url in source.exact_urls
+    ):
+        raise ValueError("Expected unique canonical HTTPS reference URLs")
+    if (license_ := source.public_license) is None:
+        return
+    if source.page_notice is None:
+        repository = (prefix or "").split("/")[:6]
+        if (
+            source.media_type != "text/plain"
+            or len(repository) != 6
+            or repository[2] != "raw.githubusercontent.com"
+            or not fullmatch(r"[0-9a-f]{40}", repository[5])
+            or prefix == "/".join(repository) + "/"
+            or not license_.evidence_url.startswith("/".join(repository) + "/")
+            or license_.evidence_url in source.exact_urls
+        ):
+            raise ValueError("Raw references and rights must be at the same immutable repository commit")
+    elif (
+        source.media_type != "text/html"
+        or license_.identifier != "CC-BY-4.0"
+        or source.permitted_use != "fetch_retain_quote"
+        or source.allow_discovery
+        or not source.exact_urls
+    ):
+        raise ValueError("An HTML notice must identify the declared documentation license")
+
+
+def _covers_url(source: SourceGrant, url: str) -> bool:
+    return url in source.exact_urls or _covers_discovery_url(source, url)
+
+
+def _covers_discovery_url(source: SourceGrant, url: str) -> bool:
+    return (
+        source.allow_discovery
+        and source.url_prefix is not None
+        and url.startswith(source.url_prefix)
+        and (source.public_license is None or urlsplit(url).path.endswith((".md", ".mdx", ".sgml")))
+    )
+
+
+class CallBudget(Record):
+    origin_calls: int = Field(default=MAX_ORIGINS, ge=1, le=64)
+    search_calls: int = Field(default=MAX_SEARCH, ge=0, le=MAX_SEARCH)
+
+    @property
+    def total_bytes(self) -> int:
+        return (self.origin_calls + self.search_calls) * RESPONSE_BYTES
 
 
 class AcquisitionBudget(Record):
@@ -258,10 +368,25 @@ class AdministrativeScope(Record):
     source: Identity
     reviewed_urls: tuple[str, ...] = Field(min_length=1, max_length=8)
 
+    @property
+    def origin_id(self) -> str:
+        return self.source
+
+
+class CurrentAdministrativeScope(Record):
+    case: Case
+    origin_id: Identity
+    reviewed_urls: tuple[str, ...] = Field(min_length=1, max_length=8)
+
 
 class AdministrativeSearch(Record):
     mode: Literal["fixed", "adaptive"]
     scopes: tuple[AdministrativeScope, ...] = Field(min_length=1, max_length=len(CASES))
+
+
+class CurrentAdministrativeSearch(Record):
+    mode: Literal["fixed", "adaptive"]
+    scopes: tuple[CurrentAdministrativeScope, ...] = Field(min_length=1, max_length=len(CASES))
 
 
 class KeenableDeclaration(Record):
@@ -277,6 +402,10 @@ class KeenableDeclaration(Record):
     budget: AcquisitionBudget | None = Field(default=None, exclude_if=lambda budget: budget is None)
     search_plan: AdministrativeSearch | None = Field(default=None, exclude_if=lambda plan: plan is None)
 
+    @property
+    def source_scoped(self) -> bool:
+        return self.revision == "2"
+
     @model_validator(mode="after")
     def approved_scope(self) -> "KeenableDeclaration":
         if self.cases != CASES:
@@ -287,100 +416,26 @@ class KeenableDeclaration(Record):
             self.revision == "2" and self.permissions
         ):
             raise ValueError("Declaration revision 2 uses source scope instead of page permissions")
-        if len({source.origin_id for source in self.sources}) != len(self.sources) or any(
-            any(right.covers_url(url) for url in left.exact_urls)
-            or any(left.covers_url(url) for url in right.exact_urls)
-            or (
-                left.url_prefix is not None
-                and right.url_prefix is not None
-                and (left.discover or not left.exact_urls)
-                and (right.discover or not right.exact_urls)
-                and (
-                    left.url_prefix.startswith(right.url_prefix)
-                    or right.url_prefix.startswith(left.url_prefix)
-                )
-            )
-            for index, left in enumerate(self.sources)
-            for right in self.sources[index + 1 :]
-        ):
-            raise ValueError("Source identities and HTTPS scopes must not overlap")
         if self.revision == "2":
-            budget = self.budget or AcquisitionBudget()
-            if len({url for url, _ in self.raw_licenses}) != len(self.raw_licenses):
-                raise ValueError("Raw rights URLs must bind to one verified digest")
-            if (
-                sum(len(source.exact_urls) for source in self.sources) + len(self.raw_licenses)
-                > budget.origin_calls
-            ):
-                raise ValueError(
-                    "Origin budget must cover all exact references and deduplicated rights files"
-                )
-            if budget.search_calls < len(self.search_cases):
-                raise ValueError("Search budget must cover each configured discovery case")
-            if (plan := self.search_plan) is not None:
-                sources = {source.origin_id: source for source in self.sources}
-                if tuple(scope.case for scope in plan.scopes) != self.search_cases:
-                    raise ValueError("Expected one reviewed search scope per discovery case in case order")
-                for scope in plan.scopes:
-                    source = sources.get(scope.source)
-                    if (
-                        source is None
-                        or source.url_prefix is None
-                        or not (source.discover or not source.exact_urls)
-                        or len(set(scope.reviewed_urls)) != len(scope.reviewed_urls)
-                        or any(
-                            canonical_url(url) != url
-                            or not fullmatch(r"https://[a-z0-9.-]+/[A-Za-z0-9._/-]+", url)
-                            or not url.startswith(source.url_prefix)
-                            or not source.covers(url, scope.case)
-                            for url in scope.reviewed_urls
-                        )
-                    ):
-                        raise ValueError(
-                            "Expected exact reviewed documentation URLs within the discovery scope"
-                        )
+            _validate_source_declaration(self)
         return self
 
     @property
     def raw_licenses(self) -> tuple[tuple[str, str], ...]:
-        return tuple(
-            sorted(
-                {
-                    (source.public_license.evidence_url, source.rights_evidence_sha256)
-                    for source in self.sources
-                    if source.public_license is not None and source.public_license.notice is None
-                }
-            )
-        )
+        return _raw_licenses(self.sources)
 
     @property
     def search_cases(self) -> tuple[Case, ...]:
         if self.revision == "1":
             return self.cases
-        return tuple(
-            case
-            for case in self.cases
-            if any(
-                (source.discover or not source.exact_urls) and case in source.cases for source in self.sources
-            )
-        )
+        return _search_cases(self.sources)
 
     @property
     def declaration_sha256(self) -> str:
-        return digest(
-            self.model_copy(
-                update={
-                    "permissions": tuple(sorted(self.permissions, key=lambda page: page.url)),
-                    "sources": tuple(sorted(self.sources, key=lambda source: source.origin_id)),
-                }
-            )
-            .model_dump_json()
-            .encode()
-        )
+        return _declaration_digest(self)
 
     def check_current(self, now: datetime) -> None:
-        if any(permission.valid_until <= now for permission in (*self.permissions, *self.sources)):
-            raise KeenableError("authorization_expired")
+        _check_current(self, now)
 
     def authority(self, url: str, case: Case) -> PagePermission | SourcePermission | None:
         for source in self.sources:
@@ -389,6 +444,153 @@ class KeenableDeclaration(Record):
         return next((permission for permission in self.permissions if permission.url == url), None)
 
 
-def load_declaration(path: Path) -> KeenableDeclaration:
+class CurrentKeenableDeclaration(Record):
+    schema_version: Literal["3"]
+    dataset_id: Identity
+    generation: Identity
+    budget: CallBudget = CallBudget()
+    search_plan: CurrentAdministrativeSearch | None = Field(
+        default=None, exclude_if=lambda plan: plan is None
+    )
+    sources: tuple[CurrentSourcePermission, ...] = Field(max_length=20)
+
+    cases: ClassVar[tuple[Case, ...]] = CASES
+    permissions: ClassVar[tuple[PagePermission, ...]] = ()
+    source_scoped: ClassVar[bool] = True
+
+    @model_validator(mode="after")
+    def approved_scope(self) -> Self:
+        _validate_source_declaration(self)
+        return self
+
+    @property
+    def dataset(self) -> str:
+        return self.dataset_id
+
+    @property
+    def raw_licenses(self) -> tuple[tuple[str, str], ...]:
+        return _raw_licenses(self.sources)
+
+    @property
+    def search_cases(self) -> tuple[Case, ...]:
+        return _search_cases(self.sources)
+
+    @property
+    def declaration_sha256(self) -> str:
+        return _declaration_digest(self)
+
+    def check_current(self, now: datetime) -> None:
+        _check_current(self, now)
+
+    def authority(self, url: str, case: Case) -> CurrentSourcePermission | None:
+        return next((source for source in self.sources if source.covers(url, case)), None)
+
+    def admits_search_result(self, url: str, case: Case) -> bool:
+        return any(case in source.cases and _covers_discovery_url(source, url) for source in self.sources)
+
+
+type Declaration = KeenableDeclaration | CurrentKeenableDeclaration
+
+
+def _raw_licenses(sources: tuple[SourceGrant, ...]) -> tuple[tuple[str, str], ...]:
+    return tuple(
+        sorted(
+            {
+                (license_.evidence_url, source.rights_evidence_sha256)
+                for source in sources
+                if (license_ := source.public_license) is not None and source.page_notice is None
+            }
+        )
+    )
+
+
+def _search_cases(sources: tuple[SourceGrant, ...]) -> tuple[Case, ...]:
+    return tuple(
+        case for case in CASES if any(source.allow_discovery and case in source.cases for source in sources)
+    )
+
+
+def _declaration_digest(declaration: Declaration) -> str:
+    ordered = {
+        "sources": tuple(sorted(declaration.sources, key=lambda source: source.origin_id)),
+    }
+    match declaration:
+        case KeenableDeclaration():
+            return record_digest(
+                declaration.model_copy(
+                    update={
+                        **ordered,
+                        "permissions": tuple(sorted(declaration.permissions, key=lambda page: page.url)),
+                    }
+                )
+            )
+        case CurrentKeenableDeclaration():
+            return record_digest(declaration.model_copy(update=ordered))
+    assert_never(declaration)
+
+
+def _check_current(declaration: Declaration, now: datetime) -> None:
+    if any(permission.valid_until <= now for permission in (*declaration.permissions, *declaration.sources)):
+        raise KeenableError("authorization_expired")
+
+
+def _validate_source_declaration(declaration: Declaration) -> None:
+    sources = {source.origin_id: source for source in declaration.sources}
+    if len(sources) != len(declaration.sources) or any(
+        any(_covers_url(right, url) for url in left.exact_urls)
+        or any(_covers_url(left, url) for url in right.exact_urls)
+        or (
+            left.url_prefix is not None
+            and right.url_prefix is not None
+            and left.allow_discovery
+            and right.allow_discovery
+            and (left.url_prefix.startswith(right.url_prefix) or right.url_prefix.startswith(left.url_prefix))
+        )
+        for index, left in enumerate(declaration.sources)
+        for right in declaration.sources[index + 1 :]
+    ):
+        raise ValueError("Source identities and HTTPS scopes must not overlap")
+    budget = declaration.budget or AcquisitionBudget()
+    raw_licenses = declaration.raw_licenses
+    if len({url for url, _ in raw_licenses}) != len(raw_licenses):
+        raise ValueError("Raw rights URLs must bind to one verified digest")
+    if (
+        sum(len(source.exact_urls) for source in declaration.sources) + len(raw_licenses)
+        > budget.origin_calls
+    ):
+        raise ValueError("Origin budget must cover all exact references and deduplicated rights files")
+    if budget.search_calls < len(declaration.search_cases):
+        raise ValueError("Search budget must cover each configured discovery case")
+    if (plan := declaration.search_plan) is None:
+        return
+    if tuple(scope.case for scope in plan.scopes) != declaration.search_cases:
+        raise ValueError("Expected one reviewed search scope per discovery case in case order")
+    for scope in plan.scopes:
+        source = sources.get(scope.origin_id)
+        if (
+            source is None
+            or source.url_prefix is None
+            or not source.allow_discovery
+            or len(set(scope.reviewed_urls)) != len(scope.reviewed_urls)
+            or any(
+                canonical_url(url) != url
+                or not fullmatch(r"https://[a-z0-9.-]+/[A-Za-z0-9._/-]+", url)
+                or not url.startswith(source.url_prefix)
+                or not (
+                    _covers_discovery_url(source, url) and scope.case in source.cases
+                    if isinstance(declaration, CurrentKeenableDeclaration)
+                    else source.covers(url, scope.case)
+                )
+                for url in scope.reviewed_urls
+            )
+        ):
+            raise ValueError("Expected exact reviewed documentation URLs within the discovery scope")
+
+
+def parse_declaration(raw: str | bytes) -> Declaration:
+    return RootModel[Declaration].model_validate_json(raw).root
+
+
+def load_declaration(path: Path) -> Declaration:
     """Load declaration-only config; no captures, credentials or network."""
-    return KeenableDeclaration.model_validate_json(path.read_bytes())
+    return parse_declaration(path.read_bytes())

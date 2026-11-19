@@ -1,14 +1,14 @@
 # CAT-3 Keenable declaration
 
-`declaration.json` defines the five administrative cases for CAT-3 and the
-reviewed discovery URLs for the workload and container cases. It defines the
+`declaration.json` uses authoring schema version `3`. It defines the
+reviewed discovery URLs for the workload and container cases, plus the
 source scopes, reference URLs, search and capture budgets, license evidence,
 and whether examples may be extracted or only quoted.
 The same frozen generation supplies both candidate collection and labeling.
 
 Load the companion with `codebench_pipeline.keenable.load_declaration`.
 Pass the current registered declaration and a stable directory under the
-dataset home to `KeenableCollection`. The declaration's `dataset` must match
+dataset home to `KeenableCollection`. The declaration's `dataset_id` must match
 the selected partition. Store the root on a filesystem shared by the stage
 workers that use this branch, with SQLite durability and working file locks.
 The generation, rather than the Dagster run ID, identifies the persisted
@@ -30,21 +30,30 @@ and available response status, digest, size and peer. Provider snippets and
 withheld page bodies are not stored.
 
 For a new live generation, declare the permitted source scope, actual license
-evidence and attribution, allowed uses, and expiry. Exact reference URLs can
-seed discovery; scoped searches can add other matching pages. Candidate
+evidence and attribution, allowed uses, and expiry. An exact reference URL
+seeds capture directly and its grant must have a single case. `allow_discovery`
+independently opts a bounded prefix into search and admission of search results.
+Each reviewed search scope names its grant by `origin_id`. Candidate
 receipts bind extracted commands to byte ranges in verified original bodies.
 The labeler verifies operation passages from those captures without another
-Keenable search or a separate page or operation grant. Historical page-grant
-receipts remain readable; they do not authorize new label-time searches.
+Keenable search or a separate page or operation grant. Historical revision `1`
+and `2` declarations retain their original authorization semantics and receipt
+serialization. Use a distinct generation when moving to schema version `3`.
 
-The registered CAT-3 spec selects this file through
-`keenable_use_cases.source_list` in `business-configs/datasets/cat3.json`.
+`pinned_license_file` requires verified license bytes from the same immutable
+repository commit. `page_notice` checks the notice in each captured HTML page
+and grants quotation only; its evidence URL and digest are declared metadata.
+`steward_decision` records the declared decision and evidence digest without a
+runtime lookup.
+
+CAT-3 registration loads this fixed category companion. The ledger derives the
+shared search and origin byte capacity from the two call limits at 512 KiB per
+reservation. The five administrative cases have a fixed order in code.
 The shipped `search_plan.mode` is `fixed`. It selects one reference query per
 scope in declaration order before moving to the next focus if budget remains.
-For a comparison, make a second declaration with a new `generation` and
-`search_plan.mode: "adaptive"`. Point the comparison spec's
-`keenable_use_cases.source_list` at that file and keep all scopes, reviewed
-URLs, acquisition budgets, and seed references identical. The adaptive catalog
+For a comparison, register a companion with a new `generation` and
+`search_plan.mode: "adaptive"`, with the same scopes, reviewed URLs, acquisition
+budgets, and seed references. The adaptive catalog
 stage must supply `GuardedSearchPlanner` to `KeenableCollection(..., planner=...)`
 using the same capacity ledger as other users of that model endpoint. Discovery
 fails closed without this guard; capture and grounding consume the frozen

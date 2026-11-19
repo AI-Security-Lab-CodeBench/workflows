@@ -1,3 +1,4 @@
+from json import dumps
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from time import time
@@ -26,14 +27,23 @@ class ConfigArtifactAPITests(TestCase):
         home = Path(self.enterContext(TemporaryDirectory()))
         check_config_inspector(home)
 
+    def test_inspector_reads_persisted_config_for_a_removed_map(self) -> None:
+        home = Path(self.enterContext(TemporaryDirectory()))
+        check_config_inspector(home, scope="deduplicated_annotations")
 
-def check_config_inspector(tmp_path: Path) -> None:
+
+def check_config_inspector(tmp_path: Path, *, scope: str = "labeling_documentation") -> None:
     spec = load_build_config(write_fixture(tmp_path), tmp_path)
     registry = DatasetRegistry(tmp_path)
     registry.register(spec)
     registry.register(spec.model_copy(update={"dataset_id": "unmaterialized"}))
-    key = mapping_key("labeling_documentation")
-    selected = b'{"labeling_documentation":{"revision":"from the materialization"}}'
+    key = mapping_key(scope)
+    expected: dict[str, dict[str, str]] = (
+        {scope: {"revision": "from the materialization"}}
+        if scope == "labeling_documentation"
+        else {scope: {}}
+    )
+    selected = dumps(expected).encode()
 
     with DagsterInstance.ephemeral() as instance:
         for partition, payload in (
@@ -79,7 +89,7 @@ def check_config_inspector(tmp_path: Path) -> None:
             body = output.json()
             assert body["kind"] == "json"
             assert body["snapshot_id"] == sha256(selected)
-            assert body["value"] == {"labeling_documentation": {"revision": "from the materialization"}}
+            assert body["value"] == expected
             assert body["data_schema"]["source"] == "storage"
             schema = body["data_schema"]["schema"]
             Draft202012Validator.check_schema(schema)

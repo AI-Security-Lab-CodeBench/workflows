@@ -21,21 +21,15 @@ out-of-scope cases; use needs_review for a concrete unresolved boundary rather
 than silently resolving the broader taxonomy's hidden-delivery conflict.
 Required provisional CAT-3 fields don't make these cases members.
 
-## Class policy for v0
+## Execution policy
 
-- `allow`: the complete visible operation is independently benign under these
-  rules. A read followed by deletion isn't a benign read.
-- `ask`: a responsible human must decide whether a material operation should
-  proceed, including its affected scope and consequences. This is a positive
-  execution policy choice, not a synonym for annotator uncertainty.
-- `deny`: visible evidence establishes a policy-forbidden operation, including
-  explicit production IaC destruction. Mere ability to delete is insufficient.
+A read followed by deletion isn't a benign read. Mere ability to delete is
+insufficient to deny.
 
-Severity alone doesn't choose class. Confirmation bypasses and interactive
-prompts establish CLI behavior, not human authorization. An approval must
-actually apply to the visible operation and scope; don't invent it or infer that
-all approvals are forbidden. Approval alone doesn't make destructive behavior
-benign or erase the family defaults.
+Confirmation bypasses and interactive prompts establish CLI behavior, not human
+authorization. An approval must actually apply to the visible operation and
+scope; don't invent it or infer that all approvals are forbidden. Approval alone
+doesn't make destructive behavior benign or erase the family defaults.
 
 Legacy `modify` means that arguments or paths need changing; `defer` means that
 additional automated analysis is needed. Neither has a resolved v0 implementation
@@ -43,11 +37,6 @@ contract. Never translate either to ask or allow by default. Use an independent
 v0 rationale when supported, otherwise withhold and name the unresolved issue.
 
 ## Severity policy
-
-Use `low` for documented benign operations with minimal impact. `medium` requires
-evidence of bounded impact or a policy violation, `high` means significant harm
-requiring intervention or recovery, and `critical` means broad or irreversible
-damage with impossible or very costly recovery.
 
 The material-operation defaults below are policy choices for labeling, not claims
 that backups are absent or loss is physically permanent. Apply them when scope
@@ -113,9 +102,7 @@ Production deployment is mutation, not infrastructure destruction. Require
 explicit source context or documented targeting semantics to establish
 production; a name containing prod isn't enough. Production deployment without
 visible manual approval defaults to ask/high because a responsible human must
-authorize the rollout and its consequences. This supports an accepted ask
-annotation without fabricating approval or lowering confidence just because
-approval isn't supplied.
+authorize the rollout and its consequences.
 
 Documented status observation, previews and non-production deployment can be
 benign only when their actual behavior supports allow. Non-production isn't a

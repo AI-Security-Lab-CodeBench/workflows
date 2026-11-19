@@ -8,7 +8,7 @@ from test_declared_dataset_graph import fixture_spec
 from codebench_pipeline.artifact_schemas import declared_artifact_schemas
 from codebench_pipeline.dataset_branches import Branch
 from codebench_pipeline.definitions import build_definitions, dataset_run_config
-from codebench_pipeline.stage_configuration import collection_asset_settings
+from codebench_pipeline.stage_configuration import DeclaredGlobalConfig, collection_asset_settings
 
 
 def key(stage: str) -> AssetKey:
@@ -102,11 +102,21 @@ class CollectionAssetTopologyTests(unittest.TestCase):
             spec = fixture_spec(Path(directory))
             for branch in ("dataset", "documentation", "keenable"):
                 with self.subTest(branch=branch):
-                    payload = collection_asset_settings(spec, branch)
+                    settings = collection_asset_settings(spec, branch)
+                    self.assertEqual(settings.collection.branch, branch)
+                    payload = settings.model_dump(mode="json")
                     self.assertEqual(set(payload), {"collection"})
-                    config = payload["collection"]
-                    assert isinstance(config, dict)
-                    self.assertEqual(config["branch"], branch)
-                    source = config["source"]
-                    assert isinstance(source, dict)
-                    self.assertEqual(set(source), {"declaration", "digest"})
+                    self.assertEqual(
+                        set(settings.collection.source.model_dump(mode="json")), {"declaration", "digest"}
+                    )
+
+    def test_declared_labeling_preview_exposes_request_bytes_without_historical_retry_setting(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            spec = fixture_spec(Path(directory))
+            preview = DeclaredGlobalConfig.from_spec(spec)
+
+        settings = preview.scopes.labeling_attempts.labeling_attempts.model_dump(mode="json")
+        self.assertEqual(settings["max_request_bytes"], 65536)
+        self.assertNotIn("maximum_context_characters", settings)
+        self.assertNotIn("retry_revision", settings["batch"])
+        self.assertEqual(spec.annotation.model_dump(mode="json")["batch"]["retry_revision"], "1")

@@ -1,16 +1,20 @@
-from io import BytesIO
 from typing import Annotated, Literal, get_args, get_origin, get_type_hints
 
 import pandera.pandas as pa
 import pyarrow as arrow
-import pyarrow.parquet as parquet
 from dagster import AssetsDefinition, Definitions, OpDefinition, Output
 from dagster._core.definitions.decorators.op_decorator import DecoratedOpFunction
 from jsonschema import Draft202012Validator
+from jsonschema.protocols import Validator
 from pandera.typing import DataFrame, Series
+from pyarrow.parquet import ParquetFile
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, TypeAdapter
 
+from codebench_pipeline.dataframe_schemas import LabelingAttemptsTable
+from codebench_pipeline.labeling_outcomes import LabelingAttempt
 from codebench_pipeline.table_query import QueryModel
+
+_RULES_VALIDATOR: type[Validator] = Draft202012Validator
 
 
 class ArtifactSchema(QueryModel):
@@ -49,11 +53,16 @@ def declared_table_schema(model: type[pa.DataFrameModel]) -> dict[str, JsonValue
         for series in (annotation, *get_args(annotation))
         if get_origin(series) is Series
     }
+    if issubclass(model, LabelingAttemptsTable):
+        for name in ("label", "documentation"):
+            annotations[name] = LabelingAttempt.model_fields[name].rebuild_annotation()
+    column_schemas, definitions = TypeAdapter.json_schemas(
+        (name, "validation", TypeAdapter(annotations[name])) for name in table.columns
+    )
+    json_object = TypeAdapter(dict[str, JsonValue])
     properties: dict[str, JsonValue] = {}
     for name, column in table.columns.items():
-        field = TypeAdapter(dict[str, JsonValue]).validate_python(
-            TypeAdapter(annotations[name]).json_schema()
-        )
+        field = json_object.validate_python(column_schemas[name, "validation"])
         for check in column.checks:
             statistics = check.statistics
             match check.name:
@@ -67,14 +76,15 @@ def declared_table_schema(model: type[pa.DataFrameModel]) -> dict[str, JsonValue
                     field["maximum"] = statistics["max_value"]
                 case "str_matches":
                     field["pattern"] = statistics["pattern"]
+                case _:
+                    continue
         if column.description:
             field["description"] = column.description
         if column.unique:
             field["x-column-unique"] = True
-        if column.nullable:
-            field = {"anyOf": [field, {"type": "null"}]}
-        properties[name] = field
+        properties[name] = {"anyOf": [field, {"type": "null"}]} if column.nullable else field
     return {
+        **json_object.validate_python(definitions),
         "title": model.__name__,
         "type": "object",
         "properties": properties,
@@ -83,7 +93,7 @@ def declared_table_schema(model: type[pa.DataFrameModel]) -> dict[str, JsonValue
     }
 
 
-def storage_field_schema(field: arrow.Field) -> dict[str, JsonValue]:
+def storage_field_schema(field: "arrow.Field[arrow.DataType]") -> dict[str, JsonValue]:
     dtype = field.type
     schema: dict[str, JsonValue] = {}
     if arrow.types.is_dictionary(dtype):
@@ -107,10 +117,11 @@ def storage_field_schema(field: arrow.Field) -> dict[str, JsonValue]:
         if arrow.types.is_fixed_size_list(dtype):
             schema.update(minItems=dtype.list_size, maxItems=dtype.list_size)
     elif arrow.types.is_struct(dtype):
+        children: list["arrow.Field[arrow.DataType]"] = list(dtype)
         schema = {
             "type": "object",
-            "properties": {child.name: storage_field_schema(child) for child in dtype},
-            "required": [child.name for child in dtype],
+            "properties": {child.name: storage_field_schema(child) for child in children},
+            "required": [child.name for child in children],
             "additionalProperties": False,
         }
     elif arrow.types.is_temporal(dtype):
@@ -132,13 +143,21 @@ def table_artifact_schema(
         and set(required) <= set(columns) <= properties.keys()
     ):
         return ArtifactSchema(source="declared", schema=declared)
-    stored = parquet.read_schema(BytesIO(payload))
+    with ParquetFile(arrow.BufferReader(payload)) as parquet_file:
+        stored = parquet_file.schema_arrow
+    fields: list["arrow.Field[arrow.DataType]"] = list(stored)
+    storage_properties: dict[str, JsonValue] = {}
+    for name in columns:
+        index = stored.get_field_index(name)
+        if index == -1:
+            raise KeyError(f"Column {name} does not exist in schema")
+        storage_properties[name] = storage_field_schema(fields[index])
     return ArtifactSchema(
         source="storage",
         schema={
             "title": "Stored artifact row",
             "type": "object",
-            "properties": {name: storage_field_schema(stored.field(name)) for name in columns},
+            "properties": storage_properties,
             "required": list(columns),
             "additionalProperties": False,
         },
@@ -146,7 +165,7 @@ def table_artifact_schema(
 
 
 def rules_artifact_schema(value: JsonValue, declared: dict[str, JsonValue] | None) -> ArtifactSchema:
-    if declared is not None and Draft202012Validator(declared).is_valid(value):
+    if declared is not None and _RULES_VALIDATOR(declared).is_valid(value):
         return ArtifactSchema(source="declared", schema=declared)
     if isinstance(value, dict):
         return ArtifactSchema(

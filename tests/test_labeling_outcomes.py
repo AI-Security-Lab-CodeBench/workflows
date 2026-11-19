@@ -21,7 +21,7 @@ class LabelingOutcomeTests(unittest.TestCase):
             second, "grounding_missing", "No operation evidence.", [], "b" * 64, "batch/1"
         )
         validate_attempts([first, second], [failure, success], rules)
-        self.assertEqual(failure.label_json, "")
+        self.assertIsNone(failure.label)
         self.assertEqual(success.failure_code, "")
         self.assertEqual(success.candidate_id, "one")
 
@@ -43,7 +43,8 @@ class LabelingOutcomeTests(unittest.TestCase):
         candidate = make_candidate("one")
         failure = failed_attempt(candidate, "missing", "No docs.", [], "a" * 64, "batch/1")
         for change in (
-            {"label_json": make_label(candidate, make_rules()).model_dump_json()},
+            {"label": make_label(candidate, make_rules()).model_dump(mode="json")},
+            {"documentation": "[]"},
             {"failure_code": ""},
             {"status": "success"},
             {"documentation_manifest_digest": "b" * 64},

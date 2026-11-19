@@ -2,11 +2,17 @@ from collections.abc import Mapping
 from copy import deepcopy
 from functools import lru_cache
 from pathlib import Path
-from typing import Literal
+from typing import Literal, assert_never
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, model_validator
 
-from codebench_pipeline.dataset_seed_config import DocumentationSeed, SourceSeed, unique_sources
+from codebench_pipeline.dataset_seed_config import (
+    DocumentationSeed,
+    PreparedDocumentationSeed,
+    PreparedSourceSeed,
+    SourceSeed,
+    unique_sources,
+)
 from codebench_pipeline.models import Identifier
 from codebench_pipeline.source_transforms import transformation_bytes
 from codebench_pipeline.storage import IntegrityError
@@ -34,14 +40,61 @@ class DocumentationManifest(ManifestHeader):
     snippets: list[DocumentationSeed]
 
 
+class _ManifestVersion(BaseModel):
+    model_config = ConfigDict(frozen=True, strict=True)
+
+    version: Literal[1, 2] = 1
+
+
+class _PreparedManifestHeader(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
+
+    version: Literal[2]
+    category_id: Identifier
+    revision: str = Field(min_length=1)
+    evidence: dict[str, JsonValue] = Field(default_factory=dict)
+
+
+class _PreparedSourceManifest(_PreparedManifestHeader):
+    sources: list[PreparedSourceSeed]
+
+
+class _PreparedDocumentationManifest(_PreparedManifestHeader):
+    snippets: list[PreparedDocumentationSeed]
+
+
 @lru_cache(maxsize=4)
 def _source_manifest(payload: bytes) -> SourceManifest:
-    return SourceManifest.model_validate_json(payload)
+    version = _ManifestVersion.model_validate_json(payload).version
+    match version:
+        case 1:
+            return SourceManifest.model_validate_json(payload)
+        case 2:
+            authored = _PreparedSourceManifest.model_validate_json(payload)
+            return SourceManifest(
+                category_id=authored.category_id,
+                revision=authored.revision,
+                evidence=authored.evidence,
+                sources=[source.runtime_config() for source in authored.sources],
+            )
+    assert_never(version)
 
 
 @lru_cache(maxsize=4)
 def _documentation_manifest(payload: bytes) -> DocumentationManifest:
-    return DocumentationManifest.model_validate_json(payload)
+    version = _ManifestVersion.model_validate_json(payload).version
+    match version:
+        case 1:
+            return DocumentationManifest.model_validate_json(payload)
+        case 2:
+            authored = _PreparedDocumentationManifest.model_validate_json(payload)
+            return DocumentationManifest(
+                category_id=authored.category_id,
+                revision=authored.revision,
+                evidence=authored.evidence,
+                snippets=[snippet.runtime_config() for snippet in authored.snippets],
+            )
+    assert_never(version)
 
 
 def load_source_manifest(path: Path, category_id: str) -> SourceManifest:

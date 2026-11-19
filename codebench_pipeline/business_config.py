@@ -6,20 +6,24 @@ from typing import Annotated, Final
 from pydantic import Field, TypeAdapter
 
 from codebench_pipeline.category_rules import (
+    AuthoredCategoryRules,
     CategoryRules,
     CategoryTaxonomy,
     CompiledExamples,
+    SharedLabelingPolicy,
     StrictModel,
     Text,
 )
 from codebench_pipeline.dataset_documentation_models import command_operations
 from codebench_pipeline.dataset_records import CandidateRecord, LabelDecision, routing, validate_label
 from codebench_pipeline.models import SemanticSnippet
+from codebench_pipeline.storage import fingerprint
 
 DEFAULT_BUSINESS_CONFIG: Final = (
     Path(__file__).resolve().parents[1] / "business-configs/categories/cat3/category.json"
 )
-DEFAULT_BASE_PROMPT: Final = Path(__file__).resolve().parents[1] / "business-configs/labeling-base.md"
+DEFAULT_BASE_PROMPT: Final = DEFAULT_BUSINESS_CONFIG.parents[2] / "labeling/instructions.md"
+LEGACY_BASE_PROMPT: Final = DEFAULT_BUSINESS_CONFIG.parents[2] / "labeling-base.md"
 
 
 class BusinessCategoryConfig(StrictModel):
@@ -27,6 +31,10 @@ class BusinessCategoryConfig(StrictModel):
     base_prompt_file: Text
     instructions_file: Text
     examples_file: Text
+
+
+class SplitBusinessCategoryConfig(StrictModel):
+    rules: AuthoredCategoryRules
 
 
 class LabelingExample(StrictModel):
@@ -51,18 +59,45 @@ def read_prompt(path: Path) -> str:
 def load_business_rules(path: Path, category_id: str | None = None) -> CategoryRules:
     """Compile only labeling business files, independently of collection manifests."""
     path = path.resolve()
-    supplied = BusinessCategoryConfig.model_validate_json(path.read_bytes())
+    supplied = TypeAdapter(BusinessCategoryConfig | SplitBusinessCategoryConfig).validate_json(
+        path.read_bytes()
+    )
     if category_id is not None and supplied.rules.category_id != category_id:
         raise ValueError("Business configuration cannot change the registered category")
     parent = path.parent
-    rules = CategoryRules(
-        **supplied.rules.model_dump(),
-        policy=read_prompt(parent / supplied.instructions_file),
-        base_prompt=read_prompt(parent / supplied.base_prompt_file),
-    )
-    families = TypeAdapter(list[ExampleFamily]).validate_json(
-        (parent / supplied.examples_file).read_bytes()
-    )
+    split_policy: tuple[SharedLabelingPolicy, AuthoredCategoryRules] | None = None
+    match supplied:
+        case BusinessCategoryConfig():
+            rules = CategoryRules(
+                category_id=supplied.rules.category_id,
+                category_name=supplied.rules.category_name,
+                version=supplied.rules.version,
+                risks=supplied.rules.risks,
+                classes=supplied.rules.classes,
+                severities=supplied.rules.severities,
+                description_language=supplied.rules.description_language,
+                policy=read_prompt(parent / supplied.instructions_file),
+                base_prompt=read_prompt(parent / supplied.base_prompt_file),
+            )
+            examples_path = parent / supplied.examples_file
+        case SplitBusinessCategoryConfig():
+            labeling = path.parents[2] / "labeling"
+            shared = SharedLabelingPolicy.model_validate_json((labeling / "policy.json").read_bytes())
+            split_policy = shared, supplied.rules
+            allowed = set(supplied.rules.allowed_severities)
+            rules = CategoryRules(
+                category_id=supplied.rules.category_id,
+                category_name=supplied.rules.category_name,
+                version=supplied.rules.version,
+                risks=supplied.rules.risks,
+                classes=shared.classes,
+                severities=[rule for rule in shared.severities if not allowed or rule.name in allowed],
+                description_language=shared.description_language,
+                policy=read_prompt(parent / "instructions.md"),
+                base_prompt=read_prompt(labeling / "instructions.md"),
+            )
+            examples_path = parent / "examples.json"
+    families = TypeAdapter(list[ExampleFamily]).validate_json(examples_path.read_bytes())
     known = {risk.id for risk in rules.risks}
     groups: set[tuple[str, str]] = set()
     identities: set[str] = set()
@@ -83,10 +118,12 @@ def load_business_rules(path: Path, category_id: str | None = None) -> CategoryR
                 raise ValueError("Expected label differs from its example family risk")
             operations = command_operations(candidate.candidate_id, candidate.util, candidate.command)
             relevant = [
-                doc for doc in example.documentation
+                doc
+                for doc in example.documentation
                 if any(
                     operation.matches(doc.utility, subcommand)
-                    for operation in operations for subcommand in doc.subcommands
+                    for operation in operations
+                    for subcommand in doc.subcommands
                 )
             ]
             if not relevant:
@@ -96,11 +133,28 @@ def load_business_rules(path: Path, category_id: str | None = None) -> CategoryR
             CompiledExamples(
                 risk_id=family.risk_id,
                 operation_family=family.operation_family,
-                examples_json=TypeAdapter(list[LabelingExample]).dump_json(
-                    family.examples, by_alias=True
-                ).decode("utf-8"),
+                examples_json=TypeAdapter(list[LabelingExample])
+                .dump_json(family.examples, by_alias=True)
+                .decode("utf-8"),
             )
         )
     if {family.risk_id for family in families} != known:
         raise ValueError("Examples must cover every category risk with operation families")
-    return rules.model_copy(update={"examples": compiled})
+    if split_policy is None:
+        return rules.model_copy(update={"examples": compiled})
+    shared, authored = split_policy
+    return rules.model_copy(
+        update={
+            "examples": compiled,
+            "shared_policy_digest": fingerprint(
+                {"policy": shared.model_dump(mode="json"), "instructions": rules.base_prompt}
+            ),
+            "category_policy_digest": fingerprint(
+                {
+                    "rules": authored.model_dump(mode="json", exclude_unset=True),
+                    "instructions": rules.policy,
+                    "examples": TypeAdapter(list[CompiledExamples]).dump_python(compiled, mode="json"),
+                }
+            ),
+        }
+    )

@@ -108,7 +108,10 @@ class SourceReviewRunner:
                     "repositoryLocationName": "Dataset building",
                     "repositoryName": "__repository__",
                     "jobName": "build_dataset",
-                    "assetSelection": [{"path": key.path} for key in configured_selection(selected)],
+                    "assetSelection": [
+                        {"path": key.path}
+                        for key in configured_selection(selected, declared=spec.has_declared_collection)
+                    ],
                 },
                 "runConfigData": dataset_run_config(spec, self.home).to_config_dict(),
                 "executionMetadata": {

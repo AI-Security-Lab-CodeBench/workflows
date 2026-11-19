@@ -1,16 +1,14 @@
 {
-  "revision": "2",
-  "dataset": "cloud_infrastructure_commands_grounded_v1",
-  "generation": "cat3-keenable-administrative-fixed-v1",
-  "generation_review": "public_license_evidence",
-  "cases": ["plan", "workloads", "containers", "storage_sql", "rollout"],
-  "budget": {"search_calls": 2, "origin_calls": 23, "total_bytes": 13107200},
+  "schema_version": "3",
+  "dataset_id": "cloud_infrastructure_commands_grounded_v1",
+  "generation": "cat3-keenable-administrative-fixed-v2",
+  "budget": {"search_calls": 2, "origin_calls": 23},
   "search_plan": {
     "mode": "fixed",
     "scopes": [
       {
         "case": "workloads",
-        "source": "kubernetes-website-kubectl",
+        "origin_id": "kubernetes-website-kubectl",
         "reviewed_urls": [
           "https://raw.githubusercontent.com/kubernetes/website/614d8c734369cef1f12d3cbf7deb3f8b437965f1/content/en/docs/reference/kubectl/quick-reference.md",
           "https://raw.githubusercontent.com/kubernetes/website/614d8c734369cef1f12d3cbf7deb3f8b437965f1/content/en/docs/reference/kubectl/jsonpath.md"
@@ -18,7 +16,7 @@
       },
       {
         "case": "containers",
-        "source": "docker-engine-resource-docs",
+        "origin_id": "docker-engine-resource-docs",
         "reviewed_urls": [
           "https://raw.githubusercontent.com/docker/docs/f8d4abc333036d7d71928bab49a417876d348966/content/manuals/engine/manage-resources/labels.md",
           "https://raw.githubusercontent.com/docker/docs/f8d4abc333036d7d71928bab49a417876d348966/content/manuals/engine/daemon/live-restore.md",
@@ -37,12 +35,14 @@
       ],
       "cases": ["workloads"],
       "media_type": "text/html",
-      "rights_evidence_sha256": "15a2aab44f651f28a46d760c1a0dda96061ecc4104105e43507a15fdd8d314d9",
-      "public_license": {
+      "allow_discovery": false,
+      "rights": {
+        "kind": "page_notice",
         "identifier": "CC-BY-4.0",
         "evidence_url": "https://developers.google.com/terms/site-policies",
         "license_url": "https://creativecommons.org/licenses/by/4.0/",
-        "notice": "creativecommons.org/licenses/by/4.0"
+        "declared_evidence_sha256": "15a2aab44f651f28a46d760c1a0dda96061ecc4104105e43507a15fdd8d314d9",
+        "required_page_notice": "creativecommons.org/licenses/by/4.0"
       },
       "valid_until": "2027-11-18T21:09:06Z",
       "attribution": "Google Cloud documentation (CC BY 4.0); unchanged excerpt",
@@ -62,12 +62,14 @@
       ],
       "cases": ["storage_sql"],
       "media_type": "text/html",
-      "rights_evidence_sha256": "15a2aab44f651f28a46d760c1a0dda96061ecc4104105e43507a15fdd8d314d9",
-      "public_license": {
+      "allow_discovery": false,
+      "rights": {
+        "kind": "page_notice",
         "identifier": "CC-BY-4.0",
         "evidence_url": "https://developers.google.com/terms/site-policies",
         "license_url": "https://creativecommons.org/licenses/by/4.0/",
-        "notice": "creativecommons.org/licenses/by/4.0"
+        "declared_evidence_sha256": "15a2aab44f651f28a46d760c1a0dda96061ecc4104105e43507a15fdd8d314d9",
+        "required_page_notice": "creativecommons.org/licenses/by/4.0"
       },
       "valid_until": "2027-11-18T21:09:06Z",
       "attribution": "Google Cloud documentation (CC BY 4.0); unchanged excerpt",
@@ -78,12 +80,14 @@
       "exact_urls": ["https://docs.cloud.google.com/sdk/gcloud/reference/run"],
       "cases": ["rollout"],
       "media_type": "text/html",
-      "rights_evidence_sha256": "15a2aab44f651f28a46d760c1a0dda96061ecc4104105e43507a15fdd8d314d9",
-      "public_license": {
+      "allow_discovery": false,
+      "rights": {
+        "kind": "page_notice",
         "identifier": "CC-BY-4.0",
         "evidence_url": "https://developers.google.com/terms/site-policies",
         "license_url": "https://creativecommons.org/licenses/by/4.0/",
-        "notice": "creativecommons.org/licenses/by/4.0"
+        "declared_evidence_sha256": "15a2aab44f651f28a46d760c1a0dda96061ecc4104105e43507a15fdd8d314d9",
+        "required_page_notice": "creativecommons.org/licenses/by/4.0"
       },
       "valid_until": "2027-11-18T21:09:06Z",
       "attribution": "Google Cloud documentation (CC BY 4.0); unchanged excerpt",
@@ -92,14 +96,15 @@
     {
       "origin_id": "kubernetes-website-kubectl",
       "url_prefix": "https://raw.githubusercontent.com/kubernetes/website/614d8c734369cef1f12d3cbf7deb3f8b437965f1/content/en/docs/reference/kubectl/",
-      "discover": true,
+      "allow_discovery": true,
       "exact_urls": [
         "https://raw.githubusercontent.com/kubernetes/website/614d8c734369cef1f12d3cbf7deb3f8b437965f1/content/en/docs/reference/kubectl/quick-reference.md"
       ],
       "cases": ["workloads"],
       "media_type": "text/plain",
-      "rights_evidence_sha256": "9ba9550ad48438d0836ddab3da480b3b69ffa0aac7b7878b5a0039e7ab429411",
-      "public_license": {
+      "rights": {
+        "kind": "pinned_license_file",
+        "evidence_sha256": "9ba9550ad48438d0836ddab3da480b3b69ffa0aac7b7878b5a0039e7ab429411",
         "identifier": "CC-BY-4.0",
         "evidence_url": "https://raw.githubusercontent.com/kubernetes/website/614d8c734369cef1f12d3cbf7deb3f8b437965f1/LICENSE",
         "license_url": "https://creativecommons.org/licenses/by/4.0/"
@@ -116,8 +121,10 @@
       ],
       "cases": ["workloads"],
       "media_type": "text/plain",
-      "rights_evidence_sha256": "9ba9550ad48438d0836ddab3da480b3b69ffa0aac7b7878b5a0039e7ab429411",
-      "public_license": {
+      "allow_discovery": false,
+      "rights": {
+        "kind": "pinned_license_file",
+        "evidence_sha256": "9ba9550ad48438d0836ddab3da480b3b69ffa0aac7b7878b5a0039e7ab429411",
         "identifier": "CC-BY-4.0",
         "evidence_url": "https://raw.githubusercontent.com/kubernetes/website/614d8c734369cef1f12d3cbf7deb3f8b437965f1/LICENSE",
         "license_url": "https://creativecommons.org/licenses/by/4.0/"
@@ -129,11 +136,12 @@
     {
       "origin_id": "docker-engine-resource-docs",
       "url_prefix": "https://raw.githubusercontent.com/docker/docs/f8d4abc333036d7d71928bab49a417876d348966/content/manuals/engine/",
-      "discover": true,
+      "allow_discovery": true,
       "cases": ["containers"],
       "media_type": "text/plain",
-      "rights_evidence_sha256": "089009c932d3cc296355e429fa9d6faf80ac89597da866e2424b4ea09add64b1",
-      "public_license": {
+      "rights": {
+        "kind": "pinned_license_file",
+        "evidence_sha256": "089009c932d3cc296355e429fa9d6faf80ac89597da866e2424b4ea09add64b1",
         "identifier": "Apache-2.0",
         "evidence_url": "https://raw.githubusercontent.com/docker/docs/f8d4abc333036d7d71928bab49a417876d348966/LICENSE",
         "license_url": "https://www.apache.org/licenses/LICENSE-2.0"
@@ -150,8 +158,10 @@
       ],
       "cases": ["storage_sql"],
       "media_type": "text/plain",
-      "rights_evidence_sha256": "3d6af92ff8a4c2cdf69afb1cf44edea727922f5cd0cf8b5f72b11cdecac8fdfd",
-      "public_license": {
+      "allow_discovery": false,
+      "rights": {
+        "kind": "pinned_license_file",
+        "evidence_sha256": "3d6af92ff8a4c2cdf69afb1cf44edea727922f5cd0cf8b5f72b11cdecac8fdfd",
         "identifier": "PostgreSQL",
         "evidence_url": "https://raw.githubusercontent.com/postgres/postgres/4892c9447e315f00be028d90a60e1e0ccfe3992d/COPYRIGHT",
         "license_url": "https://www.postgresql.org/about/licence/"

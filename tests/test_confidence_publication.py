@@ -25,6 +25,7 @@ from codebench_pipeline.dataset_export import prepare_dataset
 from codebench_pipeline.dataset_records import LabelDecision
 from codebench_pipeline.human_review import DecisionChange
 from codebench_pipeline.human_review_store import HumanReviewStore
+from codebench_pipeline.object_store import ObjectStore
 from codebench_pipeline.model_config import ModelConfig
 from codebench_pipeline.publication_authorization import authorize_publication
 from codebench_pipeline.release_runner import ReleaseRunner
@@ -332,9 +333,11 @@ class ConfidencePublicationTests(unittest.TestCase):
                     *(f"label/{sha256(identity.encode()).hexdigest()}/reuse.json" for identity in identities),
                 },
             )
-            exported = [
-                json.loads(line) for line in resolved.prepared.files["review/reviewed.jsonl"].splitlines()
-            ]
+            with HumanReviewStore(home).reader() as transaction:
+                publication = transaction.last_publication(spec.dataset_id)
+            assert publication is not None
+            sidecar = ObjectStore(spec.storage).read(f"{publication.bundle_reference}/review/reviewed.jsonl")
+            exported = [json.loads(line) for line in sidecar.splitlines()]
             self.assertEqual(
                 [set(row) & {"review", "review_confidence", "review_verdict"} for row in exported],
                 [set(), set()],

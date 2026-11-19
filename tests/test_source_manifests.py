@@ -49,11 +49,13 @@ class SourceManifestTests(unittest.TestCase):
         self.source = self.spec.documentation_catalog.documents[0]
 
     def remote(self, body: bytes) -> SourceSeed:
-        return SourceSeed.model_validate({
-            **self.source.model_dump(),
-            "local_path": None,
-            "sha256": hashlib.sha256(body).hexdigest(),
-        })
+        return SourceSeed.model_validate(
+            {
+                **self.source.model_dump(),
+                "local_path": None,
+                "sha256": hashlib.sha256(body).hexdigest(),
+            }
+        )
 
     def test_registry_reuses_validation_without_sharing_mutable_values(self) -> None:
         registry = DatasetRegistry(self.root)
@@ -92,28 +94,36 @@ class SourceManifestTests(unittest.TestCase):
     def test_live_registry_does_not_copy_superseded_manifests_but_history_retains_them(self) -> None:
         sources = self.root / "live-sources.json"
         current_source = self.source.model_copy(update={"source_id": "current-source"})
-        sources.write_text(SourceManifest(
-            category_id="CAT-99", revision="current", sources=[current_source]
-        ).model_dump_json())
+        sources.write_text(
+            SourceManifest(
+                category_id="CAT-99", revision="current", sources=[current_source]
+            ).model_dump_json()
+        )
         semantics = self.root / "live-semantics.json"
         current_snippet = self.spec.documentation.snippets[0].model_copy(
             update={"snippet": "Current documented operation."}
         )
-        semantics.write_text(DocumentationManifest(
-            category_id="CAT-99", revision="current", snippets=[current_snippet]
-        ).model_dump_json())
+        semantics.write_text(
+            DocumentationManifest(
+                category_id="CAT-99", revision="current", snippets=[current_snippet]
+            ).model_dump_json()
+        )
         assert self.spec.documentation_catalog is not None
-        stored = self.spec.model_copy(update={
-            "documentation_catalog": self.spec.documentation_catalog.model_copy(
-                update={"manifest": str(sources)}
-            ),
-            "documentation": self.spec.documentation.model_copy(update={"manifest": str(semantics)}),
-        })
+        stored = self.spec.model_copy(
+            update={
+                "documentation_catalog": self.spec.documentation_catalog.model_copy(
+                    update={"manifest": str(sources)}
+                ),
+                "documentation": self.spec.documentation.model_copy(update={"manifest": str(semantics)}),
+            }
+        )
         registry = DatasetRegistry(self.root)
         registry.register(stored)
         with (
             patch.object(SourceSeed, "__deepcopy__", side_effect=AssertionError("Superseded source copied")),
-            patch.object(DocumentationSeed, "__deepcopy__", side_effect=AssertionError("Superseded docs copied")),
+            patch.object(
+                DocumentationSeed, "__deepcopy__", side_effect=AssertionError("Superseded docs copied")
+            ),
         ):
             current = registry.get(stored.dataset_id)
         assert current.documentation_catalog is not None
@@ -149,11 +159,13 @@ class SourceManifestTests(unittest.TestCase):
         link = self.root / "capture.md"
         link.symlink_to(original)
         path = self.root / "linked-sources.json"
-        path.write_text(SourceManifest(
-            category_id="CAT-99",
-            revision="first",
-            sources=[self.source.model_copy(update={"local_path": "capture.md"})],
-        ).model_dump_json())
+        path.write_text(
+            SourceManifest(
+                category_id="CAT-99",
+                revision="first",
+                sources=[self.source.model_copy(update={"local_path": "capture.md"})],
+            ).model_dump_json()
+        )
         first = manifest_sources(path, "CAT-99")
         link.unlink()
         link.symlink_to(alternate)
@@ -171,11 +183,15 @@ class SourceManifestTests(unittest.TestCase):
             trusted=True,
         )
         assert self.spec.documentation_catalog is not None
-        spec = self.spec.model_copy(update={
-            "documentation_catalog": self.spec.documentation_catalog.model_copy(update={
-                "documents": [self.source.model_copy(update={"transform": transform})],
-            }),
-        })
+        spec = self.spec.model_copy(
+            update={
+                "documentation_catalog": self.spec.documentation_catalog.model_copy(
+                    update={
+                        "documents": [self.source.model_copy(update={"transform": transform})],
+                    }
+                ),
+            }
+        )
         registry = DatasetRegistry(self.root)
         registry.register(spec)
         registry.get(spec.dataset_id)
@@ -208,10 +224,13 @@ class SourceManifestTests(unittest.TestCase):
             with self.subTest(maximum=maximum, received=received):
                 source = self.remote(body)
                 cache = self.root / str(maximum)
-                with patch(
-                    "codebench_pipeline.source_retrieval.urlopen",
-                    return_value=SourceResponse(source.url, received),
-                ), self.assertRaises(IntegrityError):
+                with (
+                    patch(
+                        "codebench_pipeline.source_retrieval.urlopen",
+                        return_value=SourceResponse(source.url, received),
+                    ),
+                    self.assertRaises(IntegrityError),
+                ):
                     retrieve_source(source, maximum, cache, None)
                 self.assertEqual(list(cache.rglob("body")), [])
 
@@ -233,10 +252,13 @@ class SourceManifestTests(unittest.TestCase):
 
     def test_transport_recovery_is_bounded_and_never_caches_failed_content(self) -> None:
         source = self.remote(b"git status\n")
-        with patch(
-            "codebench_pipeline.source_retrieval.urlopen",
-            side_effect=URLError("unavailable host"),
-        ) as fetch, self.assertRaises(URLError):
+        with (
+            patch(
+                "codebench_pipeline.source_retrieval.urlopen",
+                side_effect=URLError("unavailable host"),
+            ) as fetch,
+            self.assertRaises(URLError),
+        ):
             retrieve_source(source, 100, self.root / "cache", self.root / "receipts")
         self.assertEqual(fetch.call_count, 3)
         self.assertEqual(list((self.root / "cache").rglob("body")), [])
@@ -244,12 +266,14 @@ class SourceManifestTests(unittest.TestCase):
 
     def test_git_blob_identity_is_checked_independently_of_sha256(self) -> None:
         body = b"git status\n"
-        source = SourceSeed.model_validate({
-            **self.source.model_dump(),
-            "local_path": None,
-            "sha256": None,
-            "git_blob_sha1": hashlib.sha1(b"blob 11\0" + body, usedforsecurity=False).hexdigest(),
-        })
+        source = SourceSeed.model_validate(
+            {
+                **self.source.model_dump(),
+                "local_path": None,
+                "sha256": None,
+                "git_blob_sha1": hashlib.sha1(b"blob 11\0" + body, usedforsecurity=False).hexdigest(),
+            }
+        )
         with patch(
             "codebench_pipeline.source_retrieval.urlopen",
             return_value=SourceResponse(source.url, body),
@@ -257,10 +281,13 @@ class SourceManifestTests(unittest.TestCase):
             result = retrieve_source(source, 100, None, None)
         self.assertEqual(result.sha256, hashlib.sha256(body).hexdigest())
         changed = source.model_copy(update={"git_blob_sha1": "0" * 40})
-        with patch(
-            "codebench_pipeline.source_retrieval.urlopen",
-            return_value=SourceResponse(source.url, body),
-        ), self.assertRaises(IntegrityError):
+        with (
+            patch(
+                "codebench_pipeline.source_retrieval.urlopen",
+                return_value=SourceResponse(source.url, body),
+            ),
+            self.assertRaises(IntegrityError),
+        ):
             retrieve_source(changed, 100, None, None)
 
     def test_persisted_source_metadata_preserves_trusted_extraction_and_provenance(self) -> None:
@@ -279,19 +306,39 @@ class SourceManifestTests(unittest.TestCase):
         catalog = build_catalog(config, self.spec.rules, self.root, branch="documentation")
         documents = snapshot_documents(catalog, SnapshotConfig(documents=[source]))
         restored = SourceDocumentsTable.validate(read_frame(frame_bytes(documents)))
+        self.assertNotIn("source_transformations_json", restored.attrs)
         adapters = document_adapters(restored, self.spec.adapters, self.root)
         candidates = extract_candidates(restored, adapters, self.spec.extraction)
         self.assertEqual(list(candidates["command"]), ["git status", "git status --show-stash"])
         expected = ["source_prepared", f"trusted_python:{transform.sha256}:transform"]
         self.assertEqual([markers[:2] for markers in candidates["transformations"]], [expected, expected])
 
+    def test_legacy_snapshot_reads_prior_transformations_without_source_inputs(self) -> None:
+        assert self.spec.documentation_catalog is not None
+        catalog = build_catalog(
+            self.spec.documentation_catalog, self.spec.rules, self.root, branch="documentation"
+        )
+        documents = snapshot_documents(catalog, SnapshotConfig(documents=[self.source]))
+        del documents.attrs["source_inputs_json"]
+        documents.attrs["source_transformations_json"] = json.dumps(
+            {
+                self.source.source_id: ["legacy-source-preparation"],
+            }
+        )
+        adapters = document_adapters(documents, self.spec.adapters, self.root)
+
+        candidates = extract_candidates(documents, adapters, self.spec.extraction)
+
+        self.assertEqual(list(candidates["command"]), ["git status", "git status --show-stash"])
+        self.assertEqual(
+            [markers[0] for markers in candidates["transformations"]], ["legacy-source-preparation"] * 2
+        )
+
     def test_noncommand_tokens_with_trailing_slashes_remain_inspectable_and_are_filtered(self) -> None:
         body = b"//\nhttps://example.org/reference/\ngit status\n"
         assert self.source.local_path is not None
         Path(self.source.local_path).write_bytes(body)
-        source = self.source.model_copy(
-            update={"format": "text", "sha256": hashlib.sha256(body).hexdigest()}
-        )
+        source = self.source.model_copy(update={"format": "text", "sha256": hashlib.sha256(body).hexdigest()})
         assert self.spec.documentation_catalog is not None
         config = self.spec.documentation_catalog.model_copy(update={"documents": [source]})
         catalog = build_catalog(config, self.spec.rules, self.root, branch="documentation")
@@ -308,9 +355,7 @@ class SourceManifestTests(unittest.TestCase):
 
     def test_manifest_category_and_paths_are_bound_and_registered_changes_are_resolved(self) -> None:
         manifest_path = self.root / "sources.json"
-        manifest = SourceManifest(
-            category_id="CAT-99", revision="first", sources=[self.source]
-        )
+        manifest = SourceManifest(category_id="CAT-99", revision="first", sources=[self.source])
         manifest_path.write_text(manifest.model_dump_json(), encoding="utf-8")
         config = json.loads(self.config.read_text())
         config["models"] = {"labeler": config["models"]["labeler"]}
@@ -324,7 +369,9 @@ class SourceManifestTests(unittest.TestCase):
         )
         current = DatasetRegistry(self.root).get(initial.dataset_id)
         assert current.documentation_catalog is not None
-        self.assertEqual([source.source_id for source in current.documentation_catalog.documents], ["new-source"])
+        self.assertEqual(
+            [source.source_id for source in current.documentation_catalog.documents], ["new-source"]
+        )
         self.assertEqual(current.documentation_snapshots.documents, current.documentation_catalog.documents)
         manifest_path.write_text(
             manifest.model_copy(update={"category_id": "CAT-98"}).model_dump_json(), encoding="utf-8"

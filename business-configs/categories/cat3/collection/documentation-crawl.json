@@ -1,38 +1,35 @@
 {
-  "revision": "cat3-repository-collection-5",
-  "source_weights": {
-    "aws": 0.99,
-    "tldr": 0.9
-  },
+  "refresh_revision": "cat3-repository-collection-5",
   "origins": [
     {
       "origin_id": "tldr",
+      "trust_weight": 0.9,
       "repository": "tldr-pages/tldr",
       "commit": "aad0d0980df9e398bc269e8c31ffaeb936731d48",
       "tree_digest": "75dce741e1d5014eba1a62fa39ce7d846fdd713706cd6b667d2095a0fa25b0b3",
-      "scope": "tldr",
-      "license_id": "CC-BY-4.0",
-      "license": {
-        "path": "LICENSE.md",
-        "sha256": "826498c9793c53709035760c33bd6681e48380d34031320447febe675420ef4d"
+      "file_selector": "tldr",
+      "rights": {
+        "license_id": "CC-BY-4.0",
+        "license_file": {
+          "path": "LICENSE.md",
+          "sha256": "826498c9793c53709035760c33bd6681e48380d34031320447febe675420ef4d"
+        },
+        "attribution": "tldr-pages team and contributors"
       },
-      "attribution": "tldr-pages team and contributors",
       "source_type": "maintainer_documentation",
       "provenance_type": "community_documentation",
-      "format": "markdown",
-      "use": "retain_and_quote_attributed_examples",
-      "transform": {
+      "parser": {
         "parser_id": "tldr",
-        "sha256": "ed3f9f60bcde3de149e4e7a4f4df296f44484519203a2d50016cd57c4e7da01e",
-        "options_json": "{\"context_characters\":100}"
+        "sha256": "ed3f9f60bcde3de149e4e7a4f4df296f44484519203a2d50016cd57c4e7da01e"
       }
     },
     {
       "origin_id": "aws",
+      "trust_weight": 0.99,
       "repository": "aws/aws-cli",
       "commit": "d71d496a02aa28c4798f95820984e690badc352b",
       "tree_digest": "5db5e9bd3869dc8f6b3c0e0e711ec9b0d800c9e1cc4a4beba3d722bb016ccddd",
-      "scope": "aws_examples",
+      "file_selector": "aws_examples",
       "excluded_paths": [
         "awscli/examples/acm/import-certificate.rst",
         "awscli/examples/cloudfront/sign-cookies.rst",
@@ -89,20 +86,19 @@
         "awscli/examples/workdocs/get-document-version.rst",
         "awscli/examples/workdocs/initiate-document-version-upload.rst"
       ],
-      "license_id": "Apache-2.0",
-      "license": {
-        "path": "LICENSE.txt",
-        "sha256": "9b3a0d5c384b013bfc56f2f265afdbbe5c2fb674b1d6ee54190d235f284a1af0"
+      "rights": {
+        "license_id": "Apache-2.0",
+        "license_file": {
+          "path": "LICENSE.txt",
+          "sha256": "9b3a0d5c384b013bfc56f2f265afdbbe5c2fb674b1d6ee54190d235f284a1af0"
+        },
+        "attribution": "Amazon.com, Inc. or its affiliates"
       },
-      "attribution": "Amazon.com, Inc. or its affiliates",
       "source_type": "official_documentation",
       "provenance_type": "vendor_documentation",
-      "format": "text",
-      "use": "retain_and_quote_attributed_examples",
-      "transform": {
+      "parser": {
         "parser_id": "aws_cli_examples",
-        "sha256": "3d47be03dc33e8568447dfad2d872e84020ae76b70dd30bd9fbc27f124409bbd",
-        "options_json": "{\"context_characters\":100}"
+        "sha256": "3d47be03dc33e8568447dfad2d872e84020ae76b70dd30bd9fbc27f124409bbd"
       }
     },
     {
@@ -110,7 +106,7 @@
       "repository": "podman-container-tools/podman",
       "commit": "9dd5e1ed33830612bc200d7a13db00af6ab865a4",
       "tree_digest": "265e6f1b4818ba469ebfc50f7d12a7b7cfbedbcef134fff50fb2fb4b0fbd3f97",
-      "scope": "markdown_files",
+      "file_selector": "markdown_files",
       "included_paths": [
         "docs/source/markdown/podman-container-prune.1.md",
         "docs/source/markdown/podman-image-inspect.1.md",
@@ -121,26 +117,29 @@
         "docs/source/markdown/podman-system-prune.1.md",
         "docs/source/markdown/podman-volume-inspect.1.md"
       ],
-      "license_id": "Apache-2.0",
-      "license": {
-        "path": "LICENSE",
-        "sha256": "62fb8a3a9621dc2388174caaabe9c2317b694bb9a1d46c98bcf5655b68f51be3"
+      "rights": {
+        "license_id": "Apache-2.0",
+        "license_file": {
+          "path": "LICENSE",
+          "sha256": "62fb8a3a9621dc2388174caaabe9c2317b694bb9a1d46c98bcf5655b68f51be3"
+        },
+        "notice_files": [
+          {
+            "path": "README.md",
+            "sha256": "d5f820f30685ddeb0f113169f86470602581389f84f1299755025818fe224149"
+          }
+        ],
+        "attribution": "Podman contributors"
       },
-      "notices": [
-        {
-          "path": "README.md",
-          "sha256": "d5f820f30685ddeb0f113169f86470602581389f84f1299755025818fe224149"
-        }
-      ],
-      "attribution": "Podman contributors",
       "source_type": "official_documentation",
       "provenance_type": "community_documentation",
-      "format": "markdown",
-      "use": "retain_and_quote_attributed_examples",
-      "transform": {
+      "parser": {
         "parser_id": "markdown_shell",
         "sha256": "fa11020e7de0fc178fe59e2e99e2b1b01e3d00148b8d2f871a1032535a5dd991",
-        "options_json": "{\"utility\":\"podman\",\"context_characters\":100}"
+        "options": {
+          "mode": "literal",
+          "utility": "podman"
+        }
       }
     },
     {
@@ -148,7 +147,7 @@
       "repository": "pulumi/docs",
       "commit": "cd1e9d81f6b5f0e7af664a9a8246c72e31e3b3e0",
       "tree_digest": "ed8a5e5888f2c8107d5877bfe2fe92d5e30fdd6aad395bcb0200cf157c912e28",
-      "scope": "markdown_files",
+      "file_selector": "markdown_files",
       "included_paths": [
         "content/docs/iac/cli/commands/pulumi_destroy.md",
         "content/docs/iac/cli/commands/pulumi_preview.md",
@@ -157,26 +156,30 @@
         "content/docs/iac/concepts/stacks.md",
         "content/docs/iac/operations/stack-management/targeted-updates.md"
       ],
-      "license_id": "Apache-2.0",
-      "license": {
-        "path": "LICENSE",
-        "sha256": "0d542e0c8804e39aa7f37eb00da5a762149dc682d7829451287e11b938e94594"
+      "rights": {
+        "license_id": "Apache-2.0",
+        "license_file": {
+          "path": "LICENSE",
+          "sha256": "0d542e0c8804e39aa7f37eb00da5a762149dc682d7829451287e11b938e94594"
+        },
+        "notice_files": [
+          {
+            "path": "README.md",
+            "sha256": "44e5b51e5ff081117282de1cf5b1ac018d41b6364f1d84fd6726a219d22533dc"
+          }
+        ],
+        "attribution": "Pulumi Documentation contributors"
       },
-      "notices": [
-        {
-          "path": "README.md",
-          "sha256": "44e5b51e5ff081117282de1cf5b1ac018d41b6364f1d84fd6726a219d22533dc"
-        }
-      ],
-      "attribution": "Pulumi Documentation contributors",
       "source_type": "official_documentation",
       "provenance_type": "vendor_documentation",
-      "format": "markdown",
-      "use": "retain_and_quote_attributed_examples",
-      "transform": {
+      "parser": {
         "parser_id": "markdown_shell",
         "sha256": "fa11020e7de0fc178fe59e2e99e2b1b01e3d00148b8d2f871a1032535a5dd991",
-        "options_json": "{\"utility\":\"pulumi\",\"context_characters\":100,\"inline_usage\":true}"
+        "options": {
+          "mode": "literal",
+          "utility": "pulumi",
+          "inline_usage": true
+        }
       }
     }
   ]

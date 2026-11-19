@@ -94,16 +94,14 @@ class DatasetGraphTests(unittest.TestCase):
             )
             self.assertEqual(
                 assets.get(AssetKey(["datasets", "deduplicated_annotations"])).parent_keys,
-                {
-                    AssetKey(["datasets", name])
-                    for name in ("proposed_annotations", "map_deduplicated_annotations_config")
-                },
+                {AssetKey(["datasets", "proposed_annotations"])},
             )
             self.assertEqual(
                 assets.get(AssetKey(["datasets", "category_eligible_annotations"])).parent_keys,
                 {
                     AssetKey(["datasets", "deduplicated_annotations"]),
-                    AssetKey(["datasets", "map_category_eligible_annotations_config"]),
+                    AssetKey(["datasets", "category_rules"]),
+                    AssetKey(["datasets", "global_config"]),
                 },
             )
             self.assertIn(
@@ -112,10 +110,7 @@ class DatasetGraphTests(unittest.TestCase):
             )
             self.assertEqual(
                 assets.get(AssetKey(["datasets", "human_review_decisions"])).parent_keys,
-                {
-                    AssetKey(["datasets", name])
-                    for name in ("human_review_queue", "map_human_review_decisions_config")
-                },
+                {AssetKey(["datasets", "human_review_queue"])},
             )
             self.assertNotIn(AssetKey(["datasets", "human_review_snapshot"]), assets.get_all_asset_keys())
             self.assertEqual(
@@ -123,7 +118,6 @@ class DatasetGraphTests(unittest.TestCase):
                 {
                     AssetKey(["datasets", "command_candidates"]),
                     AssetKey(["datasets", "documentation", "command_candidates"]),
-                    AssetKey(["datasets", "map_merged_command_candidates_config"]),
                 },
             )
             self.assertEqual(
@@ -149,7 +143,7 @@ class DatasetGraphTests(unittest.TestCase):
                 },
             )
             self.assertIn(
-                AssetKey(["datasets", "map_proposed_annotations_config"]),
+                AssetKey(["datasets", "category_rules"]),
                 assets.get(AssetKey(["datasets", "proposed_annotations"])).parent_keys,
             )
             self.assertIn(
@@ -158,10 +152,7 @@ class DatasetGraphTests(unittest.TestCase):
             )
             self.assertEqual(
                 assets.get(AssetKey(["datasets", "labeling_failures"])).parent_keys,
-                {
-                    AssetKey(["datasets", name])
-                    for name in ("labeling_attempts", "map_labeling_failures_config")
-                },
+                {AssetKey(["datasets", "labeling_attempts"])},
             )
             self.assertIn("datasets__documentation__source_catalog", {node.name for node in job.nodes})
             self.assertNotIn("datasets__documentation__dataset_release", {node.name for node in job.nodes})

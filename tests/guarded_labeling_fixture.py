@@ -13,7 +13,7 @@ from test_keenable import BODY, PEER, PLAN, SOURCE_BODY, permission, result
 from test_keenable import source_declaration as source_scope_declaration
 from test_repository import RepositoryFixture, repository_branch_fixture, repository_config_fixture
 
-from codebench_pipeline.collection_config import CAT3_DATASET_ID, DeclaredCollection
+from codebench_pipeline.collection_config import CAT3_DATASET_ID, DeclaredCollection, SourceDeclaration
 from codebench_pipeline.dataframe_schemas import CommandCandidatesTable, FilteredCommandsTable
 from codebench_pipeline.dataset_config import (
     AdapterConfig,
@@ -27,7 +27,6 @@ from codebench_pipeline.dataset_config import (
 from codebench_pipeline.dataset_extract import filter_candidates
 from codebench_pipeline.dataset_finalization import merge_candidates
 from codebench_pipeline.dataset_records import CandidateRecord
-from codebench_pipeline.declared_dataset_bundle import source_declaration
 from codebench_pipeline.grounding_policy import OperationGrant, SourceVersion, VersionIndependent
 from codebench_pipeline.inference_capacity import CapacityConfig
 from codebench_pipeline.keenable import KeenableCollection
@@ -207,9 +206,9 @@ class LabelingFixture:
             ),
             storage=StorageConfig(local_root=str(home / "tables")),
             declared_collection=DeclaredCollection(
-                existing_datasets=source_declaration(dataset.model_dump_json()),
-                documentation_crawl=source_declaration(documentation.model_dump_json()),
-                keenable_use_cases=source_declaration(self.declaration.model_dump_json()),
+                existing_datasets=SourceDeclaration.from_declaration(dataset),
+                documentation_crawl=SourceDeclaration.from_declaration(documentation),
+                keenable_use_cases=SourceDeclaration.from_declaration(self.declaration),
             ),
         )
         case.enterContext(patch.dict(os.environ, {"KEENABLE_API_KEY": "fixture-key-long"}))

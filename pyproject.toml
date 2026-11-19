@@ -25,7 +25,13 @@ dependencies = [
 ]
 
 [dependency-groups]
-dev = ["basedpyright>=1.31", "ruff>=0.12", "pandas-stubs>=2.2", "boto3-stubs[s3]>=1.40,<2"]
+dev = [
+  "basedpyright>=1.31",
+  "ruff>=0.12",
+  "pandas-stubs>=2.2",
+  "boto3-stubs[s3]>=1.40,<2",
+  "pyarrow-stubs>=20.0.0.20260819,<21",
+]
 
 [build-system]
 requires = ["hatchling"]

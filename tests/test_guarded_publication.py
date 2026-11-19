@@ -16,9 +16,11 @@ from codebench_pipeline import guarded_publication_sampling
 from codebench_pipeline.data_views import DatasetDataService
 from codebench_pipeline.dataframe_io import read_frame
 from codebench_pipeline.dataframe_schemas import model_records
+from codebench_pipeline.dataset_config import PublicationConfig
 from codebench_pipeline.dataset_records import CandidateRecord, LabelDecision
 from codebench_pipeline.dataset_registry import DatasetRegistry
 from codebench_pipeline.dataset_run import run_registered
+from codebench_pipeline.guarded_publication import ReleaseInputs, prepare_guarded_release
 from codebench_pipeline.grounding_tables import SUPPORT_ATTR, GuardedLabeling
 from codebench_pipeline.guarded_publication_controls import record_control
 from codebench_pipeline.guarded_publication_runtime import (
@@ -63,6 +65,14 @@ class GuardedPublicationTests(TestCase):
         if token is None:
             self.fail("Empty synthetic review did not complete by policy")
         with dataset_instance(home) as instance:
+            snapshots = ReviewSnapshots(home, DatasetDataService(home, instance))
+            approved = snapshots.authoritative(dataset_id)
+            stale_settings = PublicationConfig(
+                limit_per_risk=1, review_columns=approved.manifest.publication.review_columns
+            )
+            different_cap = fixture.spec.model_copy(update={"publication": stale_settings})
+            with self.assertRaisesRegex(HumanReviewError, "Registered release policy differs"):
+                prepare_guarded_release(ReleaseInputs(snapshots, approved, token, ()), home, different_cap)
             proposal, path = preview_proposal(home, instance, dataset_id)
             csv_rows = list(csv.DictReader(StringIO((path / "commands.csv").read_text())))
             self.assertEqual(

@@ -1,9 +1,11 @@
 {
   "dataset_id": "cloud_infrastructure_commands_grounded_v1",
   "category_id": "CAT-3",
-  "revision": "cat3-collection",
-  "finalization": {
-    "annotation": {"mode": "registered"}
+  "revision_label": "cat3-collection",
+  "labeling": {
+    "from_registration": true
   },
-  "storage": null
+  "storage": {
+    "from_registration": true
+  }
 }

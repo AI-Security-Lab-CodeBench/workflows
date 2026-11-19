@@ -1,10 +1,13 @@
 from collections.abc import Sequence
-from typing import Optional, TypeVar
+from typing import Final, Optional, TypeVar
 
+import numpy as np
 import pandas as pd
 import pandera.pandas as pa
 from pandera.typing import DataFrame, Series
 from pydantic import BaseModel, JsonValue, TypeAdapter
+
+from codebench_pipeline.labeling_outcomes import LabelingAttempt, historical_attempt_cells
 
 
 class StrictTable(pa.DataFrameModel):
@@ -93,20 +96,33 @@ class DocumentationTable(StrictTable):
     version_limits: Series[str]
 
 
+def _check_labeling_rows(frame: pd.DataFrame) -> bool:
+    model_records(frame, LabelingAttempt)
+    return True
+
+
+_LABELING_ROWS: Final = pa.Check(_check_labeling_rows)
+
+
 class LabelingAttemptsTable(CommandCandidatesTable):
     status: Series[str] = pa.Field(isin=["success", "failure"])
-    label_json: Series[str]
+    label: Series[object] = pa.Field(nullable=True)
     failure_code: Series[str]
     failure_detail: Series[str]
     row_input_fingerprint: Series[str] = pa.Field(str_matches=r"^[a-f0-9]{64}$")
     documentation_manifest_digest: Series[str] = pa.Field(str_matches=r"^[a-f0-9]{64}$")
-    documentation_json: Series[str]
+    documentation: Series[object]
     attempt_evidence_reference: Series[str]
+
+    @classmethod
+    def to_schema(cls) -> pa.DataFrameSchema:
+        schema = super().to_schema()
+        schema.checks = [_LABELING_ROWS]
+        return schema
 
 
 class LabelingFailuresTable(LabelingAttemptsTable):
     status: Series[str] = pa.Field(eq="failure")
-    label_json: Series[str] = pa.Field(eq="")
     failure_code: Series[str] = pa.Field(str_matches=r"\S")
     failure_detail: Series[str] = pa.Field(str_matches=r"\S")
 
@@ -172,13 +188,27 @@ Record = TypeVar("Record", bound=BaseModel)
 
 
 def validated_frame(rows: Sequence[dict[str, JsonValue]], schema: type[Schema]) -> DataFrame[Schema]:
+    provided = dict.fromkeys(name for row in rows for name in row)
     columns = [
-        name
-        for name, column in schema.to_schema().columns.items()
-        if column.required or any(name in row for row in rows)
+        name for name, column in schema.to_schema().columns.items() if column.required or name in provided
     ]
-    frame = pd.DataFrame(list(rows), columns=columns)
+    frame = pd.DataFrame(list(rows), columns=[*columns, *(name for name in provided if name not in columns)])
     return schema.validate(frame)
+
+
+def current_labeling_attempts(frame: pd.DataFrame) -> pd.DataFrame:
+    """Interpret the former text columns at the historical Parquet boundary."""
+    if "label_json" not in frame or "documentation_json" not in frame:
+        return frame
+    current = validated_frame(
+        [historical_attempt_cells(row) for row in frame_records(frame)],
+        LabelingAttemptsTable,
+    )
+    if "source_weight" in frame and "source_weight" not in current:
+        current["source_weight"] = frame["source_weight"]
+    current.index = frame.index
+    current.attrs = frame.attrs
+    return current
 
 
 def frame_records(frame: pd.DataFrame) -> list[dict[str, JsonValue]]:
@@ -191,4 +221,19 @@ def frame_records(frame: pd.DataFrame) -> list[dict[str, JsonValue]]:
 
 def model_records(frame: pd.DataFrame, model: type[Record]) -> list[Record]:
     fields = [field.alias or name for name, field in model.model_fields.items()]
-    return [model.model_validate(row) for row in frame_records(frame.loc[:, fields])]
+    return [
+        model.model_validate({name: _native_cell(value) for name, value in row.items()})
+        for row in frame.loc[:, fields].to_dict(orient="records")
+    ]
+
+
+def _native_cell(value: JsonValue | np.ndarray) -> JsonValue:
+    match value:
+        case np.ndarray():
+            return [_native_cell(item) for item in value.tolist()]
+        case list():
+            return [_native_cell(item) for item in value]
+        case dict():
+            return {name: _native_cell(item) for name, item in value.items()}
+        case _:
+            return value

@@ -5,6 +5,8 @@ from .keenable_policy import (
     MAX_RESULTS,
     PAGE_CASES,
     Case,
+    CurrentKeenableDeclaration,
+    Declaration,
     KeenableDeclaration,
     canonical_url,
     digest,
@@ -22,7 +24,7 @@ LEADS: TypeAdapter[tuple[Lead, ...]] = TypeAdapter(tuple[Lead, ...])
 
 
 def search_leads(
-    declaration: KeenableDeclaration,
+    declaration: Declaration,
     case: Case,
     envelope: SearchEnvelope,
     *,
@@ -41,10 +43,8 @@ def search_leads(
                     excluded="invalid_url",
                 )
             )
-        elif (reviewed is not None and canonical not in reviewed) or (
-            PAGE_CASES.get(canonical) != case
-            if declaration.revision == "1"
-            else declaration.authority(canonical, case) is None
+        elif (reviewed is not None and canonical not in reviewed) or not _admits_search_result(
+            declaration, canonical, case
         ):
             leads.append(
                 Lead(
@@ -60,8 +60,18 @@ def search_leads(
     return tuple(leads)
 
 
+def _admits_search_result(declaration: Declaration, url: str, case: Case) -> bool:
+    if isinstance(declaration, CurrentKeenableDeclaration):
+        return declaration.admits_search_result(url, case)
+    return (
+        PAGE_CASES.get(url) == case
+        if declaration.revision == "1"
+        else declaration.authority(url, case) is not None
+    )
+
+
 def freeze_catalog(
-    declaration: KeenableDeclaration,
+    declaration: Declaration,
     leads: list[Lead],
     searches: list[CallReceipt],
     plan: SearchPlanReceipt | None = None,
@@ -74,7 +84,7 @@ def freeze_catalog(
         leads,
         key=lambda lead: (
             lead.origin != "declared",
-            declaration.revision == "2"
+            not (isinstance(declaration, KeenableDeclaration) and declaration.revision == "1")
             and (lead.url is None or declaration.authority(lead.url, lead.case) is None),
             lead.rank,
             case_order[lead.case],
@@ -104,7 +114,7 @@ def freeze_catalog(
     )
 
 
-def declared_leads(declaration: KeenableDeclaration) -> list[Lead]:
+def declared_leads(declaration: Declaration) -> list[Lead]:
     """Resolve preverified reference targets without asking search to find them again."""
     return [
         Lead(case=source.cases[0], rank=rank, url_sha256=digest(url.encode()), url=url, origin="declared")

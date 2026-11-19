@@ -1015,8 +1015,7 @@ def validate_guarded_support(
             raise IntegrityError("Guarded support changed the exact evidence identity")
         admission.verify(candidate, item, support.quotes[identifier])
         excerpts.append(item.snippet)
-    if TypeAdapter(list[SemanticSnippet]).validate_json(attempt.documentation_json) != excerpts:
+    if attempt.documentation != excerpts:
         raise IntegrityError("Guarded support differs from the admitted attempt documentation")
-    label = LabelDecision.model_validate_json(attempt.label_json)
-    if set(label.documentation_urls) != {item.url for item in excerpts}:
+    if attempt.label is None or set(attempt.label.documentation_urls) != {item.url for item in excerpts}:
         raise IntegrityError("Guarded cached label URLs differ from its exact supporting evidence")

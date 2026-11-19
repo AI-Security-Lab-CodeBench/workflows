@@ -1,61 +1,168 @@
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Literal
 
-from pydantic import Field, JsonValue, TypeAdapter
+from pydantic import Field, JsonValue, field_validator, model_validator
+from pydantic_core import PydanticCustomError
 
+from codebench_pipeline.batch_labeling_config import DeclaredBatchLabelingConfig
 from codebench_pipeline.business_config import load_business_rules
 from codebench_pipeline.collection_config import DeclaredCollection, SourceDeclaration
 from codebench_pipeline.dataset_config import (
     AdapterConfig,
     AnnotationConfig,
+    AnnotationWorkers,
     CatalogConfig,
     DatasetBuildSpec,
     ExtractionConfig,
     FilteringConfig,
     PublicationConfig,
+    ReleaseCap,
+    RequestBytes,
     StrictStageConfig,
+    require_guarded_annotation,
 )
+from codebench_pipeline.model_config import ModelConfig
 from codebench_pipeline.models import Identifier
 from codebench_pipeline.object_store import StorageConfig
 from codebench_pipeline.repository_branch_config import load_repository_branch
 from codebench_pipeline.repository_config import SourceWeight
-from codebench_pipeline.storage import IntegrityError, fingerprint
+from codebench_pipeline.storage import IntegrityError
 
 
-class RegisteredAnnotation(StrictStageConfig):
-    mode: Literal["registered"]
+class FromRegistration(StrictStageConfig):
+    from_registration: Literal[True]
+
+    @field_validator("from_registration", mode="before")
+    @classmethod
+    def requires_true(cls, value: JsonValue) -> JsonValue:
+        if value is not True:
+            raise PydanticCustomError("from_registration", "from_registration must be true")
+        return value
 
 
-class GuardedFinalization(StrictStageConfig):
-    annotation: AnnotationConfig | RegisteredAnnotation
-    filtering: FilteringConfig = FilteringConfig()
-    publication: PublicationConfig = PublicationConfig()
-    keenable_source_weight: SourceWeight | None = None
+class DeclaredLabeling(StrictStageConfig):
+    model: ModelConfig
+    max_request_bytes: RequestBytes = 131072
+    workers: AnnotationWorkers = 1
+    batch: DeclaredBatchLabelingConfig
+
+    def registered(self) -> AnnotationConfig:
+        return AnnotationConfig(
+            model=self.model,
+            maximum_context_characters=self.max_request_bytes,
+            workers=self.workers,
+            batch=self.batch.registered(),
+        )
+
+    @model_validator(mode="after")
+    def guarded_transport(self) -> "DeclaredLabeling":
+        require_guarded_annotation(self.registered())
+        return self
+
+
+class DeclaredReview(StrictStageConfig):
+    review_columns: list[str] = Field(default_factory=lambda: PublicationConfig().review_columns)
+
+    @field_validator("review_columns")
+    @classmethod
+    def command_identity(cls, value: list[str]) -> list[str]:
+        if "command" not in value:
+            raise PydanticCustomError("review_command_identity", "review_columns must include command")
+        return PublicationConfig.unique_review_columns(value)
+
+
+class DeclaredRelease(StrictStageConfig):
+    release_cap_per_risk: ReleaseCap = 250
+
+
+class DeclaredMerge(StrictStageConfig):
+    keenable_weight: SourceWeight | None = None
+
+
+class DeclaredStorageNamespace(StrictStageConfig):
+    key_prefix: str = "datasets"
+    preview_rows: Annotated[int, Field(ge=0, le=100)] = 10
+
+
+class DeclaredLocalStorage(DeclaredStorageNamespace):
+    backend: Literal["local"]
+    root_directory: str
+
+
+class DeclaredS3Storage(DeclaredStorageNamespace):
+    backend: Literal["s3"]
+    bucket: str
+    endpoint_url: str | None = Field(default=None, repr=False)
+    region: str = "us-east-1"
+    access_key_env: str | None = None
+    secret_key_env: str | None = None
+
+
+DeclaredStorage = Annotated[DeclaredLocalStorage | DeclaredS3Storage, Field(discriminator="backend")]
 
 
 class DeclaredDatasetBundle(StrictStageConfig):
     dataset_id: Identifier
     category_id: Literal["CAT-3"]
-    revision: str = Field(min_length=1)
-    finalization: GuardedFinalization
-    storage: StorageConfig | None = None
+    revision_label: str = Field(min_length=1)
+    labeling: DeclaredLabeling | FromRegistration
+    storage: DeclaredStorage | FromRegistration | None = None
+    filtering: FilteringConfig = FilteringConfig()
+    merge: DeclaredMerge = DeclaredMerge()
+    review: DeclaredReview = DeclaredReview()
+    release: DeclaredRelease = DeclaredRelease()
 
-    def resolve(self, parent: Path, storage: StorageConfig, *, home: Path | None = None) -> DatasetBuildSpec:
+    def resolve(self, parent: Path, *, home: Path | None = None) -> DatasetBuildSpec:
         from codebench_pipeline.dataset_registry import DatasetRegistry
         from codebench_pipeline.keenable_policy import load_declaration
 
-        annotation = self.finalization.annotation
-        if isinstance(annotation, RegisteredAnnotation):
-            registry = DatasetRegistry(home or Path(".codebench-datasets"))
-            try:
-                registered = registry.get_snapshot(self.dataset_id)
-            except FileNotFoundError as error:
-                raise IntegrityError(
-                    "Declared collection requires existing registered annotation settings; select the canonical dataset --home"
-                ) from error
-            annotation = registered.annotation
-            if self.storage is None:
-                storage = registered.storage
+        dataset_home = home if home is not None else Path(".codebench-datasets")
+        registry = DatasetRegistry(dataset_home)
+        registered = None
+        match self.labeling:
+            case FromRegistration():
+                try:
+                    registered = registry.get_snapshot(self.dataset_id)
+                except FileNotFoundError as error:
+                    raise IntegrityError(
+                        "Declared collection requires existing registered annotation settings; select the canonical dataset --home"
+                    ) from error
+                annotation = registered.annotation
+                require_guarded_annotation(annotation)
+            case DeclaredLabeling() as labeling:
+                annotation = labeling.registered()
+        match self.storage:
+            case FromRegistration():
+                try:
+                    storage = (
+                        registered.storage if registered is not None else registry.storage(self.dataset_id)
+                    )
+                except FileNotFoundError as error:
+                    raise IntegrityError(
+                        "Declared collection requires existing registered storage settings; select the canonical dataset --home"
+                    ) from error
+            case DeclaredLocalStorage() as local:
+                storage = StorageConfig(
+                    local_root=local.root_directory,
+                    prefix=local.key_prefix,
+                    sample_rows=local.preview_rows,
+                )
+                root = Path(storage.local_root)
+                if not root.is_absolute():
+                    storage = storage.model_copy(update={"local_root": str((parent / root).resolve())})
+            case DeclaredS3Storage() as s3:
+                storage = StorageConfig(
+                    backend="s3",
+                    bucket=s3.bucket,
+                    endpoint_url=s3.endpoint_url,
+                    region=s3.region,
+                    access_key_env=s3.access_key_env,
+                    secret_key_env=s3.secret_key_env,
+                    prefix=s3.key_prefix,
+                    sample_rows=s3.preview_rows,
+                )
+            case None:
+                storage = StorageConfig(local_root=str((dataset_home / "dataframes").resolve()))
         category = (parent.parent / "categories" / self.category_id.replace("-", "").lower()).resolve()
         rules = load_business_rules(source_path(category, "category.json"), self.category_id)
         dataset = load_repository_branch(source_path(category, "collection/existing-datasets.json"))
@@ -65,20 +172,23 @@ class DeclaredDatasetBundle(StrictStageConfig):
             raise IntegrityError("Keenable source list belongs to a different dataset partition")
         return DatasetBuildSpec(
             dataset_id=self.dataset_id,
-            revision=self.revision,
+            revision=self.revision_label,
             rules=rules,
             catalog=CatalogConfig(),
             adapters=AdapterConfig(),
             extraction=ExtractionConfig(),
-            filtering=self.finalization.filtering,
+            filtering=self.filtering,
             annotation=annotation,
-            publication=self.finalization.publication,
+            publication=PublicationConfig(
+                limit_per_risk=self.release.release_cap_per_risk,
+                review_columns=self.review.review_columns,
+            ),
             storage=storage,
             declared_collection=DeclaredCollection(
-                existing_datasets=source_declaration(dataset.model_dump_json()),
-                documentation_crawl=source_declaration(documentation.model_dump_json()),
-                keenable_use_cases=source_declaration(keenable.model_dump_json()),
-                merge_keenable_weight=self.finalization.keenable_source_weight,
+                existing_datasets=SourceDeclaration.from_declaration(dataset),
+                documentation_crawl=SourceDeclaration.from_declaration(documentation),
+                keenable_use_cases=SourceDeclaration.from_declaration(keenable),
+                merge_keenable_weight=self.merge.keenable_weight,
             ),
         )
 
@@ -88,8 +198,3 @@ def source_path(category: Path, relative: str) -> Path:
     if not path.is_relative_to(category):
         raise IntegrityError("Business declaration escapes its category directory")
     return path
-
-
-def source_declaration(normalized_json: str) -> SourceDeclaration:
-    declaration = TypeAdapter(dict[str, JsonValue]).validate_json(normalized_json)
-    return SourceDeclaration(declaration=declaration, digest=fingerprint(declaration))

@@ -22,7 +22,7 @@ from test_declared_dataset_graph import fixture_spec
 from codebench_pipeline.artifact_schemas import declared_table_schema
 from codebench_pipeline.artifact_views import ArtifactBinding, ArtifactDataService, ArtifactQuery
 from codebench_pipeline.category_rules import CategoryRules
-from codebench_pipeline.config_assets import GlobalConfig
+from codebench_pipeline.config_assets import GLOBAL_CONFIG, REGISTERED_CONFIG_TYPE, GlobalConfig
 from codebench_pipeline.data_api import make_dataset_api
 from codebench_pipeline.data_views import DatasetDataService
 from codebench_pipeline.dataframe_io import AssetReference, DataFrameIOManager, frame_bytes
@@ -35,6 +35,7 @@ from codebench_pipeline.dataset_config import DatasetBuildSpec, load_build_confi
 from codebench_pipeline.dataset_registry import DatasetRegistry
 from codebench_pipeline.definitions import build_definitions
 from codebench_pipeline.object_store import ObjectStore, StorageConfig, sha256
+from codebench_pipeline.stage_configuration import ConfigArtifact
 from codebench_pipeline.storage import IntegrityError
 from codebench_pipeline.table_query import TableQuery, TableQueryError
 
@@ -140,11 +141,12 @@ class ArtifactSchemaTests(unittest.TestCase):
                 with self.subTest(asset=key.path):
                     output = definition.get_output_name_for_asset_key(key)
                     dtype = definition.node_def.output_def_named(output).dagster_type
-                    if dtype.key == "String":
+                    if definition.get_io_manager_key_for_asset_key(key) == "config_run_io_manager":
                         config_keys.append(key)
-                        self.assertEqual(
-                            definition.get_io_manager_key_for_asset_key(key), "config_run_io_manager"
-                        )
+                        if key == GLOBAL_CONFIG:
+                            self.assertEqual(dtype, REGISTERED_CONFIG_TYPE)
+                        else:
+                            self.assertTrue(issubclass(dtype.typing_type, ConfigArtifact))
                         continue
                     if dtype.key == RULES_TYPE.key:
                         value = make_rules()
@@ -186,7 +188,9 @@ class ArtifactSchemaTests(unittest.TestCase):
             with TestClient(make_dataset_api(data, None, 3000), base_url=origin) as client:
                 for key in config_keys:
                     with self.subTest(asset=key.path):
-                        raw = run.output_for_node(key.to_python_identifier())
+                        value = run.output_for_node(key.to_python_identifier())
+                        self.assertIsInstance(value, (DatasetBuildSpec, ConfigArtifact))
+                        raw = value.model_dump_json(by_alias=True)
                         if spec.has_declared_collection:
                             self.assertNotIn(str(self.home), raw)
                             self.assertNotIn("/fixture/model", raw)

@@ -128,15 +128,18 @@ def extract_candidates(
         for row in frame_records(adapters)
     }
     records: list[dict[str, JsonValue]] = []
-    declared_transformations = TypeAdapter(dict[str, list[str]]).validate_json(
-        documents.attrs.get("source_transformations_json", "{}")
-    )
     source_inputs = {
         source.source_id: source
         for source in TypeAdapter(list[SourceSeed]).validate_json(
             documents.attrs.get("source_inputs_json", "[]")
         )
     }
+    historical_transformations = documents.attrs.get("source_transformations_json")
+    declared_transformations = (
+        TypeAdapter(dict[str, list[str]]).validate_json(historical_transformations)
+        if historical_transformations is not None
+        else {source_id: source.transformations for source_id, source in source_inputs.items()}
+    )
     for document in frame_records(documents):
         identifier = str(document["source_id"])
         for row in canonical_rows(

@@ -13,8 +13,9 @@ from .keenable_policy import (
     PAGE_CASES,
     RESPONSE_BYTES,
     AcquisitionBudget,
+    CallBudget,
+    Declaration,
     Digest,
-    KeenableDeclaration,
     KeenableError,
     PagePermission,
     Record,
@@ -30,7 +31,7 @@ def timestamp() -> str:
 
 
 @contextmanager
-def open_ledger(root: Path, declaration: KeenableDeclaration) -> Generator["Ledger"]:
+def open_ledger(root: Path, declaration: Declaration) -> Generator["Ledger"]:
     namespace = root / declaration.dataset / "keenable" / declaration.generation
     namespace.mkdir(mode=0o700, parents=True, exist_ok=True)
     with (namespace / "writer.lock").open("a+b") as guard:
@@ -62,7 +63,7 @@ def open_ledger(root: Path, declaration: KeenableDeclaration) -> Generator["Ledg
 class Ledger:
     """One generation's serialized receipts and immutable objects."""
 
-    def __init__(self, db: sqlite3.Connection, budget: AcquisitionBudget | None) -> None:
+    def __init__(self, db: sqlite3.Connection, budget: AcquisitionBudget | CallBudget | None) -> None:
         self.db = db
         self.budget = budget
 
@@ -183,7 +184,7 @@ class SlotIdentity(Record):
     request_sha256: Digest
 
 
-def verify_lock(ledger: Ledger, lock: CaptureLock, declaration: KeenableDeclaration) -> dict[str, bytes]:
+def verify_lock(ledger: Ledger, lock: CaptureLock, declaration: Declaration) -> dict[str, bytes]:
     ledger.require_healthy()
     if ledger.artifact("lock") != lock.model_dump_json().encode():
         raise KeenableError("capture_lock_binding_mismatch")

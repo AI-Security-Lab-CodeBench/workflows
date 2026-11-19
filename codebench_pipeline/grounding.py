@@ -69,7 +69,7 @@ class GuardedEvidence:
 
     @property
     def source_limited(self) -> bool:
-        return self.sources.provider.declaration.revision == "2"
+        return self.sources.provider.declaration.source_scoped
 
     def source(self, candidate: CandidateRecord) -> tuple[str, list[RowEvidence]]:
         capture = self.sources.resolve(candidate)

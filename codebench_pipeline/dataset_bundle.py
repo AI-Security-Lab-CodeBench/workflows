@@ -21,7 +21,7 @@ from codebench_pipeline.dataset_config import (
     SnapshotSettings,
     StrictStageConfig,
 )
-from codebench_pipeline.dataset_documentation_config import DocumentationConfig
+from codebench_pipeline.dataset_documentation_config import BundleDocumentation
 from codebench_pipeline.dataset_source_models import is_documentation_source
 from codebench_pipeline.declared_dataset_bundle import DeclaredDatasetBundle
 from codebench_pipeline.legacy_dataset_config import resolve_legacy_file
@@ -29,7 +29,6 @@ from codebench_pipeline.model_config import ModelConfig
 from codebench_pipeline.models import Identifier
 from codebench_pipeline.object_store import StorageConfig
 from codebench_pipeline.source_manifests import (
-    load_documentation_manifest,
     load_source_manifest,
     resolve_source_paths,
     validate_transformations,
@@ -68,7 +67,7 @@ class CollectionSection(StrictStageConfig):
         validate_transformations(documents)
         return (
             CatalogConfig(
-                collection_revision=self.sources.revision,
+                collection_revision=manifest.revision if manifest is not None else self.sources.revision,
                 documents=documents,
                 model=self.sources.model,
                 manifest_header_json=manifest.model_dump_json(exclude={"sources"})
@@ -76,33 +75,6 @@ class CollectionSection(StrictStageConfig):
                 else None,
             ),
             SnapshotConfig(maximum_bytes=self.snapshot.maximum_bytes, workers=self.snapshot.workers),
-        )
-
-
-class BundleDocumentation(DocumentationConfig):
-    @model_validator(mode="after")
-    def one_snippet_input(self) -> "BundleDocumentation":
-        if self.manifest is not None and self.snippets:
-            raise PydanticCustomError("documentation_input", "Choose a manifest or inline snippets")
-        if self.manifest_header_json is not None:
-            raise PydanticCustomError("documentation_input", "Manifest headers are resolved at registration")
-        return self
-
-    def resolve(self, parent: Path, category_id: str) -> DocumentationConfig:
-        manifest = (
-            load_documentation_manifest((parent / self.manifest).resolve(), category_id)
-            if self.manifest is not None
-            else None
-        )
-        return DocumentationConfig(
-            mode=self.mode,
-            snippets=manifest.snippets if manifest is not None else self.snippets,
-            revision=self.revision,
-            maximum_bytes=self.maximum_bytes,
-            model=self.model,
-            manifest_header_json=manifest.model_dump_json(exclude={"snippets"})
-            if manifest is not None
-            else None,
         )
 
 
@@ -180,6 +152,8 @@ class DatasetFile(RootModel[DeclaredDatasetBundle | DatasetBundleConfig | Datase
 def load_dataset_bundle(path: Path, home: Path | None) -> DatasetBuildSpec:
     supplied = DatasetFile.model_validate_json(path.read_bytes()).root
     parent = path.resolve().parent
+    if isinstance(supplied, DeclaredDatasetBundle):
+        return supplied.resolve(parent, home=home)
     storage = supplied.storage or StorageConfig(
         local_root=str(((home or Path(".codebench-datasets")) / "dataframes").resolve())
     )
@@ -190,6 +164,4 @@ def load_dataset_bundle(path: Path, home: Path | None) -> DatasetBuildSpec:
             return resolve_legacy_file(supplied, parent, storage)
         case DatasetBundleConfig():
             return supplied.resolve(parent, storage)
-        case DeclaredDatasetBundle():
-            return supplied.resolve(parent, storage, home=home)
     assert_never(supplied)

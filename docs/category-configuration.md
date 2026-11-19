@@ -2,7 +2,8 @@
 
 Each category's business configuration owns its taxonomy and labeling policy.
 Edit `business-configs/categories/cat3/category.json`, rather than Python enums.
-The generic base prompt is `business-configs/labeling-base.md`; category instructions
+Shared label meanings and language live in `business-configs/labeling/policy.json`.
+The generic instructions live in `business-configs/labeling/instructions.md`; category instructions
 and examples are separate files beside `category.json`. Other categories can
 use independent local configuration files, but CAT-2 is an excluded local example,
 not a shipped category. Categories need not share subrisk names, counts, numbering or utilities.

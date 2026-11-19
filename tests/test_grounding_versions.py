@@ -65,7 +65,7 @@ class GroundingVersionTests(TestCase):
         fresh = runtime.attempts(pod, home / "fresh")
         (accepted,) = model_records(fresh, LabelingAttempt)
         self.assertEqual(accepted.status, "success")
-        self.assertIn(EFFECT.decode(), accepted.documentation_json)
+        self.assertTrue(any(EFFECT.decode() in doc.snippet for doc in accepted.documentation))
         fixture.inference.assert_called_once()
         fixture.inference.reset_mock()
         replay = runtime.attempts(pod, home / "replay")

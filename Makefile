@@ -7,6 +7,16 @@ e2e:
 	timeout --verbose --kill-after=10s 290s bash scripts/e2e.sh
 
 PYTHON ?= python3
+UV ?= uv
+
+ifeq ($(shell test -w . || echo readonly),readonly)
+export UV_PROJECT_ENVIRONMENT ?= $(HOME)/.cache/codebench/lint-venv
+endif
+
+.PHONY: lint
+lint:
+	$(UV) run --locked ruff check --no-cache codebench_pipeline
+	$(UV) run --locked basedpyright
 
 .PHONY: test-suite
 test-suite:

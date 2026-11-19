@@ -41,12 +41,11 @@ class GuardedLabeling:
     def admission(
         self, frame: DataFrame[FilteredCommandsTable] | DataFrame[LabelingAttemptsTable]
     ) -> GuardedEvidence:
-        require_guarded_annotation(self.spec.annotation)
         batch = self.spec.annotation.batch
         if batch is None:
             raise IntegrityError("Guarded labeling requires batch settings")
         sources = CandidateEvidence.from_frame(frame, self.home, self.spec)
-        source_limited = sources.provider.declaration.revision == "2"
+        source_limited = sources.provider.declaration.source_scoped
         return GuardedEvidence(
             sources,
             batch.grounding,
@@ -63,11 +62,9 @@ class GuardedLabeling:
     def attempts(
         self, commands: DataFrame[FilteredCommandsTable], evidence: Path
     ) -> DataFrame[LabelingAttemptsTable]:
-        guard = self.admission(commands)
         config = self.spec.annotation
-        batch = config.batch
-        if batch is None:
-            raise IntegrityError("Guarded labeling requires batch settings")
+        batch = require_guarded_annotation(config)
+        guard = self.admission(commands)
         eligible = commands.loc[commands["filter_decision"] == "eligible"]
         candidates = model_records(eligible, CandidateRecord)
         if candidates and "source_weight" not in eligible:
@@ -124,7 +121,7 @@ class GuardedLabeling:
             batch,
             evidence,
             cache,
-            config.maximum_context_characters,
+            config.max_request_bytes,
             guard,
             workers=config.workers,
         ).run(grounded, weights, failed)

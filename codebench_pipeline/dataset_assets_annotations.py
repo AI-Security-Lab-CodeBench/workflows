@@ -4,12 +4,12 @@ from dagster import AssetExecutionContext, AssetsDefinition, MetadataValue, Outp
 from pandera.typing import DataFrame
 from pydantic import JsonValue, TypeAdapter
 
+from codebench_pipeline.category_rules import CategoryRules
 from codebench_pipeline.config_assets import (
-    CONFIG_JSON,
-    labeling_settings,
-    mapped_rules,
-    mapped_settings,
-    policy_input,
+    RegisteredConfig,
+    mapped_input,
+    registered_input,
+    require_registered_rules,
 )
 from codebench_pipeline.dataframe_io import DataFrameIOManager
 from codebench_pipeline.dataframe_schemas import (
@@ -19,7 +19,7 @@ from codebench_pipeline.dataframe_schemas import (
     LabelingFailuresTable,
     ProposedAnnotationsTable,
 )
-from codebench_pipeline.dataset_asset_types import DATASET_PARTITIONS, TABLE_TYPES, table_input
+from codebench_pipeline.dataset_asset_types import DATASET_PARTITIONS, TABLE_TYPES, rules_input, table_input
 from codebench_pipeline.dataset_config import AnnotationConfig
 from codebench_pipeline.dataset_engine import cached_table
 from codebench_pipeline.dataset_registry import DatasetRegistry
@@ -28,6 +28,12 @@ from codebench_pipeline.labeling_tables import (
     failures_from_attempts,
     labeling_attempts_table,
     proposed_from_attempts,
+)
+from codebench_pipeline.stage_configuration import (
+    GuardedLabelingConfig,
+    PreparedLabelingConfig,
+    labeling_settings,
+    require_mapped_config,
 )
 from codebench_pipeline.storage import IntegrityError
 from codebench_pipeline.typed_config import TypedConfig
@@ -43,7 +49,7 @@ def annotation_assets(*, declared: bool = False) -> list[AssetsDefinition]:
         ins={
             "filtered_commands": table_input("filtered_commands", FilteredCommandsTable),
             "labeling_documentation": table_input("labeling_documentation", DocumentationTable),
-            "mapped_config": policy_input("labeling_attempts"),
+            "mapped_config": mapped_input("labeling_attempts", PreparedLabelingConfig),
         },
     )
     def labeling_attempts(
@@ -51,14 +57,15 @@ def annotation_assets(*, declared: bool = False) -> list[AssetsDefinition]:
         config: AnnotationConfig,
         filtered_commands: DataFrame[FilteredCommandsTable],
         labeling_documentation: DataFrame[DocumentationTable],
-        mapped_config: str,
+        mapped_config: PreparedLabelingConfig,
         dataset_io_manager: ResourceParam[DataFrameIOManager],
     ) -> Output[DataFrame[LabelingAttemptsTable]]:
-        category_rules = mapped_rules(mapped_config)
+        settings = require_mapped_config(context.asset_key, config, mapped_config.labeling_attempts)
+        category_rules = mapped_config.category_rules
         return cached_table(
             context,
             dataset_io_manager,
-            config,
+            settings,
             {
                 "commands": filtered_commands,
                 "documentation": labeling_documentation,
@@ -69,7 +76,7 @@ def annotation_assets(*, declared: bool = False) -> list[AssetsDefinition]:
                 filtered_commands,
                 labeling_documentation,
                 category_rules,
-                config,
+                settings,
                 evidence,
                 cache=Path(dataset_io_manager.review_home) / "row-inference" / context.partition_key
                 if dataset_io_manager.review_home is not None
@@ -86,24 +93,23 @@ def annotation_assets(*, declared: bool = False) -> list[AssetsDefinition]:
         dagster_type=TABLE_TYPES[LabelingAttemptsTable],
         ins={
             "filtered_commands": table_input("filtered_commands", FilteredCommandsTable),
-            "mapped_config": policy_input("labeling_attempts"),
+            "mapped_config": mapped_input("labeling_attempts", GuardedLabelingConfig),
         },
     )
     def guarded_labeling_attempts(
         context: AssetExecutionContext,
         filtered_commands: DataFrame[FilteredCommandsTable],
-        mapped_config: str,
+        mapped_config: GuardedLabelingConfig,
         dataset_io_manager: ResourceParam[DataFrameIOManager],
     ) -> Output[DataFrame[LabelingAttemptsTable]]:
         if dataset_io_manager.review_home is None:
             raise IntegrityError("Guarded labeling requires a registered dataset home")
         home = Path(dataset_io_manager.review_home)
         spec = DatasetRegistry(home).get_snapshot(context.partition_key)
-        rules = mapped_rules(mapped_config)
+        rules = mapped_config.category_rules
         if (
             not spec.has_declared_collection
-            or CONFIG_JSON.validate_json(mapped_config)["labeling_attempts"]
-            != labeling_settings(spec.annotation)
+            or mapped_config.labeling_attempts != labeling_settings(spec.annotation)
             or spec.rules != rules
             or spec.storage != dataset_io_manager.storage
         ):
@@ -136,16 +142,18 @@ def annotation_assets(*, declared: bool = False) -> list[AssetsDefinition]:
         dagster_type=TABLE_TYPES[ProposedAnnotationsTable],
         ins={
             "labeling_attempts": table_input("labeling_attempts", LabelingAttemptsTable),
-            "mapped_config": policy_input("proposed_annotations"),
+            "category_rules": rules_input(),
+            "registered": registered_input(),
         },
     )
     def proposed_annotations(
         context: AssetExecutionContext,
         labeling_attempts: DataFrame[LabelingAttemptsTable],
-        mapped_config: str,
+        category_rules: CategoryRules,
+        registered: RegisteredConfig,
         dataset_io_manager: ResourceParam[DataFrameIOManager],
     ) -> Output[DataFrame[ProposedAnnotationsTable]]:
-        category_rules = mapped_rules(mapped_config)
+        require_registered_rules(registered, category_rules)
         return cached_table(
             context,
             dataset_io_manager,
@@ -161,21 +169,17 @@ def annotation_assets(*, declared: bool = False) -> list[AssetsDefinition]:
         partitions_def=DATASET_PARTITIONS,
         io_manager_key="dataset_io_manager",
         dagster_type=TABLE_TYPES[LabelingFailuresTable],
-        ins={
-            "labeling_attempts": table_input("labeling_attempts", LabelingAttemptsTable),
-            "mapped_config": policy_input("labeling_failures"),
-        },
+        ins={"labeling_attempts": table_input("labeling_attempts", LabelingAttemptsTable)},
     )
     def labeling_failures(
         context: AssetExecutionContext,
         labeling_attempts: DataFrame[LabelingAttemptsTable],
-        mapped_config: str,
         dataset_io_manager: ResourceParam[DataFrameIOManager],
     ) -> Output[DataFrame[LabelingFailuresTable]]:
         return cached_table(
             context,
             dataset_io_manager,
-            mapped_settings(mapped_config, "labeling_failures", TypedConfig),
+            TypedConfig(),
             {"attempts": labeling_attempts},
             LabelingFailuresTable,
             lambda evidence: failures_from_attempts(labeling_attempts),

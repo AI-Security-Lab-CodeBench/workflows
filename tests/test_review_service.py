@@ -3,12 +3,14 @@ import tempfile
 import unittest
 from hashlib import sha256
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import PropertyMock, patch
 
 import pandas as pd
 from configuration_fixture import write_fixture
 from pydantic import JsonValue, TypeAdapter
+from starlette.testclient import TestClient
 
+from codebench_pipeline.data_api import make_dataset_api
 from codebench_pipeline.data_view_models import DatasetQueryRequest
 from codebench_pipeline.data_views import DatasetDataService
 from codebench_pipeline.dataframe_io import DataFrameIOManager
@@ -19,7 +21,6 @@ from codebench_pipeline.dataframe_schemas import (
 )
 from codebench_pipeline.dataset_config import load_build_config
 from codebench_pipeline.dataset_registry import DatasetRegistry
-from codebench_pipeline.dataset_tables import publication
 from codebench_pipeline.human_review import (
     CompletionToken,
     DecisionChange,
@@ -69,10 +70,10 @@ class ReviewServiceTests(unittest.TestCase):
             self.assertEqual(tx.get_batch(token.batch_id).completion, token)
         raise HumanReviewError("publication_failed", "Fixture runner failed")
 
-    def resolve_evidence(self, context: str) -> ResolvedReview:
+    def resolve_evidence(self, context: str, command: str = "git status") -> ResolvedReview:
         row: dict[str, JsonValue] = {
             "candidate_id": "first",
-            "command": "git status",
+            "command": command,
             "util": "git",
             "context": context,
             "source_id": "source",
@@ -92,11 +93,18 @@ class ReviewServiceTests(unittest.TestCase):
             "class_confidence": "high",
             "rationale": "Inspection fixture.",
             "documentation_urls": ["https://example.org/docs"],
-            "review_verdict": "approve",
-            "review_rationale": "Fixture independently checked.",
-            "review_confidence": "high",
         }
-        reviewed = validated_frame([row], ReviewedAnnotationsTable)
+        reviewed = validated_frame(
+            [
+                {
+                    **row,
+                    "review_verdict": "approve",
+                    "review_rationale": "Fixture independently checked.",
+                    "review_confidence": "high",
+                }
+            ],
+            ReviewedAnnotationsTable,
+        )
         sources = pd.DataFrame([{"source_id": "source", "content": context}])
         docs = pd.DataFrame(
             [{"utility": "git", "url": "https://example.org/docs", "snippet": "  full docs\n"}]
@@ -138,10 +146,9 @@ class ReviewServiceTests(unittest.TestCase):
             record_fingerprints={"first": review_identity(row, tuple(self.spec.publication.review_columns))},
         )
         annotations = validated_frame([row], ProposedAnnotationsTable)
-        prepared = publication(annotations, self.spec.rules, self.spec.publication)
-        return ResolvedReview(manifest, snapshot, annotations, self.spec.rules, prepared)
+        return ResolvedReview(manifest, snapshot, annotations, self.spec.rules)
 
-    def change(self, batch: ReviewBatch, revision: int = 0) -> DecisionRequest:
+    def change(self, batch: ReviewBatch, revision: int = 0, **edits: JsonValue) -> DecisionRequest:
         return DecisionRequest(
             dataset_id=self.spec.dataset_id,
             snapshot_id=batch.snapshot.snapshot_id,
@@ -153,6 +160,7 @@ class ReviewServiceTests(unittest.TestCase):
                 decision="approve",
                 reviewer="human",
                 notes="  retain\nnotes  ",
+                edits=edits,
             ),
         )
 
@@ -203,6 +211,53 @@ class ReviewServiceTests(unittest.TestCase):
         with self.assertRaises(HumanReviewError) as stale:
             self.service.decide(request)
         self.assertEqual(stale.exception.code, "stale")
+
+    def test_declared_command_is_visible_but_cannot_be_corrected_via_api(self) -> None:
+        self.resolved = self.resolve_evidence("Declared literal evidence.")
+        with patch.object(
+            type(self.spec), "has_declared_collection", new_callable=PropertyMock, return_value=True
+        ):
+            self.service.prepare(self.spec.dataset_id)
+        view = self.service.view(self.query)
+        self.assertIn("command", view.review_columns)
+        self.assertIs(view.column_schema["command"]["readOnly"], True)
+        origin = "http://127.0.0.1:3000"
+        client = self.enterContext(
+            TestClient(make_dataset_api(self.data, self.service, 3000), base_url=origin)
+        )
+        path = "/reviews/annotations/decision"
+        with patch.object(self.data, "specification", side_effect=AssertionError("Loaded configuration")):
+            response = client.put(
+                path,
+                headers={"Origin": origin},
+                json=self.change(view.batch, command="git status --short").model_dump(mode="json"),
+            )
+            self.assertEqual(response.status_code, 409)
+            self.assertEqual(response.json()["error"]["code"], "ineligible")
+            unchanged = self.service.view(self.query)
+            self.assertEqual(unchanged.decisions, view.decisions)
+            self.assertEqual(unchanged.batch.batch_revision, view.batch.batch_revision)
+
+            response = client.put(
+                path,
+                headers={"Origin": origin},
+                json=self.change(view.batch, severity="high").model_dump(mode="json"),
+            )
+            self.assertEqual(response.status_code, 200)
+        self.assertEqual(self.service.view(self.query).decisions[0].edits, {"severity": "high"})
+
+    def test_command_byte_change_prevents_reuse_even_with_the_same_labels(self) -> None:
+        original = self.resolve_evidence("Captured fixture.", "git status --short")
+        self.resolved = original
+        batch = self.service.prepare(self.spec.dataset_id)
+        saved = self.service.decide(self.change(batch, severity="high"))
+        self.resolved = self.resolve_evidence("Captured fixture.", "git status  --short")
+        self.service.prepare(self.spec.dataset_id)
+        changed = self.service.view(self.query)
+        self.assertEqual(changed.counts.pending, 1)
+        self.assertEqual(changed.decisions[0].edits, {})
+        with self.service.store.reader() as tx:
+            self.assertEqual(tx.list_decisions(batch.batch_id), (saved.decision,))
 
     def test_changed_evidence_reuses_selected_values_but_rejects_stale_requests(self) -> None:
         saved = self.service.decide(self.change(self.service.view(self.query).batch))
@@ -257,7 +312,9 @@ class ReviewServiceTests(unittest.TestCase):
             )
         )
         fields = response.fields
-        self.assertEqual(TypeAdapter(dict[str, JsonValue]).validate_python(fields["record"])["context"], original)
+        self.assertEqual(
+            TypeAdapter(dict[str, JsonValue]).validate_python(fields["record"])["context"], original
+        )
         historical = self.service.source.evidence(batch.snapshot, "first")
         fields = historical.fields
         self.assertEqual(

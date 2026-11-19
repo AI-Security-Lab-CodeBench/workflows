@@ -11,10 +11,16 @@ from codebench_pipeline.dataset_dependencies import collection_selection, prepar
 from codebench_pipeline.human_review import CompletionToken
 from codebench_pipeline.review_config import HumanReviewConfig
 from codebench_pipeline.stage_configuration import stage_configs
+from codebench_pipeline.typed_config import TypedConfig
 
 
 def dataset_run_config(
-    spec: DatasetBuildSpec, home: Path, branch: Branch | None = None, *, prepare_only: bool = False
+    spec: DatasetBuildSpec,
+    home: Path,
+    branch: Branch | None = None,
+    *,
+    prepare_only: bool = False,
+    configuration_only: bool = False,
 ) -> RunConfig:
     selection = (
         preparation_stages(declared=spec.has_declared_collection)
@@ -28,11 +34,15 @@ def dataset_run_config(
             "datasets__global_config": GlobalConfig.for_spec(spec),
             **{
                 f"datasets__{name.replace('/', '__')}": config
-                for name, config in stage_configs(spec).items()
+                for name, config in (() if configuration_only else stage_configs(spec).items())
                 if name in selection
                 and name != "category_rules"
-                and not (spec.has_declared_collection and name == "labeling_attempts")
+                and not (
+                    spec.has_declared_collection
+                    and name in {"labeling_attempts", "merged_command_candidates"}
+                )
                 and not isinstance(config, DeclaredSourceStageConfig)
+                and type(config) is not TypedConfig
             },
         },
         resources={"dataset_io_manager": DataFrameIOManager(storage=spec.storage, review_home=str(home))},

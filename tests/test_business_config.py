@@ -32,12 +32,14 @@ class BusinessConfigurationTests(unittest.TestCase):
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
         self.path = write_business(self.root / "business")
+        self.shared = self.root / "business" / "labeling"
 
     def test_compilation_needs_no_collection_manifest_and_roundtrips_complete_snapshot(self) -> None:
         rules = load_business_rules(self.path)
         config = CategoryRulesConfig.model_validate_json(rules.model_dump_json())
         self.path.unlink()
-        (self.path.parent / "base.md").unlink()
+        (self.shared / "policy.json").unlink()
+        (self.shared / "instructions.md").unlink()
         self.assertEqual(CategoryRules.model_validate_json(config.model_dump_json()), rules)
         self.assertEqual(len(rules.examples), 2)
         self.assertEqual(
@@ -118,9 +120,13 @@ class BusinessConfigurationTests(unittest.TestCase):
     def test_category_identity_and_missing_or_empty_business_files_fail_closed(self) -> None:
         with self.assertRaises(ValueError):
             load_business_rules(self.path, "CAT-99")
-        for name in ("base.md", "instructions.md", "examples.json"):
-            with self.subTest(file=name):
-                file = self.path.parent / name
+        for file in (
+            self.shared / "policy.json",
+            self.shared / "instructions.md",
+            self.path.parent / "instructions.md",
+            self.path.parent / "examples.json",
+        ):
+            with self.subTest(file=file):
                 original = file.read_bytes()
                 file.unlink()
                 with self.assertRaises(FileNotFoundError):
@@ -140,7 +146,7 @@ class BusinessConfigurationTests(unittest.TestCase):
             with self.subTest(changed=changed), self.assertRaises(ValidationError):
                 DatasetBundleConfig.model_validate({**original, "finalization": changed})
         finalization.pop("rules")
-        finalization["business_config"] = "business/category.json"
+        finalization["business_config"] = self.path.relative_to(self.root).as_posix()
         file = write_bundle(self.root, finalization=finalization)
         expected = load_business_rules(self.path)
         spec = load_build_config(file, self.root)
@@ -177,7 +183,7 @@ class BusinessConfigurationTests(unittest.TestCase):
             original.model_dump(exclude={"rules", "business_config"}),
         )
         persisted = bound.model_dump_json()
-        (self.path.parent / "base.md").write_text("Edited base instructions.")
+        (self.shared / "instructions.md").write_text("Edited base instructions.")
         (self.path.parent / "instructions.md").write_text("Edited category instructions.")
         refreshed = registry.get(original.dataset_id)
         self.assertNotEqual(refreshed.rules, bound.rules)
@@ -215,7 +221,7 @@ class BusinessConfigurationTests(unittest.TestCase):
         dataset.write_text(
             json.dumps(
                 {
-                    "business_config": "business/category.json",
+                    "business_config": self.path.relative_to(self.root).as_posix(),
                     "seeds": {"manifest": "does-not-exist.jsonl"},
                 }
             )

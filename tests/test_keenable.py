@@ -24,6 +24,7 @@ from codebench_pipeline.keenable_policy import (
     PublicLicense,
     ReviewedSpan,
     SourcePermission,
+    parse_declaration,
 )
 from codebench_pipeline.keenable_receipts import CallReceipt
 from codebench_pipeline.keenable_transport import DirectResponse, Request
@@ -179,6 +180,10 @@ class KeenableCollectionTests(unittest.TestCase):
         self.assertEqual((page.url, page.body_sha256), (new_page, hashlib.sha256(SOURCE_BODY).hexdigest()))
         (candidate,) = collection.candidates(lock, collection.adapters(lock))
         self.assertEqual(SOURCE_BODY[candidate.start : candidate.end], b"terraform plan")
+        self.assertEqual(
+            collection.adapters(lock)[0].permission_sha256,
+            "1d92e10ccba73af0d587304807044aec88300e98e1c06e0b63f285354c25cce9",
+        )
         self.assertEqual(collection.read_bodies(lock), {new_page: SOURCE_BODY})
         self.assertEqual(wire.call_count, 2)
         self.assertEqual(wire.call_args.args, (Request(new_page, "text/html"),))
@@ -189,6 +194,18 @@ class KeenableCollectionTests(unittest.TestCase):
         lock = collection.capture(collection.discover())
         self.assertEqual(collection.read_body(lock, PLAN), SOURCE_BODY)
         self.assertEqual(collection.candidates(lock, collection.adapters(lock)), ())
+
+    def test_historical_declarations_preserve_normalized_bytes_and_hashes(self) -> None:
+        for declaration, historical_hash in (
+            (self.declaration, "97f89a54ed982a582a6e2460f48c95520cdc89b389969b1ae6c90492cd4b9a52"),
+            (source_declaration(), "bfbaaf3e8010c1c39f00f3fa364766fdad24f7781e98ca582317fa8e7a513c03"),
+        ):
+            with self.subTest(revision=declaration.revision):
+                raw = declaration.model_dump_json()
+                replay = parse_declaration(raw)
+                self.assertEqual(hashlib.sha256(raw.encode()).hexdigest(), historical_hash)
+                self.assertEqual(replay.model_dump_json(), raw)
+                self.assertEqual(replay.declaration_sha256, historical_hash)
 
     def test_exact_sources_share_one_pinned_license_reservation_and_reject_corruption(self) -> None:
         commit = "6" * 40

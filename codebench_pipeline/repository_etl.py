@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import json
 import re
 from collections.abc import Iterator
 from pathlib import Path
-from typing import Final, Literal
+from typing import Annotated, Final, Literal, override
 
-from pydantic import JsonValue, TypeAdapter
+from pydantic import Field, JsonValue, TypeAdapter
 
 from codebench_pipeline.models import Digest
 from codebench_pipeline.repository_config import RepositoryModel
@@ -18,7 +19,7 @@ from codebench_pipeline.source_transforms import source_rows, transformation_byt
 from codebench_pipeline.storage import IntegrityError, digest
 
 _DEPLOYMENT_ROOT: Final = Path(__file__).resolve().parents[1]
-_RUNTIME_DIGEST: Final = "1da47c6dc9ece8c424fe22e7a24a7a0f6ecaff2e543b1bcf0c526baf76034a2e"
+_RUNTIME_DIGEST: Final = "a41476c5723d996fc5863b653c52efb8c1d4c0fc9fd57392d16cae02e69a7b60"
 _LEGACY_CHEATSHEETS: Final = (
     "transforms/cheatsheets.py",
     "7580c09e876750b9f3d2affd042559f2c0e9744c8c8278f109f54dc3d90ad371",
@@ -57,6 +58,63 @@ _REVIEWED_PARSERS: Final[dict[RepositoryParserId, tuple[str, str, str, Literal["
 _APPROVED_TRANSFORMS: Final = frozenset((*_REVIEWED_PARSERS.values(), _LEGACY_CHEATSHEETS))
 _POSITION: Final = re.compile(r"document; (characters|lines) (\d+):(\d+)")
 _PARSER_DEPENDENCIES: Final = {_CHEATSHEETS_FRONT_MATTER: (_LEGACY_CHEATSHEETS[:2],)}
+
+
+class ContextOptions(RepositoryModel):
+    context_characters: int = Field(default=100, ge=0, le=1000, strict=True)
+
+    def pinned_options(self) -> dict[str, JsonValue]:
+        return {"context_characters": self.context_characters}
+
+
+class FencedLinesOptions(ContextOptions):
+    mode: Literal["fenced_lines"]
+    allowed_utilities: tuple[
+        Literal["aws", "docker", "docker-compose", "gcloud", "helm", "kubectl", "terraform"], ...
+    ] = Field(min_length=1)
+
+    @override
+    def pinned_options(self) -> dict[str, JsonValue]:
+        return {"utilities": list(self.allowed_utilities), "context_characters": self.context_characters}
+
+
+class LiteralOptions(ContextOptions):
+    mode: Literal["literal"]
+    utility: Literal["podman", "pulumi"]
+    inline_usage: bool = Field(default=False, strict=True)
+
+    @override
+    def pinned_options(self) -> dict[str, JsonValue]:
+        options: dict[str, JsonValue] = {
+            "utility": self.utility,
+            "context_characters": self.context_characters,
+        }
+        if self.inline_usage:
+            options["inline_usage"] = True
+        return options
+
+
+class ContextRepositoryParser(RepositoryModel):
+    parser_id: Literal["cheatsheets_front_matter", "tldr", "aws_cli_examples"]
+    sha256: Digest
+    options: ContextOptions = ContextOptions()
+
+
+class MarkdownRepositoryParser(RepositoryModel):
+    parser_id: Literal["markdown_shell"]
+    sha256: Digest
+    options: Annotated[FencedLinesOptions | LiteralOptions, Field(discriminator="mode")]
+
+
+type RepositoryParser = Annotated[
+    ContextRepositoryParser | MarkdownRepositoryParser, Field(discriminator="parser_id")
+]
+
+
+def repository_parser_transform(parser: RepositoryParser) -> SourceTransformConfig:
+    return reviewed_parser(parser.parser_id).model_copy(
+        update={"options_json": json.dumps(parser.options.pinned_options(), separators=(",", ":"))}
+    )
 
 
 def reviewed_parser(parser_id: RepositoryParserId) -> SourceTransformConfig:

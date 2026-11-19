@@ -62,7 +62,7 @@ class UnifiedDeduplicationTests(unittest.TestCase):
             reviewed_row("excluded", category_confidence="low"),
         )
         retained = category_eligible_annotations(original, make_rules())
-        queue = review_queue(retained, make_rules(), PublicationConfig())
+        queue = review_queue(retained, make_rules(), PublicationConfig().review_columns)
         self.assertEqual(queue["candidate_id"].tolist(), list(fields))
 
     def test_review_queue_preserves_optional_source_weight_even_when_empty(self) -> None:
@@ -72,7 +72,7 @@ class UnifiedDeduplicationTests(unittest.TestCase):
                     source = {} if weight is None else {"source_weight": weight}
                     original = annotations(reviewed_row("candidate", risk_confidence=confidence, **source))
 
-                    queue = review_queue(original, make_rules(), PublicationConfig())
+                    queue = review_queue(original, make_rules(), PublicationConfig().review_columns)
 
                     self.assertEqual(
                         queue["candidate_id"].tolist(), ["candidate"] if confidence == "medium" else []

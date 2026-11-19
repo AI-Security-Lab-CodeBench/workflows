@@ -1,3 +1,4 @@
+from collections.abc import Sequence
 from pathlib import Path
 
 import pandera.pandas as pa
@@ -20,8 +21,10 @@ from codebench_pipeline.dataset_config import (
     PublicationConfig,
 )
 from codebench_pipeline.dataset_export import Publication, prepare_dataset
-from codebench_pipeline.dataset_records import CandidateRecord, LabelDecision
+from codebench_pipeline.dataset_records import CandidateRecord, LabelDecision, validate_label
+from codebench_pipeline.human_review import HumanReviewError
 from codebench_pipeline.models import SemanticSnippet
+from codebench_pipeline.review_policy import requires_human_review
 
 
 def documentation_table(config: DocumentationConfig) -> DataFrame[DocumentationTable]:
@@ -48,7 +51,7 @@ def proposed_annotations(
         config.model,
         evidence,
         cache=cache,
-        maximum_context_characters=config.maximum_context_characters,
+        maximum_context_characters=config.max_request_bytes,
         workers=config.workers,
     )
     originals = {candidate.candidate_id: candidate for candidate in candidates}
@@ -101,15 +104,21 @@ def released_commands(
 def review_queue(
     annotations: DataFrame[ProposedAnnotationsTable],
     rules: CategoryRules,
-    config: PublicationConfig,
+    review_columns: Sequence[str],
 ) -> DataFrame[ReviewQueueTable]:
-    prepared = publication(annotations, rules, config)
-    eligible = set(prepared.eligible_ids)
-    reasons = {row["candidate_id"]: row["exclusion_reason"] for row in prepared.pending}
-    queue = annotations.loc[annotations["candidate_id"].isin(prepared.human_review_ids)].reset_index(
-        drop=True
-    )
-    queue["exclusion_reason"] = [
-        "" if identity in eligible else reasons[identity] for identity in queue["candidate_id"]
-    ]
+    if not set(review_columns).issubset(annotations.columns):
+        raise HumanReviewError("ineligible", "A review column is absent from the input table")
+    reasons: dict[str, str] = {}
+    for candidate, label in zip(
+        model_records(annotations, CandidateRecord), model_records(annotations, LabelDecision), strict=True
+    ):
+        validate_label(candidate, label, rules)
+        if requires_human_review(label):
+            reasons[candidate.candidate_id] = (
+                f"label={label.decision}"
+                if label.decision == "reject" or not label.documentation_urls
+                else ""
+            )
+    queue = annotations.loc[annotations["candidate_id"].isin(reasons)].reset_index(drop=True)
+    queue["exclusion_reason"] = queue["candidate_id"].map(reasons)
     return ReviewQueueTable.validate(queue)

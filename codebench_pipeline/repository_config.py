@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
-from typing import Annotated, Final, Literal
+from typing import Annotated, Final, Literal, assert_never
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, StringConstraints, model_validator
+from pydantic_core import PydanticCustomError
 
 from codebench_pipeline.dataset_branches import Branch
 from codebench_pipeline.models import Digest
@@ -17,7 +18,14 @@ Commit = Annotated[str, StringConstraints(pattern=r"^[a-f0-9]{40}$")]
 RepositoryName = Annotated[str, StringConstraints(pattern=r"^[A-Za-z0-9_-]+/[A-Za-z0-9_][A-Za-z0-9_.-]*$")]
 RepositoryScope = Literal["cheatsheet", "tldr", "aws_examples", "readme", "compose", "markdown_files"]
 RepositoryFormat = Literal["text", "markdown"]
+RepositoryLicense = Literal["Apache-2.0", "CC0-1.0", "CC-BY-4.0"]
+RepositoryUse = Literal["retain_and_quote_attributed_examples"]
+REPOSITORY_USE: Final[RepositoryUse] = "retain_and_quote_attributed_examples"
 SourceWeight = Annotated[float, Field(strict=True, ge=0, le=1, allow_inf_nan=False)]
+MaximumFileBytes = Annotated[int, Field(ge=1, le=8 * 1024 * 1024)]
+CaptureWorkers = Annotated[int, Field(ge=1, le=24)]
+DEFAULT_MAXIMUM_FILE_BYTES: Final = 512 * 1024
+DEFAULT_CAPTURE_WORKERS: Final = 12
 DEFAULT_SOURCE_WEIGHTS: Final[dict[Branch, float]] = {
     "documentation": 0.9,
     "dataset": 0.6,
@@ -35,6 +43,15 @@ def check_path(path: str) -> None:
         raise IntegrityError(f"Unsafe repository path: {path!r}")
 
 
+def selector_format(selector: RepositoryScope) -> RepositoryFormat:
+    match selector:
+        case "cheatsheet" | "aws_examples":
+            return "text"
+        case "tldr" | "readme" | "compose" | "markdown_files":
+            return "markdown"
+    assert_never(selector)
+
+
 class RepositoryModel(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid", revalidate_instances="always")
 
@@ -44,47 +61,55 @@ class RightsFile(RepositoryModel):
     sha256: Digest
 
 
-class RepositoryOriginScope(RepositoryModel):
+class RepositoryOriginIdentity(RepositoryModel):
     origin_id: RepositoryId
     repository: RepositoryName
     commit: Commit
     tree_digest: Digest
-    scope: RepositoryScope
     included_paths: tuple[str, ...] = ()
     excluded_paths: tuple[str, ...] = ()
-    license_id: Literal["Apache-2.0", "CC0-1.0", "CC-BY-4.0"]
-    license: RightsFile
-    notices: tuple[RightsFile, ...] = ()
-    attribution: str = Field(min_length=1)
     source_type: Literal["community_command_corpus", "maintainer_documentation", "official_documentation"]
     provenance_type: Literal[
         "human_collected", "human_authored", "community_documentation", "vendor_documentation"
     ]
-    format: RepositoryFormat
-    use: Literal["retain_and_quote_attributed_examples"]
 
-    @model_validator(mode="after")
-    def check_scope(self) -> RepositoryOriginScope:
-        paths = (
-            *self.included_paths,
-            *self.excluded_paths,
-            self.license.path,
-            *(item.path for item in self.notices),
-        )
+    def check_scope_paths(self, selector: RepositoryScope, rights_files: tuple[RightsFile, ...]) -> None:
+        paths = (*self.included_paths, *self.excluded_paths, *(item.path for item in rights_files))
         for path in paths:
             check_path(path)
         if len(set(paths)) != len(paths):
-            raise ValueError("Repository policy paths must be distinct")
-        if self.scope == "markdown_files":
+            raise PydanticCustomError("repository_paths", "Repository policy paths must be distinct")
+        if selector == "markdown_files":
             if (
                 not self.included_paths
                 or self.excluded_paths
-                or self.format != "markdown"
                 or any(not path.endswith(".md") for path in self.included_paths)
             ):
-                raise ValueError("Markdown file scope requires only explicit Markdown paths")
+                raise PydanticCustomError(
+                    "repository_markdown_paths", "Markdown file scope requires only explicit Markdown paths"
+                )
         elif self.included_paths:
-            raise ValueError("Explicit repository paths require the Markdown file scope")
+            raise PydanticCustomError(
+                "repository_included_paths", "Explicit repository paths require the Markdown file scope"
+            )
+
+
+class RepositoryOriginScope(RepositoryOriginIdentity):
+    scope: RepositoryScope
+    license_id: RepositoryLicense
+    license: RightsFile
+    notices: tuple[RightsFile, ...] = ()
+    attribution: str = Field(min_length=1)
+    format: RepositoryFormat
+    use: RepositoryUse
+
+    @model_validator(mode="after")
+    def check_scope(self) -> RepositoryOriginScope:
+        self.check_scope_paths(self.scope, (self.license, *self.notices))
+        if self.scope == "markdown_files" and self.format != "markdown":
+            raise PydanticCustomError(
+                "repository_markdown_format", "Markdown file scope requires Markdown format"
+            )
         return self
 
 
@@ -108,8 +133,8 @@ def repository_origin_matches(origin: RepositoryOriginScope, branch: RepositoryB
 
 class RepositorySettings(RepositoryModel):
     source_weights: dict[RepositoryId, SourceWeight] = Field(default_factory=dict)
-    maximum_file_bytes: int = Field(default=512 * 1024, ge=1, le=8 * 1024 * 1024)
-    workers: int = Field(default=12, ge=1, le=24)
+    maximum_file_bytes: MaximumFileBytes = DEFAULT_MAXIMUM_FILE_BYTES
+    workers: CaptureWorkers = DEFAULT_CAPTURE_WORKERS
 
     def source_weight(self, branch: RepositoryBranch, origin_id: str) -> float:
         return self.source_weights.get(origin_id, DEFAULT_SOURCE_WEIGHTS[branch])

@@ -92,10 +92,13 @@ class BuildPlan:
     unconfigured: tuple[Branch, ...] = ()
     references: dict[str, AssetReference] = field(default_factory=dict)
     source_authorizations: dict[str, SourceInventoryAuthorization] = field(default_factory=dict)
+    declared: bool = False
 
     @property
     def asset_selection(self) -> list[AssetKey]:
-        return configured_selection(AssetKey(["datasets", *stage.split("/")]) for stage in self.selected)
+        return configured_selection(
+            (AssetKey(["datasets", *stage.split("/")]) for stage in self.selected), declared=self.declared
+        )
 
 
 def plan_dataset(
@@ -150,7 +153,7 @@ def plan_dataset(
             if stage.rsplit("/", 1)[-1] == "command_candidates":
                 values[stage] = unavailable_candidates(spec, stage_branch(stage), "waiting")
             continue
-        config = configurations[stage]
+        config = None if stage == "category_rules" else configurations[stage]
         if isinstance(config, DeclaredSourceStageConfig):
             try:
                 require_source_rights(config)
@@ -178,7 +181,7 @@ def plan_dataset(
         inputs = {name: values[parent] for name, parent in dependencies.items()}
         expected = (
             fingerprint(spec.rules.model_dump_json())
-            if stage == "category_rules"
+            if config is None
             else stage_signature(stage.rsplit("/", 1)[-1], config, inputs)
         )
         materialization = records[0].asset_materialization
@@ -192,7 +195,7 @@ def plan_dataset(
         )
         if recorded != expected and not (
             not spec.has_declared_collection
-            and stage != "category_rules"
+            and config is not None
             and legacy_signature_matches(
                 manager,
                 stage.rsplit("/", 1)[-1],
@@ -264,6 +267,7 @@ def plan_dataset(
         unconfigured,
         references,
         source_authorizations,
+        declared=spec.has_declared_collection,
     )
 
 

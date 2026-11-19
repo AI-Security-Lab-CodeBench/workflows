@@ -13,9 +13,10 @@ historical builds.
 
 | File | What to edit |
 | --- | --- |
-| `labeling-base.md` | Category-independent annotation method, evidence authority, output discipline and confidence semantics. Keep domain rules out. |
-| `categories/cat3/category.json` | Current CAT-3 names, IDs, class and severity definitions, routing patterns, concise risk guidance and references to the three labeling files. Its `rules` object has no inline `policy`. |
-| `categories/cat3/instructions.md` | CAT-3 membership, benign-family scope, risk boundaries, severity defaults and v0 execution-class policy. Change the general rule rather than adding one exception per tool or flag. |
+| `labeling/policy.json` | Shared class and severity definitions and output description language. |
+| `labeling/instructions.md` | Shared annotation method, evidence authority, output discipline and confidence semantics. Keep domain rules out. |
+| `categories/cat3/category.json` | CAT-3 identity, risk taxonomy, routing patterns and concise risk guidance under `rules`. An optional `allowed_severities` list may restrict the shared severity names; omit it to allow all. |
+| `categories/cat3/instructions.md` | CAT-3 membership, benign-family scope, risk boundaries and defaults for material operations. Change the general rule rather than adding one exception per tool or flag. |
 | `categories/cat3/examples.json` | A small bank of documented demonstrations grouped by risk and operation family. Update expected labels when a business rule changes. |
 | `datasets/cat3.json` | Dataset and category IDs, labeling settings, publication settings and storage. |
 | `categories/cat3/collection/existing-datasets.json` | Pinned repository corpora and their acquisition settings. |
@@ -25,9 +26,9 @@ historical builds.
 | `categories/cat3/reference-examples/semantics.jsonl` | The relocated historical Terraform semantic snippets, kept as reference examples rather than a complete current semantic manifest. |
 
 The logical `CAT-3` ID resolves to `categories/cat3/category.json` under this
-directory. That category file references the shared `../../labeling-base.md`,
-its local `instructions.md` and its local `examples.json`. Preserve those
-policy references when moving files.
+directory. The loader finds `instructions.md` and `examples.json` next to the
+category file and loads the two shared files from `labeling/` under the same
+business configuration root. Category declarations carry no file references.
 
 ## Reading the dataset configuration
 
@@ -163,8 +164,8 @@ only when it teaches a decision the existing cases don't cover.
 ## Checking a policy edit
 
 Check JSON syntax and typed model validation, unique candidate and family
-identities, allowed routing IDs, matching operation documentation, relative
-references and citation membership. Keep rationales within 400 characters and
+identities, allowed routing IDs, matching operation documentation, allowed
+severity names and citation membership. Keep rationales within 400 characters and
 descriptions in the configured language. Every accepted example must remain
 independently supported by its own evidence.
 

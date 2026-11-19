@@ -1,108 +1,114 @@
 {
-  "revision": "cat3-repository-collection-5",
-  "source_weights": {
-    "kubernetes-examples": 0.8,
-    "gke-samples": 0.77,
-    "terraform-gke-examples": 0.74,
-    "terraform-eks-examples": 0.73,
-    "prometheus-helm-charts": 0.71,
-    "kubeflow-manifests": 0.69,
-    "opentelemetry-demo": 0.67,
-    "online-boutique": 0.65,
-    "docker-awesome-compose": 0.62,
-    "cheat": 0.55
-  },
+  "refresh_revision": "cat3-repository-collection-5",
   "origins": [
     {
       "origin_id": "cheat",
+      "trust_weight": 0.55,
       "repository": "cheat/cheatsheets",
       "commit": "36bdb99dcfadde210503d8c2dcf94b34ee950e1d",
       "tree_digest": "8ba7ddbf5536cbb15ba747af0d62213fbe75a65faa3a318e391f79e287be7bd2",
-      "scope": "cheatsheet",
-      "excluded_paths": ["http"],
-      "license_id": "CC0-1.0",
-      "license": {
-        "path": ".github/LICENSE.txt",
-        "sha256": "a2010f343487d3f7618affe54f789f5487602331c0a8d03f49e9a7c547cf0499"
+      "file_selector": "cheatsheet",
+      "excluded_paths": [
+        "http"
+      ],
+      "rights": {
+        "license_id": "CC0-1.0",
+        "license_file": {
+          "path": ".github/LICENSE.txt",
+          "sha256": "a2010f343487d3f7618affe54f789f5487602331c0a8d03f49e9a7c547cf0499"
+        },
+        "attribution": "cheat/cheatsheets contributors"
       },
-      "attribution": "cheat/cheatsheets contributors",
       "source_type": "community_command_corpus",
       "provenance_type": "human_collected",
-      "format": "text",
-      "use": "retain_and_quote_attributed_examples",
-      "transform": {
+      "parser": {
         "parser_id": "cheatsheets_front_matter",
-        "sha256": "c72984484228cb6366f7747b242e08118cd7093895ae41c654c082d56a4d1055",
-        "options_json": "{\"context_characters\":100}"
+        "sha256": "c72984484228cb6366f7747b242e08118cd7093895ae41c654c082d56a4d1055"
       }
     },
     {
       "origin_id": "kubernetes-examples",
+      "trust_weight": 0.8,
       "repository": "kubernetes/examples",
       "commit": "22934a040acbb0c0aa103023ccbd871507bf17f6",
       "tree_digest": "c3e30c4e211cbb7d2ff3b30e519434d0a13ee430a8c50f14656e3fd76e050504",
-      "scope": "readme",
-      "license_id": "Apache-2.0",
-      "license": {
-        "path": "LICENSE",
-        "sha256": "b40930bbcf80744c86c46a12bc9da056641d722716c378f5659b9e555ef833e1"
-      },
-      "notices": [
-        {
-          "path": "README.md",
-          "sha256": "1cc9208f1073fa4987beef22f0a08a0b2a29251035cc5b73a819878ce6421ee8"
+      "file_selector": "readme",
+      "rights": {
+        "license_id": "Apache-2.0",
+        "license_file": {
+          "path": "LICENSE",
+          "sha256": "b40930bbcf80744c86c46a12bc9da056641d722716c378f5659b9e555ef833e1"
         },
-        {
-          "path": "OWNERS",
-          "sha256": "01cea495a8327c3b617556a6447456d400e0ad8bd2f695c4fff1d0dce267756b"
-        }
-      ],
-      "attribution": "Kubernetes Examples contributors (Kubernetes SIG Apps)",
+        "notice_files": [
+          {
+            "path": "README.md",
+            "sha256": "1cc9208f1073fa4987beef22f0a08a0b2a29251035cc5b73a819878ce6421ee8"
+          },
+          {
+            "path": "OWNERS",
+            "sha256": "01cea495a8327c3b617556a6447456d400e0ad8bd2f695c4fff1d0dce267756b"
+          }
+        ],
+        "attribution": "Kubernetes Examples contributors (Kubernetes SIG Apps)"
+      },
       "source_type": "community_command_corpus",
       "provenance_type": "human_authored",
-      "format": "markdown",
-      "use": "retain_and_quote_attributed_examples",
-      "transform": {
+      "parser": {
         "parser_id": "markdown_shell",
         "sha256": "fa11020e7de0fc178fe59e2e99e2b1b01e3d00148b8d2f871a1032535a5dd991",
-        "options_json": "{\"utilities\":[\"kubectl\"],\"context_characters\":100}"
+        "options": {
+          "mode": "fenced_lines",
+          "allowed_utilities": [
+            "kubectl"
+          ]
+        }
       }
     },
     {
       "origin_id": "docker-awesome-compose",
+      "trust_weight": 0.62,
       "repository": "docker/awesome-compose",
       "commit": "30f4b7f6a6c3b0c0ecf4d4efb0de203c48d11562",
       "tree_digest": "7b4bf92b9571ee862658cd391e4f432a658785a5fdb098470b55f240a3ebc3e3",
-      "scope": "compose",
-      "excluded_paths": ["elasticsearch-logstash-kibana/README.md"],
-      "license_id": "CC0-1.0",
-      "license": {
-        "path": "LICENSE",
-        "sha256": "a2010f343487d3f7618affe54f789f5487602331c0a8d03f49e9a7c547cf0499"
-      },
-      "notices": [
-        {
-          "path": "README.md",
-          "sha256": "879fa3222cf509885aa37b55268882252ba65908597b726378c0a62a275041f7"
-        }
+      "file_selector": "compose",
+      "excluded_paths": [
+        "elasticsearch-logstash-kibana/README.md"
       ],
-      "attribution": "Docker Awesome Compose contributors",
+      "rights": {
+        "license_id": "CC0-1.0",
+        "license_file": {
+          "path": "LICENSE",
+          "sha256": "a2010f343487d3f7618affe54f789f5487602331c0a8d03f49e9a7c547cf0499"
+        },
+        "notice_files": [
+          {
+            "path": "README.md",
+            "sha256": "879fa3222cf509885aa37b55268882252ba65908597b726378c0a62a275041f7"
+          }
+        ],
+        "attribution": "Docker Awesome Compose contributors"
+      },
       "source_type": "community_command_corpus",
       "provenance_type": "human_authored",
-      "format": "markdown",
-      "use": "retain_and_quote_attributed_examples",
-      "transform": {
+      "parser": {
         "parser_id": "markdown_shell",
         "sha256": "fa11020e7de0fc178fe59e2e99e2b1b01e3d00148b8d2f871a1032535a5dd991",
-        "options_json": "{\"utilities\":[\"docker\",\"docker-compose\"],\"context_characters\":100}"
+        "options": {
+          "mode": "fenced_lines",
+          "allowed_utilities": [
+            "docker",
+            "docker-compose"
+          ]
+        }
       }
     },
     {
       "origin_id": "gke-samples",
+      "trust_weight": 0.77,
       "repository": "GoogleCloudPlatform/kubernetes-engine-samples",
       "commit": "2c7091f9066e82d036e16f0a0ab68a18b09d29e1",
       "tree_digest": "57c4b057cf8a6c55faa32a7972a2e0c10e623b2b4d49de22929d6f90ccab5d7e",
-      "scope": "readme",
+      "file_selector": "readme",
       "excluded_paths": [
         "ai-ml/adk-vertex/README.md",
         "ai-ml/adk-vllm/README.md",
@@ -235,34 +241,40 @@
         "windows/windows-multi-arch/README.md",
         "workloads/migrate-x86-app-to-multi-arch/README.md"
       ],
-      "license_id": "Apache-2.0",
-      "license": {
-        "path": "LICENSE",
-        "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
+      "rights": {
+        "license_id": "Apache-2.0",
+        "license_file": {
+          "path": "LICENSE",
+          "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
+        },
+        "notice_files": [
+          {
+            "path": "README.md",
+            "sha256": "855fe8ae41c418cf2d922da9416ddf31a7196a3ef61c6e31cbca3b97a3ba26c8"
+          }
+        ],
+        "attribution": "Google Cloud GKE Samples contributors"
       },
-      "notices": [
-        {
-          "path": "README.md",
-          "sha256": "855fe8ae41c418cf2d922da9416ddf31a7196a3ef61c6e31cbca3b97a3ba26c8"
-        }
-      ],
-      "attribution": "Google Cloud GKE Samples contributors",
       "source_type": "community_command_corpus",
       "provenance_type": "human_authored",
-      "format": "markdown",
-      "use": "retain_and_quote_attributed_examples",
-      "transform": {
+      "parser": {
         "parser_id": "markdown_shell",
         "sha256": "fa11020e7de0fc178fe59e2e99e2b1b01e3d00148b8d2f871a1032535a5dd991",
-        "options_json": "{\"utilities\":[\"kubectl\"],\"context_characters\":100}"
+        "options": {
+          "mode": "fenced_lines",
+          "allowed_utilities": [
+            "kubectl"
+          ]
+        }
       }
     },
     {
       "origin_id": "online-boutique",
+      "trust_weight": 0.65,
       "repository": "GoogleCloudPlatform/microservices-demo",
       "commit": "c7cb6d5bfd6ea3aed768634ebbcb98cb7a523712",
       "tree_digest": "a2f78d80ddd82ba5e4b8f491fcc85714540dc98b9785b210bbb11332a3c79d9e",
-      "scope": "readme",
+      "file_selector": "readme",
       "excluded_paths": [
         "docs/releasing/README.md",
         "helm-chart/README.md",
@@ -284,34 +296,42 @@
         "src/productcatalogservice/README.md",
         "src/shippingservice/README.md"
       ],
-      "license_id": "Apache-2.0",
-      "license": {
-        "path": "LICENSE",
-        "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+      "rights": {
+        "license_id": "Apache-2.0",
+        "license_file": {
+          "path": "LICENSE",
+          "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+        },
+        "notice_files": [
+          {
+            "path": "README.md",
+            "sha256": "bc00f3b549458838242287afe42df006e54602dac3f7b90c5fd1c5e5432cbe8c"
+          }
+        ],
+        "attribution": "Google Cloud Online Boutique contributors"
       },
-      "notices": [
-        {
-          "path": "README.md",
-          "sha256": "bc00f3b549458838242287afe42df006e54602dac3f7b90c5fd1c5e5432cbe8c"
-        }
-      ],
-      "attribution": "Google Cloud Online Boutique contributors",
       "source_type": "community_command_corpus",
       "provenance_type": "human_authored",
-      "format": "markdown",
-      "use": "retain_and_quote_attributed_examples",
-      "transform": {
+      "parser": {
         "parser_id": "markdown_shell",
         "sha256": "fa11020e7de0fc178fe59e2e99e2b1b01e3d00148b8d2f871a1032535a5dd991",
-        "options_json": "{\"utilities\":[\"kubectl\",\"terraform\",\"gcloud\"],\"context_characters\":100}"
+        "options": {
+          "mode": "fenced_lines",
+          "allowed_utilities": [
+            "kubectl",
+            "terraform",
+            "gcloud"
+          ]
+        }
       }
     },
     {
       "origin_id": "opentelemetry-demo",
+      "trust_weight": 0.67,
       "repository": "open-telemetry/opentelemetry-demo",
       "commit": "155d637d14dfa7a80358c1114a71a924c058572f",
       "tree_digest": "c35eda51150b2d54ae800c5e381b21654ec4a1cb0511fed1d92bce4b5549f48f",
-      "scope": "readme",
+      "file_selector": "readme",
       "excluded_paths": [
         "src/accounting/README.md",
         "src/ad/README.md",
@@ -333,34 +353,40 @@
         "src/telemetry-docs/README.md",
         "telemetry-schema/README.md"
       ],
-      "license_id": "Apache-2.0",
-      "license": {
-        "path": "LICENSE",
-        "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
+      "rights": {
+        "license_id": "Apache-2.0",
+        "license_file": {
+          "path": "LICENSE",
+          "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
+        },
+        "notice_files": [
+          {
+            "path": "README.md",
+            "sha256": "1c959673f58ff8587072ba20bed7232c0ee54d2007ca8c74fa94fdd89ad10ac7"
+          }
+        ],
+        "attribution": "OpenTelemetry Demo contributors"
       },
-      "notices": [
-        {
-          "path": "README.md",
-          "sha256": "1c959673f58ff8587072ba20bed7232c0ee54d2007ca8c74fa94fdd89ad10ac7"
-        }
-      ],
-      "attribution": "OpenTelemetry Demo contributors",
       "source_type": "community_command_corpus",
       "provenance_type": "human_authored",
-      "format": "markdown",
-      "use": "retain_and_quote_attributed_examples",
-      "transform": {
+      "parser": {
         "parser_id": "markdown_shell",
         "sha256": "fa11020e7de0fc178fe59e2e99e2b1b01e3d00148b8d2f871a1032535a5dd991",
-        "options_json": "{\"utilities\":[\"docker\"],\"context_characters\":100}"
+        "options": {
+          "mode": "fenced_lines",
+          "allowed_utilities": [
+            "docker"
+          ]
+        }
       }
     },
     {
       "origin_id": "kubeflow-manifests",
+      "trust_weight": 0.69,
       "repository": "kubeflow/manifests",
       "commit": "65afa7c83c2a22fdb23e61b608d27709bc475504",
       "tree_digest": "ab9f11e0b78c2de62e5712baccfcf9a96434304010e5ac2f2027ebfebcd45cd3",
-      "scope": "readme",
+      "file_selector": "readme",
       "excluded_paths": [
         "applications/hub/helm-catalog/README.md",
         "applications/hub/helm/README.md",
@@ -428,34 +454,41 @@
         "releases/release-26.10/README.md",
         "releases/templates/README.md"
       ],
-      "license_id": "Apache-2.0",
-      "license": {
-        "path": "LICENSE",
-        "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
+      "rights": {
+        "license_id": "Apache-2.0",
+        "license_file": {
+          "path": "LICENSE",
+          "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
+        },
+        "notice_files": [
+          {
+            "path": "README.md",
+            "sha256": "98f4c306210f5183fb719024ec57cea782fe1af56a63f379cd363bdb289fea23"
+          }
+        ],
+        "attribution": "Kubeflow Manifests contributors"
       },
-      "notices": [
-        {
-          "path": "README.md",
-          "sha256": "98f4c306210f5183fb719024ec57cea782fe1af56a63f379cd363bdb289fea23"
-        }
-      ],
-      "attribution": "Kubeflow Manifests contributors",
       "source_type": "community_command_corpus",
       "provenance_type": "human_authored",
-      "format": "markdown",
-      "use": "retain_and_quote_attributed_examples",
-      "transform": {
+      "parser": {
         "parser_id": "markdown_shell",
         "sha256": "fa11020e7de0fc178fe59e2e99e2b1b01e3d00148b8d2f871a1032535a5dd991",
-        "options_json": "{\"utilities\":[\"kubectl\",\"helm\"],\"context_characters\":100}"
+        "options": {
+          "mode": "fenced_lines",
+          "allowed_utilities": [
+            "kubectl",
+            "helm"
+          ]
+        }
       }
     },
     {
       "origin_id": "prometheus-helm-charts",
+      "trust_weight": 0.71,
       "repository": "prometheus-community/helm-charts",
       "commit": "5b1d5aed453921966b6e63d6e441f42d67183a6e",
       "tree_digest": "71407fd5563dc12b9e7a37a211f9c66ac8d77c9b5b37b7cbf61799b191462af4",
-      "scope": "readme",
+      "file_selector": "readme",
       "excluded_paths": [
         "changelog/README.md",
         "charts/alertmanager-snmp-notifier/README.md",
@@ -503,34 +536,41 @@
         "charts/prometheus-windows-exporter/README.md",
         "charts/prometheus-yet-another-cloudwatch-exporter/README.md"
       ],
-      "license_id": "Apache-2.0",
-      "license": {
-        "path": "LICENSE",
-        "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
+      "rights": {
+        "license_id": "Apache-2.0",
+        "license_file": {
+          "path": "LICENSE",
+          "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
+        },
+        "notice_files": [
+          {
+            "path": "README.md",
+            "sha256": "88c2fc3ffbd39393eec966d22f6c552be53011c986592dda55b25001b8a0af73"
+          }
+        ],
+        "attribution": "Prometheus Community Helm Charts contributors"
       },
-      "notices": [
-        {
-          "path": "README.md",
-          "sha256": "88c2fc3ffbd39393eec966d22f6c552be53011c986592dda55b25001b8a0af73"
-        }
-      ],
-      "attribution": "Prometheus Community Helm Charts contributors",
       "source_type": "community_command_corpus",
       "provenance_type": "human_authored",
-      "format": "markdown",
-      "use": "retain_and_quote_attributed_examples",
-      "transform": {
+      "parser": {
         "parser_id": "markdown_shell",
         "sha256": "fa11020e7de0fc178fe59e2e99e2b1b01e3d00148b8d2f871a1032535a5dd991",
-        "options_json": "{\"utilities\":[\"kubectl\",\"helm\"],\"context_characters\":100}"
+        "options": {
+          "mode": "fenced_lines",
+          "allowed_utilities": [
+            "kubectl",
+            "helm"
+          ]
+        }
       }
     },
     {
       "origin_id": "terraform-gke-examples",
+      "trust_weight": 0.74,
       "repository": "terraform-google-modules/terraform-google-kubernetes-engine",
       "commit": "3830b0c1f94aebbb51c3952a4300fcfcc722f12f",
       "tree_digest": "d9b14437488dee6bf7b06257eef0e2774d651f398bfe7eb4c3f14131a8751069",
-      "scope": "readme",
+      "file_selector": "readme",
       "excluded_paths": [
         "autogen/main/README.md",
         "autogen/safer-cluster/README.md",
@@ -601,34 +641,42 @@
         "modules/safer-cluster/README.md",
         "modules/workload-identity/README.md"
       ],
-      "license_id": "Apache-2.0",
-      "license": {
-        "path": "LICENSE",
-        "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+      "rights": {
+        "license_id": "Apache-2.0",
+        "license_file": {
+          "path": "LICENSE",
+          "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+        },
+        "notice_files": [
+          {
+            "path": "README.md",
+            "sha256": "6f5ca819e8b96c6e840b06cd63a79cc5e791eb26cee4e2db26b28de59a260a50"
+          }
+        ],
+        "attribution": "Terraform Google Kubernetes Engine module contributors"
       },
-      "notices": [
-        {
-          "path": "README.md",
-          "sha256": "6f5ca819e8b96c6e840b06cd63a79cc5e791eb26cee4e2db26b28de59a260a50"
-        }
-      ],
-      "attribution": "Terraform Google Kubernetes Engine module contributors",
       "source_type": "community_command_corpus",
       "provenance_type": "human_authored",
-      "format": "markdown",
-      "use": "retain_and_quote_attributed_examples",
-      "transform": {
+      "parser": {
         "parser_id": "markdown_shell",
         "sha256": "fa11020e7de0fc178fe59e2e99e2b1b01e3d00148b8d2f871a1032535a5dd991",
-        "options_json": "{\"utilities\":[\"kubectl\",\"terraform\",\"gcloud\"],\"context_characters\":100}"
+        "options": {
+          "mode": "fenced_lines",
+          "allowed_utilities": [
+            "kubectl",
+            "terraform",
+            "gcloud"
+          ]
+        }
       }
     },
     {
       "origin_id": "terraform-eks-examples",
+      "trust_weight": 0.73,
       "repository": "terraform-aws-modules/terraform-aws-eks",
       "commit": "25c846a384bc66d16cc801d2f851431deb38de5d",
       "tree_digest": "1c79debb34f2b135ac2d234b02b8a0e51b91ecb80bfb2e8bef0421918e010e87",
-      "scope": "readme",
+      "file_selector": "readme",
       "excluded_paths": [
         "docs/README.md",
         "examples/README.md",
@@ -644,26 +692,33 @@
         "modules/karpenter/README.md",
         "modules/self-managed-node-group/README.md"
       ],
-      "license_id": "Apache-2.0",
-      "license": {
-        "path": "LICENSE",
-        "sha256": "a6cba85bc92e0cff7a450b1d873c0eaa2e9fc96bf472df0247a26bec77bf3ff9"
+      "rights": {
+        "license_id": "Apache-2.0",
+        "license_file": {
+          "path": "LICENSE",
+          "sha256": "a6cba85bc92e0cff7a450b1d873c0eaa2e9fc96bf472df0247a26bec77bf3ff9"
+        },
+        "notice_files": [
+          {
+            "path": "README.md",
+            "sha256": "a525ffaa50beb44685807192ce5aeff73013084c398f9d554b644b1fa383eba9"
+          }
+        ],
+        "attribution": "Terraform AWS EKS module contributors"
       },
-      "notices": [
-        {
-          "path": "README.md",
-          "sha256": "a525ffaa50beb44685807192ce5aeff73013084c398f9d554b644b1fa383eba9"
-        }
-      ],
-      "attribution": "Terraform AWS EKS module contributors",
       "source_type": "community_command_corpus",
       "provenance_type": "human_authored",
-      "format": "markdown",
-      "use": "retain_and_quote_attributed_examples",
-      "transform": {
+      "parser": {
         "parser_id": "markdown_shell",
         "sha256": "fa11020e7de0fc178fe59e2e99e2b1b01e3d00148b8d2f871a1032535a5dd991",
-        "options_json": "{\"utilities\":[\"kubectl\",\"terraform\",\"aws\"],\"context_characters\":100}"
+        "options": {
+          "mode": "fenced_lines",
+          "allowed_utilities": [
+            "kubectl",
+            "terraform",
+            "aws"
+          ]
+        }
       }
     },
     {
@@ -671,31 +726,34 @@
       "repository": "pulumi/examples",
       "commit": "f9765bf6fbc548a5391b41ce100f0ca753a6d271",
       "tree_digest": "03ba5e443db19931e8b1750e54861ed80847cf55fc2032c75e92a1e6a34e45b9",
-      "scope": "markdown_files",
+      "file_selector": "markdown_files",
       "included_paths": [
         "aws-cs-s3-folder/README.md",
         "aws-fs-s3-folder/README.md"
       ],
-      "license_id": "Apache-2.0",
-      "license": {
-        "path": "LICENSE",
-        "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+      "rights": {
+        "license_id": "Apache-2.0",
+        "license_file": {
+          "path": "LICENSE",
+          "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+        },
+        "notice_files": [
+          {
+            "path": "README.md",
+            "sha256": "ab0b3d2898b07483a0cbc211bbf576a8c5e21a40e10947f004cd499b3b7bc311"
+          }
+        ],
+        "attribution": "Pulumi Examples contributors"
       },
-      "notices": [
-        {
-          "path": "README.md",
-          "sha256": "ab0b3d2898b07483a0cbc211bbf576a8c5e21a40e10947f004cd499b3b7bc311"
-        }
-      ],
-      "attribution": "Pulumi Examples contributors",
       "source_type": "community_command_corpus",
       "provenance_type": "human_authored",
-      "format": "markdown",
-      "use": "retain_and_quote_attributed_examples",
-      "transform": {
+      "parser": {
         "parser_id": "markdown_shell",
         "sha256": "fa11020e7de0fc178fe59e2e99e2b1b01e3d00148b8d2f871a1032535a5dd991",
-        "options_json": "{\"utility\":\"pulumi\",\"context_characters\":100}"
+        "options": {
+          "mode": "literal",
+          "utility": "pulumi"
+        }
       }
     }
   ]

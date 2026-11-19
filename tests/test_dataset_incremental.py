@@ -20,9 +20,11 @@ from codebench_pipeline.dataset_records import LabelDecision
 from codebench_pipeline.dataset_registry import DatasetRegistry
 from codebench_pipeline.dataset_source_models import SourceSelection
 from codebench_pipeline.definitions import build_definitions, dataset_run_config
+from codebench_pipeline.human_review import DecisionChange, HumanReviewError
 from codebench_pipeline.human_review_store import HumanReviewStore
 from codebench_pipeline.model_config import ModelConfig
 from codebench_pipeline.models import AdapterSpec
+from codebench_pipeline.review_snapshots import ReviewSnapshots
 from codebench_pipeline.runtime_instance import dataset_instance
 
 
@@ -191,11 +193,51 @@ class IncrementalDatasetTests(unittest.TestCase):
             },
         )
 
-    def test_publication_cap_changes_only_prepared_review_queue(self) -> None:
+    def test_publication_cap_replaces_completion_without_changing_review_rows(self) -> None:
+        dataset_id = self.configuration["dataset_id"]
+        store = HumanReviewStore(self.home)
+        with dataset_instance(self.home) as instance, store.transaction() as tx:
+            data = DatasetDataService(self.home, instance)
+            before = data.read_current(dataset_id, "human_review_queue").value
+            original = tx.get_current_batch(dataset_id, "annotations")
+            self.assertTrue(original.snapshot.candidate_ids)
+            for candidate_id in original.snapshot.candidate_ids:
+                tx.save_decision(
+                    original.snapshot,
+                    DecisionChange(
+                        batch_id=original.batch_id,
+                        generation=original.generation,
+                        candidate_id=candidate_id,
+                        expected_row_revision=0,
+                        decision="approve",
+                        reviewer="synthetic QA",
+                    ),
+                )
+            token = tx.complete(
+                original.snapshot, tx.get_current_batch(dataset_id, "annotations"), "synthetic QA"
+            )
+            self.assertEqual(tx.authorize_completion(original.snapshot, token), token)
+
         self.configuration["publication"]["limit_per_risk"] = 1
         self.assertEqual(set(self.build()), {"human_review_queue"})
         with dataset_instance(self.home) as instance:
             run = instance.get_runs(limit=1)[0]
+            data = DatasetDataService(self.home, instance)
+            after = data.read_current(dataset_id, "human_review_queue").value
+            snapshots = ReviewSnapshots(self.home, data)
+            self.assertEqual(snapshots.current(dataset_id).manifest.publication.limit_per_risk, 1)
+        assert isinstance(before, pd.DataFrame) and isinstance(after, pd.DataFrame)
+        pd.testing.assert_frame_equal(before, after)
+        with store.reader() as tx:
+            fresh = tx.get_current_batch(dataset_id, "annotations")
+            self.assertEqual(fresh.snapshot.candidate_ids, original.snapshot.candidate_ids)
+            self.assertEqual(fresh.snapshot.record_fingerprints, original.snapshot.record_fingerprints)
+            self.assertNotEqual(fresh.snapshot.snapshot_id, original.snapshot.snapshot_id)
+            self.assertNotEqual(fresh.batch_id, original.batch_id)
+            self.assertIsNone(fresh.completion)
+            with self.assertRaises(HumanReviewError) as rejected:
+                tx.authorize_completion(fresh.snapshot, token)
+            self.assertEqual(rejected.exception.code, "stale")
         receipt = json.loads((self.home / f"build-{run.run_id}.json").read_text())
         self.assertEqual(receipt["status"], "awaiting_human_review")
 
@@ -288,10 +330,6 @@ class IncrementalDatasetTests(unittest.TestCase):
                     "human_review_queue",
                     "global_config",
                     "map_labeling_attempts_config",
-                    "map_proposed_annotations_config",
-                    "map_labeling_failures_config",
-                    "map_deduplicated_annotations_config",
-                    "map_category_eligible_annotations_config",
                     "map_human_review_queue_config",
                 )
             },

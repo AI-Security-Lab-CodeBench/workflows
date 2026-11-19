@@ -94,9 +94,16 @@ class EvidenceAdmissionTests(TestCase):
             fixture.inference.assert_not_called()
         rows = {row.command: row for row in model_records(first, LabelingAttempt)}
         self.assertEqual(rows["terraform plan"].status, "success")
-        self.assertIn("previews proposed changes", rows["terraform plan"].documentation_json)
+        self.assertTrue(
+            any("previews proposed changes" in doc.snippet for doc in rows["terraform plan"].documentation)
+        )
         self.assertEqual(rows["kubectl get pods"].status, "success")
-        self.assertIn("lists pods in the selected namespace", rows["kubectl get pods"].documentation_json)
+        self.assertTrue(
+            any(
+                "lists pods in the selected namespace" in doc.snippet
+                for doc in rows["kubectl get pods"].documentation
+            )
+        )
         self.assertEqual(rows[SCOPE_COMMAND].failure_code, "operation_unsupported")
         (orig,) = [
             path for path in home.glob("repository-v2/*/blobs/*") if path.read_bytes() == documentation
@@ -128,7 +135,7 @@ class EvidenceAdmissionTests(TestCase):
         result = labeling.attempts(fixture.filtered(), home / "first")
         row = next(row for row in model_records(result, LabelingAttempt) if row.command == SCOPE_COMMAND)
         self.assertEqual(row.status, "success")
-        self.assertIn("lists pods across all namespaces", row.documentation_json)
+        self.assertTrue(any("lists pods across all namespaces" in doc.snippet for doc in row.documentation))
         labeling.verify(result)
 
         for receipt in home.glob("label-grounding-v2/*/shared-operations/*.json"):

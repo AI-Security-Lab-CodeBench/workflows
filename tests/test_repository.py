@@ -18,8 +18,7 @@ from codebench_pipeline.repository import (
     repository_documents,
 )
 from codebench_pipeline.repository_branch_config import (
-    DeclaredRepositoryOrigin,
-    RepositoryBranchConfig,
+    RepositoryBranchDeclaration,
     load_repository_branch,
 )
 from codebench_pipeline.repository_config import RepositoryBranch, RepositoryConfig, RepositoryOrigin
@@ -114,23 +113,27 @@ def repository_config_fixture() -> RepositoryConfig:
 
 def repository_branch_fixture(
     branch: RepositoryBranch, fixtures: tuple[RepositoryFixture, ...]
-) -> RepositoryBranchConfig:
+) -> RepositoryBranchDeclaration:
     filename = {"dataset": "existing-datasets.json", "documentation": "documentation-crawl.json"}[branch]
     templates = load_repository_branch(COLLECTION / filename)
     origins = {origin.origin_id: origin for origin in templates.origins}
-    source_ids = [fixture.origin.origin_id for fixture in fixtures]
-    return RepositoryBranchConfig(
-        revision="synthetic",
+    return RepositoryBranchDeclaration(
+        refresh_revision="synthetic",
         origins=tuple(
-            DeclaredRepositoryOrigin.model_validate(
-                {
-                    **fixture.declaration().model_dump(exclude={"transform"}),
-                    "transform": origins[fixture.origin.origin_id].transform,
+            template.model_copy(
+                update={
+                    "tree_digest": origin.tree_digest,
+                    "included_paths": origin.included_paths,
+                    "excluded_paths": origin.excluded_paths,
+                    "rights": template.rights.model_copy(
+                        update={"license_file": origin.license, "notice_files": origin.notices}
+                    ),
                 }
             )
             for fixture in fixtures
+            for origin in (fixture.declaration(),)
+            for template in (origins[origin.origin_id],)
         ),
-        source_weights={source_id: templates.source_weight(branch, source_id) for source_id in source_ids},
     )
 
 

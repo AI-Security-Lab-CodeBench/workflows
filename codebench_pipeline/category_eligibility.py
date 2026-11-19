@@ -19,7 +19,7 @@ def category_eligible_annotations(
         if row["category_confidence"] not in ("medium", "high"):
             reasons.append("low_category_confidence")
         if reasons:
-            exclusions.append({"candidate_id": row["candidate_id"], "reasons": reasons})
+            exclusions.append({"candidate_id": row["candidate_id"], "reasons": [*reasons]})
         else:
             retained.append(row)
     result = validated_frame(retained, ProposedAnnotationsTable)

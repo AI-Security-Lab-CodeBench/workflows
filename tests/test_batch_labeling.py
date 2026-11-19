@@ -215,9 +215,9 @@ class BatchLabelingTests(unittest.TestCase):
                     root / "run",
                 )
             self.assertEqual(valid.status, "success")
-            self.assertIsNotNone(valid.label_json)
-            self.assertEqual(json.loads(valid.label_json)["candidate_id"], "one")
-            self.assertEqual(json.loads(valid.label_json)["util"], valid.util)
+            assert valid.label is not None
+            self.assertEqual(valid.label.candidate_id, "one")
+            self.assertEqual(valid.label.util, valid.util)
             self.assertEqual(invalid.status, "failure")
             self.assertIn("Label identity differs from candidate", invalid.failure_detail)
 
@@ -356,8 +356,8 @@ class BatchLabelingTests(unittest.TestCase):
                     root / "run",
                 )
             self.assertEqual([row.status for row in results], ["success", "failure", "failure"])
-            self.assertEqual(results[1].label_json, "")
-            self.assertEqual(results[2].label_json, "")
+            self.assertIsNone(results[1].label)
+            self.assertIsNone(results[2].label)
             self.assertIn("Quote is absent", results[2].failure_detail)
             self.assertEqual(results[1].failure_code, "protocol_exhausted")
 
@@ -519,7 +519,7 @@ class BatchLabelingTests(unittest.TestCase):
             self.assertEqual(first[0].status, "success")
             self.assertEqual(refreshed, first)
             self.assertEqual(inference.call_count, 2)
-            self.assertIn("Inspect reads metadata.", first[0].documentation_json)
+            self.assertTrue(any("Inspect reads metadata." in doc.snippet for doc in first[0].documentation))
 
     def test_stale_refresh_shares_provider_budget_with_new_judgments(self) -> None:
         def complete(
@@ -731,7 +731,7 @@ class BatchLabelingTests(unittest.TestCase):
                     maximum_context_characters=1024,
                 )
             self.assertEqual(results[0].failure_code, "context_limit")
-            self.assertEqual(results[0].label_json, "")
+            self.assertIsNone(results[0].label)
 
     def test_truncated_output_does_not_consume_the_repair_context_budget(self) -> None:
         truncated = tool_reply("submit_labels", {"outcomes": []}, finish_reason="length")

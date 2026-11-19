@@ -136,6 +136,9 @@ def reconciled_counts(inputs: ReleaseInputs) -> dict[str, JsonValue]:
 
 def prepare_guarded_release(inputs: ReleaseInputs, home: Path, spec: DatasetBuildSpec) -> ReleaseProposal:
     resolved = inputs.resolved
+    publication = resolved.manifest.publication
+    if spec.publication != publication:
+        raise HumanReviewError("stale", "Registered release policy differs from the completed snapshot")
     rules = resolved.rules
     counts = reconciled_counts(inputs)
     corrected = apply_label_corrections(resolved.reviewed, inputs.decisions, rules)
@@ -145,6 +148,8 @@ def prepare_guarded_release(inputs: ReleaseInputs, home: Path, spec: DatasetBuil
     candidates = {
         candidate.candidate_id: candidate for candidate in model_records(corrected, CandidateRecord)
     }
+    if any(candidate.command != originals[identity].command for identity, candidate in candidates.items()):
+        raise HumanReviewError("pending", "Edited commands require newly verified literal provenance")
     labels = {label.candidate_id: label for label in model_records(corrected, LabelDecision)}
     approved = frozenset(
         decision.candidate_id for decision in inputs.decisions if decision.decision == "approve"
@@ -180,8 +185,6 @@ def prepare_guarded_release(inputs: ReleaseInputs, home: Path, spec: DatasetBuil
             or (uncertain and identity not in approved)
         ):
             continue
-        if candidate.command != originals[identity].command:
-            raise HumanReviewError("pending", "Edited commands require newly verified literal provenance")
         source = collection.resolve(originals[identity])
         source_bindings[identity] = {
             "origin_id": source.origin_id,
@@ -213,7 +216,7 @@ def prepare_guarded_release(inputs: ReleaseInputs, home: Path, spec: DatasetBuil
                 contribution,
             )
         )
-    cap = spec.publication.limit_per_risk
+    cap = publication.limit_per_risk
     selected = select_survivors(survivors, {risk.id: cap for risk in rules.risks}, source_weights)
     ordered = selected.ordered
     selected_ids = frozenset(ordered)

@@ -14,11 +14,12 @@ from .keenable_policy import (
     COMMANDS,
     PAGE_CASES,
     Case,
+    Declaration,
     KeenableDeclaration,
     KeenableError,
     PagePermission,
+    Permission,
     ReviewedSpan,
-    SourcePermission,
     canonical_url,
     digest,
     load_declaration,
@@ -43,7 +44,7 @@ class KeenableCollection:
     """Bounded CAT-3 collection with durable cross-run receipts and inert source bytes."""
 
     def __init__(
-        self, root: Path, declaration: KeenableDeclaration, *, planner: GuardedSearchPlanner | None = None
+        self, root: Path, declaration: Declaration, *, planner: GuardedSearchPlanner | None = None
     ) -> None:
         self.root = root
         self.declaration = declaration
@@ -126,7 +127,7 @@ class KeenableCollection:
                         media_type=permission.media_type,
                         rights_evidence_sha256=permission.rights_evidence_sha256,
                         call=receipt,
-                        case=case if isinstance(permission, SourcePermission) else None,
+                        case=None if isinstance(permission, PagePermission) else case,
                     )
                 )
             self.declaration.check_current(datetime.now(UTC))
@@ -220,7 +221,7 @@ class KeenableCollection:
 
 
 def _search(
-    ledger: Ledger, declaration: KeenableDeclaration, case: Case, *, option: SearchOption | None = None
+    ledger: Ledger, declaration: Declaration, case: Case, *, option: SearchOption | None = None
 ) -> tuple[CallReceipt, tuple[Lead, ...]]:
     slot = f"search:{case if option is None else option.id}"
     if (prior := ledger.call(slot)) is not None:
@@ -242,9 +243,7 @@ def _search(
             sorted(
                 source.url_prefix
                 for source in declaration.sources
-                if source.url_prefix is not None
-                and (source.discover or not source.exact_urls)
-                and case in source.cases
+                if source.url_prefix is not None and source.allow_discovery and case in source.cases
             )
         )
     )
@@ -316,7 +315,7 @@ def _source_spans(body: bytes, case: Case) -> tuple[ReviewedSpan, ...]:
 def _capture(
     ledger: Ledger,
     url: str,
-    permission: PagePermission | SourcePermission | None,
+    permission: Permission | None,
     *,
     rights_sha256: str | None = None,
 ) -> tuple[CallReceipt, bytes | None]:
@@ -349,12 +348,12 @@ def _capture(
         sensitive = any(pattern.search(text) for pattern in SECRET_PATTERNS) or bool(
             api_key and api_key in text
         )
-        license_ = permission.public_license if isinstance(permission, SourcePermission) else None
-        if (
-            license_ is not None
-            and license_.notice is not None
-            and license_.notice.casefold() not in text.casefold()
-        ):
+        notice = (
+            permission.page_notice
+            if permission is not None and not isinstance(permission, PagePermission)
+            else None
+        )
+        if notice is not None and notice.casefold() not in text.casefold():
             return ledger.finish(
                 receipt,
                 state="withheld",

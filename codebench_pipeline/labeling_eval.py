@@ -20,6 +20,8 @@ from codebench_pipeline.model_config import ModelConfig
 from codebench_pipeline.models import SemanticSnippet
 from codebench_pipeline.review_policy import requires_human_review
 
+type EvaluationSplit = Literal["development", "heldout", "all"]
+
 
 class CohortRecord(BaseModel):
     model_config = ConfigDict(strict=True, frozen=True)
@@ -80,7 +82,8 @@ def evaluation_summary(
         before = original.baseline()
         baseline_review += requires_human_review(before)
         outcomes[attempt.status] += 1
-        if attempt.status == "failure":
+        after = attempt.label
+        if after is None:
             failures[attempt.failure_code] += 1
             changes.append(
                 {
@@ -91,7 +94,6 @@ def evaluation_summary(
                 }
             )
             continue
-        after = LabelDecision.model_validate_json(attempt.label_json)
         labels.append(after)
         proposed_review += requires_human_review(after)
         fields = (
@@ -179,7 +181,7 @@ def run_evaluation(
     cohort_path: Path,
     annotation_path: Path,
     out: Path,
-    split: Literal["development", "heldout", "all"],
+    split: EvaluationSplit,
     batch_size: int | None,
 ) -> dict[str, JsonValue]:
     cohort_bytes = cohort_path.read_bytes()
@@ -219,7 +221,7 @@ def run_evaluation(
         documentation_by_candidate={
             record.candidate().candidate_id: record.seed_documentation for record in records
         },
-        maximum_context_characters=config.maximum_context_characters,
+        maximum_context_characters=config.max_request_bytes,
     )
     elapsed = time.monotonic() - started
     _write(out / "attempts.json", [attempt.model_dump(mode="json") for attempt in attempts])
@@ -241,8 +243,11 @@ def main() -> None:
     args = parser.parse_args()
     if args.credentials_stdin:
         _credentials()
-    split = TypeAdapter(Literal["development", "heldout", "all"]).validate_python(args.split)
-    summary = run_evaluation(args.cohort, args.annotation_config, args.out, split, args.batch_size)
+    match args.split:
+        case "development" | "heldout" | "all" as split:
+            summary = run_evaluation(args.cohort, args.annotation_config, args.out, split, args.batch_size)
+        case _:
+            parser.error("Invalid evaluation split")
     print(
         json.dumps({key: value for key, value in summary.items() if key != "changes"}, indent=2), flush=True
     )

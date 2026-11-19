@@ -2,6 +2,7 @@ from pathlib import Path
 from typing import Annotated, Literal, assert_never
 
 from pydantic import ConfigDict, Field, field_validator, model_validator
+from pydantic_core import PydanticCustomError
 
 from codebench_pipeline.batch_labeling_config import BatchLabelingConfig
 from codebench_pipeline.category_rules import CategoryRules, Text
@@ -99,11 +100,20 @@ class FilteringConfig(StrictStageConfig):
     quarantine_dynamic_shell: bool = True
 
 
+RequestBytes = Annotated[int, Field(ge=1024, le=1048576)]
+ReleaseCap = Annotated[int, Field(ge=1, le=250)]
+AnnotationWorkers = Annotated[int, Field(ge=1, le=16)]
+
+
 class AnnotationConfig(StrictStageConfig):
     model: ModelConfig
-    maximum_context_characters: int = Field(default=131072, ge=1024, le=1048576)
-    workers: int = Field(default=1, ge=1, le=16)
+    maximum_context_characters: RequestBytes = 131072
+    workers: AnnotationWorkers = 1
     batch: BatchLabelingConfig | None = None
+
+    @property
+    def max_request_bytes(self) -> int:
+        return self.maximum_context_characters
 
     @model_validator(mode="after")
     def batch_provider(self) -> "AnnotationConfig":
@@ -117,7 +127,7 @@ class ReviewConfig(AnnotationConfig):
 
 
 class PublicationConfig(StrictStageConfig):
-    limit_per_risk: int = Field(default=250, ge=1, le=250)
+    limit_per_risk: ReleaseCap = 250
     review_columns: list[str] = Field(
         default_factory=lambda: ["command", "category_id", "risk_id", "severity", "class"]
     )
@@ -203,7 +213,7 @@ class DatasetBuildSpec(StrictStageConfig):
                 or (self.snapshots.documents or self.documentation_snapshots.documents)
             ):
                 raise ValueError("Declared collection cannot include prepared source inventories")
-            require_guarded_annotation(self.annotation)
+            _declared_annotation_batch(self.annotation)
         elif self.documentation is None:
             raise ValueError("Prepared source inputs require labeling documentation")
         return self
@@ -242,11 +252,24 @@ def load_build_config(path: Path, home: Path | None = None) -> DatasetBuildSpec:
     return load_dataset_bundle(path, home)
 
 
-def require_guarded_annotation(annotation: AnnotationConfig) -> None:
+def _declared_annotation_batch(annotation: AnnotationConfig) -> BatchLabelingConfig:
     batch = annotation.batch
     if annotation.model.provider != "openai_compatible" or batch is None:
-        raise ValueError("Declared collection requires guarded OpenAI-compatible batch labeling")
-    if not batch.backend_revision.strip() or not Path(batch.capacity.state_directory).is_absolute():
-        raise ValueError(
-            "Guarded labeling requires a pinned backend revision and absolute shared capacity directory"
+        raise PydanticCustomError(
+            "declared_labeling", "Declared collection requires guarded OpenAI-compatible batch labeling"
         )
+    if not batch.backend_revision.strip() or not Path(batch.capacity.state_directory).is_absolute():
+        raise PydanticCustomError(
+            "declared_labeling_capacity",
+            "Guarded labeling requires a pinned backend revision and absolute shared capacity directory",
+        )
+    return batch
+
+
+def require_guarded_annotation(annotation: AnnotationConfig) -> BatchLabelingConfig:
+    batch = _declared_annotation_batch(annotation)
+    if batch.inference_mode != "guarded":
+        raise PydanticCustomError(
+            "declared_labeling_transport", "Declared collection requires guarded inference transport"
+        )
+    return batch

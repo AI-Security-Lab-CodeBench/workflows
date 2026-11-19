@@ -72,9 +72,9 @@ def validate_rows(rows: list[dict[str, str]], taxonomy: Taxonomy = DEFAULT_TAXON
             continue
         if row["category"] != taxonomy.canonical or row["risk"] not in taxonomy.risk_names:
             errors.append(f"{where}: noncanonical category or risk")
-        if row["severity"] not in {"critical", "high", "medium", "low"}:
+        if row["severity"] not in taxonomy.severities:
             errors.append(f"{where}: invalid severity")
-        if row["class"] not in {"allow", "deny", "ask"}:
+        if row["class"] not in taxonomy.classes:
             errors.append(f"{where}: excluded or invalid class")
         if row["source"] == "synthetic":
             if row["seed"].strip() == "-":

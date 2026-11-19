@@ -2,8 +2,9 @@
 
 The executable labeling instructions live in `business-configs/`, not this document.
 
-- `business-configs/labeling-base.md`: generic annotation method, evidence boundaries, output discipline and confidence semantics.
-- `business-configs/categories/cat3/category.json`: CAT-3 taxonomy, routing and references to its policy and examples.
+- `business-configs/labeling/instructions.md`: generic annotation method, evidence boundaries, output discipline and confidence semantics.
+- `business-configs/labeling/policy.json`: shared class and severity definitions and description language.
+- `business-configs/categories/cat3/category.json`: CAT-3 taxonomy, routing and optional restrictions on allowed severities.
 - `business-configs/categories/cat3/instructions.md`: CAT-3 membership, risk boundaries, severity defaults and class policy.
 - `business-configs/categories/cat3/examples.json`: documented, illustrative few-shot examples grouped by operation family. They are not collected dataset rows.
 - `business-configs/datasets/cat3.json`: initial model, worker, source/reference and publication settings.

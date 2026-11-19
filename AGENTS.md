@@ -87,7 +87,7 @@ and authored tests, not binaries or benchmark outputs.
 
 ## Authority and evidence
 
-Follow the current user request first. `business-configs/labeling-base.md` carries
+Follow the current user request first. `business-configs/labeling/instructions.md` carries
 generic labeling instructions; `business-configs/categories/<category>/` carries
 category taxonomy, policy and illustrative examples. These are the editable
 policy sources; `docs/labeling-policy.md` is an editing guide, not another prompt.

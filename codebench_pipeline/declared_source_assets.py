@@ -1,4 +1,3 @@
-import json
 import os
 from pathlib import Path
 
@@ -6,7 +5,7 @@ from dagster import AssetExecutionContext, AssetsDefinition, Output, ResourcePar
 from pandera.typing import DataFrame
 
 from codebench_pipeline.collection_config import DeclaredSourceStageConfig
-from codebench_pipeline.config_assets import CONFIG_JSON, mapped_rules, policy_input
+from codebench_pipeline.config_assets import mapped_input
 from codebench_pipeline.dataframe_io import DataFrameIOManager
 from codebench_pipeline.dataframe_schemas import (
     CommandCandidatesTable,
@@ -17,7 +16,7 @@ from codebench_pipeline.dataset_asset_types import DATASET_PARTITIONS, TABLE_TYP
 from codebench_pipeline.dataset_branches import CollectionBranch, asset_branch, asset_path
 from codebench_pipeline.dataset_engine import cached_table
 from codebench_pipeline.dataset_registry import DatasetRegistry
-from codebench_pipeline.keenable import KeenableCollection, KeenableDeclaration
+from codebench_pipeline.keenable import KeenableCollection
 from codebench_pipeline.keenable_planner import GuardedSearchPlanner
 from codebench_pipeline.keenable_tables import (
     provider_adapters,
@@ -34,16 +33,16 @@ from codebench_pipeline.repository import (
 )
 from codebench_pipeline.repository_receipts import RECEIPT_ATTR
 from codebench_pipeline.source_evidence import require_source_rights
-from codebench_pipeline.stage_configuration import declared_source_config
+from codebench_pipeline.stage_configuration import DeclaredBranchConfig, declared_source_config
 from codebench_pipeline.storage import IntegrityError
 
 
 def source_run(
-    context: AssetExecutionContext, storage: DataFrameIOManager, mapped_config: str
+    context: AssetExecutionContext, storage: DataFrameIOManager, mapped_config: DeclaredBranchConfig
 ) -> tuple[DeclaredSourceStageConfig, RepositoryRun]:
     if storage.review_home is None:
         raise IntegrityError("Declared source acquisition requires a registered dataset home")
-    config = DeclaredSourceStageConfig.model_validate(CONFIG_JSON.validate_json(mapped_config)["collection"])
+    config = mapped_config.collection
     home = Path(storage.review_home)
     spec = DatasetRegistry(home).get_snapshot(context.partition_key)
     branch = asset_branch(context.asset_key.path)
@@ -61,7 +60,7 @@ def source_run(
 def provider_collection(
     config: DeclaredSourceStageConfig, run: RepositoryRun, *, plan_receipts: Path | None = None
 ) -> KeenableCollection:
-    declaration = KeenableDeclaration.model_validate_json(json.dumps(config.source.declaration))
+    declaration = config.source.keenable_config()
     if declaration.dataset != run.dataset_id:
         raise IntegrityError("Keenable declaration belongs to another partition")
     if (
@@ -95,12 +94,12 @@ def provider_collection(
 
 def declared_source_assets(branch: CollectionBranch) -> list[AssetsDefinition]:
     prefix = asset_path(branch.capture, branch.namespace)[:-1]
-    mapping = policy_input(branch.group)
+    mapping = mapped_input(branch.group, DeclaredBranchConfig)
     assets: list[AssetsDefinition] = []
 
     def index_sources(
         context: AssetExecutionContext,
-        mapped_config: str,
+        mapped_config: DeclaredBranchConfig,
         dataset_io_manager: ResourceParam[DataFrameIOManager],
     ) -> Output[DataFrame[SourceCatalogTable]]:
         config, run = source_run(context, dataset_io_manager, mapped_config)
@@ -114,7 +113,7 @@ def declared_source_assets(branch: CollectionBranch) -> list[AssetsDefinition]:
             context,
             dataset_io_manager,
             config,
-            {"category_rules": mapped_rules(mapped_config)},
+            {"category_rules": mapped_config.category_rules},
             SourceCatalogTable,
             compute,
         )
@@ -122,7 +121,7 @@ def declared_source_assets(branch: CollectionBranch) -> list[AssetsDefinition]:
     def capture_indexed_sources(
         context: AssetExecutionContext,
         source_catalog: DataFrame[SourceCatalogTable],
-        mapped_config: str,
+        mapped_config: DeclaredBranchConfig,
         dataset_io_manager: ResourceParam[DataFrameIOManager],
     ) -> Output[DataFrame[SourceDocumentsTable]]:
         config, run = source_run(context, dataset_io_manager, mapped_config)
@@ -143,7 +142,7 @@ def declared_source_assets(branch: CollectionBranch) -> list[AssetsDefinition]:
 
     def capture_documentation(
         context: AssetExecutionContext,
-        mapped_config: str,
+        mapped_config: DeclaredBranchConfig,
         dataset_io_manager: ResourceParam[DataFrameIOManager],
     ) -> Output[DataFrame[SourceDocumentsTable]]:
         config, run = source_run(context, dataset_io_manager, mapped_config)
@@ -161,7 +160,7 @@ def declared_source_assets(branch: CollectionBranch) -> list[AssetsDefinition]:
             context,
             dataset_io_manager,
             config,
-            {"category_rules": mapped_rules(mapped_config)},
+            {"category_rules": mapped_config.category_rules},
             SourceDocumentsTable,
             compute,
         )
@@ -211,7 +210,7 @@ def declared_source_assets(branch: CollectionBranch) -> list[AssetsDefinition]:
     def command_candidates(
         context: AssetExecutionContext,
         source_documents: DataFrame[SourceDocumentsTable],
-        mapped_config: str,
+        mapped_config: DeclaredBranchConfig,
         dataset_io_manager: ResourceParam[DataFrameIOManager],
     ) -> Output[DataFrame[CommandCandidatesTable]]:
         config, run = source_run(context, dataset_io_manager, mapped_config)

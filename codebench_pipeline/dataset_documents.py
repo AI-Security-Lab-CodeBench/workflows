@@ -24,8 +24,11 @@ from codebench_pipeline.storage import IntegrityError
 
 @pa.check_types
 def snapshot_documents(
-    catalog: DataFrame[SourceCatalogTable], config: SnapshotConfig,
-    *, cache: Path | None = None, evidence: Path | None = None,
+    catalog: DataFrame[SourceCatalogTable],
+    config: SnapshotConfig,
+    *,
+    cache: Path | None = None,
+    evidence: Path | None = None,
 ) -> DataFrame[SourceDocumentsTable]:
     supplied = {source.source_id: source for source in config.documents}
     selected = [row for row in frame_records(catalog) if row["decision"] == "selected"]
@@ -40,13 +43,15 @@ def snapshot_documents(
                 evidence.mkdir(parents=True, exist_ok=True)
                 identity = hashlib.sha256(source.source_id.encode()).hexdigest()
                 (evidence / f"{identity}.failure.json").write_text(
-                    json.dumps({
-                        "source_id": source.source_id,
-                        "url": source.url,
-                        "complete": False,
-                        "error_type": type(error).__name__,
-                        "error": str(error),
-                    }),
+                    json.dumps(
+                        {
+                            "source_id": source.source_id,
+                            "url": source.url,
+                            "complete": False,
+                            "error_type": type(error).__name__,
+                            "error": str(error),
+                        }
+                    ),
                     encoding="utf-8",
                 )
             raise
@@ -56,17 +61,18 @@ def snapshot_documents(
         retrieved = list(executor.map(retrieve, sources))
     rows = [
         {
-            **{key: value for key, value in row.items()
-               if key not in {"sample", "captured_content", "decision", "analysis", "confidence", "rationale"}},
+            **{
+                key: value
+                for key, value in row.items()
+                if key
+                not in {"sample", "captured_content", "decision", "analysis", "confidence", "rationale"}
+            },
             "content": result.content,
             "sha256": result.sha256,
         }
         for row, result in zip(selected, retrieved, strict=True)
     ]
     frame = validated_frame(rows, SourceDocumentsTable)
-    frame.attrs["source_transformations_json"] = json.dumps(
-        {source.source_id: source.transformations for source in sources}, ensure_ascii=False
-    )
     frame.attrs["source_inputs_json"] = json.dumps(
         [source.model_dump(mode="json") for source in sources], ensure_ascii=False
     )
@@ -79,9 +85,13 @@ def document_adapters(
 ) -> DataFrame[DocumentAdaptersTable]:
     rows: list[dict[str, JsonValue]] = []
     for document in frame_records(documents):
-        adapter = AdapterSpec.model_validate({
-            "format": document["format"], "text_field": document["text_field"],
-            "context_field": document["context_field"], "rationale": "Declared category manifest mapping.",
-        })
+        adapter = AdapterSpec.model_validate(
+            {
+                "format": document["format"],
+                "text_field": document["text_field"],
+                "context_field": document["context_field"],
+                "rationale": "Declared category manifest mapping.",
+            }
+        )
         rows.append({"source_id": document["source_id"], **adapter.model_dump(mode="json")})
     return validated_frame(rows, DocumentAdaptersTable)

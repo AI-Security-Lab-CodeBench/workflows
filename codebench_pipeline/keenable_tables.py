@@ -12,7 +12,14 @@ from codebench_pipeline.dataframe_schemas import (
     validated_frame,
 )
 from codebench_pipeline.keenable import KeenableCollection
-from codebench_pipeline.keenable_policy import PAGE_CASES, KeenableError, PagePermission, SourcePermission
+from codebench_pipeline.keenable_policy import (
+    PAGE_CASES,
+    CurrentSourcePermission,
+    KeenableDeclaration,
+    KeenableError,
+    PagePermission,
+    Permission,
+)
 from codebench_pipeline.keenable_receipts import (
     AdapterReceipt,
     CandidateReceipt,
@@ -53,12 +60,18 @@ def provider_catalog(collection: KeenableCollection) -> DataFrame[SourceCatalogT
                 "captured_content": "",
                 "decision": "selected" if permission is not None and lead.excluded is None else "exclude",
                 "rationale": lead.excluded or ("permission" if permission is not None else "withheld"),
-                "analysis": "",
+                "analysis": (
+                    _rights_description(permission) if isinstance(permission, CurrentSourcePermission) else ""
+                ),
                 "confidence": "not_applicable",
             }
             for lead in catalog.leads
             for permission in (permissions.get(lead.url),)
-            for license_ in (permission.public_license if isinstance(permission, SourcePermission) else None,)
+            for license_ in (
+                permission.public_license
+                if permission is not None and not isinstance(permission, PagePermission)
+                else None,
+            )
         ],
         SourceCatalogTable,
     )
@@ -71,7 +84,7 @@ def provider_documents(
 ) -> DataFrame[SourceDocumentsTable]:
     lock = collection.capture(CatalogReceipt.model_validate_json(catalog.attrs[PROVIDER_RECEIPT]))
     bodies = collection.read_bodies(lock)
-    permissions: dict[str, PagePermission | SourcePermission] = {}
+    permissions: dict[str, Permission] = {}
     for page in lock.pages:
         permission = collection.declaration.authority(page.url, page.case or PAGE_CASES[page.url])
         if permission is None:
@@ -98,7 +111,7 @@ def provider_documents(
             }
             for page in lock.pages
             for permission in (permissions[page.url],)
-            for license_ in (permission.public_license if isinstance(permission, SourcePermission) else None,)
+            for license_ in (None if isinstance(permission, PagePermission) else permission.public_license,)
         ],
         SourceDocumentsTable,
     )
@@ -146,9 +159,10 @@ def provider_candidates(
                 "source_url": candidate.url,
                 "source_position": f"bytes:{candidate.start}:{candidate.end}",
                 "transformations": [
-                    "literal-code-blocks-v2"
-                    if collection.declaration.revision == "2"
-                    else "reviewed-byte-spans-v1"
+                    "reviewed-byte-spans-v1"
+                    if isinstance(collection.declaration, KeenableDeclaration)
+                    and collection.declaration.revision == "1"
+                    else "literal-code-blocks-v2"
                 ],
                 "risk_candidates": [],
             }
@@ -159,3 +173,13 @@ def provider_candidates(
     frame.attrs[PROVIDER_RECEIPT] = CANDIDATE_RECEIPTS.dump_json(candidates).decode()
     frame.attrs["keenable_capture_lock"] = lock.model_dump_json()
     return frame
+
+
+def _rights_description(permission: CurrentSourcePermission) -> str:
+    match permission.rights.kind:
+        case "pinned_license_file":
+            return "Pinned license file; capture verifies the evidence bytes"
+        case "page_notice":
+            return "Declared evidence metadata; capture checks the notice in the page"
+        case "steward_decision":
+            return "Declared steward decision and evidence metadata; no runtime lookup"

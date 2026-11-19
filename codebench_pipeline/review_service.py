@@ -29,7 +29,8 @@ class AnnotationReviewSource:
         self.snapshots = snapshots
 
     def current(self, dataset_id: str) -> ReviewInput:
-        columns = tuple(self.snapshots.data.specification(dataset_id).publication.review_columns)
+        spec = self.snapshots.data.specification(dataset_id)
+        columns = tuple(spec.publication.review_columns)
         resolved = self.snapshots.capture(dataset_id, columns)
         reviewed = pd.DataFrame(resolved.reviewed, copy=False)
         uncertain = reviewed.loc[reviewed["candidate_id"].isin(resolved.snapshot.candidate_ids)].copy()
@@ -39,6 +40,7 @@ class AnnotationReviewSource:
             "candidate_id",
             validation=annotation_review_validation(resolved.rules),
             evidence={"manifest": resolved.manifest.model_dump(mode="json")},
+            column_schema={"command": {"editable": False}} if spec.has_declared_collection else {},
         )
 
     def evidence(self, snapshot: ReviewSnapshot, candidate_id: str) -> EvidenceResponse:

@@ -21,7 +21,7 @@ from codebench_pipeline.annotation_cache import (
     reviewer_cache_lock,
     save_cached_invocation,
 )
-from codebench_pipeline.category_rules import CategoryRules
+from codebench_pipeline.category_rules import CategoryRules, ClassRule, RiskRule, SeverityRule, StrictModel
 from codebench_pipeline.dataset_documentation_models import command_operations
 from codebench_pipeline.dataset_records import (
     CandidateRecord,
@@ -61,6 +61,27 @@ def label_schema(candidate: CandidateRecord, rules: CategoryRules) -> type[Label
     )
 
 
+class PromptRisk(StrictModel):
+    id: str
+    name: str
+    definition: str
+    guidance: str
+
+    @classmethod
+    def from_rule(cls, rule: RiskRule) -> PromptRisk:
+        return cls(id=rule.id, name=rule.name, definition=rule.definition, guidance=rule.guidance)
+
+
+class PromptTaxonomy(StrictModel):
+    category_id: str
+    category_name: str
+    version: str
+    risks: list[PromptRisk]
+    classes: list[ClassRule]
+    severities: list[SeverityRule]
+    description_language: str
+
+
 def request(
     candidate: CandidateRecord,
     docs: list[SemanticSnippet],
@@ -71,14 +92,15 @@ def request(
         (
             rules.base_prompt,
             rules.policy,
-            rules.model_dump_json(
-                exclude={
-                    "policy": True,
-                    "base_prompt": True,
-                    "examples": True,
-                    "risks": {"__all__": {"command_patterns", "shell_routes"}},
-                }
-            ),
+            PromptTaxonomy(
+                category_id=rules.category_id,
+                category_name=rules.category_name,
+                version=rules.version,
+                risks=[PromptRisk.from_rule(rule) for rule in rules.risks],
+                classes=rules.classes,
+                severities=rules.severities,
+                description_language=rules.description_language,
+            ).model_dump_json(),
         )
     )
     payload: dict[str, JsonValue] = {

@@ -38,6 +38,8 @@ class AdapterPlan(FrozenModel):
 
 
 class SemanticSnippet(FrozenModel):
+    model_config = ConfigDict(strict=True)
+
     utility: str = Field(min_length=1)
     subcommands: list[str] = Field(min_length=1)
     url: str = Field(pattern=r"^https?://")

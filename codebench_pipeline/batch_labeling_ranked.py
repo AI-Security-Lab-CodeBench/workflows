@@ -12,7 +12,7 @@ from codebench_pipeline.batch_labeling_config import BatchLabelingConfig
 from codebench_pipeline.category_rules import CategoryRules
 from codebench_pipeline.command_batches import similarity_batches
 from codebench_pipeline.dataset_finalization import normalized_command
-from codebench_pipeline.dataset_records import CandidateRecord, LabelDecision, index_records, routing
+from codebench_pipeline.dataset_records import CandidateRecord, index_records, routing
 from codebench_pipeline.labeling_outcomes import LabelingAttempt, failed_attempt, validate_attempts
 from codebench_pipeline.model_config import ModelConfig
 from codebench_pipeline.repository_config import SourceWeight
@@ -104,9 +104,9 @@ class RankedLabeling:
                         update={"attempt_evidence_reference": (packet_path / reference).as_posix()}
                     )
                 )
-                if attempt.status != "success":
+                label = attempt.label
+                if label is None:
                     continue
-                label = LabelDecision.model_validate_json(attempt.label_json)
                 if (
                     label.decision == "accept"
                     and label.category_id == self.rules.category_id

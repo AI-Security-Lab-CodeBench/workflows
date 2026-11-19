@@ -2,7 +2,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from .keenable_policy import Case, Digest, Identity, Media, PagePermission, Record, SourcePermission
+from .keenable_policy import Case, Digest, Identity, Media, Permission, Record
 
 
 class _Hit(BaseModel):
@@ -29,7 +29,7 @@ class Lead(Record):
 
 class SelectedPage(Record):
     lead: Lead
-    permission: PagePermission | SourcePermission | None
+    permission: Permission | None
     state: Literal["pending", "withheld"]
 
 

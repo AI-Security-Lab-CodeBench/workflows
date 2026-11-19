@@ -1,6 +1,11 @@
 from pathlib import Path
 
-from codebench_pipeline.business_config import DEFAULT_BASE_PROMPT, load_business_rules, read_prompt
+from codebench_pipeline.business_config import (
+    DEFAULT_BASE_PROMPT,
+    LEGACY_BASE_PROMPT,
+    load_business_rules,
+    read_prompt,
+)
 from codebench_pipeline.dataset_config import (
     AdapterConfig,
     AnnotationConfig,
@@ -117,5 +122,6 @@ def resolve_labeling_inputs(spec: DatasetBuildSpec) -> DatasetBuildSpec:
         else spec.rules
     )
     if spec.business_config is None and not rules.base_prompt:
-        rules = rules.model_copy(update={"base_prompt": read_prompt(DEFAULT_BASE_PROMPT)})
+        prompt = LEGACY_BASE_PROMPT if LEGACY_BASE_PROMPT.is_file() else DEFAULT_BASE_PROMPT
+        rules = rules.model_copy(update={"base_prompt": read_prompt(prompt)})
     return spec.model_copy(update={"rules": rules})

@@ -25,7 +25,6 @@ from codebench_pipeline.collection_config import CAT3_DATASET_ID
 from codebench_pipeline.config_assets import (
     ConfigRunIOManager,
     configuration_assets,
-    configuration_key,
     configured_selection,
 )
 from codebench_pipeline.dataframe_io import DataFrameIOManager
@@ -64,15 +63,10 @@ def build_definitions(home: Path, *, specification: DatasetBuildSpec | None = No
     declared = specification is not None and specification.has_declared_collection
     branches = collection_branches(declared=declared)
     stages = preparation_stages(declared=declared)
+    config_definitions = configuration_assets(home, declared=declared)
 
-    def with_configuration(spec: AssetSpec) -> AssetSpec:
-        described = describe_stage(spec, declared=declared)
-        upstream = configuration_key("/".join(spec.key.path[1:]))
-        return (
-            described
-            if upstream in {dep.asset_key for dep in spec.deps}
-            else described.merge_attributes(deps=[upstream])
-        )
+    def described(spec: AssetSpec) -> AssetSpec:
+        return describe_stage(spec, declared=declared)
 
     existing_sources = source_assets()
     if declared:
@@ -86,7 +80,7 @@ def build_definitions(home: Path, *, specification: DatasetBuildSpec | None = No
         sources = [*existing_sources, *source_assets("documentation")]
     processing = processing_assets()
     assets = [
-        definition.map_asset_specs(with_configuration)
+        definition.map_asset_specs(described)
         for definition in [
             *sources,
             *(processing[:1] if declared else processing),
@@ -107,6 +101,11 @@ def build_definitions(home: Path, *, specification: DatasetBuildSpec | None = No
             release_run_config(matching_spec(key), home).to_config_dict()
         )
 
+    def configuration_only_config(key: str) -> dict[str, JsonValue]:
+        return TypeAdapter(dict[str, JsonValue]).validate_python(
+            dataset_run_config(matching_spec(key), home, configuration_only=True).to_config_dict()
+        )
+
     def matching_spec(key: str) -> DatasetBuildSpec:
         spec = registry.get(key)
         if spec.has_declared_collection != declared:
@@ -121,7 +120,9 @@ def build_definitions(home: Path, *, specification: DatasetBuildSpec | None = No
         name="build_dataset",
         description="Process eligible corpus and documentation inventories without source approval.",
         selection=AssetSelection.assets(
-            *configured_selection(AssetKey(["datasets", *name.split("/")]) for name in stages)
+            *configured_selection(
+                (AssetKey(["datasets", *name.split("/")]) for name in stages), declared=declared
+            )
         ),
         partitions_def=DATASET_PARTITIONS,
         config=PartitionedConfig(
@@ -142,8 +143,11 @@ def build_definitions(home: Path, *, specification: DatasetBuildSpec | None = No
             description=f"Acquire and extract {branch} candidates independently of labeling and review.",
             selection=AssetSelection.assets(
                 *configured_selection(
-                    AssetKey(["datasets", *stage.split("/")])
-                    for stage in collection_selection(branch, declared=declared)
+                    (
+                        AssetKey(["datasets", *stage.split("/")])
+                        for stage in collection_selection(branch, declared=declared)
+                    ),
+                    declared=declared,
                 )
             ),
             partitions_def=DATASET_PARTITIONS,
@@ -172,7 +176,9 @@ def build_definitions(home: Path, *, specification: DatasetBuildSpec | None = No
                 name="prepare_dataset",
                 description="Acquire and filter all three branches before labeling.",
                 selection=AssetSelection.assets(
-                    *configured_selection(AssetKey(["datasets", *name.split("/")]) for name in prepare)
+                    *configured_selection(
+                        (AssetKey(["datasets", *name.split("/")]) for name in prepare), declared=True
+                    )
                 ),
                 partitions_def=DATASET_PARTITIONS,
                 config=PartitionedConfig(
@@ -187,15 +193,24 @@ def build_definitions(home: Path, *, specification: DatasetBuildSpec | None = No
         description="Release eligible low-uncertainty rows automatically; uncertain rows require completed human review.",
         selection=AssetSelection.assets(
             *configured_selection(
-                AssetKey(["datasets", name])
-                for name in RELEASE_STAGES
-                if not name.startswith("documentation/")
+                (AssetKey(["datasets", name]) for name in RELEASE_STAGES), declared=declared
             )
         ),
         partitions_def=DATASET_PARTITIONS,
         config=PartitionedConfig(
             DATASET_PARTITIONS,
             run_config_for_partition_key_fn=release_config,
+            tags_for_partition_key_fn=partition_tags,
+        ),
+    )
+    configuration_job = UnresolvedAssetJobDefinition(
+        name="refresh_dataset_configuration",
+        description="Materialize registered settings and category rules without running processing stages.",
+        selection=AssetSelection.assets(*config_definitions).upstream(),
+        partitions_def=DATASET_PARTITIONS,
+        config=PartitionedConfig(
+            DATASET_PARTITIONS,
+            run_config_for_partition_key_fn=configuration_only_config,
             tags_for_partition_key_fn=partition_tags,
         ),
     )
@@ -244,8 +259,8 @@ def build_definitions(home: Path, *, specification: DatasetBuildSpec | None = No
         )
 
     return Definitions(
-        assets=[*configuration_assets(home, declared=declared), *assets, bashguard_syntax_audit],
-        jobs=[job, *collection_jobs, release_job, bashguard_audit_job(home)],
+        assets=[*config_definitions, *assets, bashguard_syntax_audit],
+        jobs=[job, *collection_jobs, release_job, configuration_job, bashguard_audit_job(home)],
         sensors=[
             SensorDefinition(name="dataset_build_requests", job=job, evaluation_fn=dataset_build_requests)
         ],

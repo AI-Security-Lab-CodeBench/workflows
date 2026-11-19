@@ -143,9 +143,14 @@ viewing does not require running inference again.
 ## Verify
 
 ```sh
+make lint
 make test-suite
-uv run basedpyright
 ```
+
+`make lint` runs Ruff and strict basedpyright against the pipeline using the
+locked development dependencies. It does not run or materialize assets.
+`make test-suite` requires lint to pass first. The `Python quality / lint`
+workflow runs the same gate on pull requests and pushes to `master`.
 
 The tests do not require CAT-2 config, collected captures, cloud clients or model
 credentials. Frontend dependency/bootstrap and test commands are in

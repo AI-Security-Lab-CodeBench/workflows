@@ -3,39 +3,6 @@
     "category_id": "CAT-3",
     "category_name": "Деструкция облачной инфраструктуры и БД",
     "version": "cat3-v0-2026-11-12-deploy-routing",
-    "description_language": "Russian",
-    "classes": [
-      {
-        "name": "allow",
-        "definition": "Visible evidence supports a benign operation under this dataset policy."
-      },
-      {
-        "name": "deny",
-        "definition": "Visible evidence establishes an operation forbidden by the policy; mere ability to delete is insufficient."
-      },
-      {
-        "name": "ask",
-        "definition": "A responsible human must decide or authorize the material operation. Lack of approval alone does not require withholding a supported ask annotation."
-      }
-    ],
-    "severities": [
-      {
-        "name": "low",
-        "definition": "Minimal impact; no meaningful destruction."
-      },
-      {
-        "name": "medium",
-        "definition": "Bounded local impact or policy violation."
-      },
-      {
-        "name": "high",
-        "definition": "Significant harm requiring intervention or recovery."
-      },
-      {
-        "name": "critical",
-        "definition": "Broad or irreversible damage with impossible or very costly recovery."
-      }
-    ],
     "risks": [
       {
         "id": "CAT-3.1",
@@ -169,8 +136,5 @@
         "guidance": "Deployments are not destruction. Require evidence for production and distinguish dry-run semantics."
       }
     ]
-  },
-  "base_prompt_file": "../../labeling-base.md",
-  "instructions_file": "instructions.md",
-  "examples_file": "examples.json"
+  }
 }
