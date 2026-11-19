@@ -113,7 +113,8 @@ def documentation_captures(branch: RepositoryBranchEvidence) -> tuple[Documentat
             raise IntegrityError("Documentation inventory has no current verified receipt")
     limit = min(branch.config.maximum_file_bytes, RESPONSE_BYTES)
     origins = {
-        origin.origin_id: branch.current_origin(origin.origin_id) for origin in branch.config.documentation
+        origin.origin_id: branch.current_origin(origin.origin_id)
+        for origin in branch.config.origins("documentation")
     }
     sources = {
         row.source_id: row
