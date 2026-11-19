@@ -2,16 +2,19 @@
 
 ## Source-driven collection
 
-The graph has three independently selectable branches. Existing
-datasets use unprefixed collection keys; documentation uses `documentation/`;
-Keenable uses `keenable/`. Each branch owns the following four artifacts:
+The graph has three independently selectable branches. Each one reads a
+declaration captured as data for the run. Review its actual origins or search
+permissions in the branch's config asset. Runtime storage locations are not
+collection settings.
 
-| Stage | Why it exists | What to inspect before labeling |
+| Branch | Asset sequence (within the branch namespace) | What to inspect before labeling |
 | --- | --- | --- |
-| `source_catalog` | Establish the exact scope before downloading it. Repository branches enumerate pinned trees; Keenable records ranked leads from its configured queries. | Selected and excluded entries, scope completeness and reasons. A lead is not permission to copy a page. |
-| `source_documents` | Preserve what the parser actually read, independently of what discovery returned. | Original captured bytes, hashes, source permissions and receipts. An empty capture cannot stand in for a failed download. |
-| `document_adapters` | Bind a captured source to the reviewed parser that understands its format. | Parser identity and digest. A parser is trusted configuration; commands in source documents are inert data. |
-| `command_candidates` | Extract command occurrences while their original context and location are available. | Trace a candidate back to its source and exact byte range; inspect exclusions and parser transformations. |
+| Existing datasets (unprefixed) | `enumerate_corpus_files` → `capture_corpus_files` → `command_candidates` | Check admitted files and exclusions against each pinned repository tree. Check captured bytes against the inventory before tracing extracted rows to the reviewed parser and source position. |
+| Documentation (`documentation/`) | `capture_documentation` → `command_candidates` | Inspect scope and permission evidence alongside the captured documents. The parser reads these captures and preserves the location of each example. |
+| Keenable (`keenable/`) | `discover_use_cases` → `capture_origin_pages` → `command_candidates` | Inspect the search leads separately from the permitted origin captures. A search result alone cannot supply a candidate. Check extracted spans against verified origin bytes. |
+
+A failed integrity or permission check cannot be treated as a successful empty
+collection. Parser bindings belong to the extraction that consumes them.
 
 `merged_command_candidates` joins the configured branches and retains original
 identities. `filtered_commands` applies the common eligibility filters. The

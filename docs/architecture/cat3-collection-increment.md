@@ -1,5 +1,9 @@
 # CAT-3 collection increment
 
+Historical design record. The four-stage template and path-bearing declaration
+examples below are superseded for new runs. Use the [active collection graph](cat3-collection-flow.md)
+and [stage reference](../pipeline-stages.md) for current behavior.
+
 **Status:** The independent [review](cat3-collection-review.md) passed and the human owner approved the [revised Mermaid flow](cat3-collection-flow.md) for implementation on November 18, 2026. Source eligibility, QA and release authorization still require their own evidence.
 
 **Production target:** The existing `cloud_infrastructure_commands_grounded_v1` partition of `dataset_builds`, with one `datasets/dataset_release`. Keep the current corpus and documentation scopes, add at least two independent eligible corpus origins, and add a Keenable administrative-use-case branch. Guarded labeling consumes candidate provenance and acquires other evidence on demand; it retains verified snippets and receipts with attempts. Release requires the current outputs of all configured branches and the existing labeling and review gates.

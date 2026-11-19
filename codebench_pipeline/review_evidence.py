@@ -3,11 +3,12 @@ from hashlib import sha256
 from typing import assert_never
 
 import pandas as pd
-from pydantic import JsonValue, TypeAdapter
+from pydantic import JsonValue, RootModel, TypeAdapter
 
 from codebench_pipeline.category_rules import CategoryRules
 from codebench_pipeline.dataframe_io import DataFrameIOManager
 from codebench_pipeline.dataframe_schemas import frame_records, model_records
+from codebench_pipeline.dataset_branches import COLLECTION_BRANCHES, stage_name
 from codebench_pipeline.dataset_records import CandidateRecord, routing
 from codebench_pipeline.human_review import HumanReviewError, ReviewSnapshot
 from codebench_pipeline.object_store import ObjectStore
@@ -49,7 +50,7 @@ def _inference(
             text = store.read(matched.group(1)).decode("utf-8")
             filename = name.removeprefix(prefix)
             if filename.endswith(".json"):
-                value = TypeAdapter(JsonValue).validate_json(text)
+                value = RootModel[JsonValue].model_validate_json(text).root
                 if filename == "receipt.json":
                     receipt = TypeAdapter(dict[str, JsonValue]).validate_python(value)
                     value = {key: item for key, item in receipt.items() if key != "provider_config"}
@@ -58,6 +59,15 @@ def _inference(
                 artifacts[filename] = text
         result[evidence_stage] = artifacts
     return result
+
+
+def evidence_capture_stage(manifest: ReviewManifest, branch: JsonValue) -> str:
+    """Resolve the source table recorded by this immutable review manifest."""
+    descriptor = next(
+        (item for item in COLLECTION_BRANCHES if item.namespace == branch), COLLECTION_BRANCHES[0]
+    )
+    current = stage_name(descriptor.capture, descriptor.namespace)
+    return current if current in manifest.references else stage_name("source_documents", descriptor.namespace)
 
 
 def review_evidence(
@@ -83,26 +93,28 @@ def review_evidence(
     branch_prefix = "documentation/" if origin.get("branch") == "documentation" else ""
     sources = [
         source
-        for source in frame_records(snapshots.frame(manifest, f"{branch_prefix}source_documents"))
+        for source in frame_records(
+            snapshots.frame(manifest, evidence_capture_stage(manifest, origin.get("branch")))
+        )
         if source["source_id"] == origin.get("source_id", row["source_id"])
     ]
     if len(sources) != 1:
         raise HumanReviewError("conflict", "Immutable review evidence lacks a unique source")
-    documentation: list[JsonValue] = [
-        doc
-        for doc in frame_records(
-            snapshots.frame(
-                manifest,
-                "labeling_documentation" if shared_processing else f"{branch_prefix}labeling_documentation",
-            )
-        )
-        if doc["utility"] == row["util"]
-        or doc["url"] in TypeAdapter(list[str]).validate_python(row["documentation_urls"], strict=True)
-    ]
+    documentation: list[JsonValue]
     if "labeling_attempts" in manifest.references:
         documentation = TypeAdapter(list[JsonValue]).validate_python(
             frame.attrs.get("row_documentation", {}).get(candidate_id, [])
         )
+    else:
+        documentation_stage = (
+            "labeling_documentation" if shared_processing else f"{branch_prefix}labeling_documentation"
+        )
+        urls = TypeAdapter(list[str]).validate_python(row["documentation_urls"], strict=True)
+        documentation = [
+            doc
+            for doc in frame_records(snapshots.frame(manifest, documentation_stage))
+            if doc["utility"] == row["util"] or doc["url"] in urls
+        ]
     duplicates = TypeAdapter(list[dict[str, JsonValue]]).validate_python(frame.attrs.get("duplicates", []))
     duplicate_evidence: list[JsonValue] = []
     merged_stage = next(
@@ -135,7 +147,11 @@ def review_evidence(
                     "origin": {key: value for key, value in duplicate_origin.items()},
                     "source_document": next(
                         source
-                        for source in frame_records(snapshots.frame(manifest, f"{prefix}source_documents"))
+                        for source in frame_records(
+                            snapshots.frame(
+                                manifest, evidence_capture_stage(manifest, duplicate_origin.get("branch"))
+                            )
+                        )
                         if source["source_id"] == duplicate_origin["source_id"]
                     ),
                     "inference": _inference(manifest, duplicate_origin["candidate_id"], prefix, identifier),
@@ -161,9 +177,9 @@ def review_evidence(
             "source_document": sources[0],
             "documentation": documentation,
             "taxonomy": rules,
-            "label_correction_risk_ids": correction_risks,
+            "label_correction_risk_ids": TypeAdapter(list[JsonValue]).validate_python(correction_risks),
             "origin": origin,
-            "duplicates": TypeAdapter(JsonValue).validate_python(frame.attrs.get("duplicates", [])),
+            "duplicates": TypeAdapter(list[JsonValue]).validate_python(frame.attrs.get("duplicates", [])),
             "duplicate_evidence": duplicate_evidence,
             "inference": _inference(
                 manifest,

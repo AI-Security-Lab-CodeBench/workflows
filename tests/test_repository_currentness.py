@@ -4,11 +4,10 @@ from unittest import TestCase
 from unittest.mock import patch
 
 from pydantic import ValidationError
-from test_repository import CONFIG, TLDR, RepositoryFixture
+from test_repository import TLDR, RepositoryFixture, repository_config_fixture
 
 from codebench_pipeline.repository import (
     RepositoryRun,
-    load_repository_config,
     repository_adapters,
     repository_candidates,
     repository_catalog,
@@ -22,7 +21,7 @@ class RepositoryCurrentnessTests(TestCase):
     def setUp(self) -> None:
         home = self.enterContext(TemporaryDirectory())
         self.run_context = RepositoryRun(Path(home), "cat3-isolation", "run")
-        shipped = load_repository_config(CONFIG)
+        shipped = repository_config_fixture()
         cheat = RepositoryFixture(shipped.dataset[0])
         cheat.file("docker", b"docker ps --all\n")
         docs = RepositoryFixture(shipped.documentation[0])
@@ -106,7 +105,7 @@ class RepositoryCurrentnessTests(TestCase):
 
     def test_declared_parser_can_change_without_changing_scope_or_capture(self) -> None:
         home = self.run_context
-        shipped = load_repository_config(CONFIG)
+        shipped = repository_config_fixture()
         kube = RepositoryFixture(shipped.dataset[1])
         kube.file("sample/README.md", b"```bash\nkubectl get pods\n```\n\n`kubectl get services`\n")
         old = self.config.model_copy(update={"dataset": (kube.declaration(),)})

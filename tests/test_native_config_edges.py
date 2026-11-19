@@ -15,11 +15,18 @@ class NativeConfigEdgesTests(TestCase):
                 Path(home), specification=fixture_spec(Path(home))
             ).resolve_asset_graph()
 
-        branch_stages = ("source_catalog", "source_documents", "document_adapters", "command_candidates")
         branch_mappings = (
-            ((), "existing_datasets"),
-            (("documentation",), "documentation_crawl"),
-            (("keenable",), "keenable_use_cases"),
+            (
+                (),
+                "existing_datasets",
+                ("enumerate_corpus_files", "capture_corpus_files", "command_candidates"),
+            ),
+            (("documentation",), "documentation_crawl", ("capture_documentation", "command_candidates")),
+            (
+                ("keenable",),
+                "keenable_use_cases",
+                ("discover_use_cases", "capture_origin_pages", "command_candidates"),
+            ),
         )
         shared = (
             "merged_command_candidates",
@@ -35,7 +42,7 @@ class NativeConfigEdgesTests(TestCase):
         )
         expected = {
             AssetKey(["datasets", *prefix, stage]): AssetKey(["datasets", f"map_{scope}_config"])
-            for prefix, scope in branch_mappings
+            for prefix, scope, branch_stages in branch_mappings
             for stage in branch_stages
         } | {AssetKey(["datasets", stage]): AssetKey(["datasets", f"map_{stage}_config"]) for stage in shared}
         rules = AssetKey(["datasets", "category_rules"])

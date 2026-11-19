@@ -1,17 +1,17 @@
 import json
 
 from dagster import Config
+from pydantic import JsonValue
 
 from codebench_pipeline.category_rules import CategoryRulesConfig
 from codebench_pipeline.collection_config import CollectionMergeConfig, DeclaredSourceStageConfig
-from codebench_pipeline.dataset_branches import Branch, collection_branches, stage_name
+from codebench_pipeline.dataset_branches import BRANCH_BY_NAMESPACE, Branch, collection_branches, stage_name
 from codebench_pipeline.dataset_config import (
     DatasetBuildSpec,
     catalog_for_branch,
     snapshots_for_branch,
 )
 from codebench_pipeline.keenable_policy import KeenableDeclaration
-from codebench_pipeline.repository_config import RepositoryConfig
 from codebench_pipeline.review_config import HumanReviewConfig
 from codebench_pipeline.storage import IntegrityError, fingerprint
 from codebench_pipeline.typed_config import TypedConfig
@@ -20,14 +20,7 @@ from codebench_pipeline.typed_config import TypedConfig
 def finalization_stage_configs(spec: DatasetBuildSpec) -> dict[str, Config]:
     merge: TypedConfig = TypedConfig()
     if spec.declared_collection is not None:
-        collection = spec.declared_collection
-        dataset = RepositoryConfig.model_validate(collection.existing_datasets.declaration)
-        docs = RepositoryConfig.model_validate(collection.documentation_crawl.declaration)
-        if dataset.keenable_source_weight != docs.keenable_source_weight or max(
-            dataset.source_weight("dataset", origin.origin_id) for origin in dataset.dataset
-        ) >= min(docs.source_weight("documentation", origin.origin_id) for origin in docs.documentation):
-            raise IntegrityError("Collection declarations disagree on source trust tiers")
-        merge = CollectionMergeConfig(keenable_source_weight=dataset.keenable_source_weight)
+        merge = CollectionMergeConfig(keenable_source_weight=spec.declared_collection.keenable_source_weight)
     return {
         "merged_command_candidates": merge,
         "filtered_commands": spec.filtering,
@@ -46,10 +39,7 @@ def finalization_stage_configs(spec: DatasetBuildSpec) -> dict[str, Config]:
 def collection_stage_configs(spec: DatasetBuildSpec, branch: Branch) -> dict[str, Config]:
     if spec.declared_collection is not None:
         config = declared_source_config(spec, branch)
-        return {
-            stage_name(name, branch): config
-            for name in ("source_catalog", "source_documents", "document_adapters", "command_candidates")
-        }
+        return {stage_name(name, branch): config for name in BRANCH_BY_NAMESPACE[branch].declared_stages}
     adapters, extraction = {
         "dataset": (spec.adapters, spec.extraction),
         "documentation": (
@@ -65,6 +55,15 @@ def collection_stage_configs(spec: DatasetBuildSpec, branch: Branch) -> dict[str
             "document_adapters": adapters,
             "command_candidates": extraction,
         }.items()
+    }
+
+
+def collection_asset_settings(spec: DatasetBuildSpec, branch: Branch) -> dict[str, JsonValue]:
+    """Serialize one scoped declaration for the branch's same-run config mapping."""
+    return {
+        "collection": declared_source_config(spec, branch).model_dump(
+            mode="json", exclude={"source": {"source_list"}}, exclude_none=True
+        )
     }
 
 

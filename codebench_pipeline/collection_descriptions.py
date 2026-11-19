@@ -1,53 +1,53 @@
 from typing import Final
 
-REPOSITORY_DESCRIPTIONS: Final = {
-    "source_catalog": (
-        "Enumerate complete, pinned repository scopes and check their rights evidence before "
-        "classifying files for capture. SourceCatalogTable retains selected files, exclusions "
-        "and their source pins. Incomplete trees or invalid mandatory evidence stop the branch."
+DECLARED_COLLECTION_DESCRIPTIONS: Final = {
+    "enumerate_corpus_files": (
+        "Read the pinned corpus trees and match their files to the declared scopes after checking "
+        "rights. The SourceCatalogTable records admitted and excluded paths. An incomplete tree or "
+        "missing rights evidence stops the branch. Reuse this index when retrying capture."
     ),
-    "source_documents": (
-        "Fetch every eligible pinned file and compare its Git blob and content hashes. "
-        "SourceDocumentsTable retains the inert body and attribution with capture receipts. "
-        "A required capture that cannot be verified fails the branch."
-    ),
-    "document_adapters": (
-        "Assign each captured file its reviewed parser or approved ETL mapping. "
-        "DocumentAdaptersTable binds that mapping to the captured file. Unapproved parsers, "
-        "transforms or changed bytes stop the branch."
+    "capture_corpus_files": (
+        "Fetch the admitted files from the stored corpus index and check their Git blob and content "
+        "hashes. SourceDocumentsTable retains verified text and attribution. Failed mandatory captures "
+        "stop extraction; verified blobs can be reused on retry."
     ),
     "command_candidates": (
-        "Apply each authorized adapter to recover literal commands and their original positions. "
-        "CommandCandidatesTable retains the original source IDs and capture evidence before shared "
-        "filtering. Invalid adapter bindings or canonical rows fail extraction."
+        "Resolve each captured corpus file's approved ETL against the deployment allowlist, then run it "
+        "against verified bytes. CommandCandidatesTable retains inert commands, input positions and "
+        "transformations. A changed capture or unapproved ETL fails extraction."
+    ),
+    "documentation/capture_documentation": (
+        "Verify the pinned documentation trees, apply the declared scope and rights checks, and capture "
+        "every admitted file in one asset. SourceDocumentsTable retains verified text and attribution; "
+        "its evidence includes excluded paths. Missing mandatory files or rights block the branch."
+    ),
+    "documentation/command_candidates": (
+        "Use the approved documentation parser on the verified captures to extract literal examples and "
+        "nearby context. CommandCandidatesTable links each example to its original file and position. "
+        "A changed capture or unapproved parser fails extraction."
+    ),
+    "keenable/discover_use_cases": (
+        "Record the leads from bounded, scoped searches and declared reference URLs. SourceCatalogTable "
+        "exposes selections and exclusions before any selected page is captured. A failed or ambiguous "
+        "search stops the generation."
+    ),
+    "keenable/capture_origin_pages": (
+        "Verify usage rights and fetch the selected pages directly from their origins. "
+        "SourceDocumentsTable stores the verified text and the capture lock. Withheld pages add no "
+        "rows; an uncertain or failed mandatory request blocks the generation."
+    ),
+    "keenable/command_candidates": (
+        "Resolve the permitted parser and byte spans against the capture lock, then read the literal "
+        "administrative examples. CommandCandidatesTable retains exact positions and capture evidence. "
+        "A healthy empty generation is valid; an invalid lock or span binding blocks extraction."
     ),
 }
-PROVIDER_DESCRIPTIONS: Final = {
-    "source_catalog": (
-        "Combine declared reference URLs with results of configured searches, apply the permitted "
-        "source scopes, and freeze the eligible URLs. SourceCatalogTable exposes the selection and exclusions. "
-        "A failed or ambiguous search stops the generation."
-    ),
-    "source_documents": (
-        "Capture authorized pages once for extraction and labeling. SourceDocumentsTable "
-        "retains verified text and attribution alongside a capture lock. Withheld pages add no "
-        "rows; failure to verify a required capture stops the generation."
-    ),
-    "document_adapters": (
-        "Bind the permitted byte spans and parser to each locked page. DocumentAdaptersTable "
-        "shows the mapping used by extraction. A missing or changed capture cannot authorize a mapping."
-    ),
-    "command_candidates": (
-        "Read the literal administrative examples at the authorized byte spans and retain "
-        "their capture hashes and source positions in CommandCandidatesTable. A healthy empty "
-        "generation is valid; an invalid lock or adapter blocks extraction."
-    ),
-}
+
 FINALIZATION_DESCRIPTIONS: Final = {
     "merged_command_candidates": (
         "Combine the current typed candidate tables from the three registered collection branches. "
-        "CommandCandidatesTable namespaces candidate and source IDs and retains the originals and "
-        "acquisition receipts and each row's configured source weight. Any unavailable or stale branch blocks the merge."
+        "CommandCandidatesTable prefixes candidate and source IDs with the branch and retains the originals, "
+        "acquisition receipts and source weights. Any unavailable or stale configured branch blocks the merge."
     ),
     "labeling_attempts": (
         "Consider eligible commands from the highest-trust sources first. Use the verified source "

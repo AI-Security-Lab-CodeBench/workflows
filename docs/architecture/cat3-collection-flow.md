@@ -1,37 +1,29 @@
-# Proposed CAT-3 Dagster flow
+# CAT-3 Dagster flow
 
 Three-branch collection design.
 All three branches use the existing `dataset_builds` partition,
 `cloud_infrastructure_commands_grounded_v1`. Solid lines carry persisted data;
-dotted lines supply scoped configuration. The collection diagram is a template
-instantiated three times. Exact keys and direct edges are specified in the
-[increment's dependency table](cat3-collection-increment.md#asset-keys-and-direct-dependencies).
+dotted lines supply scoped configuration. Each branch has its own acquisition
+boundaries. The [stage reference](../pipeline-stages.md) explains what to inspect.
 
 ```mermaid
 flowchart LR
   G[global_config] -.-> R[category_rules]
-  G -.-> M[Branch config mapping]
-  R -.-> M
-  M -.-> C[source_catalog]
-  M -.-> D[source_documents]
-  M -.-> A[document_adapters]
-  M -.-> O[command_candidates]
-  C --> D
-  D --> A
-  D --> O
-  A --> O
+  G -.-> DS[Existing datasets config]
+  G -.-> DC[Documentation config]
+  G -.-> KC[Keenable config]
+  DS -.-> I[enumerate_corpus_files]
+  I --> C[capture_corpus_files] --> X[command_candidates]
+  DC -.-> D[documentation/capture_documentation]
+  D --> Y[documentation/command_candidates]
+  KC -.-> S[keenable/discover_use_cases]
+  S --> P[keenable/capture_origin_pages] --> Z[keenable/command_candidates]
 ```
 
-| Instance | Catalog | Documents | Adapter and candidates |
-|---|---|---|---|
-| Existing datasets | Enumerate eligible files from configured, pinned corpus origins. | Capture original bytes and verify integrity. | Apply the source's reviewed, hash-pinned Python ETL; retain the input position and transformation. |
-| Documentation | Enumerate the configured documentation repositories and scopes. | Capture the pinned documents. | Extract examples and nearby explanations with document locations. |
-| Keenable | Discover lead URLs through bounded queries from configured seeds and coverage questions. | Verify separately fetched origin bytes; a search result cannot authorize a row. | Extract permitted administrative examples with exact source spans, provenance and transformations. |
-
-Only the Keenable collection catalog searches for sources. Its search and the
-origin requests inside `source_documents` are runtime calls, not Dagster
-assets. Source-driven acquisition uses the declared branch permissions;
-historical prepared-source manifests remain readable.
+Only Keenable searches for new origins. Its discovery output is a set of leads;
+capture checks permission before retaining origin bytes. Repository branches use
+reviewed pins instead. Configuration edges after the first stage are omitted
+for clarity. The separate prepared-manifest graph remains readable.
 
 ```mermaid
 flowchart TD

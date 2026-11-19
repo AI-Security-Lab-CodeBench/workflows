@@ -13,7 +13,13 @@ from dagster import (
 from pandera.typing import DataFrame
 
 from codebench_pipeline.category_rules import CategoryRules
-from codebench_pipeline.config_assets import COLLECTION_SCOPES, GLOBAL_CONFIG, mapped_rules, policy_input
+from codebench_pipeline.config_assets import (
+    COLLECTION_SCOPES,
+    CONFIG_JSON,
+    GLOBAL_CONFIG,
+    mapped_rules,
+    policy_input,
+)
 from codebench_pipeline.dataframe_io import DataFrameIOManager
 from codebench_pipeline.dataframe_schemas import (
     CommandCandidatesTable,
@@ -34,7 +40,6 @@ from codebench_pipeline.dataset_catalog import build_catalog
 from codebench_pipeline.dataset_config import (
     AdapterConfig,
     CatalogConfig,
-    DatasetBuildSpec,
     DocumentationConfig,
     ExtractionConfig,
     FilteringConfig,
@@ -63,7 +68,7 @@ def source_assets(branch: Branch = "dataset") -> list[AssetsDefinition]:
         registered: str,
         dataset_io_manager: ResourceParam[DataFrameIOManager],
     ) -> Output[CategoryRules]:
-        rules = DatasetBuildSpec.model_validate_json(registered).rules
+        rules = CategoryRules.model_validate(CONFIG_JSON.validate_json(registered)["rules"])
         version = fingerprint(rules.model_dump_json())
         key = f"category-rules/{version}"
         hit = dataset_io_manager.exists(key)

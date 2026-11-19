@@ -126,7 +126,7 @@ def implementation_signature(
                 values[name] = value.reference.digest
                 continue
         if isinstance(value, CategoryRules):
-            if stage == "source_catalog":
+            if stage == "source_catalog" or isinstance(config, DeclaredSourceStageConfig):
                 values[name] = source_scope(value)
             elif stage == "filtered_commands":
                 values[name] = {
@@ -227,7 +227,11 @@ def cached_table(
             authorize_finalization_output(
                 Path(storage.review_home), context.instance, context.partition_key, value, complete=True
             )
-    source_token = authorize_compute(context, storage, inputs) if stage in SOURCE_GATED_STAGES else None
+    source_token = (
+        authorize_compute(context, storage, inputs)
+        if stage in SOURCE_GATED_STAGES or "source_catalog" in inputs
+        else None
+    )
     scoped_versions = stage_code_versions(stage, config, inputs.keys())
     signature = implementation_signature(stage, config, inputs, scoped_versions)
     branch = asset_branch(context.asset_key.path)
@@ -242,7 +246,9 @@ def cached_table(
                 frame = schema.validate(compute(evidence))
                 if shared_inputs:
                     frame.attrs = {**shared_inputs[0].attrs, **frame.attrs}
-                if stage == "source_catalog":
+                if stage == "source_catalog" or (
+                    isinstance(config, DeclaredSourceStageConfig) and "category_rules" in inputs
+                ):
                     frame.attrs["codebench_source_inventory"] = {
                         "branch": branch,
                         "signature": signature,

@@ -1,7 +1,8 @@
 # CAT-3 repository acquisition
 
-`repositories.json` declares immutable repository trees and rights evidence.
-Every origin also declares a trusted ETL path, SHA-256, entrypoint, and options.
+`existing-datasets.json` declares corpus origins; `documentation-crawl.json`
+declares original documentation. Each pins its own repository trees and rights
+evidence. Each origin selects a reviewed parser by ID and pins its SHA-256.
 Scope controls which files can enter the catalog; the ETL declaration controls
 how a captured file is read. A parser revision must match the separate
 deployment allowlist in `codebench_pipeline/repository_etl.py`. Candidate

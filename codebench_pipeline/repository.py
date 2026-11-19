@@ -23,7 +23,8 @@ from codebench_pipeline.repository_acquisition import (
     catalog_origin,
     origin_receipt_failure,
 )
-from codebench_pipeline.repository_config import RepositoryBranch, RepositoryConfig
+from codebench_pipeline.repository_branch_config import RepositoryAcquisitionConfig
+from codebench_pipeline.repository_config import RepositoryBranch
 from codebench_pipeline.repository_config import load_repository_config as load_repository_config
 from codebench_pipeline.repository_etl import (
     ADAPTER_BINDINGS,
@@ -44,7 +45,7 @@ from codebench_pipeline.storage import IntegrityError
 
 
 def repository_catalog(
-    config: RepositoryConfig, branch: RepositoryBranch, run: RepositoryRun
+    config: RepositoryAcquisitionConfig, branch: RepositoryBranch, run: RepositoryRun
 ) -> DataFrame[SourceCatalogTable]:
     """Enumerate a complete pinned scope and record policy and origin evidence."""
     rows: list[dict[str, JsonValue]] = []
@@ -100,7 +101,7 @@ def repository_catalog(
 
 
 def repository_documents(
-    catalog: DataFrame[SourceCatalogTable], config: RepositoryConfig, run: RepositoryRun
+    catalog: DataFrame[SourceCatalogTable], config: RepositoryAcquisitionConfig, run: RepositoryRun
 ) -> DataFrame[SourceDocumentsTable]:
     """Capture the complete authorized scope with byte-level integrity and replay."""
     receipt = read_receipt(catalog, "source_catalog", run)
@@ -137,7 +138,7 @@ def repository_documents(
 
 
 def repository_adapters(
-    documents: DataFrame[SourceDocumentsTable], config: RepositoryConfig, run: RepositoryRun
+    documents: DataFrame[SourceDocumentsTable], config: RepositoryAcquisitionConfig, run: RepositoryRun
 ) -> DataFrame[DocumentAdaptersTable]:
     """Resolve adapters against the independent deployment allowlist before imports."""
     receipt = read_receipt(documents, "source_documents", run)
@@ -170,7 +171,7 @@ def repository_adapters(
 def repository_candidates(
     documents: DataFrame[SourceDocumentsTable],
     adapters: DataFrame[DocumentAdaptersTable],
-    config: RepositoryConfig,
+    config: RepositoryAcquisitionConfig,
     run: RepositoryRun,
 ) -> DataFrame[CommandCandidatesTable]:
     """Extract inert examples with capture, adapter and exact source span bindings."""

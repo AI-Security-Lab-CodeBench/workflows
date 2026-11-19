@@ -10,16 +10,45 @@ class CollectionBranch:
     namespace: Branch
     group: str
     job: str
+    capture: str
+    index: str | None = None
 
     @property
     def terminal(self) -> str:
         return stage_name("command_candidates", self.namespace)
 
+    @property
+    def declared_stages(self) -> tuple[str, ...]:
+        names = (self.capture, "command_candidates")
+        return (self.index, *names) if self.index is not None else names
+
 
 COLLECTION_BRANCHES: Final = (
-    CollectionBranch("dataset", "existing_datasets", "build_existing_datasets"),
-    CollectionBranch("documentation", "documentation_crawl", "build_documentation"),
-    CollectionBranch("keenable", "keenable_use_cases", "build_keenable"),
+    CollectionBranch(
+        "dataset",
+        "existing_datasets",
+        "build_existing_datasets",
+        "capture_corpus_files",
+        "enumerate_corpus_files",
+    ),
+    CollectionBranch(
+        "documentation",
+        "documentation_crawl",
+        "build_documentation",
+        "capture_documentation",
+    ),
+    CollectionBranch(
+        "keenable",
+        "keenable_use_cases",
+        "build_keenable",
+        "capture_origin_pages",
+        "discover_use_cases",
+    ),
+)
+
+BRANCH_BY_NAMESPACE: Final = {branch.namespace: branch for branch in COLLECTION_BRANCHES}
+DECLARED_SOURCE_STAGES: Final = frozenset(
+    name for branch in COLLECTION_BRANCHES for name in branch.declared_stages
 )
 
 

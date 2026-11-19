@@ -4,11 +4,10 @@ from dagster import AssetKey, AssetSpec
 
 from codebench_pipeline.bashguard_audit import AUDIT_STAGE
 from codebench_pipeline.collection_descriptions import (
+    DECLARED_COLLECTION_DESCRIPTIONS,
     FINALIZATION_DESCRIPTIONS,
-    PROVIDER_DESCRIPTIONS,
-    REPOSITORY_DESCRIPTIONS,
 )
-from codebench_pipeline.dataset_branches import COLLECTION_BRANCHES, FINALIZATION_STAGES, asset_branch
+from codebench_pipeline.dataset_branches import BRANCH_BY_NAMESPACE, FINALIZATION_STAGES, asset_branch
 
 DESCRIPTIONS: dict[str, str] = {
     AUDIT_STAGE: """
@@ -358,14 +357,12 @@ class DescribedAsset(Protocol):
 def describe_stage(spec: DescribedAsset, *, declared: bool = False) -> AssetSpec:
     stage = spec.key.path[-1]
     if declared:
-        branch = asset_branch(spec.key.path)
-        if stage in REPOSITORY_DESCRIPTIONS:
-            descriptions = PROVIDER_DESCRIPTIONS if branch == "keenable" else REPOSITORY_DESCRIPTIONS
-            group = next(
-                descriptor.group for descriptor in COLLECTION_BRANCHES if descriptor.namespace == branch
-            )
+        qualified = "/".join(spec.key.path[1:])
+        if qualified in DECLARED_COLLECTION_DESCRIPTIONS:
+            group = BRANCH_BY_NAMESPACE[asset_branch(spec.key.path)].group
             return spec.replace_attributes(
-                description=f"**How it works:** {descriptions[stage]}", group_name=group
+                description=f"**How it works:** {DECLARED_COLLECTION_DESCRIPTIONS[qualified]}",
+                group_name=group,
             )
         if stage in FINALIZATION_DESCRIPTIONS:
             return spec.replace_attributes(

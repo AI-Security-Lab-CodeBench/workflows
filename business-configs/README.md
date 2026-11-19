@@ -4,52 +4,101 @@ This directory holds the human-editable labeling policy, runtime templates and
 reference declarations. Edit the files below instead of copying policy into
 Python, runtime snapshots or a second category configuration.
 
+For CAT-3, start at `datasets/cat3.json`. This template selects the category by
+ID. The loader resolves the category policy and each branch declaration by
+convention. Branches create file inventories and captures at run time; source
+bodies and documentation snippets do not belong in the active configuration.
+`datasets/cat3-prepared.json` preserves the prepared manifest references used by
+historical builds.
+
 | File | What to edit |
 | --- | --- |
 | `labeling-base.md` | Category-independent annotation method, evidence authority, output discipline and confidence semantics. Keep domain rules out. |
 | `categories/cat3/category.json` | Current CAT-3 names, IDs, class and severity definitions, routing patterns, concise risk guidance and references to the three labeling files. Its `rules` object has no inline `policy`. |
 | `categories/cat3/instructions.md` | CAT-3 membership, benign-family scope, risk boundaries, severity defaults and v0 execution-class policy. Change the general rule rather than adding one exception per tool or flag. |
 | `categories/cat3/examples.json` | A small bank of documented demonstrations grouped by risk and operation family. Update expected labels when a business rule changes. |
-| `datasets/cat3.json` | Initial runtime settings: model, four labeling workers, source and semantic manifests, extraction/filter limits and publication cap. |
+| `datasets/cat3.json` | Dataset and category IDs, labeling settings, publication settings and storage. |
+| `categories/cat3/collection/existing-datasets.json` | Pinned repository corpora and their acquisition settings. |
+| `categories/cat3/collection/documentation-crawl.json` | Pinned original documentation repositories and their acquisition settings. |
+| `categories/cat3/keenable/declaration.json` | Discovery generation, reviewed source scopes, rights evidence, reference URLs, cases and budgets. |
 | `categories/cat3/reference-examples/sources.jsonl` | The relocated, pinned historical source declaration, kept only as a reference example for source preparation. |
 | `categories/cat3/reference-examples/semantics.jsonl` | The relocated historical Terraform semantic snippets, kept as reference examples rather than a complete current semantic manifest. |
 
-All paths resolve relative to the file that declares them. The dataset template
-binds `../categories/cat3/category.json`. That category file binds the shared
-`../../labeling-base.md`, its local `instructions.md` and its local `examples.json`.
-Preserve these references when moving files.
+The logical `CAT-3` ID resolves to `categories/cat3/category.json` under this
+directory. That category file references the shared `../../labeling-base.md`,
+its local `instructions.md` and its local `examples.json`. Preserve those
+policy references when moving files.
 
 ## Reading the dataset configuration
 
-`datasets/cat3.json` is a starting template, not an instruction to overwrite a
-registered dataset's settings. It retains the current native labeler,
-`chatgpt-subscription/gpt-6-luna`, its 900-second timeout, four workers, the existing
-limits and the configured source branches.
+`datasets/cat3.json` is a starting template. Register the template to change a
+dataset's active configuration. Its logical category selects the three
+source-driven branches; there is no pipeline version to choose.
 
 Read the dataset file from top to bottom:
 
-| Section | Stages it configures |
+| Field | Meaning |
 | --- | --- |
-| `existing_datasets` | Catalog of existing corpora, snapshot retrieval, adapters and raw candidate extraction. |
-| `documentation_crawl` | The same four stages for original documentation, with independent inputs, limits and workers. |
-| `finalization.filtering` | Filtering after the two candidate streams merge. |
-| `finalization.documentation` | Operation evidence supplied to the labeler. This is separate from the documentation crawl. |
-| `finalization.business_config`, `annotation` | Taxonomy, prompts and demonstrations; model, context limit, parallelism and optional batch settings. |
-| `finalization.publication` | Editable human-review columns and the per-risk release cap. |
+| `dataset_id` | Dataset partition to configure. The Keenable declaration's `dataset` must match. |
+| `category_id` | `CAT-3` selects the category policy and independently loads the corpus, documentation and Keenable declarations. |
+| `revision` | Identifier for this dataset configuration. |
+| `finalization.annotation` | Model, context limit, parallelism and guarded batch settings. `{"mode":"registered"}` reuses existing registration settings. |
+| `finalization.filtering` | Optional routing and candidate filtering settings. |
+| `finalization.publication` | Optional review and release settings. |
+| `finalization.keenable_source_weight` | Optional merge weight for Keenable candidates; defaults to `0.30`. |
 | `storage` | Artifact storage; `null` uses the dataset home's local storage. |
 
-Register a new configuration after changing a versioned bundle. Registration
-resolves its policy and manifests into stage inputs. Historical inference
-snapshots and review decisions are not rewritten by editing the template.
+The two repository branch files use the same field names and contain only the
+origins for their own branch:
+
+| Field | Meaning |
+| --- | --- |
+| `revision` | Reviewed revision of the branch declaration. |
+| `origins` | Nonempty list of origins. Each declares `origin_id`, `repository`, `commit`, `tree_digest`, `scope`, `license_id`, `license`, `attribution`, `source_type`, `provenance_type`, `format`, `use`, and `transform`. `included_paths`, `excluded_paths`, and `notices` are optional. Scope paths and rights paths identify files in the pinned upstream repository. |
+| `origins[].transform` | Reviewed `parser_id` (`cheatsheets_front_matter`, `tldr`, `aws_cli_examples`, or `markdown_shell`), pinned `sha256`, optional `options_json` (a JSON object encoded as text), and optional `batch_size` (default `128`). Deployment code checks the pin for that ID and supplies the module and entrypoint. |
+| `source_weights` | Optional overrides by origin ID in this branch. Default weights are `0.60` for a corpus and `0.90` for documentation. All weights must be finite numbers from 0 to 1. Every documentation origin must outrank every corpus, and every corpus must outrank Keenable. |
+| `maximum_file_bytes`, `workers` | Optional per-branch capture size limit (default `524288`, range 1 to 8388608) and download concurrency (default `12`, range 1 to 24). |
+
+The Keenable branch keeps its own declaration with `dataset`, `revision`,
+`generation`, `generation_review`, and `cases`. Its current source-scoped
+format also defines `sources`, `budget` and `search_plan`. `sources` identifies
+permitted origins and rights. `budget` bounds requests and bytes; `search_plan`
+selects discovery behavior within reviewed scopes. These collection settings
+are separate from label-time remote lookup.
+
+Register a new configuration after changing a declaration. Registration
+resolves policy and stores the branch declarations and their digests without
+local source-list or parser paths. Historical declared snapshots remain
+readable. Re-register from the current template to produce current branch
+settings from a registration that still contains source-list paths.
+Historical inference snapshots and review decisions are not rewritten.
 
 Change runtime settings through the normal registration/configuration workflow.
 Editing the template alone doesn't reconfigure an already registered dataset.
 The core pipeline owns policy invalidation, cached-result reuse and review gates.
 Don't change confidence merely to reduce the human queue.
 
+## Command embeddings on labeling workers
+
+Provision the CPU encoder before running labeling. Use the `tokenizer.json`
+and `onnx/model_quantized.onnx` files from `Xenova/all-MiniLM-L6-v2` at
+revision `751bff37182d3f1213fa05d7196b954e230abad9`. Keep those relative
+paths under one directory and verify their SHA-256 hashes:
+
+| File | SHA-256 |
+| --- | --- |
+| `tokenizer.json` | `da0e79933b9ed51798a3ae27893d3c5fa4a201126cef75586296df9b4d2c62a0` |
+| `onnx/model_quantized.onnx` | `afdb6f1a0e45b715d0bb9b11772f032c399babd23bfc31fed1c170afc848bdb1` |
+
+Install the locked runtime dependencies and mount the directory read-only in
+the worker that executes labeling. Set `CODEBENCH_COMMAND_ENCODER_DIR` to
+the directory **inside that worker**. The encoder groups pending commands;
+it does not index documents or supply citations. Changing batch membership
+does not by itself invalidate an otherwise reusable row label.
+
 ## Local inputs and source preparation
 
-The runtime template declares three companion config documents. They are
+The historical prepared template declares three companion config documents. They are
 separate so the main stage settings remain readable:
 
 - `manifests/cat3/datasets.json`
@@ -69,7 +118,7 @@ for the exact invocation of a utility without arguments, never as a wildcard
 for all of its subcommands or flags. Missing operation documentation blocks
 labeling; demonstrations do not fill a target's evidence gap.
 
-The two files in `reference-examples/` aren't selected by the runtime template.
+The two files in `reference-examples/` aren't selected by the active template.
 They preserve a small historical declaration and snippets for inspection, not a
 full source inventory, fresh eligibility decision or replacement for current
 candidate documentation. The source example's `local_path` now resolves to

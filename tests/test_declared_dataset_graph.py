@@ -12,7 +12,13 @@ from dagster import AssetKey
 from pydantic import ValidationError
 from test_keenable import PEER, PLAN, SOURCE_BODY, permission, result
 from test_keenable import source_declaration as source_scope_declaration
-from test_repository import CONFIG, DOCKER, TLDR, RepositoryFixture
+from test_repository import (
+    DOCKER,
+    TLDR,
+    RepositoryFixture,
+    repository_branch_fixture,
+    repository_config_fixture,
+)
 
 from codebench_pipeline.artifact_views import ArtifactJSON, ArtifactQuery, ArtifactTable
 from codebench_pipeline.collection_config import CAT3_DATASET_ID
@@ -31,7 +37,7 @@ from codebench_pipeline.human_review import HumanReviewError
 from codebench_pipeline.keenable_policy import CASES, KeenableDeclaration
 from codebench_pipeline.keenable_transport import DirectResponse
 from codebench_pipeline.object_store import StorageConfig
-from codebench_pipeline.repository import load_repository_config
+from codebench_pipeline.repository_receipts import RepositoryReceipt
 from codebench_pipeline.runtime_instance import dataset_instance
 from codebench_pipeline.stage_configuration import stage_configs
 from codebench_pipeline.storage import IntegrityError, fingerprint
@@ -70,9 +76,7 @@ def fixture_spec(home: Path) -> DatasetBuildSpec:
 def with_keenable_declaration(spec: DatasetBuildSpec, declaration: KeenableDeclaration) -> DatasetBuildSpec:
     collection = spec.declared_collection
     assert collection is not None
-    source = source_declaration(
-        Path(collection.keenable_use_cases.source_list), declaration.model_dump_json()
-    )
+    source = source_declaration(declaration.model_dump_json())
     return spec.model_copy(
         update={"declared_collection": collection.model_copy(update={"keenable_use_cases": source})}
     )
@@ -182,6 +186,13 @@ class DeclaredDatasetGraphTests(unittest.TestCase):
                 },
             )
             data = DatasetDataService(home, instance)
+            documentation = data.read_current(spec.dataset_id, "documentation/capture_documentation")
+            assert isinstance(documentation.value, pd.DataFrame)
+            scope = RepositoryReceipt.model_validate_json(
+                documentation.value.attrs["documentation_scope_receipt_json"]
+            )
+            self.assertEqual((scope.stage, scope.branch), ("source_catalog", "documentation"))
+            self.assertEqual(scope.observations["complete"], True)
             filtered = data.read_current(spec.dataset_id, "filtered_commands")
             self.assertIsNone(filtered.publication_state)
             assert isinstance(filtered.value, pd.DataFrame)
@@ -207,10 +218,10 @@ class DeclaredDatasetGraphTests(unittest.TestCase):
             assert collection is not None
             settings = collection.existing_datasets
             adjusted = {**settings.declaration}
-            origins = adjusted["dataset"]
+            origins = adjusted["origins"]
             assert isinstance(origins, list) and isinstance(origins[0], dict)
-            adjusted["dataset"] = [{**origins[0], "attribution": "Updated fixture attribution"}]
-            revised_source = source_declaration(Path(settings.source_list), json.dumps(adjusted))
+            adjusted["origins"] = [{**origins[0], "attribution": "Updated fixture attribution"}]
+            revised_source = source_declaration(json.dumps(adjusted))
             changed = spec.model_copy(
                 update={
                     "declared_collection": collection.model_copy(update={"existing_datasets": revised_source})
@@ -223,9 +234,8 @@ class DeclaredDatasetGraphTests(unittest.TestCase):
             self.assertEqual(
                 plan.selected,
                 (
-                    "source_catalog",
-                    "source_documents",
-                    "document_adapters",
+                    "enumerate_corpus_files",
+                    "capture_corpus_files",
                     "command_candidates",
                     "merged_command_candidates",
                     "filtered_commands",
@@ -381,23 +391,12 @@ class DeclaredDatasetGraphTests(unittest.TestCase):
         spec = fixture_spec(home)
         collection = spec.declared_collection
         assert collection is not None
-        repositories = load_repository_config(CONFIG)
+        repositories = repository_config_fixture()
         docker = RepositoryFixture(repositories.dataset[2])
         docker.file("sample/README.md", DOCKER)
         docker.file("sample/compose.yaml", b"services: {}")
         tldr = RepositoryFixture(repositories.documentation[0])
         tldr.file("pages/common/docker.md", TLDR)
-        repositories = repositories.model_copy(
-            update={
-                "dataset": (docker.declaration(),),
-                "documentation": (tldr.declaration(),),
-                "keenable_source_weight": 0.24,
-                "source_weights": {
-                    source.origin.origin_id: repositories.source_weights[source.origin.origin_id]
-                    for source in (docker, tldr)
-                },
-            }
-        )
         wire: dict[str, bytes] = {}
         for fixture in (docker, tldr):
             origin = fixture.origin
@@ -420,13 +419,17 @@ class DeclaredDatasetGraphTests(unittest.TestCase):
                 side_effect=fetch,
             )
         )
-        repository = source_declaration(CONFIG.resolve(), repositories.model_dump_json())
         spec = spec.model_copy(
             update={
                 "declared_collection": collection.model_copy(
                     update={
-                        "existing_datasets": repository,
-                        "documentation_crawl": repository,
+                        "existing_datasets": source_declaration(
+                            repository_branch_fixture("dataset", (docker,)).model_dump_json()
+                        ),
+                        "documentation_crawl": source_declaration(
+                            repository_branch_fixture("documentation", (tldr,)).model_dump_json()
+                        ),
+                        "merge_keenable_weight": 0.24,
                     }
                 )
             }

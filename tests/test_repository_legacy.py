@@ -6,12 +6,11 @@ from tempfile import TemporaryDirectory
 from unittest import TestCase
 from unittest.mock import patch
 
-from test_repository import CONFIG, TLDR, RepositoryFixture
+from test_repository import TLDR, RepositoryFixture, repository_config_fixture
 
 from codebench_pipeline.object_store import ObjectStore, StorageConfig
 from codebench_pipeline.repository import (
     RepositoryRun,
-    load_repository_config,
     repository_catalog,
     repository_documents,
 )
@@ -26,7 +25,7 @@ class LegacyRepositoryCaptureTests(TestCase):
         self.run_context = RepositoryRun(home, "migration-fixture", "run")
         self.legacy_root = Path(self.enterContext(TemporaryDirectory()))
         (home / "source-downloads").symlink_to(self.legacy_root, target_is_directory=True)
-        shipped = load_repository_config(CONFIG)
+        shipped = repository_config_fixture()
         fixture = RepositoryFixture(shipped.documentation[0])
         fixture.file("pages/common/docker.md", TLDR)
         self.blob = fixture.entries["pages/common/docker.md"][2]

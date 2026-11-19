@@ -10,7 +10,6 @@ from codebench_pipeline.config_assets import CONFIG_JSON, mapped_rules, policy_i
 from codebench_pipeline.dataframe_io import DataFrameIOManager
 from codebench_pipeline.dataframe_schemas import (
     CommandCandidatesTable,
-    DocumentAdaptersTable,
     SourceCatalogTable,
     SourceDocumentsTable,
 )
@@ -33,7 +32,7 @@ from codebench_pipeline.repository import (
     repository_catalog,
     repository_documents,
 )
-from codebench_pipeline.repository_config import RepositoryConfig
+from codebench_pipeline.repository_receipts import RECEIPT_ATTR
 from codebench_pipeline.source_evidence import require_source_rights
 from codebench_pipeline.stage_configuration import declared_source_config
 from codebench_pipeline.storage import IntegrityError
@@ -44,8 +43,7 @@ def source_run(
 ) -> tuple[DeclaredSourceStageConfig, RepositoryRun]:
     if storage.review_home is None:
         raise IntegrityError("Declared source acquisition requires a registered dataset home")
-    stage = "/".join(context.asset_key.path[1:])
-    config = DeclaredSourceStageConfig.model_validate(CONFIG_JSON.validate_json(mapped_config)[stage])
+    config = DeclaredSourceStageConfig.model_validate(CONFIG_JSON.validate_json(mapped_config)["collection"])
     home = Path(storage.review_home)
     spec = DatasetRegistry(home).get_snapshot(context.partition_key)
     branch = asset_branch(context.asset_key.path)
@@ -96,17 +94,11 @@ def provider_collection(
 
 
 def declared_source_assets(branch: CollectionBranch) -> list[AssetsDefinition]:
-    prefix = asset_path("source_catalog", branch.namespace)[:-1]
+    prefix = asset_path(branch.capture, branch.namespace)[:-1]
+    mapping = policy_input(branch.group)
+    assets: list[AssetsDefinition] = []
 
-    @asset(
-        key_prefix=prefix,
-        group_name=branch.group,
-        partitions_def=DATASET_PARTITIONS,
-        io_manager_key="dataset_io_manager",
-        dagster_type=TABLE_TYPES[SourceCatalogTable],
-        ins={"mapped_config": policy_input(branch.group)},
-    )
-    def source_catalog(
+    def index_sources(
         context: AssetExecutionContext,
         mapped_config: str,
         dataset_io_manager: ResourceParam[DataFrameIOManager],
@@ -116,9 +108,7 @@ def declared_source_assets(branch: CollectionBranch) -> list[AssetsDefinition]:
         def compute(evidence: Path) -> DataFrame[SourceCatalogTable]:
             if config.branch == "keenable":
                 return provider_catalog(provider_collection(config, run, plan_receipts=evidence))
-            return repository_catalog(
-                RepositoryConfig.model_validate(config.source.declaration), config.branch, run
-            )
+            return repository_catalog(config.repository_config, config.branch, run)
 
         return cached_table(
             context,
@@ -129,18 +119,7 @@ def declared_source_assets(branch: CollectionBranch) -> list[AssetsDefinition]:
             compute,
         )
 
-    @asset(
-        key_prefix=prefix,
-        group_name=branch.group,
-        partitions_def=DATASET_PARTITIONS,
-        io_manager_key="dataset_io_manager",
-        dagster_type=TABLE_TYPES[SourceDocumentsTable],
-        ins={
-            "source_catalog": table_input("source_catalog", SourceCatalogTable, branch.namespace),
-            "mapped_config": policy_input(branch.group),
-        },
-    )
-    def source_documents(
+    def capture_indexed_sources(
         context: AssetExecutionContext,
         source_catalog: DataFrame[SourceCatalogTable],
         mapped_config: str,
@@ -151,9 +130,7 @@ def declared_source_assets(branch: CollectionBranch) -> list[AssetsDefinition]:
         def compute(evidence: Path) -> DataFrame[SourceDocumentsTable]:
             if config.branch == "keenable":
                 return provider_documents(provider_collection(config, run), source_catalog)
-            return repository_documents(
-                source_catalog, RepositoryConfig.model_validate(config.source.declaration), run
-            )
+            return repository_documents(source_catalog, config.repository_config, run)
 
         return cached_table(
             context,
@@ -164,40 +141,61 @@ def declared_source_assets(branch: CollectionBranch) -> list[AssetsDefinition]:
             compute,
         )
 
-    @asset(
-        key_prefix=prefix,
-        group_name=branch.group,
-        partitions_def=DATASET_PARTITIONS,
-        io_manager_key="dataset_io_manager",
-        dagster_type=TABLE_TYPES[DocumentAdaptersTable],
-        ins={
-            "source_documents": table_input("source_documents", SourceDocumentsTable, branch.namespace),
-            "mapped_config": policy_input(branch.group),
-        },
-    )
-    def document_adapters(
+    def capture_documentation(
         context: AssetExecutionContext,
-        source_documents: DataFrame[SourceDocumentsTable],
         mapped_config: str,
         dataset_io_manager: ResourceParam[DataFrameIOManager],
-    ) -> Output[DataFrame[DocumentAdaptersTable]]:
+    ) -> Output[DataFrame[SourceDocumentsTable]]:
         config, run = source_run(context, dataset_io_manager, mapped_config)
 
-        def compute(evidence: Path) -> DataFrame[DocumentAdaptersTable]:
-            if config.branch == "keenable":
-                return provider_adapters(provider_collection(config, run), source_documents)
-            return repository_adapters(
-                source_documents, RepositoryConfig.model_validate(config.source.declaration), run
-            )
+        def compute(evidence: Path) -> DataFrame[SourceDocumentsTable]:
+            repository = config.repository_config
+            catalog = repository_catalog(repository, "documentation", run)
+            scope_receipt = catalog.attrs[RECEIPT_ATTR]
+            (evidence / "documentation-scope.json").write_text(scope_receipt, encoding="utf-8")
+            captured = repository_documents(catalog, repository, run)
+            captured.attrs["documentation_scope_receipt_json"] = scope_receipt
+            return captured
 
         return cached_table(
             context,
             dataset_io_manager,
             config,
-            {"source_documents": source_documents},
-            DocumentAdaptersTable,
+            {"category_rules": mapped_rules(mapped_config)},
+            SourceDocumentsTable,
             compute,
         )
+
+    if branch.index is not None:
+        assets.append(
+            asset(
+                name=branch.index,
+                key_prefix=prefix,
+                group_name=branch.group,
+                partitions_def=DATASET_PARTITIONS,
+                io_manager_key="dataset_io_manager",
+                dagster_type=TABLE_TYPES[SourceCatalogTable],
+                ins={"mapped_config": mapping},
+            )(index_sources)
+        )
+    assets.append(
+        asset(
+            name=branch.capture,
+            key_prefix=prefix,
+            group_name=branch.group,
+            partitions_def=DATASET_PARTITIONS,
+            io_manager_key="dataset_io_manager",
+            dagster_type=TABLE_TYPES[SourceDocumentsTable],
+            ins={
+                "mapped_config": mapping,
+                **(
+                    {"source_catalog": table_input(branch.index, SourceCatalogTable, branch.namespace)}
+                    if branch.index is not None
+                    else {}
+                ),
+            },
+        )(capture_indexed_sources if branch.index is not None else capture_documentation)
+    )
 
     @asset(
         key_prefix=prefix,
@@ -206,15 +204,13 @@ def declared_source_assets(branch: CollectionBranch) -> list[AssetsDefinition]:
         io_manager_key="dataset_io_manager",
         dagster_type=TABLE_TYPES[CommandCandidatesTable],
         ins={
-            "source_documents": table_input("source_documents", SourceDocumentsTable, branch.namespace),
-            "document_adapters": table_input("document_adapters", DocumentAdaptersTable, branch.namespace),
-            "mapped_config": policy_input(branch.group),
+            "source_documents": table_input(branch.capture, SourceDocumentsTable, branch.namespace),
+            "mapped_config": mapping,
         },
     )
     def command_candidates(
         context: AssetExecutionContext,
         source_documents: DataFrame[SourceDocumentsTable],
-        document_adapters: DataFrame[DocumentAdaptersTable],
         mapped_config: str,
         dataset_io_manager: ResourceParam[DataFrameIOManager],
     ) -> Output[DataFrame[CommandCandidatesTable]]:
@@ -222,13 +218,15 @@ def declared_source_assets(branch: CollectionBranch) -> list[AssetsDefinition]:
 
         def compute(evidence: Path) -> DataFrame[CommandCandidatesTable]:
             if config.branch == "keenable":
+                collection = provider_collection(config, run)
                 return provider_candidates(
-                    provider_collection(config, run), source_documents, document_adapters
+                    collection, source_documents, provider_adapters(collection, source_documents)
                 )
+            repository = config.repository_config
             return repository_candidates(
                 source_documents,
-                document_adapters,
-                RepositoryConfig.model_validate(config.source.declaration),
+                repository_adapters(source_documents, repository, run),
+                repository,
                 run,
             )
 
@@ -236,9 +234,9 @@ def declared_source_assets(branch: CollectionBranch) -> list[AssetsDefinition]:
             context,
             dataset_io_manager,
             config,
-            {"source_documents": source_documents, "adapters": document_adapters},
+            {"source_documents": source_documents},
             CommandCandidatesTable,
             compute,
         )
 
-    return [source_catalog, source_documents, document_adapters, command_candidates]
+    return [*assets, command_candidates]

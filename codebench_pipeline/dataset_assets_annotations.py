@@ -4,7 +4,13 @@ from dagster import AssetExecutionContext, AssetsDefinition, MetadataValue, Outp
 from pandera.typing import DataFrame
 from pydantic import JsonValue, TypeAdapter
 
-from codebench_pipeline.config_assets import mapped_rules, mapped_settings, policy_input
+from codebench_pipeline.config_assets import (
+    CONFIG_JSON,
+    labeling_settings,
+    mapped_rules,
+    mapped_settings,
+    policy_input,
+)
 from codebench_pipeline.dataframe_io import DataFrameIOManager
 from codebench_pipeline.dataframe_schemas import (
     DocumentationTable,
@@ -85,7 +91,6 @@ def annotation_assets(*, declared: bool = False) -> list[AssetsDefinition]:
     )
     def guarded_labeling_attempts(
         context: AssetExecutionContext,
-        config: AnnotationConfig,
         filtered_commands: DataFrame[FilteredCommandsTable],
         mapped_config: str,
         dataset_io_manager: ResourceParam[DataFrameIOManager],
@@ -97,7 +102,8 @@ def annotation_assets(*, declared: bool = False) -> list[AssetsDefinition]:
         rules = mapped_rules(mapped_config)
         if (
             not spec.has_declared_collection
-            or spec.annotation != config
+            or CONFIG_JSON.validate_json(mapped_config)["labeling_attempts"]
+            != labeling_settings(spec.annotation)
             or spec.rules != rules
             or spec.storage != dataset_io_manager.storage
         ):
@@ -106,7 +112,7 @@ def annotation_assets(*, declared: bool = False) -> list[AssetsDefinition]:
         output = cached_table(
             context,
             dataset_io_manager,
-            config,
+            spec.annotation,
             {"commands": filtered_commands, "category_rules": rules},
             LabelingAttemptsTable,
             lambda evidence: labeling.attempts(filtered_commands, evidence),

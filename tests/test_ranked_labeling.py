@@ -14,7 +14,7 @@ from test_batch_labeling import batch_config, remote_model, submitted, tool_repl
 from test_dataset_annotation import documentation
 from test_dataset_rules import make_candidate, make_label, make_rules
 from test_declared_dataset_graph import fixture_spec
-from test_repository import CONFIG
+from test_repository import repository_config_fixture
 
 from codebench_pipeline.batch_labeling import EvidenceAdmission, RowEvidence, annotate_batches
 from codebench_pipeline.batch_labeling_config import BatchLabelingConfig
@@ -30,7 +30,7 @@ from codebench_pipeline.labeling_tables import proposed_from_attempts
 from codebench_pipeline.model_config import ModelConfig
 from codebench_pipeline.models import SemanticSnippet
 from codebench_pipeline.openai_transport import HTTPResponse
-from codebench_pipeline.repository_config import RepositoryConfig, load_repository_config
+from codebench_pipeline.repository_config import RepositoryConfig
 from codebench_pipeline.storage import fingerprint
 
 
@@ -408,7 +408,7 @@ class RankedLabelingTests(TestCase):
                 self.assertEqual(row["deferred_candidates"], 0)
 
     def test_repository_weights_reject_invalid_numbers_unknown_origins_and_tier_inversions(self) -> None:
-        config = load_repository_config(CONFIG)
+        config = repository_config_fixture()
         dataset_id = config.dataset[0].origin_id
         for origin, value in (
             (dataset_id, float("nan")),
@@ -426,7 +426,7 @@ class RankedLabelingTests(TestCase):
                 )
 
     def test_source_weight_changes_only_its_branch_declaration_digest(self) -> None:
-        config = load_repository_config(CONFIG)
+        config = repository_config_fixture()
         origin = config.dataset[0].origin_id
         revised = RepositoryConfig.model_validate(
             {**config.model_dump(), "source_weights": {**config.source_weights, origin: 0.51}}
@@ -436,7 +436,7 @@ class RankedLabelingTests(TestCase):
         self.assertEqual(revised.branch_digest("documentation"), config.branch_digest("documentation"))
 
     def test_keenable_weight_is_optional_for_older_declarations_and_cannot_tie_a_dataset(self) -> None:
-        config = load_repository_config(CONFIG)
+        config = repository_config_fixture()
         old = RepositoryConfig.model_validate(config.model_dump(exclude={"keenable_source_weight"}))
         self.assertEqual(old.keenable_source_weight, 0.3)
         changed = RepositoryConfig.model_validate({**config.model_dump(), "keenable_source_weight": 0.24})

@@ -1,11 +1,8 @@
 {
   "dataset_id": "cloud_infrastructure_commands_grounded_v1",
+  "category_id": "CAT-3",
   "revision": "cat3-collection",
-  "existing_datasets": {"source_list": "collection/repositories.json"},
-  "documentation_crawl": {"source_list": "collection/repositories.json"},
-  "keenable_use_cases": {"source_list": "keenable/declaration.json"},
   "finalization": {
-    "business_config": "../categories/cat3/category.json",
     "annotation": {"mode": "registered"}
   },
   "storage": null

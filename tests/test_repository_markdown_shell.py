@@ -5,8 +5,9 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
+from test_repository import repository_config_fixture
+
 from codebench_pipeline import repository_etl
-from codebench_pipeline.repository_config import load_repository_config
 from codebench_pipeline.repository_etl import authorize_adapter, repository_rows, source_span
 from codebench_pipeline.source_transform_contract import (
     TRANSFORM_OPTIONS,
@@ -17,11 +18,10 @@ from codebench_pipeline.source_transform_contract import (
 from codebench_pipeline.storage import IntegrityError
 
 ROOT = Path(__file__).resolve().parents[1]
-DECLARATIONS = ROOT / "business-configs/categories/cat3/collection/repositories.json"
 
 
 def declared_transform(origin_id: str) -> SourceTransformConfig:
-    config = load_repository_config(DECLARATIONS)
+    config = repository_config_fixture()
     return next(
         origin.transform
         for origin in (*config.dataset, *config.documentation)

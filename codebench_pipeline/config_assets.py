@@ -25,10 +25,14 @@ from codebench_pipeline.dataset_branches import (
     collection_branches,
     stage_branch,
 )
-from codebench_pipeline.dataset_config import DatasetBuildSpec
+from codebench_pipeline.dataset_config import AnnotationConfig, DatasetBuildSpec
 from codebench_pipeline.dataset_registry import DatasetRegistry, read_registered_spec
-from codebench_pipeline.stage_configuration import collection_stage_configs, finalization_stage_configs
-from codebench_pipeline.storage import IntegrityError
+from codebench_pipeline.stage_configuration import (
+    collection_asset_settings,
+    collection_stage_configs,
+    finalization_stage_configs,
+)
+from codebench_pipeline.storage import IntegrityError, fingerprint
 
 GLOBAL_CONFIG: Final = AssetKey(["datasets", "global_config"])
 POLICY_SCOPES: Final = frozenset(
@@ -51,6 +55,13 @@ CONFIG_JSON: Final = TypeAdapter(dict[str, JsonValue])
 
 class GlobalConfig(Config):
     snapshot: str = ""
+    expected_revision: str = ""
+
+    @classmethod
+    def for_spec(cls, spec: DatasetBuildSpec) -> "GlobalConfig":
+        if spec.has_declared_collection:
+            return cls(expected_revision=fingerprint(spec.model_dump_json()))
+        return cls(snapshot=spec.model_dump_json())
 
 
 def mapping_key(scope: str) -> AssetKey:
@@ -82,6 +93,12 @@ def policy_input(scope: str) -> AssetIn:
 
 def mapped_rules(mapped_config: str) -> CategoryRules:
     return CategoryRules.model_validate(CONFIG_JSON.validate_json(mapped_config)["category_rules"])
+
+
+def labeling_settings(config: AnnotationConfig) -> dict[str, JsonValue]:
+    return config.model_dump(
+        mode="json", exclude={"batch": {"capacity": {"state_directory", "expected_model_path"}}}
+    )
 
 
 def mapped_settings[Settings: Config](
@@ -125,6 +142,8 @@ def configuration_assets(home: Path, *, declared: bool = False) -> list[AssetsDe
     )
     def global_config(context: AssetExecutionContext, config: GlobalConfig) -> str:
         registry = DatasetRegistry(home)
+        if declared and config.snapshot:
+            raise IntegrityError("Declared runs accept a revision, not an inline build specification")
         spec = (
             read_registered_spec(config.snapshot.encode())
             if config.snapshot
@@ -134,8 +153,29 @@ def configuration_assets(home: Path, *, declared: bool = False) -> list[AssetsDe
             raise IntegrityError("Configuration snapshot belongs to another dataset partition")
         if spec.has_declared_collection != declared:
             raise IntegrityError("Dataset registration changed configured source inputs; reload definitions")
-        if declared and spec != registry.get_snapshot(context.partition_key):
+        if config.expected_revision and config.expected_revision != fingerprint(spec.model_dump_json()):
             raise IntegrityError("Run configuration no longer matches the registered specification")
+        if declared:
+            scopes = {
+                branch.group: collection_asset_settings(spec, branch.namespace)
+                for branch in collection_branches(declared=True)
+            }
+            for scope, settings in finalization_stage_configs(spec).items():
+                scopes[scope] = {
+                    scope: labeling_settings(settings)
+                    if isinstance(settings, AnnotationConfig)
+                    else settings.model_dump(mode="json")
+                }
+            return json.dumps(
+                {
+                    "dataset_id": spec.dataset_id,
+                    "revision": spec.revision,
+                    "rules": spec.rules.model_dump(mode="json"),
+                    "scopes": scopes,
+                },
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
         return spec.model_dump_json()
 
     def mapping(scope: str) -> AssetsDefinition:
@@ -145,6 +185,15 @@ def configuration_assets(home: Path, *, declared: bool = False) -> list[AssetsDe
         )
 
         def project(registered: str, category_rules: CategoryRules | None = None) -> str:
+            if declared:
+                value = CONFIG_JSON.validate_json(registered)
+                if needs_policy and category_rules != CategoryRules.model_validate(value["rules"]):
+                    raise IntegrityError("Category rules differ from the run configuration; replan the build")
+                scopes = TypeAdapter(dict[str, dict[str, JsonValue]]).validate_python(value["scopes"])
+                scoped = scopes[scope]
+                if category_rules is not None:
+                    scoped["category_rules"] = category_rules.model_dump(mode="json")
+                return CONFIG_JSON.dump_json(scoped).decode()
             spec = DatasetBuildSpec.model_validate_json(registered)
             if needs_policy and category_rules != spec.rules:
                 raise IntegrityError("Category rules differ from the run configuration; replan the build")

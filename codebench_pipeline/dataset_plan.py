@@ -271,8 +271,8 @@ def graph_materialization_stale(
     spec: DatasetBuildSpec, instance: DagsterInstance, *, home: Path, stage: str
 ) -> bool | None:
     if not spec.has_declared_collection:
-        return True if stage.startswith("keenable/") else None
-    if stage in {"semantic_evidence", "labeling_documentation"}:
+        return True if stage in KNOWN_STAGES and stage not in INPUT_STAGES else None
+    if stage == "semantic_evidence" or (stage in KNOWN_STAGES and stage not in DECLARED_INPUT_STAGES):
         return True
     if stage not in DECLARED_INPUT_STAGES or stage in RELEASE_STAGES:
         return None

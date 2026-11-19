@@ -19,18 +19,19 @@ def dataset_run_config(
     selection = (
         preparation_stages(declared=spec.has_declared_collection)
         if branch is None
-        else collection_selection(branch)
+        else collection_selection(branch, declared=spec.has_declared_collection)
     )
     if prepare_only:
         selection = selection[: selection.index("filtered_commands") + 1]
     return RunConfig(
         ops={
-            "datasets__global_config": GlobalConfig(snapshot=spec.model_dump_json()),
+            "datasets__global_config": GlobalConfig.for_spec(spec),
             **{
                 f"datasets__{name.replace('/', '__')}": config
                 for name, config in stage_configs(spec).items()
                 if name in selection
                 and name != "category_rules"
+                and not (spec.has_declared_collection and name == "labeling_attempts")
                 and not isinstance(config, DeclaredSourceStageConfig)
             },
         },
@@ -47,7 +48,7 @@ def release_run_config(
     authorization = token.model_dump_json() if token is not None else ""
     return RunConfig(
         ops={
-            "datasets__global_config": GlobalConfig(snapshot=spec.model_dump_json()),
+            "datasets__global_config": GlobalConfig.for_spec(spec),
             **{
                 f"datasets__{name}": HumanReviewConfig(authorization=authorization)
                 for name in ("human_review_decisions", "dataset_release")

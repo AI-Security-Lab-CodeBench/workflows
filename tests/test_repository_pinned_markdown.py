@@ -6,10 +6,9 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
-from test_repository import CONFIG, RepositoryFixture
+from test_repository import RepositoryFixture, repository_config_fixture
 
 from codebench_pipeline.repository_acquisition import catalog_origin
-from codebench_pipeline.repository_config import load_repository_config
 from codebench_pipeline.repository_etl import authorize_adapter, repository_rows, source_span
 from codebench_pipeline.repository_receipts import RepositoryRun
 from codebench_pipeline.source_transform_contract import TRANSFORM_OPTIONS, TransformContext
@@ -18,7 +17,7 @@ from codebench_pipeline.storage import IntegrityError
 
 class PinnedMarkdownTests(unittest.TestCase):
     def test_catalog_admits_only_declared_markdown_with_verified_rights(self) -> None:
-        initial = load_repository_config(CONFIG)
+        initial = repository_config_fixture()
         origin = next(item for item in initial.documentation if item.origin_id == "podman-docs")
         fixture = RepositoryFixture(origin)
         known = "manual/ps.md"
@@ -61,7 +60,7 @@ class PinnedMarkdownTests(unittest.TestCase):
         )
 
     def test_catalog_blocks_an_absent_or_nonregular_declared_file(self) -> None:
-        initial = load_repository_config(CONFIG)
+        initial = repository_config_fixture()
         origin = next(item for item in initial.documentation if item.origin_id == "podman-docs")
         for mode in (None, "120000"):
             with self.subTest(mode=mode), TemporaryDirectory() as temporary:
@@ -83,7 +82,7 @@ class PinnedMarkdownTests(unittest.TestCase):
                     catalog_origin(declaration, run, initial.maximum_file_bytes)
 
     def test_literal_usage_keeps_exact_spans_and_rejects_templates(self) -> None:
-        initial = load_repository_config(CONFIG)
+        initial = repository_config_fixture()
         origin = next(item for item in initial.documentation if item.origin_id == "pulumi-docs")
         text = "\r\n".join(
             [

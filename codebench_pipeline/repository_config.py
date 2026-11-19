@@ -44,7 +44,7 @@ class RightsFile(RepositoryModel):
     sha256: Digest
 
 
-class RepositoryOrigin(RepositoryModel):
+class RepositoryOriginScope(RepositoryModel):
     origin_id: RepositoryId
     repository: RepositoryName
     commit: Commit
@@ -62,10 +62,9 @@ class RepositoryOrigin(RepositoryModel):
     ]
     format: RepositoryFormat
     use: Literal["retain_and_quote_attributed_examples"]
-    transform: SourceTransformConfig
 
     @model_validator(mode="after")
-    def check_scope(self) -> RepositoryOrigin:
+    def check_scope(self) -> RepositoryOriginScope:
         paths = (
             *self.included_paths,
             *self.excluded_paths,
@@ -89,7 +88,63 @@ class RepositoryOrigin(RepositoryModel):
         return self
 
 
-class RepositoryConfig(RepositoryModel):
+class RepositoryOrigin(RepositoryOriginScope):
+    transform: SourceTransformConfig
+
+
+def repository_origin_matches(origin: RepositoryOriginScope, branch: RepositoryBranch) -> bool:
+    if branch == "dataset":
+        return (
+            origin.scope in {"cheatsheet", "readme", "compose", "markdown_files"}
+            and origin.source_type == "community_command_corpus"
+            and origin.provenance_type in {"human_authored", "human_collected"}
+        )
+    return (
+        origin.scope in {"tldr", "aws_examples", "markdown_files"}
+        and origin.source_type != "community_command_corpus"
+        and origin.provenance_type in {"vendor_documentation", "community_documentation"}
+    )
+
+
+class RepositorySettings(RepositoryModel):
+    source_weights: dict[RepositoryId, SourceWeight] = Field(default_factory=dict)
+    maximum_file_bytes: int = Field(default=512 * 1024, ge=1, le=8 * 1024 * 1024)
+    workers: int = Field(default=12, ge=1, le=24)
+
+    def source_weight(self, branch: RepositoryBranch, origin_id: str) -> float:
+        return self.source_weights.get(origin_id, DEFAULT_SOURCE_WEIGHTS[branch])
+
+    def digest_for_origins(self, branch: RepositoryBranch, origins: tuple[RepositoryOrigin, ...]) -> str:
+        from codebench_pipeline.repository_etl import parser_revisions
+
+        declarations: list[JsonValue] = [origin.model_dump(mode="json") for origin in origins]
+        return fingerprint(
+            {
+                "branch": branch,
+                "settings": self.model_dump(
+                    mode="json",
+                    include={
+                        "version",
+                        "category_id",
+                        "refresh",
+                        "failure",
+                        "declaration_revision",
+                        "maximum_file_bytes",
+                        "workers",
+                    },
+                ),
+                "source_weights": {
+                    origin.origin_id: self.source_weight(branch, origin.origin_id) for origin in origins
+                },
+                "origins": declarations,
+                "parsers": parser_revisions(tuple(origin.transform for origin in origins)),
+            }
+        )
+
+
+class RepositoryConfig(RepositorySettings):
+    """Read the combined repository declaration stored in historical registrations."""
+
     version: Literal[1]
     category_id: Literal["CAT-3"]
     revision: RepositoryId
@@ -97,10 +152,7 @@ class RepositoryConfig(RepositoryModel):
     failure: Literal["block_branch_on_incomplete_scope_or_integrity_error"]
     dataset: tuple[RepositoryOrigin, ...] = Field(min_length=1)
     documentation: tuple[RepositoryOrigin, ...] = Field(min_length=1)
-    source_weights: dict[RepositoryId, SourceWeight] = Field(default_factory=dict)
     keenable_source_weight: SourceWeight = DEFAULT_SOURCE_WEIGHTS["keenable"]
-    maximum_file_bytes: int = Field(default=512 * 1024, ge=1, le=8 * 1024 * 1024)
-    workers: int = Field(default=12, ge=1, le=24)
 
     @model_validator(mode="after")
     def check_branches(self) -> RepositoryConfig:
@@ -115,16 +167,8 @@ class RepositoryConfig(RepositoryModel):
             raise ValueError("Source weights must keep documentation above datasets above Keenable")
         if len({item.repository.casefold() for item in origins}) != len(origins):
             raise ValueError("Repository origins must be independent")
-        if any(
-            origin.scope not in {"cheatsheet", "readme", "compose", "markdown_files"}
-            or origin.source_type != "community_command_corpus"
-            or origin.provenance_type not in {"human_authored", "human_collected"}
-            for origin in self.dataset
-        ) or any(
-            origin.scope not in {"tldr", "aws_examples", "markdown_files"}
-            or origin.source_type == "community_command_corpus"
-            or origin.provenance_type not in {"vendor_documentation", "community_documentation"}
-            for origin in self.documentation
+        if any(not repository_origin_matches(origin, "dataset") for origin in self.dataset) or any(
+            not repository_origin_matches(origin, "documentation") for origin in self.documentation
         ):
             raise ValueError("Repository origin provenance or scope differs from the branch")
         return self
@@ -132,39 +176,13 @@ class RepositoryConfig(RepositoryModel):
     def origins(self, branch: RepositoryBranch) -> tuple[RepositoryOrigin, ...]:
         return self.dataset if branch == "dataset" else self.documentation
 
-    def source_weight(self, branch: RepositoryBranch, origin_id: str) -> float:
-        return self.source_weights.get(origin_id, DEFAULT_SOURCE_WEIGHTS[branch])
-
     @property
     def digest(self) -> str:
         return fingerprint(self.model_dump(mode="json"))
 
     def branch_digest(self, branch: RepositoryBranch) -> str:
         """Bind the selected branch's declarations and transitive parser files."""
-        from codebench_pipeline.repository_etl import parser_revisions
-
-        origins = self.origins(branch)
-        declarations: list[JsonValue] = [origin.model_dump(mode="json") for origin in origins]
-        return fingerprint(
-            {
-                "branch": branch,
-                "settings": self.model_dump(
-                    mode="json",
-                    exclude={
-                        "dataset",
-                        "documentation",
-                        "revision",
-                        "source_weights",
-                        "keenable_source_weight",
-                    },
-                ),
-                "source_weights": {
-                    origin.origin_id: self.source_weight(branch, origin.origin_id) for origin in origins
-                },
-                "origins": declarations,
-                "parsers": parser_revisions(tuple(origin.transform for origin in origins)),
-            }
-        )
+        return self.digest_for_origins(branch, self.origins(branch))
 
 
 def load_repository_config(path: Path) -> RepositoryConfig:

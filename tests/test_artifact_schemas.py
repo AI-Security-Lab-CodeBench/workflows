@@ -176,7 +176,7 @@ class ArtifactSchemaTests(unittest.TestCase):
                 instance=instance,
                 partition_key=spec.dataset_id,
                 run_config=RunConfig(
-                    ops={"datasets__global_config": GlobalConfig(snapshot=spec.model_dump_json())},
+                    ops={"datasets__global_config": GlobalConfig.for_spec(spec)},
                     resources={"dataset_io_manager": DataFrameIOManager(storage=spec.storage)},
                 ),
             )
@@ -187,6 +187,9 @@ class ArtifactSchemaTests(unittest.TestCase):
                 for key in config_keys:
                     with self.subTest(asset=key.path):
                         raw = run.output_for_node(key.to_python_identifier())
+                        if spec.has_declared_collection:
+                            self.assertNotIn(str(self.home), raw)
+                            self.assertNotIn("/fixture/model", raw)
                         response = client.post(
                             "/artifacts/data",
                             headers={"Origin": origin},

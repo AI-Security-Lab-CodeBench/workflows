@@ -8,7 +8,7 @@ from pydantic import ValidationError
 
 from codebench_pipeline.category_rules import CategoryRules
 from codebench_pipeline.dataframe_io import DataFrameIOManager
-from codebench_pipeline.dataset_branches import asset_branch
+from codebench_pipeline.dataset_branches import BRANCH_BY_NAMESPACE, asset_branch
 from codebench_pipeline.dataset_registry import DatasetRegistry
 from codebench_pipeline.documentation_authorization import (
     SourceInventoryAuthorization,
@@ -50,8 +50,8 @@ def authorize_compute(
     catalog, binding = inventory_authorization(home, context.instance, context.partition_key, branch)
     for name, value in inputs.items():
         if isinstance(value, pd.DataFrame):
-            if name == "source_catalog":
-                if not value.equals(catalog):
+            if name == "source_catalog" or "documentation_scope_receipt_json" in catalog.attrs:
+                if not value.equals(catalog) or value.attrs != catalog.attrs:
                     raise HumanReviewError("stale", "Source catalog differs from the current inventory")
             elif frame_inventory_authorization(value, branch) != binding:
                 raise HumanReviewError("stale", "Input belongs to an earlier source inventory")
@@ -72,7 +72,10 @@ def authorize_output(
         config = declared_source_config(spec, branch)
         require_source_rights(config)
         validate_source_receipt(frame, config, manager)
-    if context.asset_key.path[-1] == "source_catalog":
+    root = (
+        BRANCH_BY_NAMESPACE[branch].declared_stages[0] if spec.has_declared_collection else "source_catalog"
+    )
+    if context.asset_key.path[-1] == root:
         return
     _, binding = inventory_authorization(
         home, context.step_context.instance, context.asset_partition_key, branch

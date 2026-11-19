@@ -1,5 +1,14 @@
 # Independent collection, unified dataset
 
+The dataset branch publishes a pinned corpus inventory before capture.
+The documentation branch enumerates its pinned scope as part of capture.
+A third branch searches Keenable using
+configured administrative cases, then verifies permitted origin captures.
+Search hits do not authorize retention. Only reviewed, hash-pinned parser
+declarations may transform inert captured content. See
+`docs/architecture/cat3-collection-flow.md` for the graph. The two-branch
+preparation rules below describe historical prepared manifests.
+
 The current topology requires automatic eligible-source collection in independent
 branches, followed by unified post-extraction processing and uncertainty-only final human review.
 Earlier branch-specific releases, human corpus admission, independent per-command

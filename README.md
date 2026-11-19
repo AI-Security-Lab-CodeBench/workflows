@@ -70,15 +70,17 @@ Use Python 3.12 or 3.13 and the committed dependency lock:
 uv sync --frozen
 ```
 
-Validate the shipped configuration, inspect a stage, or register a snapshot:
+Set `CODEBENCH_HOME` to the existing registered dataset home. The declared
+configuration inherits its model settings from that registry. Validate the
+configuration, inspect a stage, or register a snapshot:
 
 ```sh
 uv run python -m codebench_pipeline.dataset_cli validate \
-  --config business-configs/datasets/cat3.json
+  --config business-configs/datasets/cat3.json --home "${CODEBENCH_HOME:?}"
 uv run python -m codebench_pipeline.dataset_cli inspect-config \
-  --config business-configs/datasets/cat3.json --stage labeling_attempts
+  --config business-configs/datasets/cat3.json --stage labeling_attempts --home "${CODEBENCH_HOME:?}"
 uv run python -m codebench_pipeline.dataset_cli register \
-  --config business-configs/datasets/cat3.json --home .codebench-datasets
+  --config business-configs/datasets/cat3.json --home "${CODEBENCH_HOME:?}"
 ```
 
 Validation and registration do not run inference or collect commands. A fresh
@@ -108,12 +110,11 @@ bundle, the server also accepts `--bundle /path/to/dagster_ui/build`.
 ## CAT-3 configuration inputs
 
 Use `skills/codebench-source-preparation/SKILL.md` with the requested category.
-The branch sections in `business-configs/datasets/cat3.json` select three
-reviewable configuration documents under `business-configs/manifests/cat3/`:
-
-- `datasets.json`: source manifest for existing corpora.
-- `documentation-sources.json`: source manifest for original documentation.
-- `semantics.json`: prepared operation-level references for labeling.
+The CAT-3 template selects the category. Its collection inputs are maintained
+separately: `collection/existing-datasets.json`, `collection/documentation-crawl.json`
+and `keenable/declaration.json` under the category directory. The loader
+embeds their validated contents in the configuration assets.
+The separate `cat3-prepared.json` configuration uses historical prepared manifests.
 
 Keep preparation inventories, exclusions, reports and downloaded captures
 in the local preparation workspace. The configuration bundle contains the
@@ -131,7 +132,7 @@ Then build the registered CAT-3 collection:
 
 ```sh
 uv run python -m codebench_pipeline.dataset_cli build \
-  --dataset cloud_infrastructure_commands --home .codebench-datasets
+  --dataset cloud_infrastructure_commands_grounded_v1 --home "${CODEBENCH_HOME:?}"
 ```
 
 This invokes the labeler for missing eligible rows. Declared sources load automatically; only

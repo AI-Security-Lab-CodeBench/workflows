@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from collections.abc import Iterator
 from pathlib import Path
-from typing import Final
+from typing import Final, Literal
 
 from pydantic import JsonValue, TypeAdapter
 
@@ -27,37 +27,48 @@ _LEGACY_CHEATSHEETS: Final = (
 )
 _CHEATSHEETS_FRONT_MATTER: Final = "business-configs/categories/cat3/collection/cheatsheets_front_matter.py"
 _HISTORICAL_CHEATSHEETS_PATH: Final = "business-configs/categories/cat3/collection/cheatsheets_v2.py"
-_APPROVED_TRANSFORMS: Final = frozenset(
-    {
-        _LEGACY_CHEATSHEETS,
-        (
-            _CHEATSHEETS_FRONT_MATTER,
-            "c72984484228cb6366f7747b242e08118cd7093895ae41c654c082d56a4d1055",
-            "transform",
-            "function",
-        ),
-        (
-            "transforms/tldr.py",
-            "ed3f9f60bcde3de149e4e7a4f4df296f44484519203a2d50016cd57c4e7da01e",
-            "transform",
-            "function",
-        ),
-        (
-            "transforms/aws_rst.py",
-            "3d47be03dc33e8568447dfad2d872e84020ae76b70dd30bd9fbc27f124409bbd",
-            "AwsExamples",
-            "class",
-        ),
-        (
-            "business-configs/categories/cat3/collection/markdown_shell.py",
-            "fa11020e7de0fc178fe59e2e99e2b1b01e3d00148b8d2f871a1032535a5dd991",
-            "transform",
-            "function",
-        ),
-    }
-)
+RepositoryParserId = Literal["cheatsheets_front_matter", "tldr", "aws_cli_examples", "markdown_shell"]
+_REVIEWED_PARSERS: Final[dict[RepositoryParserId, tuple[str, str, str, Literal["function", "class"]]]] = {
+    "cheatsheets_front_matter": (
+        _CHEATSHEETS_FRONT_MATTER,
+        "c72984484228cb6366f7747b242e08118cd7093895ae41c654c082d56a4d1055",
+        "transform",
+        "function",
+    ),
+    "tldr": (
+        "transforms/tldr.py",
+        "ed3f9f60bcde3de149e4e7a4f4df296f44484519203a2d50016cd57c4e7da01e",
+        "transform",
+        "function",
+    ),
+    "aws_cli_examples": (
+        "transforms/aws_rst.py",
+        "3d47be03dc33e8568447dfad2d872e84020ae76b70dd30bd9fbc27f124409bbd",
+        "AwsExamples",
+        "class",
+    ),
+    "markdown_shell": (
+        "business-configs/categories/cat3/collection/markdown_shell.py",
+        "fa11020e7de0fc178fe59e2e99e2b1b01e3d00148b8d2f871a1032535a5dd991",
+        "transform",
+        "function",
+    ),
+}
+_APPROVED_TRANSFORMS: Final = frozenset((*_REVIEWED_PARSERS.values(), _LEGACY_CHEATSHEETS))
 _POSITION: Final = re.compile(r"document; (characters|lines) (\d+):(\d+)")
 _PARSER_DEPENDENCIES: Final = {_CHEATSHEETS_FRONT_MATTER: (_LEGACY_CHEATSHEETS[:2],)}
+
+
+def reviewed_parser(parser_id: RepositoryParserId) -> SourceTransformConfig:
+    """Bind an authored parser ID to the independently reviewed implementation."""
+    module_path, sha256, entrypoint, kind = _REVIEWED_PARSERS[parser_id]
+    return SourceTransformConfig(
+        module_path=module_path,
+        sha256=sha256,
+        entrypoint=entrypoint,
+        kind=kind,
+        trusted=True,
+    )
 
 
 def _is_approved(transform: SourceTransformConfig) -> bool:
@@ -88,6 +99,7 @@ def parser_revisions(transforms: tuple[SourceTransformConfig, ...]) -> dict[str,
         "codebench_pipeline/source_transforms.py",
         "codebench_pipeline/repository.py",
         "codebench_pipeline/repository_acquisition.py",
+        "codebench_pipeline/repository_branch_config.py",
         "codebench_pipeline/repository_config.py",
         "codebench_pipeline/repository_etl.py",
         "codebench_pipeline/repository_legacy.py",

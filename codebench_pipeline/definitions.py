@@ -110,7 +110,7 @@ def build_definitions(home: Path, *, specification: DatasetBuildSpec | None = No
     def matching_spec(key: str) -> DatasetBuildSpec:
         spec = registry.get(key)
         if spec.has_declared_collection != declared:
-            raise IntegrityError("Dataset registration does not match this configured source inputs")
+            raise IntegrityError("Dataset registration does not match this collection graph")
         return spec
 
     def partition_tags(key: str) -> dict[str, str]:
@@ -142,7 +142,8 @@ def build_definitions(home: Path, *, specification: DatasetBuildSpec | None = No
             description=f"Acquire and extract {branch} candidates independently of labeling and review.",
             selection=AssetSelection.assets(
                 *configured_selection(
-                    AssetKey(["datasets", *stage.split("/")]) for stage in collection_selection(branch)
+                    AssetKey(["datasets", *stage.split("/")])
+                    for stage in collection_selection(branch, declared=declared)
                 )
             ),
             partitions_def=DATASET_PARTITIONS,
@@ -216,8 +217,8 @@ def build_definitions(home: Path, *, specification: DatasetBuildSpec | None = No
                     "specification": spec.model_dump_json(),
                     "source_inputs": {
                         branch.namespace: stage_signature(
-                            "source_catalog",
-                            configs[collection_selection(branch.namespace)[1]],
+                            collection_selection(branch.namespace, declared=declared)[1].rsplit("/", 1)[-1],
+                            configs[collection_selection(branch.namespace, declared=declared)[1]],
                             {"category_rules": spec.rules},
                         )
                         for branch in branches

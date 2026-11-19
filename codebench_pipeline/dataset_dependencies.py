@@ -1,4 +1,10 @@
-from codebench_pipeline.dataset_branches import COLLECTION_BRANCHES, FINALIZATION_STAGES, Branch, stage_name
+from codebench_pipeline.dataset_branches import (
+    BRANCH_BY_NAMESPACE,
+    COLLECTION_BRANCHES,
+    FINALIZATION_STAGES,
+    Branch,
+    stage_name,
+)
 
 INPUT_STAGES: dict[str, dict[str, str]] = {
     "category_rules": {},
@@ -61,11 +67,19 @@ COLLECTION_STAGE_NAMES = ("source_catalog", "source_documents", "document_adapte
 DECLARED_INPUT_STAGES = {
     "category_rules": {},
     **{
-        stage_name(stage, branch.namespace): {
-            name: stage_name(parent, branch.namespace) for name, parent in INPUT_STAGES[stage].items()
-        }
+        stage_name(stage, branch.namespace): dependencies
         for branch in COLLECTION_BRANCHES
-        for stage in COLLECTION_STAGE_NAMES
+        for stage, dependencies in (
+            (
+                (
+                    (branch.index, {"category_rules": "category_rules"}),
+                    (branch.capture, {"source_catalog": stage_name(branch.index, branch.namespace)}),
+                )
+                if branch.index is not None
+                else ((branch.capture, {"category_rules": "category_rules"}),)
+            )
+            + (("command_candidates", {"source_documents": stage_name(branch.capture, branch.namespace)}),)
+        )
     },
     **{
         stage: dependencies
@@ -79,7 +93,11 @@ DECLARED_INPUT_STAGES = {
         name: stage for name, stage in INPUT_STAGES["labeling_attempts"].items() if name != "documentation"
     },
 }
-KNOWN_STAGES = frozenset(INPUT_STAGES) | frozenset(DECLARED_INPUT_STAGES)
+KNOWN_STAGES = (
+    frozenset(INPUT_STAGES)
+    | frozenset(DECLARED_INPUT_STAGES)
+    | {stage_name(stage, "keenable") for stage in COLLECTION_STAGE_NAMES}
+)
 
 
 def preparation_stages(*, declared: bool) -> tuple[str, ...]:
@@ -90,5 +108,6 @@ def preparation_stages(*, declared: bool) -> tuple[str, ...]:
     )
 
 
-def collection_selection(branch: Branch) -> tuple[str, ...]:
-    return ("category_rules", *(stage_name(stage, branch) for stage in COLLECTION_STAGE_NAMES))
+def collection_selection(branch: Branch, *, declared: bool = False) -> tuple[str, ...]:
+    stages = BRANCH_BY_NAMESPACE[branch].declared_stages if declared else COLLECTION_STAGE_NAMES
+    return ("category_rules", *(stage_name(stage, branch) for stage in stages))

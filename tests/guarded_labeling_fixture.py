@@ -9,9 +9,9 @@ from pandera.typing import DataFrame
 from pydantic import TypeAdapter
 from test_batch_labeling import batch_config, remote_model, submitted, tool_reply
 from test_dataset_rules import make_rules
-from test_keenable import BODY, DECLARATION, PEER, PLAN, SOURCE_BODY, permission, result
+from test_keenable import BODY, PEER, PLAN, SOURCE_BODY, permission, result
 from test_keenable import source_declaration as source_scope_declaration
-from test_repository import CONFIG, RepositoryFixture
+from test_repository import RepositoryFixture, repository_branch_fixture, repository_config_fixture
 
 from codebench_pipeline.collection_config import CAT3_DATASET_ID, DeclaredCollection
 from codebench_pipeline.dataframe_schemas import CommandCandidatesTable, FilteredCommandsTable
@@ -43,7 +43,6 @@ from codebench_pipeline.object_store import StorageConfig
 from codebench_pipeline.openai_transport import HTTPResponse
 from codebench_pipeline.repository import (
     RepositoryRun,
-    load_repository_config,
     repository_adapters,
     repository_candidates,
     repository_catalog,
@@ -80,7 +79,7 @@ class LabelingFixture:
         self.home = home
         self.remote_rows: list[str] = []
         self.library = "/fixture/docs" if context7 else None
-        config = load_repository_config(CONFIG)
+        config = repository_config_fixture()
         kube, compose, tldr = (
             RepositoryFixture(origin)
             for origin in (config.dataset[1], config.dataset[2], config.documentation[0])
@@ -90,16 +89,12 @@ class LabelingFixture:
         compose.file("sample/compose.yml", b"services: {}")
         tldr.file("pages/common/docker.md", documentation_corpus)
         self.repositories = (kube, compose, tldr)
-        self.repository_config = config.model_copy(
-            update={
-                "dataset": (kube.declaration(), compose.declaration()),
-                "documentation": (tldr.declaration(),),
-                "source_weights": {
-                    source.origin.origin_id: config.source_weights[source.origin.origin_id]
-                    for source in self.repositories
-                },
-            }
-        )
+        dataset = repository_branch_fixture("dataset", (kube, compose))
+        documentation = repository_branch_fixture("documentation", (tldr,))
+        self.repository_configs = {
+            "dataset": dataset.runtime("dataset"),
+            "documentation": documentation.runtime("documentation"),
+        }
         self.declaration = (
             source_scope_declaration()
             if source_limited
@@ -197,7 +192,6 @@ class LabelingFixture:
         rights_path = home / "label-grounding-v2" / CAT3_DATASET_ID / "rights" / f"{sha256(RIGHTS)}.json"
         rights_path.parent.mkdir(parents=True)
         rights_path.write_bytes(RIGHTS)
-        repository = source_declaration(CONFIG, self.repository_config.model_dump_json())
         self.spec = DatasetBuildSpec(
             dataset_id=CAT3_DATASET_ID,
             revision="synthetic-guarded",
@@ -213,9 +207,9 @@ class LabelingFixture:
             ),
             storage=StorageConfig(local_root=str(home / "tables")),
             declared_collection=DeclaredCollection(
-                existing_datasets=repository,
-                documentation_crawl=repository,
-                keenable_use_cases=source_declaration(DECLARATION, self.declaration.model_dump_json()),
+                existing_datasets=source_declaration(dataset.model_dump_json()),
+                documentation_crawl=source_declaration(documentation.model_dump_json()),
+                keenable_use_cases=source_declaration(self.declaration.model_dump_json()),
             ),
         )
         case.enterContext(patch.dict(os.environ, {"KEENABLE_API_KEY": "fixture-key-long"}))
@@ -254,10 +248,11 @@ class LabelingFixture:
         run = RepositoryRun(self.home, self.spec.dataset_id, "synthetic-filter")
 
         def repository(branch: RepositoryBranch) -> DataFrame[CommandCandidatesTable]:
-            catalog = repository_catalog(self.repository_config, branch, run)
-            documents = repository_documents(catalog, self.repository_config, run)
-            adapters = repository_adapters(documents, self.repository_config, run)
-            return repository_candidates(documents, adapters, self.repository_config, run)
+            config = self.repository_configs[branch]
+            catalog = repository_catalog(config, branch, run)
+            documents = repository_documents(catalog, config, run)
+            adapters = repository_adapters(documents, config, run)
+            return repository_candidates(documents, adapters, config, run)
 
         provider = KeenableCollection(self.home, self.declaration)
         documents = provider_documents(provider, provider_catalog(provider))

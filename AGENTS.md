@@ -104,6 +104,22 @@ existing data before replacing it; never overwrite concurrent work.
 
 ## Pipeline topology
 
+- Review collection branches independently. Name each asset for the operation it
+  performs and the evidence it produces. Add a boundary when its output can be
+  inspected, reused or retried independently. Reject pass-through stages and
+  artificial catalog, document or adapter steps added to mirror a sibling.
+  Share a stage only where its inputs, guarantees and output contract match.
+- Load authored declarations at the run boundary. Make their validated contents
+  inspectable as configuration assets and pass those values to consumers. Never
+  put a local file path or file URI in a collection declaration, mapped asset,
+  run snapshot or cache identity. Resolve storage and installed parser locations
+  inside the runtime. Preserve upstream URLs, source positions and remote corpus
+  selectors when they identify evidence; do not erase provenance to hide a path.
+- Require a field-by-field review for each branch declaration: identify the
+  consumer, the decision the field changes, and how a reviewer can verify it.
+  Reject unknown keys, ignored settings, duplicate sources of truth and defaults
+  copied from another branch. A reviewer must be able to inspect one branch's
+  effective inputs without sorting through declarations for unrelated branches.
 - Maintain independently executable **Existing datasets** and **Documentation
   crawl** collection branches. Show each as a named surrounding group in Dagster
   lineage, with a separately named shared finalization group.

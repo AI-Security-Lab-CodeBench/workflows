@@ -12,17 +12,21 @@ from pydantic import JsonValue, TypeAdapter
 from codebench_pipeline.dataframe_schemas import frame_records
 from codebench_pipeline.repository import (
     RepositoryRun,
-    load_repository_config,
     repository_adapters,
     repository_candidates,
     repository_catalog,
     repository_documents,
 )
-from codebench_pipeline.repository_config import RepositoryBranch, RepositoryOrigin
+from codebench_pipeline.repository_branch_config import (
+    DeclaredRepositoryOrigin,
+    RepositoryBranchConfig,
+    load_repository_branch,
+)
+from codebench_pipeline.repository_config import RepositoryBranch, RepositoryConfig, RepositoryOrigin
 from codebench_pipeline.repository_receipts import read_receipt
 from codebench_pipeline.storage import IntegrityError
 
-CONFIG = Path("business-configs/categories/cat3/collection/repositories.json")
+COLLECTION = Path("business-configs/categories/cat3/collection")
 LICENSE = b"Synthetic fixture license."
 KUBE = (
     "Overview: caf\u00e9\r\n"
@@ -93,12 +97,49 @@ class RepositoryFixture:
         ).encode()
 
 
+def repository_config_fixture() -> RepositoryConfig:
+    dataset = load_repository_branch(COLLECTION / "existing-datasets.json").runtime("dataset")
+    docs = load_repository_branch(COLLECTION / "documentation-crawl.json").runtime("documentation")
+    return RepositoryConfig(
+        version=1,
+        category_id="CAT-3",
+        revision="synthetic",
+        refresh="reviewed_declaration_and_pin_only",
+        failure="block_branch_on_incomplete_scope_or_integrity_error",
+        dataset=dataset.origins("dataset"),
+        documentation=docs.origins("documentation"),
+        source_weights=dataset.source_weights | docs.source_weights,
+    )
+
+
+def repository_branch_fixture(
+    branch: RepositoryBranch, fixtures: tuple[RepositoryFixture, ...]
+) -> RepositoryBranchConfig:
+    filename = {"dataset": "existing-datasets.json", "documentation": "documentation-crawl.json"}[branch]
+    templates = load_repository_branch(COLLECTION / filename)
+    origins = {origin.origin_id: origin for origin in templates.origins}
+    source_ids = [fixture.origin.origin_id for fixture in fixtures]
+    return RepositoryBranchConfig(
+        revision="synthetic",
+        origins=tuple(
+            DeclaredRepositoryOrigin.model_validate(
+                {
+                    **fixture.declaration().model_dump(exclude={"transform"}),
+                    "transform": origins[fixture.origin.origin_id].transform,
+                }
+            )
+            for fixture in fixtures
+        ),
+        source_weights={source_id: templates.source_weight(branch, source_id) for source_id in source_ids},
+    )
+
+
 class RepositoryStagesTests(unittest.TestCase):
     def setUp(self) -> None:
         temporary = TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.run_context = RepositoryRun(Path(temporary.name), "cat3-fixture", "run-1")
-        initial = load_repository_config(CONFIG)
+        initial = repository_config_fixture()
         self.kube = RepositoryFixture(initial.dataset[1])
         self.kube.file("sample/README.md", KUBE)
         self.kube.file("sample/nested/tests/README.md", b"out of scope")

@@ -5,12 +5,11 @@ from unittest import TestCase
 from unittest.mock import patch
 
 from pydantic import JsonValue, TypeAdapter
-from test_repository import CONFIG, RepositoryFixture
+from test_repository import RepositoryFixture, repository_config_fixture
 
 from codebench_pipeline.dataframe_schemas import frame_records
 from codebench_pipeline.repository import (
     RepositoryRun,
-    load_repository_config,
     repository_adapters,
     repository_candidates,
     repository_catalog,
@@ -25,7 +24,7 @@ from codebench_pipeline.storage import IntegrityError
 
 class CheatsheetFrontMatterTests(TestCase):
     def test_reviewed_parser_rejects_a_stale_runtime_lock(self) -> None:
-        transform = load_repository_config(CONFIG).dataset[0].transform
+        transform = repository_config_fixture().dataset[0].transform
         home = Path(self.enterContext(TemporaryDirectory()))
         parser = home / transform.module_path
         parser.parent.mkdir(parents=True)
@@ -44,7 +43,7 @@ class CheatsheetFrontMatterTests(TestCase):
     def test_parser_skips_only_valid_initial_metadata_and_preserves_original_command_spans(self) -> None:
         home = Path(self.enterContext(TemporaryDirectory()))
         run = RepositoryRun(home, "cat3-fixture", "front-matter")
-        shipped = load_repository_config(CONFIG)
+        shipped = repository_config_fixture()
         fixture = RepositoryFixture(shipped.dataset[0])
         sheet = (
             "---\r\n"

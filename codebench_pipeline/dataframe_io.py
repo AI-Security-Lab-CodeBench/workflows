@@ -188,7 +188,10 @@ class DataFrameIOManager(ConfigurableIOManager):
                 with HumanReviewStore(Path(self.review_home)).transaction(
                     timeout=10, dataset_id=context.asset_partition_key
                 ) as tx:
-                    from codebench_pipeline.dataset_branches import FINALIZATION_STAGES
+                    from codebench_pipeline.dataset_branches import (
+                        DECLARED_SOURCE_STAGES,
+                        FINALIZATION_STAGES,
+                    )
 
                     if context.asset_key.path[-1] in FINALIZATION_STAGES:
                         from codebench_pipeline.dataset_finalization import authorize_finalization_output
@@ -210,7 +213,9 @@ class DataFrameIOManager(ConfigurableIOManager):
                                 raise IntegrityError("Finalization outputs must be tables")
                             case _:
                                 assert_never(obj)
-                    if context.asset_key.path[-1] in SOURCE_GATED_STAGES | {"source_catalog"}:
+                    if context.asset_key.path[-1] in SOURCE_GATED_STAGES | DECLARED_SOURCE_STAGES | {
+                        "source_catalog"
+                    }:
                         match obj:
                             case pd.DataFrame():
                                 authorize_output(context, self, obj)

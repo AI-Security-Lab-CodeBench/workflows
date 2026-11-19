@@ -1,4 +1,3 @@
-import json
 import re
 from dataclasses import dataclass
 from hashlib import sha256
@@ -18,11 +17,11 @@ from codebench_pipeline.grounding_policy import (
     version_constraints,
 )
 from codebench_pipeline.keenable import KeenableCollection
-from codebench_pipeline.keenable_policy import KeenableDeclaration
 from codebench_pipeline.keenable_receipts import CandidateReceipt, CaptureLock
 from codebench_pipeline.keenable_tables import CANDIDATE_RECEIPTS, provider_source_id
 from codebench_pipeline.models import Digest
-from codebench_pipeline.repository_config import RepositoryConfig, RepositoryOrigin, check_path
+from codebench_pipeline.repository_branch_config import RepositoryAcquisitionConfig
+from codebench_pipeline.repository_config import RepositoryOrigin, check_path
 from codebench_pipeline.repository_etl import SourceSpan, source_span
 from codebench_pipeline.repository_receipts import RepositoryReceipt
 from codebench_pipeline.repository_tree import tree_url
@@ -85,7 +84,7 @@ class CandidateCapture:
 
 @dataclass(frozen=True, slots=True)
 class RepositoryBranchEvidence:
-    config: RepositoryConfig
+    config: RepositoryAcquisitionConfig
     receipt: RepositoryReceipt
     rows: dict[str, RepositoryCandidate]
     root: Path
@@ -159,12 +158,12 @@ class CandidateEvidence:
     def from_frame(cls, frame: pd.DataFrame, home: Path, spec: DatasetBuildSpec) -> "CandidateEvidence":
         if spec.declared_collection is None:
             raise IntegrityError("Candidate evidence requires a registered collection declaration")
+        spec.declared_collection.require_current_declarations()
         attrs = BRANCH_METADATA.validate_python(frame.attrs.get("branch_metadata"))
         repositories: dict[str, RepositoryBranchEvidence] = {}
         root = home / "repository-v2" / spec.dataset_id
         for branch in ("dataset", "documentation"):
-            source = spec.declared_collection.for_branch(branch)
-            config = RepositoryConfig.model_validate(source.declaration)
+            config = spec.declared_collection.repository_config(branch)
             receipt = RepositoryReceipt.model_validate_json(str(attrs[branch]["repository_receipt_json"]))
             if (
                 receipt.branch != branch
@@ -177,10 +176,7 @@ class CandidateEvidence:
                 raise IntegrityError("Repository terminal receipt does not match the registered branch")
             rows = REPOSITORY_CANDIDATES.validate_python(receipt.observations["candidates"])
             repositories[branch] = RepositoryBranchEvidence(config, receipt, rows, root)
-        declaration = KeenableDeclaration.model_validate_json(
-            json.dumps(spec.declared_collection.keenable_use_cases.declaration)
-        )
-        provider = KeenableCollection(home, declaration)
+        provider = KeenableCollection(home, spec.declared_collection.keenable_declaration)
         lock = CaptureLock.model_validate_json(str(attrs["keenable"]["keenable_capture_lock"]))
         provider.adapters(lock)
         return cls(
