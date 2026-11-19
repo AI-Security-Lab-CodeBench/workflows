@@ -841,7 +841,7 @@
     },
     {
       "origin_id": "podman-docs",
-      "repository": "containers/podman",
+      "repository": "podman-container-tools/podman",
       "commit": "9dd5e1ed33830612bc200d7a13db00af6ab865a4",
       "tree_digest": "265e6f1b4818ba469ebfc50f7d12a7b7cfbedbcef134fff50fb2fb4b0fbd3f97",
       "scope": "markdown_files",
