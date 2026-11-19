@@ -1,0 +1,10 @@
+FROM golang:1.26.0 AS build
+WORKDIR /src
+COPY go.mod go.sum ./
+COPY internal/analyze ./internal/analyze
+COPY cmd/bashguard-audit ./cmd/bashguard-audit
+RUN CGO_ENABLED=0 go build -mod=readonly -trimpath -o /bashguard-audit ./cmd/bashguard-audit
+
+FROM scratch
+COPY --from=build /bashguard-audit /bashguard-audit
+ENTRYPOINT ["/bashguard-audit"]

@@ -8,24 +8,17 @@ import (
 	"mvdan.cc/sh/v3/syntax"
 )
 
-const MaxSourceBytes = 64 * 1024
-const MaxASTDepth = 256
-const MaxASTNodes = 32768
+const (
+	MaxSourceBytes = 64 * 1024
+	MaxASTDepth    = 256
+	MaxASTNodes    = 32768
+)
 
 func Analyze(source string) (Document, error) {
 	doc := Document{Source: source, Nodes: []Node{}, Calls: []Call{}, Reasons: []string{}}
-	switch {
-	case len(source) > MaxSourceBytes:
-		return doc, &Error{Kind: "size", Detail: "source exceeds 64 KiB"}
-	case !utf8.ValidString(source):
-		return doc, &Error{Kind: "utf8", Detail: "source is not valid UTF-8"}
-	case strings.IndexByte(source, 0) >= 0:
-		return doc, &Error{Kind: "nul", Detail: "source contains NUL"}
-	}
-	parser := syntax.NewParser(syntax.Variant(syntax.LangBash), syntax.KeepComments(true))
-	file, err := parser.Parse(strings.NewReader(source), "")
+	file, err := parseBash(source)
 	if err != nil {
-		return doc, &Error{Kind: "parse", Detail: "invalid Bash syntax", Cause: err}
+		return doc, err
 	}
 	stack := []int{}
 	commentParents := make(map[uint]int)
@@ -119,4 +112,21 @@ func Analyze(source string) (Document, error) {
 	}
 	doc.Eligible = len(doc.Reasons) == 0
 	return doc, nil
+}
+
+func parseBash(source string) (*syntax.File, *Error) {
+	switch {
+	case len(source) > MaxSourceBytes:
+		return nil, &Error{Kind: "size", Detail: "source exceeds 64 KiB"}
+	case !utf8.ValidString(source):
+		return nil, &Error{Kind: "utf8", Detail: "source is not valid UTF-8"}
+	case strings.IndexByte(source, 0) >= 0:
+		return nil, &Error{Kind: "nul", Detail: "source contains NUL"}
+	}
+	parser := syntax.NewParser(syntax.Variant(syntax.LangBash), syntax.KeepComments(true))
+	file, err := parser.Parse(strings.NewReader(source), "")
+	if err != nil {
+		return nil, &Error{Kind: "parse", Detail: "invalid Bash syntax", Cause: err}
+	}
+	return file, nil
 }
