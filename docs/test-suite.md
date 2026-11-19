@@ -5,7 +5,11 @@ environment. Use the existing deployment and a clean, read-only checkout mount
 at the revision you intend to verify. The caller must be a non-root Linux user
 with Python and the locked project dependencies, GNU `timeout`, and the
 PostgreSQL executables `initdb`, `postgres`, `pg_isready`, and `createdb` on
-`PATH`. `make test-suite PYTHON=/path/to/python3` selects a different installed
+`PATH`. `initdb` requires the test account to have a passwd entry; a numeric
+Compose UID without one cannot initialize the private cluster. If using a
+separate named test account, set `HOME`, `TMPDIR`, and `GOCACHE` to locations
+writable by that account before starting the runner. Do not inherit a
+service-owned temporary directory. `make test-suite PYTHON=/path/to/python3` selects a different installed
 Python. If `CODEBENCH_BASHGUARD_AUDIT_BINARY` is unset or points to a missing
 file, the runner needs Go and the authored `bashguard` source. It builds
 `bashguard/cmd/bashguard-audit` once into its private scratch directory and
