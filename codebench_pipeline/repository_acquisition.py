@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from http.client import HTTPException
 from pathlib import PurePosixPath
@@ -9,8 +10,8 @@ from typing import Literal
 from pydantic import JsonValue, TypeAdapter, ValidationError
 
 from codebench_pipeline.repository_config import Commit, RepositoryModel, RepositoryOrigin
-from codebench_pipeline.repository_legacy import read_legacy_capture
-from codebench_pipeline.repository_receipts import RepositoryRun, canonical, publish_bytes, sha256
+from codebench_pipeline.repository_legacy import PreparedCaptureCache
+from codebench_pipeline.repository_receipts import RepositoryRun, canonical, sha256
 from codebench_pipeline.repository_tree import (
     TREE_LIMIT,
     TreeEntry,
@@ -62,12 +63,14 @@ def _fetch_blob(origin: RepositoryOrigin, entry: TreeEntry, limit: int) -> bytes
 def catalog_origin(
     origin: RepositoryOrigin, run: RepositoryRun, limit: int
 ) -> tuple[list[CatalogSource], dict[str, JsonValue]]:
-    tree_path = run.root / "trees" / f"{origin.tree_digest}.json"
+    tree_key = f"trees/{origin.tree_digest}.json"
     raw = (
-        tree_path.read_bytes() if tree_path.exists() else fetch_repository_bytes(tree_url(origin), TREE_LIMIT)
+        run.read_evidence(tree_key)
+        if run.evidence_exists(tree_key)
+        else fetch_repository_bytes(tree_url(origin), TREE_LIMIT)
     )
     entries = validate_tree(raw, origin)
-    publish_bytes(tree_path, raw)
+    run.write_evidence(tree_key, raw)
     files = {entry.path: entry for entry in entries if entry.regular}
     missing_inclusions = set(origin.included_paths) - files.keys()
     if missing_inclusions:
@@ -80,13 +83,13 @@ def catalog_origin(
         if item.path not in files:
             raise IntegrityError(f"Pinned rights file is absent: {origin.origin_id}/{item.path}")
         entry = files[item.path]
-        proof_path = run.root / "rights" / f"{item.sha256}.json"
+        proof_key = f"rights/{item.sha256}.json"
         proof = canonical({"sha256": item.sha256, "git_blob_sha1": entry.sha})
-        if not proof_path.exists():
+        if not run.evidence_exists(proof_key):
             body = _fetch_blob(origin, entry, limit)
             if sha256(body) != item.sha256:
                 raise IntegrityError(f"Rights evidence SHA-256 differs: {origin.origin_id}/{item.path}")
-        publish_bytes(proof_path, proof)
+        run.write_evidence(proof_key, proof)
         rights.append(
             {
                 "url": raw_url(origin, item.path),
@@ -152,19 +155,24 @@ def catalog_origin(
 def capture_sources(
     sources: tuple[CatalogSource, ...], origin: RepositoryOrigin, runtime: CaptureRuntime
 ) -> list[tuple[CapturedSource, str]]:
+    run = runtime.run
+
     def capture(source: CatalogSource) -> tuple[CapturedSource, str]:
         capture_key = f"blobs/{source.git_blob_sha1}"
-        path = runtime.run.root / capture_key
-        cached = path.is_file()
-        digest_path = path.with_suffix(".sha256")
+        cached = run.evidence_exists(capture_key)
+        digest_key = f"{capture_key}.sha256"
         try:
             if source.size > runtime.limit:
                 raise IntegrityError(f"Repository capture exceeds the configured size: {source.path}")
             method: Literal["https", "repository_cache", "verified_prepared_cache"]
             if cached:
-                body, method = path.read_bytes(), "repository_cache"
+                body, method = run.read_evidence(capture_key), "repository_cache"
             else:
-                imported = read_legacy_capture(runtime.run.dataset_home, source.git_blob_sha1, source.size)
+                imported = (
+                    runtime.prepared_cache.read(source.git_blob_sha1, source.size)
+                    if runtime.prepared_cache is not None
+                    else None
+                )
                 if imported is None:
                     body, method = (
                         fetch_repository_bytes(raw_url(origin, source.path), runtime.limit),
@@ -173,20 +181,20 @@ def capture_sources(
                 else:
                     body, method = imported, "verified_prepared_cache"
             checksum = sha256(body)
-            if cached and digest_path.read_text(encoding="ascii") != checksum:
+            if cached and run.read_evidence(digest_key) != checksum.encode("ascii"):
                 raise IntegrityError(f"Stored capture SHA-256 differs: {source.path}")
             if len(body) != source.size or git_blob_sha1(body) != source.git_blob_sha1:
                 raise IntegrityError(f"Repository capture Git blob differs: {source.path}")
             text = body.decode("utf-8")
             if any(pattern.search(text) for pattern in SECRET_PATTERNS):
                 raise IntegrityError(f"Sensitive repository capture withheld: {source.path}")
-            publish_bytes(digest_path, checksum.encode("ascii"))
-            publish_bytes(path, body)
+            run.write_evidence(digest_key, checksum.encode("ascii"))
+            run.write_evidence(capture_key, body)
         except (OSError, ValueError, IntegrityError, HTTPException) as error:
             failure = canonical(
                 {
-                    "dataset_id": runtime.run.dataset_id,
-                    "run_id": runtime.run.run_id,
+                    "dataset_id": run.dataset_id,
+                    "run_id": run.run_id,
                     "source_id": source.source_id,
                     "origin_id": source.origin_id,
                     "path": source.path,
@@ -195,11 +203,8 @@ def capture_sources(
                     "complete": False,
                 }
             )
-            publish_bytes(
-                runtime.run.root
-                / "failures"
-                / runtime.run.run_id
-                / f"{source.source_id}-{sha256(failure)}.json",
+            run.write_evidence(
+                f"failures/{run.run_id}/{source.source_id}-{sha256(failure)}.json",
                 failure,
             )
             raise
@@ -220,10 +225,12 @@ def capture_sources(
         return list(executor.map(capture, sources))
 
 
-class CaptureRuntime(RepositoryModel):
+@dataclass(frozen=True, slots=True)
+class CaptureRuntime:
     limit: int
     workers: int
     run: RepositoryRun
+    prepared_cache: PreparedCaptureCache | None
 
 
 CATALOG_SOURCES = TypeAdapter(tuple[CatalogSource, ...])
@@ -246,4 +253,4 @@ def origin_receipt_failure(
             "complete": False,
         }
     )
-    publish_bytes(run.root / "failures" / run.run_id / f"{origin.origin_id}-{sha256(failure)}.json", failure)
+    run.write_evidence(f"failures/{run.run_id}/{origin.origin_id}-{sha256(failure)}.json", failure)

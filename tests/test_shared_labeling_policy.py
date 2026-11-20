@@ -7,18 +7,19 @@ import unittest
 from pathlib import Path
 
 from business_fixture import write_business
+from configuration_fixture import example_config, seed_prepared_snapshot
 from pydantic import ValidationError
 from test_dataset_annotation import documentation
-from test_dataset_bundle import write_bundle
 from test_dataset_rules import make_candidate, make_label, make_rules
+from test_declared_dataset_graph import BUNDLE, declared_labeling_fixture, fixture_spec
 
 from codebench_pipeline.business_config import load_business_rules
 from codebench_pipeline.dataset_annotation import request
 from codebench_pipeline.dataset_config import load_build_config
 from codebench_pipeline.dataset_records import validate_label
 from codebench_pipeline.dataset_registry import DatasetRegistry
-from codebench_pipeline.storage import fingerprint
-from scripts.category_config import load_labeling_prompt, load_taxonomy
+from codebench_pipeline.storage import IntegrityError
+from scripts.category_config import load_script_policy, load_taxonomy
 
 
 class SharedLabelingPolicyTests(unittest.TestCase):
@@ -47,9 +48,8 @@ class SharedLabelingPolicyTests(unittest.TestCase):
                     candidate = make_candidate(risk=expected_risks[0])
                     system, payload = request(candidate, documentation(), rules)
                     pipeline_policy = json.loads(system.rsplit("\n\n", 1)[1])
-                    _, _, standalone_policy, standalone_examples = load_labeling_prompt(
-                        [candidate.command], path
-                    ).split("\n\n")
+                    prompt = load_script_policy(path).render_prompt([candidate.command])
+                    _, _, standalone_policy, standalone_examples = prompt.split("\n\n")
                     for compiled in (pipeline_policy, json.loads(standalone_policy)):
                         self.assertEqual(compiled["classes"], policy["classes"])
                         self.assertEqual(compiled["severities"], expected_severities)
@@ -99,29 +99,28 @@ class SharedLabelingPolicyTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             home = Path(temporary)
             business = home / "business"
-            category = write_business(business)
-            bundle = write_bundle(home)
+            shutil.copytree(BUNDLE.parent.parent, business)
+            bundle = business / "datasets" / BUNDLE.name
             registry = DatasetRegistry(home)
             document = json.loads(bundle.read_bytes())
-            finalization = document["finalization"]
+            document["labeling"] = declared_labeling_fixture(home).model_dump(mode="json")
+            document["storage"] = {"backend": "s3", "bucket": "fixture-artifacts"}
             historical_rules = make_rules().model_copy(update={"base_prompt": "Historical instructions."})
-            finalization["rules"] = historical_rules.model_dump(mode="json")
             bundle.write_text(json.dumps(document), encoding="utf-8")
-            historical = load_build_config(bundle, home)
-            registry.register(historical)
-            directory = registry.root / historical.dataset_id
-            old_revision = fingerprint(
-                historical.model_dump_json(
-                    exclude={"rules": {"shared_policy_digest", "category_policy_digest"}}
-                )
+            historical, old_revision = seed_prepared_snapshot(
+                home,
+                fixture_spec(home).model_copy(update={"rules": historical_rules}),
+                example_config().documentation,
             )
+            with self.assertRaisesRegex(IntegrityError, "Only declared"):
+                registry.register(historical)
+            with self.assertRaisesRegex(IntegrityError, "read-only"):
+                registry.get(historical.dataset_id)
+            directory = registry.root / historical.dataset_id
             self.assertEqual((directory / "current").read_text(encoding="ascii"), old_revision)
             old_file = directory / f"{old_revision}.json"
             old_bytes = old_file.read_bytes()
 
-            finalization.pop("rules")
-            finalization["business_config"] = category.relative_to(home).as_posix()
-            bundle.write_text(json.dumps(document), encoding="utf-8")
             registry.register(load_build_config(bundle, home))
             initial = registry.get_snapshot(historical.dataset_id)
             initial_revision = (directory / "current").read_text(encoding="ascii")
@@ -146,7 +145,16 @@ class SharedLabelingPolicyTests(unittest.TestCase):
             self.assertEqual(prior, initial)
             self.assertEqual(old_file.read_bytes(), old_bytes)
             self.assertEqual(initial_file.read_bytes(), initial_bytes)
-            self.assertEqual(current.model_dump(exclude={"rules"}), initial.model_dump(exclude={"rules"}))
+            self.assertEqual(
+                current.model_dump(exclude={"rules", "config_directory"}),
+                initial.model_dump(exclude={"rules", "config_directory"}),
+            )
+            assert current.config_directory is not None and initial.config_directory is not None
+            self.assertNotEqual(current.config_directory.digest, initial.config_directory.digest)
+            self.assertEqual(
+                current.config_directory.read(Path("labeling/instructions.md")),
+                revised_instructions.encode(),
+            )
             self.assertEqual(current.rules.description_language, "French")
             self.assertEqual(current.rules.base_prompt, revised_instructions)
             self.assertEqual(current.rules.examples, initial.rules.examples)

@@ -2,6 +2,7 @@ import csv
 import json
 import os
 import re
+from contextlib import ExitStack
 from dataclasses import replace
 from io import StringIO
 from pathlib import Path
@@ -10,7 +11,7 @@ from unittest import TestCase
 from unittest.mock import patch
 
 import pandas as pd
-from guarded_labeling_fixture import CORPUS, LabelingFixture
+from guarded_labeling_fixture import CORPUS, LabelingFixture, fixture_vectors
 
 from codebench_pipeline import guarded_publication_sampling
 from codebench_pipeline.data_views import DatasetDataService
@@ -20,8 +21,8 @@ from codebench_pipeline.dataset_config import PublicationConfig
 from codebench_pipeline.dataset_records import CandidateRecord, LabelDecision
 from codebench_pipeline.dataset_registry import DatasetRegistry
 from codebench_pipeline.dataset_run import run_registered
-from codebench_pipeline.guarded_publication import ReleaseInputs, prepare_guarded_release
-from codebench_pipeline.grounding_tables import SUPPORT_ATTR, GuardedLabeling
+from codebench_pipeline.grounding_tables import SUPPORT_ATTR
+from codebench_pipeline.guarded_publication import ReleaseInputs, ReleaseProposal, prepare_guarded_release
 from codebench_pipeline.guarded_publication_controls import record_control
 from codebench_pipeline.guarded_publication_runtime import (
     current_proposal,
@@ -37,9 +38,11 @@ from codebench_pipeline.models import SemanticSnippet
 from codebench_pipeline.object_store import ObjectStore
 from codebench_pipeline.release_admission import read_publication
 from codebench_pipeline.release_runner import ReleaseContinuation, ReleaseRunner
+from codebench_pipeline.repository_receipts import RepositoryRun
 from codebench_pipeline.review_snapshots import ReviewManifest, ReviewSnapshots
 from codebench_pipeline.runtime_instance import dataset_instance
-from codebench_pipeline.storage import IntegrityError
+from codebench_pipeline.stage_configuration import DeclaredGlobalConfig
+from codebench_pipeline.storage import IntegrityError, fingerprint
 
 
 class GuardedPublicationTests(TestCase):
@@ -50,9 +53,12 @@ class GuardedPublicationTests(TestCase):
         store = HumanReviewStore(home)
         with store.transaction(dataset_id=dataset_id) as tx:
             record_control(tx, dataset_id, "hold", actor=100)
-        with patch(
-            "codebench_pipeline.grounding_tools.GroundingBroker.execute",
-            side_effect=AssertionError("labeler attempted provider lookup"),
+        with (
+            patch("codebench_pipeline.labeling_runtime.encode_from_directory", side_effect=fixture_vectors),
+            patch(
+                "codebench_pipeline.grounding_tools.GroundingBroker.execute",
+                side_effect=AssertionError("labeler attempted provider lookup"),
+            ),
         ):
             outcome = run_registered(dataset_id, home)
         self.assertEqual(outcome.status, "prepared")
@@ -65,14 +71,19 @@ class GuardedPublicationTests(TestCase):
         if token is None:
             self.fail("Empty synthetic review did not complete by policy")
         with dataset_instance(home) as instance:
-            snapshots = ReviewSnapshots(home, DatasetDataService(home, instance))
+            snapshots = ReviewSnapshots.from_environment(home, DatasetDataService(home, instance))
             approved = snapshots.authoritative(dataset_id)
             stale_settings = PublicationConfig(
                 limit_per_risk=1, review_columns=approved.manifest.publication.review_columns
             )
             different_cap = fixture.spec.model_copy(update={"publication": stale_settings})
             with self.assertRaisesRegex(HumanReviewError, "Registered release policy differs"):
-                prepare_guarded_release(ReleaseInputs(snapshots, approved, token, ()), home, different_cap)
+                prepare_guarded_release(
+                    ReleaseInputs(snapshots, approved, token, ()),
+                    RepositoryRun(home, dataset_id, "release-verification"),
+                    different_cap,
+                    publication_versions={},
+                )
             proposal, path = preview_proposal(home, instance, dataset_id)
             csv_rows = list(csv.DictReader(StringIO((path / "commands.csv").read_text())))
             self.assertEqual(
@@ -158,6 +169,42 @@ class GuardedPublicationTests(TestCase):
                     frame.attrs[SUPPORT_ATTR] = {**supports, sampled: supports[sampled] + "\n"}
                 return frame
 
+            with ExitStack() as race:
+
+                def change_registration_after_load(
+                    inputs: ReleaseInputs,
+                    run: RepositoryRun,
+                    registered: DeclaredGlobalConfig,
+                    *,
+                    publication_versions: dict[str, str],
+                ) -> ReleaseProposal:
+                    prepared = prepare_guarded_release(
+                        inputs, run, registered, publication_versions=publication_versions
+                    )
+                    race.enter_context(
+                        patch.object(
+                            DatasetRegistry,
+                            "current_revision",
+                            return_value=fingerprint("registration changed after release input resolution"),
+                        )
+                    )
+                    return prepared
+
+                with (
+                    patch(
+                        "codebench_pipeline.review_inputs.prepare_guarded_release",
+                        side_effect=change_registration_after_load,
+                    ) as intercepted,
+                    self.assertRaisesRegex(
+                        HumanReviewError, "Registered dataset configuration changed during the run"
+                    ) as stale,
+                ):
+                    runner(token)
+                intercepted.assert_called_once()
+                self.assertEqual(stale.exception.code, "stale")
+                with store.reader() as tx:
+                    self.assertFalse(tx.list_publications(dataset_id))
+
             publication = runner(token)
             self.assertEqual(publication.proposal_digest, proposal)
             self.assertEqual(runner(token), publication)
@@ -168,7 +215,10 @@ class GuardedPublicationTests(TestCase):
             with patch.object(ReviewSnapshots, "frame", changed_support):
                 with store.transaction(dataset_id=dataset_id) as tx:
                     changed = current_proposal(
-                        ReviewSnapshots(home, DatasetDataService(home, instance)), token, tx
+                        ReviewSnapshots.from_environment(home, DatasetDataService(home, instance)),
+                        token,
+                        tx,
+                        fixture.spec,
                     )
                 self.assertEqual(changed.manifest["sampling"], sampling)
                 self.assertEqual(changed.manifest["csv_sha256"], expected["csv_sha256"])
@@ -196,8 +246,8 @@ class GuardedPublicationTests(TestCase):
         fixture = LabelingFixture(
             self, home, shared_body=b"<pre>terraform plan</pre><p>Unrelated origin response.</p>"
         )
-        filtered = fixture.filtered()
-        attempts = GuardedLabeling(home, fixture.spec).attempts(filtered, home / "attempts")
+        filtered, labeling = fixture.labeling()
+        attempts = labeling.attempts(filtered, home / "attempts")
         rows = {row.command: row for row in model_records(attempts, LabelingAttempt)}
         self.assertEqual(rows["terraform plan"].failure_code, "operation_unsupported")
         self.assertEqual(rows["kubectl get pods"].status, "success")
@@ -205,14 +255,13 @@ class GuardedPublicationTests(TestCase):
     def test_mutating_one_repository_capture_cannot_restore_its_success(self) -> None:
         home = Path(self.enterContext(TemporaryDirectory()))
         fixture = LabelingFixture(self, home, context7=True)
-        filtered = fixture.filtered()
-        labeling = GuardedLabeling(home, fixture.spec)
+        filtered, labeling = fixture.labeling()
         attempts = labeling.attempts(filtered, home / "attempts")
         self.assertEqual({row.status for row in model_records(attempts, LabelingAttempt)}, {"success"})
         (capture,) = [path for path in home.rglob("blobs/*") if path.read_bytes() == CORPUS]
         capture.write_bytes(CORPUS.replace(b"Enumerate", b"Overwrite"))
         with self.assertRaisesRegex(IntegrityError, "capture digest mismatch"):
-            labeling.verify(attempts)
+            labeling.evidence_inputs.verify(attempts)
         during = len(fixture.remote_rows)
         evidence = home / "relabel"
         evidence.mkdir()

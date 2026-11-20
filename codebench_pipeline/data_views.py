@@ -20,9 +20,10 @@ from codebench_pipeline.dataset_artifacts import DatasetArtifactCatalog
 from codebench_pipeline.dataset_asset_types import DATASET_PARTITIONS
 from codebench_pipeline.dataset_branches import HISTORICAL_PROCESSING_STAGES
 from codebench_pipeline.dataset_config import DatasetBuildSpec
-from codebench_pipeline.dataset_plan import KNOWN_STAGES
+from codebench_pipeline.dataset_dependencies import KNOWN_STAGES
 from codebench_pipeline.dataset_registry import DatasetRegistry
 from codebench_pipeline.human_review import HumanReviewError
+from codebench_pipeline.review_output_state import read_current_snapshot
 from codebench_pipeline.table_query import TableQueryError, query_table
 
 
@@ -61,7 +62,7 @@ class DatasetDataService:
 
     def specification(self, dataset_id: str) -> DatasetBuildSpec:
         try:
-            return self.registry.get(dataset_id)
+            return self.registry.get_snapshot(dataset_id)
         except FileNotFoundError as error:
             raise DatasetViewError("not_found", "Dataset is not registered") from error
 
@@ -80,7 +81,7 @@ class DatasetDataService:
         if stage not in KNOWN_STAGES and stage not in historical:
             raise DatasetViewError("not_found", "Unknown dataset stage")
         spec = self.specification(dataset_id)
-        manager = DataFrameIOManager(storage=spec.storage, review_home=str(self.home))
+        manager = DataFrameIOManager.from_environment(spec.storage)
         with build_input_context(
             asset_key=AssetKey(["datasets", *stage.split("/")]),
             partition_key=dataset_id,
@@ -88,7 +89,7 @@ class DatasetDataService:
             instance=self.instance,
         ) as context:
             try:
-                snapshot = manager.read_current(context)
+                snapshot = read_current_snapshot(self.home, manager, context)
             except FileNotFoundError as error:
                 raise DatasetViewError("not_materialized", "This stage has no persisted output") from error
         return StoredDatasetAsset(spec, stage, snapshot.reference, snapshot.value, snapshot.publication_state)

@@ -4,20 +4,18 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
 
 from dagster import DagsterInvalidInvocationError
 from dataset_documentation_fixtures import commands, seed
 from pydantic import JsonValue, ValidationError
-from test_dataset_rules import make_rules
+from test_declared_dataset_graph import fixture_spec
 
-from codebench_pipeline.dataframe_schemas import frame_records
-from codebench_pipeline.dataset_documentation import collect_documentation
 from codebench_pipeline.dataset_documentation_config import BundleDocumentation, DocumentationConfig
+from codebench_pipeline.dataset_documentation_models import command_operations
 from codebench_pipeline.dataset_engine import stage_signature
 from codebench_pipeline.dataset_seed_config import DocumentationSeed
 from codebench_pipeline.source_manifests import DocumentationManifest, manifest_documentation
-from codebench_pipeline.storage import IntegrityError
+from codebench_pipeline.stage_configuration import stage_configs
 
 
 class DatasetDocumentationTests(unittest.TestCase):
@@ -38,82 +36,12 @@ class DatasetDocumentationTests(unittest.TestCase):
         with self.assertRaises((ValidationError, DagsterInvalidInvocationError)):
             config.revision = "changed"
 
-    def test_provided_evidence_retains_rows_and_reports_only_eligible_gaps(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            with (
-                patch("urllib.request.OpenerDirector.open", side_effect=AssertionError("No source search")),
-                patch(
-                    "codebench_pipeline.inference.subprocess.run", side_effect=AssertionError("No docs model")
-                ),
-            ):
-                table = collect_documentation(
-                    commands("probe inspect example && probe erase example"),
-                    make_rules(),
-                    DocumentationConfig(snippets=[seed()]),
-                    root,
-                )
-            self.assertEqual(frame_records(table), [seed().model_dump(mode="json")])
-            receipt = json.loads((root / "documentation-receipt.json").read_text())
-            self.assertEqual([row["status"] for row in receipt["coverage"]], ["covered", "gap"])
-            self.assertEqual(receipt["coverage"][1]["command_words"], ["erase", "example"])
-            self.assertEqual(receipt["use_scope"], "semantic_reference_only")
-
-    def test_empty_or_ineligible_commands_do_not_invent_operation_coverage(self) -> None:
-        for frame in (commands(), commands("probe inspect example", decision="needs_review")):
-            with self.subTest(rows=len(frame)), tempfile.TemporaryDirectory() as temporary:
-                root = Path(temporary)
-                table = collect_documentation(frame, make_rules(), DocumentationConfig(), root)
-                self.assertTrue(table.empty)
-                self.assertEqual(
-                    json.loads((root / "documentation-receipt.json").read_text())["coverage"], []
-                )
-
-    def test_nested_subcommand_coverage_ignores_global_option_values(self) -> None:
-        supplied = seed().model_copy(update={"subcommands": ["system inspect"]})
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            collect_documentation(
-                commands("probe --context example system inspect target", "probe system erase target"),
-                make_rules(),
-                DocumentationConfig(snippets=[supplied]),
-                root,
-            )
-            receipt = json.loads((root / "documentation-receipt.json").read_text())
-            self.assertEqual([row["status"] for row in receipt["coverage"]], ["covered", "gap"])
-            self.assertEqual(receipt["coverage"][1]["command_words"], ["system", "erase", "target"])
-
-    def test_empty_semantics_retains_gap_without_fabricating_documentation(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            table = collect_documentation(
-                commands("probe inspect example"), make_rules(), DocumentationConfig(), root
-            )
-            self.assertTrue(table.empty)
-            receipt = json.loads((root / "documentation-receipt.json").read_text())
-            self.assertEqual(receipt["coverage"][0]["status"], "gap")
-            self.assertEqual(receipt["status"], "partial")
-
-    def test_manifest_retains_full_input_and_category_binding_without_inference(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            source = root / "semantics.json"
-            manifest = DocumentationManifest(category_id="CAT-8", revision="provided-v1", snippets=[seed()])
-            source.write_text(manifest.model_dump_json(), encoding="utf-8")
-            config = DocumentationConfig(
-                manifest=str(source), snippets=manifest_documentation(source, "CAT-8")
-            )
-            table = collect_documentation(
-                commands("probe inspect example"), make_rules(), config, root / "evidence"
-            )
-            self.assertEqual(frame_records(table), [seed().model_dump(mode="json")])
-            self.assertEqual(
-                (root / "evidence/documentation-manifest.json").read_bytes(), source.read_bytes()
-            )
-            with self.assertRaises(IntegrityError):
-                manifest_documentation(source, "CAT-99")
-            with self.assertRaises(FileNotFoundError):
-                manifest_documentation(root / "missing.json", "CAT-8")
+    def test_nested_subcommand_matching_ignores_global_option_values(self) -> None:
+        (inspect,) = command_operations("inspect", "probe", "probe --context example system inspect target")
+        (erase,) = command_operations("erase", "probe", "probe system erase target")
+        self.assertTrue(inspect.matches("probe", "system inspect"))
+        self.assertFalse(erase.matches("probe", "system inspect"))
+        self.assertEqual(erase.words, ("system", "erase", "target"))
 
     def test_malformed_semantic_inputs_are_rejected_at_the_input_boundary(self) -> None:
         changes: list[dict[str, JsonValue]] = [
@@ -126,7 +54,7 @@ class DatasetDocumentationTests(unittest.TestCase):
             with self.subTest(change=change), self.assertRaises(ValidationError):
                 DocumentationSeed.model_validate({**seed().model_dump(), **change})
 
-    def test_authored_operation_selectors_and_notes_reach_documentation_receipt(self) -> None:
+    def test_archived_manifest_retains_operation_selectors_and_applicability(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             path = root / "semantics.json"
@@ -152,30 +80,17 @@ class DatasetDocumentationTests(unittest.TestCase):
             )
             config = BundleDocumentation(manifest=path.name, revision="old-wrapper-revision")
 
-            collect_documentation(
-                commands("probe --inspect=example", "probe erase example"),
-                make_rules(),
-                config.resolve(root, "CAT-8"),
-                root / "evidence",
-            )
-
-            receipt = json.loads((root / "evidence/documentation-receipt.json").read_text())
-            self.assertEqual(receipt["revision"], "operation-reference-2")
-            self.assertEqual([row["status"] for row in receipt["coverage"]], ["covered", "gap"])
-            self.assertEqual(receipt["provided"][0]["version_limits"], "Only on supported builds.")
+            resolved = config.resolve(root, "CAT-8")
+            self.assertEqual(resolved.revision, "operation-reference-2")
+            (snippet,) = resolved.snippets
+            self.assertEqual(snippet.subcommands, ["--inspect"])
+            self.assertEqual(snippet.version_limits, "Only on supported builds.")
 
     def test_flag_references_match_equals_options_without_matching_embedded_values(self) -> None:
-        supplied = seed().model_copy(update={"subcommands": ["--inspect"]})
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            collect_documentation(
-                commands("probe --inspect=example", "probe --context=--inspect erase example"),
-                make_rules(),
-                DocumentationConfig(snippets=[supplied]),
-                root,
-            )
-            receipt = json.loads((root / "documentation-receipt.json").read_text())
-            self.assertEqual([row["status"] for row in receipt["coverage"]], ["covered", "gap"])
+        (direct,) = command_operations("direct", "probe", "probe --inspect=example")
+        (embedded,) = command_operations("embedded", "probe", "probe --context=--inspect erase example")
+        self.assertTrue(direct.matches("probe", "--inspect"))
+        self.assertFalse(embedded.matches("probe", "--inspect"))
 
     def test_default_reference_is_accepted_and_covers_only_an_exact_bare_invocation(self) -> None:
         supplied = DocumentationSeed.model_validate(
@@ -189,63 +104,34 @@ class DatasetDocumentationTests(unittest.TestCase):
             root = Path(temporary)
             path = root / "documentation.json"
             path.write_text(manifest.model_dump_json())
-            snippets = manifest_documentation(path, "CAT-8")
-            table = collect_documentation(
-                commands(
-                    "probe",
-                    "probe inspect",
-                    "probe -h",
-                    "probe --context example",
-                    "probe --",
-                    'probe ""',
-                    "probe <default>",
-                    "other",
-                    "probe 'unterminated",
-                ),
-                make_rules(),
-                DocumentationConfig(manifest=str(path), snippets=snippets),
-                root / "evidence",
-            )
-            self.assertEqual(frame_records(table), [supplied.model_dump(mode="json")])
-            receipt = json.loads((root / "evidence/documentation-receipt.json").read_text())
-            self.assertEqual(
-                [row["status"] for row in receipt["coverage"]],
-                ["covered", "gap", "gap", "gap", "gap", "gap", "gap", "gap", "gap"],
-            )
+            (snippet,) = manifest_documentation(path, "CAT-8")
+            self.assertEqual(snippet, supplied)
+            (selector,) = snippet.subcommands
+            for command in (
+                "probe",
+                "probe inspect",
+                "probe -h",
+                "probe --context example",
+                "probe --",
+                'probe ""',
+                "probe <default>",
+                "other",
+                "probe 'unterminated",
+            ):
+                with self.subTest(command=command):
+                    (operation,) = command_operations("candidate", "probe", command)
+                    self.assertEqual(operation.matches(snippet.utility, selector), command == "probe")
 
-    def test_byte_limits_count_utf8_and_leave_a_failure_receipt(self) -> None:
-        supplied = seed().model_copy(update={"snippet": "\u00e9\u00e9"})
+    def test_changed_documentation_capture_invalidates_labeling_without_reopening_authored_files(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            with self.assertRaises(IntegrityError):
-                collect_documentation(
-                    commands("probe inspect example"),
-                    make_rules(),
-                    DocumentationConfig(snippets=[supplied], maximum_bytes=3),
-                    root,
-                )
-            self.assertEqual(
-                json.loads((root / "documentation-receipt.json").read_text())["status"], "failed"
-            )
-
-    def test_manifest_evidence_change_invalidates_the_semantic_stage_signature(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            path = Path(temporary) / "semantics.json"
-            manifest = DocumentationManifest(category_id="CAT-8", revision="first", snippets=[seed()])
-            path.write_text(manifest.model_dump_json(), encoding="utf-8")
-            config = DocumentationConfig(manifest=str(path), snippets=[seed()])
-            before = stage_signature("labeling_documentation", config, {})
-            path.write_text(
-                manifest.model_copy(update={"revision": "second"}).model_dump_json(), encoding="utf-8"
-            )
-            self.assertNotEqual(stage_signature("labeling_documentation", config, {}), before)
-
-    def test_existing_receipt_is_never_overwritten(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            frame = commands("probe inspect example")
-            collect_documentation(frame, make_rules(), DocumentationConfig(), root)
-            previous = (root / "documentation-receipt.json").read_bytes()
-            with self.assertRaises(IntegrityError):
-                collect_documentation(frame, make_rules(), DocumentationConfig(), root)
-            self.assertEqual((root / "documentation-receipt.json").read_bytes(), previous)
+            home = Path(temporary)
+            settings = stage_configs(fixture_spec(home))["labeling_attempts"]
+            capture = commands("probe inspect example")
+            inputs = {"documentation_capture": capture}
+            before = stage_signature("labeling_attempts", settings, inputs)
+            (home / "semantics.json").write_text("unregistered", encoding="utf-8")
+            self.assertEqual(stage_signature("labeling_attempts", settings, inputs), before)
+            capture.attrs["documentation_scope_receipt_json"] = '{"revision":"changed"}'
+            self.assertNotEqual(stage_signature("labeling_attempts", settings, inputs), before)

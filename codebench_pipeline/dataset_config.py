@@ -7,6 +7,7 @@ from pydantic_core import PydanticCustomError
 from codebench_pipeline.batch_labeling_config import BatchLabelingConfig
 from codebench_pipeline.category_rules import CategoryRules, Text
 from codebench_pipeline.collection_config import DeclaredCollection
+from codebench_pipeline.config_directory import ConfigDirectorySnapshot
 from codebench_pipeline.dataset_branches import Branch
 from codebench_pipeline.dataset_documentation_config import DocumentationConfig as DocumentationConfig
 from codebench_pipeline.dataset_seed_config import (
@@ -14,8 +15,7 @@ from codebench_pipeline.dataset_seed_config import (
     SourceSeed,
     unique_sources,
 )
-from codebench_pipeline.dataset_source_models import is_documentation_source
-from codebench_pipeline.model_config import ModelConfig, ModelRoles
+from codebench_pipeline.model_config import ModelConfig
 from codebench_pipeline.models import Identifier
 from codebench_pipeline.object_store import StorageConfig
 from codebench_pipeline.typed_config import TypedConfig
@@ -43,18 +43,6 @@ class CatalogInputs(StrictStageConfig):
         return self
 
 
-class DatasetSeeds(CatalogInputs):
-    """Category source inputs prepared by the local agent."""
-
-    revision: str = Field(default="1", min_length=1)
-
-    @model_validator(mode="after")
-    def one_source_input(self) -> "DatasetSeeds":
-        if self.manifest is not None and self.documents:
-            raise ValueError("Choose either a source manifest or inline source records")
-        return self
-
-
 class CatalogConfig(CatalogInputs):
     collection_revision: str = Field(default="1", min_length=1)
     model: ModelConfig | None = None
@@ -67,11 +55,6 @@ class CatalogConfig(CatalogInputs):
 
 SnapshotBytes = Annotated[int, Field(gt=0)]
 SnapshotWorkers = Annotated[int, Field(ge=1, le=16)]
-
-
-class SnapshotSettings(StrictStageConfig):
-    maximum_bytes: SnapshotBytes = 10_485_760
-    workers: SnapshotWorkers = 8
 
 
 class SnapshotConfig(StrictStageConfig):
@@ -140,44 +123,15 @@ class PublicationConfig(StrictStageConfig):
         return value
 
 
-class DatasetFileConfig(StrictStageConfig):
-    dataset_id: Identifier
-    revision: str = Field(min_length=1)
-    rules: CategoryRules | None = None
-    business_config: Text | None = None
-    models: ModelRoles
-    seeds: DatasetSeeds
-    documentation_sources: DatasetSeeds | None = None
-    documentation: DocumentationConfig
-    snapshot_maximum_bytes: int = Field(default=10_485_760, gt=0)
-    adapters: Literal["provided"] = "provided"
-    adapter_sample_characters: int = Field(default=8000, ge=100, le=50000)
-    labeling_workers: int = Field(default=1, ge=1, le=8)
-    labeling_batch: BatchLabelingConfig | None = None
-    extraction: ExtractionConfig = ExtractionConfig()
-    filtering: FilteringConfig = FilteringConfig()
-    publication: PublicationConfig = PublicationConfig()
-    storage: StorageConfig | None = None
-
-    @model_validator(mode="after")
-    def matching_sources(self) -> "DatasetFileConfig":
-        if (self.rules is None) == (self.business_config is None):
-            raise ValueError("Choose exactly one of rules or business_config")
-        if self.documentation_sources is not None:
-            for document in self.documentation_sources.documents:
-                if not is_documentation_source(document.source_type, document.provenance_type):
-                    raise ValueError(
-                        "Documentation sources require original documentation or forum provenance, not corpora"
-                    )
-        return self
-
-
 class DatasetBuildSpec(StrictStageConfig):
     dataset_id: Identifier
     revision: str
     refresh_external_inputs: bool = False
     rules: CategoryRules
     business_config: Text | None = None
+    config_directory: ConfigDirectorySnapshot | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
     catalog: CatalogConfig
     snapshots: SnapshotConfig = SnapshotConfig()
     documentation_catalog: CatalogConfig | None = None
@@ -204,6 +158,10 @@ class DatasetBuildSpec(StrictStageConfig):
 
     @model_validator(mode="after")
     def matching_collection_inputs(self) -> "DatasetBuildSpec":
+        if self.config_directory is not None and (
+            self.has_declared_collection and self.config_directory.category_id != self.rules.category_id
+        ):
+            raise ValueError("Configuration directory scope differs from the declared dataset category")
         if self.has_declared_collection:
             if "documentation" in self.model_fields_set or self.refresh_external_inputs:
                 raise ValueError("Declared collection requires pinned inputs and no labeling documentation")
@@ -247,9 +205,10 @@ def snapshots_for_branch(spec: DatasetBuildSpec, branch: Branch) -> SnapshotConf
 
 
 def load_build_config(path: Path, home: Path | None = None) -> DatasetBuildSpec:
-    from codebench_pipeline.dataset_bundle import load_dataset_bundle
+    from codebench_pipeline.declared_dataset_bundle import DeclaredDatasetBundle
 
-    return load_dataset_bundle(path, home)
+    bundle = DeclaredDatasetBundle.model_validate_json(path.read_bytes())
+    return bundle.resolve(path.resolve().parent, home=home)
 
 
 def _declared_annotation_batch(annotation: AnnotationConfig) -> BatchLabelingConfig:

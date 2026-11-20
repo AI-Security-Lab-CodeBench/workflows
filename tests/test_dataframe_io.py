@@ -33,6 +33,7 @@ from codebench_pipeline.storage import IntegrityError
 @dataclass
 class S3State:
     objects: dict[str, tuple[bytes, str]] = field(default_factory=dict)
+    reads: list[str] = field(default_factory=list)
     reject_writes: bool = False
 
 
@@ -53,6 +54,7 @@ def s3_fixture() -> Generator[tuple[StorageConfig, S3State]]:
             self.wfile.write(data)
 
         def do_GET(self) -> None:
+            state.reads.append(self.path)
             result = state.objects.get(self.path)
             if result is None:
                 self.reply(404, b"<Error><Code>NoSuchKey</Code></Error>")
@@ -95,6 +97,45 @@ def s3_fixture() -> Generator[tuple[StorageConfig, S3State]]:
 
 
 class DataFrameIOTests(unittest.TestCase):
+    def test_attempt_evidence_keeps_relative_names_under_the_attempt_prefix(self) -> None:
+        scratch = self.root / "step-scratch"
+        nested = scratch / "nested"
+        nested.mkdir(parents=True)
+        (scratch / "receipt.json").write_bytes(b"top")
+        (nested / "receipt.json").write_bytes(b"nested")
+
+        receipts = self.manager.retain_attempt_evidence(scratch, "attempt")
+
+        self.assertEqual(set(receipts), {"receipt.json", "nested/receipt.json"})
+        self.assertEqual(self.manager.read_evidence("attempt/receipt.json"), b"top")
+        self.assertEqual(self.manager.read_evidence("attempt/nested/receipt.json"), b"nested")
+
+    def test_attempt_evidence_rejects_a_replaced_scratch_root(self) -> None:
+        outside = self.root / "outside"
+        outside.mkdir()
+        (outside / "receipt.json").write_bytes(b"not an attempt")
+        scratch = self.root / "step-scratch"
+        scratch.symlink_to(outside, target_is_directory=True)
+
+        with self.assertRaises(IntegrityError):
+            self.manager.retain_attempt_evidence(scratch, "attempt")
+        with self.assertRaises(FileNotFoundError):
+            self.manager.read_evidence("attempt/receipt.json")
+
+    def test_attempt_evidence_rejects_links_outside_scratch(self) -> None:
+        manager = DataFrameIOManager(storage=self.config)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            scratch = root / "attempt"
+            scratch.mkdir()
+            outside = root / "outside.txt"
+            outside.write_bytes(b"outside the attempt")
+            (scratch / "receipt").symlink_to(outside)
+            with self.assertRaisesRegex(IntegrityError, "regular"):
+                manager.retain_attempt_evidence(scratch, "attempt")
+            with self.assertRaises(FileNotFoundError):
+                manager.read_evidence("attempt/receipt")
+
     def setUp(self) -> None:
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
@@ -264,12 +305,17 @@ class DataFrameIOTests(unittest.TestCase):
             access_key_env="IO_MISSING_ACCESS",
             secret_key_env="IO_MISSING_SECRET",
         )
-        with patch.dict("os.environ", {}, clear=True), self.assertRaises(ValueError):
-            DataFrameIOManager(storage=config).read_evidence("missing")
+        with (
+            patch.dict("os.environ", {}, clear=True),
+            self.assertRaisesRegex(
+                ValueError, "Configured credential environment variables must be populated"
+            ),
+        ):
+            DataFrameIOManager.from_environment(config)
 
     def test_s3_http_roundtrips_conditional_replacement_and_tamper_detection(self) -> None:
         with s3_fixture() as (config, state):
-            manager = DataFrameIOManager(storage=config)
+            manager = DataFrameIOManager.from_environment(config)
             for number in (1, 2):
                 manager.handle_output(
                     build_output_context(asset_key="remote"), pd.DataFrame({"id": [number]})
@@ -283,7 +329,9 @@ class DataFrameIOTests(unittest.TestCase):
             def unexpected_compute() -> pd.DataFrame:
                 self.fail("Remote cache hit must not compute")
 
-            cached, hit = DataFrameIOManager(storage=config).cached_frame("empty-v1", unexpected_compute)
+            cached, hit = DataFrameIOManager.from_environment(config).cached_frame(
+                "empty-v1", unexpected_compute
+            )
             self.assertTrue(hit)
             assert_frame_equal(cached, expected)
             uri = manager.write_evidence("receipt", b"original")
@@ -300,6 +348,36 @@ class DataFrameIOTests(unittest.TestCase):
                 manager.write_evidence("new-receipt", b"racing writer")
             self.assertFalse(manager.exists("new-receipt"))
             self.assertEqual(state.objects[key][0], b"tampered")
+
+    def test_bound_s3_client_works_after_named_credentials_are_removed(self) -> None:
+        with s3_fixture() as (config, _):
+            manager = DataFrameIOManager.from_environment(config)
+
+            with patch.dict("os.environ", {}, clear=True):
+                manager.write_evidence("bound-client", b"private artifact")
+                self.assertEqual(manager.read_evidence("bound-client"), b"private artifact")
+
+        for value in ("fixture-access", "fixture-secret"):
+            self.assertNotIn(value, manager.model_dump_json())
+            self.assertNotIn(value, repr(manager))
+
+    def test_s3_binding_without_selectors_uses_the_default_provider_chain(self) -> None:
+        with s3_fixture() as (config, _):
+            defaults = config.model_copy(update={"access_key_env": None, "secret_key_env": None})
+            with (
+                patch.dict(
+                    "os.environ",
+                    {
+                        "AWS_ACCESS_KEY_ID": "fixture-default-access",
+                        "AWS_SECRET_ACCESS_KEY": "fixture-default-secret",
+                    },
+                    clear=True,
+                ),
+                patch("boto3.DEFAULT_SESSION", None),
+            ):
+                manager = DataFrameIOManager.from_environment(defaults)
+                manager.write_evidence("default-provider", b"default provider")
+                self.assertEqual(manager.read_evidence("default-provider"), b"default provider")
 
 
 if __name__ == "__main__":

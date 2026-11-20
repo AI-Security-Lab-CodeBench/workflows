@@ -3,13 +3,13 @@ from io import BytesIO
 from json import loads
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 import pandas as pd
 import pandera.pandas as pa
 import pyarrow as arrow
 import pyarrow.parquet as parquet
-from configuration_fixture import write_fixture
-from dagster import AssetKey, DagsterInstance, Definitions, Output, RunConfig, asset, materialize
+from dagster import AssetKey, AssetsDefinition, DagsterInstance, Definitions, Output, asset
 from dagster_pandera import pandera_schema_to_dagster_type
 from jsonschema import Draft202012Validator
 from pandera.typing import DataFrame, Series
@@ -17,12 +17,22 @@ from pydantic import ValidationError
 from starlette.testclient import TestClient
 from test_artifact_views import FixtureCatalog
 from test_dataset_rules import make_rules
-from test_declared_dataset_graph import fixture_spec
+from test_declared_dataset_graph import BUNDLE, fixture_spec
 
-from codebench_pipeline.artifact_schemas import declared_table_schema
+from codebench_pipeline.artifact_schemas import (
+    declared_artifact_schemas,
+    declared_table_schema,
+    rules_artifact_schema,
+)
 from codebench_pipeline.artifact_views import ArtifactBinding, ArtifactDataService, ArtifactQuery
 from codebench_pipeline.category_rules import CategoryRules
-from codebench_pipeline.config_assets import GLOBAL_CONFIG, REGISTERED_CONFIG_TYPE, GlobalConfig
+from codebench_pipeline.config_assets import (
+    CONFIG_DIRECTORY,
+    GLOBAL_CONFIG,
+    REGISTERED_CONFIG_TYPE,
+    ConfigRunIOManager,
+)
+from codebench_pipeline.config_directory import ConfigDirectorySnapshot
 from codebench_pipeline.data_api import make_dataset_api
 from codebench_pipeline.data_views import DatasetDataService
 from codebench_pipeline.dataframe_io import AssetReference, DataFrameIOManager, frame_bytes
@@ -31,10 +41,11 @@ from codebench_pipeline.dataframe_schemas import (
     ProposedAnnotationsTable,
 )
 from codebench_pipeline.dataset_asset_types import RULES_TYPE, TABLE_TYPES
-from codebench_pipeline.dataset_config import DatasetBuildSpec, load_build_config
+from codebench_pipeline.dataset_config import DatasetBuildSpec
 from codebench_pipeline.dataset_registry import DatasetRegistry
-from codebench_pipeline.definitions import build_definitions
+from codebench_pipeline.definitions import build_definitions, dataset_run_config
 from codebench_pipeline.object_store import ObjectStore, StorageConfig, sha256
+from codebench_pipeline.runtime_instance import dataset_instance
 from codebench_pipeline.stage_configuration import ConfigArtifact
 from codebench_pipeline.storage import IntegrityError
 from codebench_pipeline.table_query import TableQuery, TableQueryError
@@ -128,20 +139,23 @@ class ArtifactSchemaTests(unittest.TestCase):
         self.assertTrue(Draft202012Validator(schema).is_valid(body["value"]))
 
     def test_all_registered_asset_outputs_have_inspectable_schemas(self) -> None:
-        for spec in (load_build_config(write_fixture(self.home), self.home), fixture_spec(self.home)):
-            with self.subTest(declared=spec.has_declared_collection):
-                DatasetRegistry(self.home).register(spec)
-                self.check_inventory(build_definitions(self.home, specification=spec), spec)
+        spec = fixture_spec(self.home)
+        DatasetRegistry(self.home).register(spec)
+        self.check_inventory(self.definitions, spec)
 
     def check_inventory(self, definitions: Definitions, spec: DatasetBuildSpec) -> None:
         reverse_types = {value.key: model for model, value in TABLE_TYPES.items()}
         config_keys: list[AssetKey] = []
-        for definition in definitions.assets:
+        for definition in definitions.assets or ():
+            assert isinstance(definition, AssetsDefinition)
             for key in definition.keys:
                 with self.subTest(asset=key.path):
                     output = definition.get_output_name_for_asset_key(key)
                     dtype = definition.node_def.output_def_named(output).dagster_type
                     if definition.get_io_manager_key_for_asset_key(key) == "config_run_io_manager":
+                        if key == CONFIG_DIRECTORY:
+                            self.assertIs(dtype.typing_type, ConfigDirectorySnapshot)
+                            continue
                         config_keys.append(key)
                         if key == GLOBAL_CONFIG:
                             self.assertEqual(dtype, REGISTERED_CONFIG_TYPE)
@@ -165,35 +179,39 @@ class ArtifactSchemaTests(unittest.TestCase):
 
                     self.assertEqual(response.data_schema.source, "declared")
                     schema = response.data_schema.schema_
-                    self.assertEqual(set(schema["properties"]), expected)
+                    properties = schema.get("properties")
+                    assert isinstance(properties, dict)
+                    self.assertEqual(set(properties), expected)
                     Draft202012Validator.check_schema(schema)
                     self.assertEqual(response.snapshot_id, reference.digest)
 
         with DagsterInstance.ephemeral() as instance:
             instance.add_dynamic_partitions("dataset_builds", [spec.dataset_id])
-            run = materialize(
-                definitions.assets,
-                selection=[*config_keys, AssetKey(["datasets", "category_rules"])],
-                resources=definitions.resources,
+            run = definitions.resolve_job_def("refresh_dataset_configuration").execute_in_process(
                 instance=instance,
                 partition_key=spec.dataset_id,
-                run_config=RunConfig(
-                    ops={"datasets__global_config": GlobalConfig.for_spec(spec)},
-                    resources={"dataset_io_manager": DataFrameIOManager(storage=spec.storage)},
-                ),
+                run_config=dataset_run_config(spec),
             )
             self.assertTrue(run.success)
+            projections = [key for key in config_keys if key != GLOBAL_CONFIG]
+            projected = definitions.get_implicit_global_asset_job_def().execute_in_process(
+                instance=instance, partition_key=spec.dataset_id, asset_selection=projections
+            )
+            self.assertTrue(projected.success)
+            self.assertCountEqual(
+                [event.asset_key for event in projected.get_asset_materialization_events()], projections
+            )
             origin = "http://127.0.0.1:3000"
             data = DatasetDataService(self.home, instance)
             with TestClient(make_dataset_api(data, None, 3000), base_url=origin) as client:
                 for key in config_keys:
                     with self.subTest(asset=key.path):
-                        value = run.output_for_node(key.to_python_identifier())
-                        self.assertIsInstance(value, (DatasetBuildSpec, ConfigArtifact))
+                        producer = run if key == GLOBAL_CONFIG else projected
+                        value = producer.output_for_node(key.to_python_identifier())
+                        self.assertIsInstance(value, ConfigArtifact)
                         raw = value.model_dump_json(by_alias=True)
-                        if spec.has_declared_collection:
-                            self.assertNotIn(str(self.home), raw)
-                            self.assertNotIn("/fixture/model", raw)
+                        self.assertNotIn(str(self.home), raw)
+                        self.assertNotIn("/fixture/model", raw)
                         response = client.post(
                             "/artifacts/data",
                             headers={"Origin": origin},
@@ -210,6 +228,26 @@ class ArtifactSchemaTests(unittest.TestCase):
                         validator = Draft202012Validator(schema)
                         self.assertTrue(validator.is_valid(body["value"]))
                         self.assertFalse(validator.is_valid(raw))
+
+    def test_observed_directory_snapshot_conforms_to_declared_schema(self) -> None:
+        spec = fixture_spec(self.home)
+        dataset_id = DatasetRegistry(self.home).register(spec)
+        with (
+            dataset_instance(self.home) as instance,
+            patch.dict("os.environ", {"CODEBENCH_CONFIG_ROOT": str(BUNDLE.parent.parent)}),
+        ):
+            instance.add_dynamic_partitions("dataset_builds", [dataset_id])
+            run = self.definitions.resolve_job_def("observe_dataset_configuration").execute_in_process(
+                instance=instance, partition_key=dataset_id
+            )
+        (event,) = run.get_asset_materialization_events()
+        self.assertEqual(event.asset_key, CONFIG_DIRECTORY)
+        directory = ConfigRunIOManager(home=str(self.home)).directory(run.run_id)
+        self.assertEqual(directory, spec.config_directory)
+        schema = declared_artifact_schemas(self.definitions)[tuple(CONFIG_DIRECTORY.path)]
+        Draft202012Validator.check_schema(schema)
+        self.assertEqual(rules_artifact_schema(directory.model_dump(mode="json"), schema).source, "declared")
+        self.assertEqual(rules_artifact_schema({}, schema).source, "storage")
 
     def test_empty_declared_table_keeps_lists_aliases_and_constraints(self) -> None:
         frame = pd.DataFrame(columns=list(ProposedAnnotationsTable.to_schema().columns))

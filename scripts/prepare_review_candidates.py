@@ -5,18 +5,18 @@ import shlex
 from pathlib import Path
 
 if __package__:
-    from .category_config import Taxonomy, load_taxonomy
+    from .category_config import Taxonomy, add_policy_options, cli_taxonomy
     from .command_filter import command_words
     from .source_pipeline import source_eligible, write_jsonl
-    from .validate_dataset import DEFAULT_TAXONOMY, load_jsonl
+    from .validate_dataset import load_jsonl
 else:
-    from category_config import Taxonomy, load_taxonomy
+    from category_config import Taxonomy, add_policy_options, cli_taxonomy
     from command_filter import command_words
     from source_pipeline import source_eligible, write_jsonl
-    from validate_dataset import DEFAULT_TAXONOMY, load_jsonl
+    from validate_dataset import load_jsonl
 
 
-def prepare(args: argparse.Namespace, taxonomy: Taxonomy = DEFAULT_TAXONOMY) -> dict[str, int]:
+def prepare(args: argparse.Namespace, taxonomy: Taxonomy) -> dict[str, int]:
     candidates = load_jsonl(args.inputs / "candidates.jsonl")
     candidate_ids = set()
     for candidate in candidates:
@@ -114,12 +114,11 @@ def main() -> None:
     parser.add_argument("--eligible", type=Path, required=True)
     parser.add_argument("--documents", type=Path, required=True)
     parser.add_argument("--out", type=Path, required=True)
-    parser.add_argument("--category-config", type=Path)
+    add_policy_options(parser)
     args = parser.parse_args()
     import json
 
-    taxonomy = load_taxonomy(args.category_config) if args.category_config else DEFAULT_TAXONOMY
-    print(json.dumps(prepare(args, taxonomy)))
+    print(json.dumps(prepare(args, cli_taxonomy(args))))
 
 
 if __name__ == "__main__":

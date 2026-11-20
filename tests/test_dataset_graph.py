@@ -1,35 +1,45 @@
 import tempfile
 import unittest
 from concurrent.futures import ThreadPoolExecutor
+from datetime import UTC, datetime
 from pathlib import Path
 from threading import Barrier
 from unittest.mock import Mock, patch
 
 import pandas as pd
-from configuration_fixture import write_fixture
-from dagster import AssetKey
+from dagster import AssetKey, AssetRecordsFilter
 from dagster._core.run_coordinator.base import SubmitRunContext
 from dagster._core.workspace.context import BaseWorkspaceRequestContext
+from guarded_labeling_fixture import LabelingFixture
+from native_dataset_cycle import NativeDatasetCycle
 from pandera.errors import SchemaError
 from pydantic import ValidationError
+from test_declared_dataset_graph import fixture_spec, with_keenable_declaration
+from test_keenable import source_declaration
 
-from codebench_pipeline.config_assets import configured_selection
+from codebench_pipeline.collection_config import SourceDeclaration
+from codebench_pipeline.config_assets import CONFIG_DIRECTORY, configured_selection
 from codebench_pipeline.dataframe_io import AssetSnapshot, DataFrameIOManager
 from codebench_pipeline.dataframe_schemas import CommandsTable
-from codebench_pipeline.dataset_config import AnnotationConfig, FilteringConfig, load_build_config
+from codebench_pipeline.dataset_config import FilteringConfig
+from codebench_pipeline.dataset_dependencies import DECLARED_INPUT_STAGES, preparation_stages
 from codebench_pipeline.dataset_engine import stage_signature
-from codebench_pipeline.dataset_plan import INPUT_STAGES, PREPARATION_STAGES, plan_dataset
+from codebench_pipeline.dataset_registry import DatasetRegistry
+from codebench_pipeline.dataset_run import refresh_registered_configuration
 from codebench_pipeline.definitions import build_definitions, dataset_run_config
+from codebench_pipeline.human_review import HumanReviewError
+from codebench_pipeline.repository_branch_config import RepositoryBranchDeclaration
 from codebench_pipeline.runtime_instance import dataset_instance
 from codebench_pipeline.stage_configuration import stage_configs
-from codebench_pipeline.storage import digest
+from codebench_pipeline.stage_implementation import ImplementationSource
 
 
 class DatasetGraphTests(unittest.TestCase):
     def test_verified_storage_inputs_preserve_stage_fingerprints(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             home = Path(temporary)
-            spec = load_build_config(write_fixture(home), home)
+            spec = fixture_spec(home)
+            configs = stage_configs(spec)
             manager = DataFrameIOManager(storage=spec.storage)
             frame = pd.DataFrame({"command": ["git status", "git diff"], "context": [None, "inspection"]})
             frame.attrs["provenance"] = {"sources": [{"id": "fixture", "positions": [1, 2]}]}
@@ -37,9 +47,9 @@ class DatasetGraphTests(unittest.TestCase):
                 reference = manager.persist_value(value)
                 stored = AssetSnapshot(reference, manager.read_version(reference))
                 for stage, config in (
-                    ("source_catalog", spec.catalog),
+                    ("enumerate_corpus_files", configs["enumerate_corpus_files"]),
                     ("filtered_commands", FilteringConfig()),
-                    ("proposed_annotations", spec.annotation),
+                    ("labeling_attempts", configs["labeling_attempts"]),
                 ):
                     with self.subTest(format=reference.format, stage=stage):
                         self.assertEqual(
@@ -49,25 +59,31 @@ class DatasetGraphTests(unittest.TestCase):
 
     def test_publication_policy_change_invalidates_only_the_publication_signature(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            spec = load_build_config(write_fixture(Path(temporary)), Path(temporary))
+            spec = fixture_spec(Path(temporary))
             before = stage_signature("human_review_queue", spec.publication, {})
-            extraction = stage_signature("command_candidates", spec.extraction, {})
+            config = stage_configs(spec)["command_candidates"]
+            extraction = stage_signature("command_candidates", config, {})
 
-            def changed_policy(path: Path) -> str:
-                return "f" * 64 if path.name == "review_stages.py" else digest(path)
+            read_source = ImplementationSource.read
 
-            with patch("codebench_pipeline.dataset_engine.digest", side_effect=changed_policy):
+            def changed_policy(source: ImplementationSource, name: str) -> bytes:
+                payload = read_source(source, name)
+                return payload + b"\n" if name == "codebench_pipeline/review_stages.py" else payload
+
+            with patch.object(ImplementationSource, "read", changed_policy):
                 self.assertNotEqual(stage_signature("human_review_queue", spec.publication, {}), before)
-                self.assertEqual(stage_signature("command_candidates", spec.extraction, {}), extraction)
+                self.assertEqual(stage_signature("command_candidates", config, {}), extraction)
 
     def test_local_submission_reaches_launcher_without_waiting_for_a_daemon(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             home = Path(temporary)
             with dataset_instance(home) as instance:
-                spec = load_build_config(write_fixture(home), home)
+                spec = fixture_spec(home)
+                run_config = dataset_run_config(spec).to_config_dict()
+                self.assertEqual(set(run_config["ops"]), {"datasets__global_config"})
                 run = instance.create_run_for_job(
                     build_definitions(home).resolve_job_def("build_dataset"),
-                    run_config=dataset_run_config(spec, home).to_config_dict(),
+                    run_config=run_config,
                 )
                 context = SubmitRunContext(run, Mock(spec=BaseWorkspaceRequestContext))
                 with patch.object(instance, "launch_run", side_effect=RuntimeError("launcher reached")):
@@ -89,12 +105,16 @@ class DatasetGraphTests(unittest.TestCase):
             )
             self.assertEqual(
                 assets.get_all_asset_keys(),
-                set(configured_selection(AssetKey(["datasets", *name.split("/")]) for name in INPUT_STAGES))
-                | {AssetKey(["datasets", "bashguard_syntax_audit"])},
+                set(
+                    configured_selection(
+                        AssetKey(["datasets", *name.split("/")]) for name in DECLARED_INPUT_STAGES
+                    )
+                )
+                | {CONFIG_DIRECTORY, AssetKey(["datasets", "bashguard_syntax_audit"])},
             )
             self.assertEqual(
                 assets.get(AssetKey(["datasets", "deduplicated_annotations"])).parent_keys,
-                {AssetKey(["datasets", "proposed_annotations"])},
+                {AssetKey(["datasets", "proposed_annotations"]), AssetKey(["datasets", "global_config"])},
             )
             self.assertEqual(
                 assets.get(AssetKey(["datasets", "category_eligible_annotations"])).parent_keys,
@@ -104,13 +124,22 @@ class DatasetGraphTests(unittest.TestCase):
                     AssetKey(["datasets", "global_config"]),
                 },
             )
-            self.assertIn(
-                AssetKey(["datasets", "category_eligible_annotations"]),
+            review_evidence = {AssetKey(["datasets", *stage.split("/")]) for stage in preparation_stages()}
+            registered = AssetKey(["datasets", "global_config"])
+            queue = AssetKey(["datasets", "human_review_queue"])
+            decisions = AssetKey(["datasets", "human_review_decisions"])
+            self.assertEqual(
                 assets.get(AssetKey(["datasets", "human_review_queue"])).parent_keys,
+                (review_evidence - {queue})
+                | {registered, AssetKey(["datasets", "map_human_review_queue_config"])},
             )
             self.assertEqual(
-                assets.get(AssetKey(["datasets", "human_review_decisions"])).parent_keys,
-                {AssetKey(["datasets", "human_review_queue"])},
+                assets.get(decisions).parent_keys,
+                review_evidence | {registered},
+            )
+            self.assertEqual(
+                assets.get(AssetKey(["datasets", "dataset_release"])).parent_keys,
+                review_evidence | {registered, decisions},
             )
             self.assertNotIn(AssetKey(["datasets", "human_review_snapshot"]), assets.get_all_asset_keys())
             self.assertEqual(
@@ -118,6 +147,9 @@ class DatasetGraphTests(unittest.TestCase):
                 {
                     AssetKey(["datasets", "command_candidates"]),
                     AssetKey(["datasets", "documentation", "command_candidates"]),
+                    AssetKey(["datasets", "keenable", "command_candidates"]),
+                    AssetKey(["datasets", "map_merged_command_candidates_config"]),
+                    AssetKey(["datasets", "global_config"]),
                 },
             )
             self.assertEqual(
@@ -125,22 +157,27 @@ class DatasetGraphTests(unittest.TestCase):
                 {
                     AssetKey(["datasets", "merged_command_candidates"]),
                     AssetKey(["datasets", "map_filtered_commands_config"]),
+                    AssetKey(["datasets", "global_config"]),
                 },
             )
             self.assertEqual(
-                assets.get(AssetKey(["datasets", "source_documents"])).parent_keys,
-                {AssetKey(["datasets", name]) for name in ("source_catalog", "map_existing_datasets_config")},
-            )
-            self.assertIn(
-                AssetKey(["datasets", "filtered_commands"]),
-                assets.get(AssetKey(["datasets", "labeling_documentation"])).parent_keys,
-            )
-            self.assertEqual(
-                assets.get(AssetKey(["datasets", "documentation", "source_documents"])).parent_keys,
+                assets.get(AssetKey(["datasets", "capture_corpus_files"])).parent_keys,
                 {
-                    AssetKey(["datasets", "documentation", "source_catalog"]),
-                    AssetKey(["datasets", "map_documentation_crawl_config"]),
+                    AssetKey(["datasets", name])
+                    for name in ("enumerate_corpus_files", "map_existing_datasets_config")
                 },
+            )
+            self.assertEqual(
+                assets.get(AssetKey(["datasets", "labeling_attempts"])).parent_keys,
+                {
+                    AssetKey(["datasets", "filtered_commands"]),
+                    AssetKey(["datasets", "map_labeling_attempts_config"]),
+                    AssetKey(["datasets", "documentation", "capture_documentation"]),
+                },
+            )
+            self.assertEqual(
+                assets.get(AssetKey(["datasets", "documentation", "capture_documentation"])).parent_keys,
+                {AssetKey(["datasets", "map_documentation_crawl_config"])},
             )
             self.assertIn(
                 AssetKey(["datasets", "category_rules"]),
@@ -152,9 +189,9 @@ class DatasetGraphTests(unittest.TestCase):
             )
             self.assertEqual(
                 assets.get(AssetKey(["datasets", "labeling_failures"])).parent_keys,
-                {AssetKey(["datasets", "labeling_attempts"])},
+                {AssetKey(["datasets", "labeling_attempts"]), AssetKey(["datasets", "global_config"])},
             )
-            self.assertIn("datasets__documentation__source_catalog", {node.name for node in job.nodes})
+            self.assertIn("datasets__documentation__capture_documentation", {node.name for node in job.nodes})
             self.assertNotIn("datasets__documentation__dataset_release", {node.name for node in job.nodes})
             release = definitions.resolve_job_def("release_dataset")
             self.assertEqual(
@@ -176,70 +213,87 @@ class DatasetGraphTests(unittest.TestCase):
                         if incoming.name not in {"mapped_config", "registered"}:
                             self.assertNotEqual(incoming.dagster_type.key, "String")
 
-    def test_both_configured_branches_plan_without_source_approval(self) -> None:
+    def test_registered_partition_enables_native_mapping_for_all_declared_branches(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             home = Path(temporary)
-            spec = load_build_config(write_fixture(home), home)
-            catalog = spec.documentation_catalog or spec.catalog
-            spec = spec.model_copy(update={"catalog": catalog, "documentation_catalog": catalog})
+            spec = fixture_spec(home)
+            DatasetRegistry(home).register(spec)
+            refresh_registered_configuration(spec.dataset_id, home)
             with dataset_instance(home) as instance:
-                plan = plan_dataset(spec, stage_configs(spec), instance, home=home)
-            self.assertIsNone(plan.waiting_for)
-            self.assertEqual(set(plan.selected), set(PREPARATION_STAGES))
-            self.assertEqual(plan.blocked, ())
-            self.assertIn(AssetKey(["datasets", "documentation", "source_documents"]), plan.asset_selection)
-
-    def test_unconfigured_branches_do_not_schedule_empty_inventories(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            home = Path(temporary)
-            spec = load_build_config(write_fixture(home), home)
-            empty = spec.catalog.model_copy(update={"documents": [], "search_request": None})
-            spec = spec.model_copy(update={"catalog": empty, "documentation_catalog": None})
-            with dataset_instance(home) as instance:
-                plan = plan_dataset(spec, stage_configs(spec), instance, home=home)
-            self.assertEqual(
-                plan.selected,
-                (
-                    "category_rules",
-                    "merged_command_candidates",
-                    "filtered_commands",
-                    "labeling_documentation",
-                    "labeling_attempts",
-                    "proposed_annotations",
-                    "labeling_failures",
-                    "deduplicated_annotations",
-                    "category_eligible_annotations",
-                    "human_review_queue",
-                ),
+                requests = NativeDatasetCycle(home).tick(instance)
+            self.assertEqual(len(requests), 1)
+            self.assertEqual(requests[0].partition_key, spec.dataset_id)
+            self.assertTrue(
+                {
+                    AssetKey(["datasets", "map_existing_datasets_config"]),
+                    AssetKey(["datasets", "map_documentation_crawl_config"]),
+                    AssetKey(["datasets", "map_keenable_use_cases_config"]),
+                }.issubset(requests[0].asset_selection or [])
             )
-            self.assertEqual(plan.unconfigured, ("dataset", "documentation"))
-            self.assertIsNone(plan.waiting_for)
-            self.assertEqual(plan.blocked, ())
+
+    def test_expired_source_rights_prevent_branch_and_finalization_materializations(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary)
+            declaration = source_declaration()
+            expired = declaration.model_copy(
+                update={
+                    "sources": tuple(
+                        source.model_copy(update={"valid_until": datetime(2000, 1, 1, tzinfo=UTC)})
+                        for source in declaration.sources
+                    )
+                }
+            )
+            spec = with_keenable_declaration(LabelingFixture(self, home).spec, expired)
+            DatasetRegistry(home).register(spec)
+            refresh_registered_configuration(spec.dataset_id, home)
+            with dataset_instance(home) as instance:
+                with self.assertRaisesRegex(HumanReviewError, "Keenable source authorization has expired"):
+                    NativeDatasetCycle(home).drain(instance, partition=spec.dataset_id)
+                for stage in (
+                    "keenable/discover_use_cases",
+                    "keenable/command_candidates",
+                    "filtered_commands",
+                    "labeling_attempts",
+                    "human_review_queue",
+                ):
+                    records = instance.fetch_materializations(
+                        AssetRecordsFilter(
+                            asset_key=AssetKey(["datasets", *stage.split("/")]),
+                            asset_partitions=[spec.dataset_id],
+                        ),
+                        limit=1,
+                    )
+                    self.assertFalse(records.records, stage)
 
     def test_branch_configuration_keeps_source_inventories_separate(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             home = Path(temporary)
-            spec = load_build_config(write_fixture(home), home)
-            catalog = spec.documentation_catalog or spec.catalog
-            spec = spec.model_copy(
-                update={
-                    "catalog": catalog.model_copy(update={"collection_revision": "dataset-only"}),
-                    "documentation_catalog": catalog.model_copy(update={"collection_revision": "docs-only"}),
-                }
+            spec = fixture_spec(home)
+            collection = spec.declared_collection
+            assert collection is not None
+            declaration = collection.documentation_crawl.declaration
+            assert isinstance(declaration, RepositoryBranchDeclaration)
+            updated = SourceDeclaration.from_declaration(
+                declaration.model_copy(update={"refresh_revision": "docs-only"})
             )
             configurations = stage_configs(spec)
-            self.assertEqual(
-                configurations["source_catalog"].model_dump()["collection_revision"], "dataset-only"
+            revised = stage_configs(
+                spec.model_copy(
+                    update={
+                        "declared_collection": collection.model_copy(update={"documentation_crawl": updated})
+                    }
+                )
             )
+            self.assertEqual(configurations["enumerate_corpus_files"], revised["enumerate_corpus_files"])
             self.assertEqual(
-                configurations["documentation/source_catalog"].model_dump()["collection_revision"],
-                "docs-only",
+                configurations["keenable/discover_use_cases"], revised["keenable/discover_use_cases"]
             )
-            self.assertIs(configurations["labeling_attempts"], spec.annotation)
+            self.assertNotEqual(
+                configurations["documentation/capture_documentation"],
+                revised["documentation/capture_documentation"],
+            )
+            self.assertNotEqual(configurations["labeling_attempts"], revised["labeling_attempts"])
             self.assertNotIn("documentation/proposed_annotations", configurations)
-            run_config = dataset_run_config(spec, home).to_config_dict()
-            self.assertIn("datasets__documentation__source_catalog", run_config["ops"])
-            self.assertNotIn("datasets__documentation/source_catalog", run_config["ops"])
 
     def test_malformed_release_and_unknown_config_are_rejected(self) -> None:
         with self.assertRaises(SchemaError):
@@ -249,25 +303,28 @@ class DatasetGraphTests(unittest.TestCase):
 
     def test_policy_and_labeler_changes_preserve_unaffected_stage_signatures(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            spec = load_build_config(write_fixture(Path(temporary)), Path(temporary))
+            spec = fixture_spec(Path(temporary))
             changed = spec.rules.model_copy(update={"policy": spec.rules.policy + " Additional review rule."})
             original_inputs = {"category_rules": spec.rules}
             changed_inputs = {"category_rules": changed}
-            for stage, config in (("source_catalog", spec.catalog), ("filtered_commands", spec.filtering)):
+            for stage in ("enumerate_corpus_files", "filtered_commands"):
+                config = stage_configs(spec)[stage]
                 self.assertEqual(
                     stage_signature(stage, config, original_inputs),
                     stage_signature(stage, config, changed_inputs),
                 )
+            original = stage_configs(spec)["labeling_attempts"]
             self.assertNotEqual(
-                stage_signature("proposed_annotations", spec.annotation, original_inputs),
-                stage_signature("proposed_annotations", spec.annotation, changed_inputs),
+                stage_signature("labeling_attempts", original, original_inputs),
+                stage_signature("labeling_attempts", original, changed_inputs),
             )
-            labeler = AnnotationConfig(
-                model=spec.annotation.model.model_copy(update={"model": "another/labeler"})
+            annotation = spec.annotation.model_copy(
+                update={"model": spec.annotation.model.model_copy(update={"model": "another/labeler"})}
             )
+            labeler = stage_configs(spec.model_copy(update={"annotation": annotation}))["labeling_attempts"]
             self.assertNotEqual(
-                stage_signature("proposed_annotations", spec.annotation, original_inputs),
-                stage_signature("proposed_annotations", labeler, original_inputs),
+                stage_signature("labeling_attempts", original, original_inputs),
+                stage_signature("labeling_attempts", labeler, original_inputs),
             )
 
     def test_concurrent_first_initialization_preserves_both_partition_updates(self) -> None:

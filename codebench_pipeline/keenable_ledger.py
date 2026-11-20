@@ -34,7 +34,7 @@ def timestamp() -> str:
 def open_ledger(root: Path, declaration: Declaration) -> Generator["Ledger"]:
     namespace = root / declaration.dataset / "keenable" / declaration.generation
     namespace.mkdir(mode=0o700, parents=True, exist_ok=True)
-    with (namespace / "writer.lock").open("a+b") as guard:
+    with (namespace / "writer.lock").open("ab") as guard:
         flock(guard, LOCK_EX)
         with closing(sqlite3.connect(namespace / "generation.sqlite3")) as db:
             db.executescript(

@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 from typing import Annotated, Final
 
-from pydantic import Field, TypeAdapter
+from pydantic import Field, RootModel, TypeAdapter
 
 from codebench_pipeline.category_rules import (
     AuthoredCategoryRules,
@@ -23,7 +24,6 @@ DEFAULT_BUSINESS_CONFIG: Final = (
     Path(__file__).resolve().parents[1] / "business-configs/categories/cat3/category.json"
 )
 DEFAULT_BASE_PROMPT: Final = DEFAULT_BUSINESS_CONFIG.parents[2] / "labeling/instructions.md"
-LEGACY_BASE_PROMPT: Final = DEFAULT_BUSINESS_CONFIG.parents[2] / "labeling-base.md"
 
 
 class BusinessCategoryConfig(StrictModel):
@@ -35,6 +35,10 @@ class BusinessCategoryConfig(StrictModel):
 
 class SplitBusinessCategoryConfig(StrictModel):
     rules: AuthoredCategoryRules
+
+
+class BusinessCategoryDeclaration(RootModel[BusinessCategoryConfig | SplitBusinessCategoryConfig]):
+    pass
 
 
 class LabelingExample(StrictModel):
@@ -49,19 +53,27 @@ class ExampleFamily(StrictModel):
     examples: Annotated[list[LabelingExample], Field(min_length=1)]
 
 
-def read_prompt(path: Path) -> str:
-    content = path.read_text(encoding="utf-8")
+def read_prompt(path: Path, read_bytes: Callable[[Path], bytes]) -> str:
+    content = read_bytes(path).decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
     if not content.strip():
         raise ValueError(f"Empty labeling instructions: {path}")
     return content
 
 
-def load_business_rules(path: Path, category_id: str | None = None) -> CategoryRules:
+def load_business_rules(
+    path: Path,
+    category_id: str | None = None,
+    *,
+    read_bytes: Callable[[Path], bytes] = Path.read_bytes,
+) -> CategoryRules:
     """Compile only labeling business files, independently of collection manifests."""
-    path = path.resolve()
-    supplied = TypeAdapter(BusinessCategoryConfig | SplitBusinessCategoryConfig).validate_json(
-        path.read_bytes()
-    )
+    return compile_business_rules(path.resolve(), category_id, read_bytes)
+
+
+def compile_business_rules(
+    path: Path, category_id: str | None, read_bytes: Callable[[Path], bytes]
+) -> CategoryRules:
+    supplied = BusinessCategoryDeclaration.model_validate_json(read_bytes(path)).root
     if category_id is not None and supplied.rules.category_id != category_id:
         raise ValueError("Business configuration cannot change the registered category")
     parent = path.parent
@@ -76,13 +88,13 @@ def load_business_rules(path: Path, category_id: str | None = None) -> CategoryR
                 classes=supplied.rules.classes,
                 severities=supplied.rules.severities,
                 description_language=supplied.rules.description_language,
-                policy=read_prompt(parent / supplied.instructions_file),
-                base_prompt=read_prompt(parent / supplied.base_prompt_file),
+                policy=read_prompt(parent / supplied.instructions_file, read_bytes),
+                base_prompt=read_prompt(parent / supplied.base_prompt_file, read_bytes),
             )
             examples_path = parent / supplied.examples_file
         case SplitBusinessCategoryConfig():
             labeling = path.parents[2] / "labeling"
-            shared = SharedLabelingPolicy.model_validate_json((labeling / "policy.json").read_bytes())
+            shared = SharedLabelingPolicy.model_validate_json(read_bytes(labeling / "policy.json"))
             split_policy = shared, supplied.rules
             allowed = set(supplied.rules.allowed_severities)
             rules = CategoryRules(
@@ -93,11 +105,11 @@ def load_business_rules(path: Path, category_id: str | None = None) -> CategoryR
                 classes=shared.classes,
                 severities=[rule for rule in shared.severities if not allowed or rule.name in allowed],
                 description_language=shared.description_language,
-                policy=read_prompt(parent / "instructions.md"),
-                base_prompt=read_prompt(labeling / "instructions.md"),
+                policy=read_prompt(parent / "instructions.md", read_bytes),
+                base_prompt=read_prompt(labeling / "instructions.md", read_bytes),
             )
             examples_path = parent / "examples.json"
-    families = TypeAdapter(list[ExampleFamily]).validate_json(examples_path.read_bytes())
+    families = TypeAdapter(list[ExampleFamily]).validate_json(read_bytes(examples_path))
     known = {risk.id for risk in rules.risks}
     groups: set[tuple[str, str]] = set()
     identities: set[str] = set()

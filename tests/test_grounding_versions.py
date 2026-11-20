@@ -5,17 +5,20 @@ from tempfile import TemporaryDirectory
 from unittest import TestCase
 from unittest.mock import patch
 
+from configuration_fixture import seed_prepared_snapshot
 from guarded_labeling_fixture import CORPUS, LOOKUP_BODY, LabelingFixture
 from pydantic import TypeAdapter
 
-from codebench_pipeline.batch_labeling import RowEvidence
+from codebench_pipeline.batch_labeling_rows import RowEvidence
 from codebench_pipeline.dataframe_schemas import model_records
+from codebench_pipeline.dataset_config import require_guarded_annotation
+from codebench_pipeline.dataset_documentation_config import DocumentationConfig
 from codebench_pipeline.dataset_records import CandidateRecord
+from codebench_pipeline.dataset_registry import DatasetRegistry
 from codebench_pipeline.grounding import GuardedEvidence, OperationReceipt, admitted_excerpt
 from codebench_pipeline.grounding_passages import Applicability, operation_passages
 from codebench_pipeline.grounding_policy import OperationGrant
 from codebench_pipeline.grounding_sources import CandidateCapture, CandidateEvidence
-from codebench_pipeline.grounding_tables import GuardedLabeling
 from codebench_pipeline.labeling_outcomes import LabelingAttempt
 from codebench_pipeline.storage import IntegrityError
 
@@ -59,8 +62,7 @@ class GroundingVersionTests(TestCase):
             corpus=b"```bash\nkubectl get pods\n```\n",
             documentation_corpus=SIBLING,
         )
-        runtime = GuardedLabeling(home, fixture.spec)
-        filtered = fixture.filtered()
+        filtered, runtime = fixture.labeling()
         pod = filtered.loc[filtered["command"] == "kubectl get pods"].copy()
         fresh = runtime.attempts(pod, home / "fresh")
         (accepted,) = model_records(fresh, LabelingAttempt)
@@ -69,8 +71,31 @@ class GroundingVersionTests(TestCase):
         fixture.inference.assert_called_once()
         fixture.inference.reset_mock()
         replay = runtime.attempts(pod, home / "replay")
-        runtime.verify(replay, selected=frozenset({accepted.candidate_id}))
+        runtime.evidence_inputs.verify(replay, selected=frozenset({accepted.candidate_id}))
         fixture.inference.assert_not_called()
+
+    def test_shared_operation_verification_rejects_linked_receipt_directory(self) -> None:
+        home = Path(self.enterContext(TemporaryDirectory()))
+        fixture = LabelingFixture(
+            self, home, corpus=b"```bash\nkubectl get pods\n```\n", documentation_corpus=SIBLING
+        )
+        filtered, runtime = fixture.labeling()
+        pod = filtered.loc[filtered["command"] == "kubectl get pods"].copy()
+        (candidate,) = model_records(pod, CandidateRecord)
+        (attempt,) = model_records(runtime.attempts(pod, home / "labeling"), LabelingAttempt)
+        self.assertEqual(attempt.status, "success")
+        guard = runtime.evidence_inputs.admission(pod)
+        _, (item,) = guard.source(candidate)
+        guard.verify(candidate, item, item.snippet.snippet)
+
+        receipts = guard.root / "shared-operations"
+        external = receipts.rename(home / "external-receipts")
+        receipts.symlink_to(external, target_is_directory=True)
+
+        with self.assertRaisesRegex(
+            IntegrityError, "Linked or non-directory local evidence component: shared-operations"
+        ):
+            guard.verify(candidate, item, item.snippet.snippet)
 
     def test_section_and_document_restrictions_survive_prose_markup_and_false_scope_resets(self) -> None:
         effect = b"<p>Lists pods using <code>kubectl get pods</code>.</p>"
@@ -129,8 +154,8 @@ class GroundingVersionTests(TestCase):
                     corpus=qualifier + b"```bash\nkubectl get pods\n```\n",
                     documentation_corpus=NESTED,
                 )
-                runtime = GuardedLabeling(home, fixture.spec)
-                filtered = fixture.filtered()
+                filtered, runtime = fixture.labeling()
+                evidence = runtime.evidence_inputs
                 pod = next(
                     row
                     for row in model_records(filtered, CandidateRecord)
@@ -138,7 +163,7 @@ class GroundingVersionTests(TestCase):
                 )
                 only_pod = filtered.loc[filtered["candidate_id"] == pod.candidate_id].copy()
                 self.assertEqual(
-                    runtime.admission(only_pod).sources.resolve(pod).versions,
+                    evidence.admission(only_pod).sources.resolve(pod).versions,
                     ("1.28",) if qualifier else (),
                 )
                 resolve = CandidateEvidence.resolve
@@ -155,10 +180,10 @@ class GroundingVersionTests(TestCase):
                     previous = runtime.attempts(only_pod, home / "old")
                     (accepted,) = model_records(previous, LabelingAttempt)
                     self.assertEqual(accepted.status, "success")
-                    old_binding, _ = runtime.admission(only_pod).source(pod)
+                    old_binding, _ = evidence.admission(only_pod).source(pod)
 
                 with self.assertRaisesRegex(ValueError, "current source-level operation passage"):
-                    runtime.verify(previous, selected=frozenset({pod.candidate_id}))
+                    evidence.verify(previous, selected=frozenset({pod.candidate_id}))
 
                 source = GuardedEvidence.source
                 verify = GuardedEvidence.verify
@@ -186,8 +211,8 @@ class GroundingVersionTests(TestCase):
         home = Path(self.enterContext(TemporaryDirectory()))
         body = b"Kubernetes client version `1.0` only.\n\n" + CORPUS
         fixture = LabelingFixture(self, home, corpus=body)
-        runtime = GuardedLabeling(home, fixture.spec)
-        result = runtime.attempts(fixture.filtered(), home / "attempts")
+        filtered, runtime = fixture.labeling()
+        result = runtime.attempts(filtered, home / "attempts")
         pod = next(row for row in model_records(result, LabelingAttempt) if row.command == "kubectl get pods")
         self.assertEqual(pod.failure_code, "operation_unsupported")
         versions = json.loads((home / "attempts/source-versions.json").read_bytes())
@@ -197,8 +222,17 @@ class GroundingVersionTests(TestCase):
     def test_historical_persisted_receipt_rechecks_version_and_rights_without_transport(self) -> None:
         home = Path(self.enterContext(TemporaryDirectory()))
         fixture = LabelingFixture(self, home, context7=True, source_limited=False)
-        filtered = fixture.filtered()
-        guard = GuardedLabeling(home, fixture.spec).admission(filtered)
+        archived, revision = seed_prepared_snapshot(home, fixture.spec, DocumentationConfig())
+        registry = DatasetRegistry(home)
+        snapshot = registry.get_snapshot(archived.dataset_id, revision=revision)
+        self.assertEqual(snapshot, archived)
+        with self.assertRaisesRegex(IntegrityError, "read-only"):
+            registry.get(archived.dataset_id)
+        filtered, runtime = fixture.labeling()
+        evidence = replace(
+            runtime.evidence_inputs, grounding=require_guarded_annotation(snapshot.annotation).grounding
+        )
+        guard = evidence.admission(filtered)
         candidate = next(
             row for row in model_records(filtered, CandidateRecord) if row.command == "terraform plan"
         )
@@ -245,4 +279,11 @@ class GroundingVersionTests(TestCase):
                         replace(guard, config=config).verify(candidate, item, item.snippet.snippet)
             receipt.write_bytes(old.model_copy(update={"returned_version": "2.0"}).body)
             with self.assertRaisesRegex(IntegrityError, "admission receipt"):
+                guard.verify(candidate, item, item.snippet.snippet)
+
+            external = home / "external-operation-receipt.json"
+            external.write_bytes(old.body)
+            receipt.unlink()
+            receipt.symlink_to(external)
+            with self.assertRaises(IntegrityError):
                 guard.verify(candidate, item, item.snippet.snippet)

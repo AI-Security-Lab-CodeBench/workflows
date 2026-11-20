@@ -207,18 +207,14 @@ class CollectionDeclarationTests(TestCase):
         }
         expected_digest = fingerprint(historical)
         wire = TypeAdapter(dict[str, JsonValue]).dump_json(
-            {
-                "branch": "dataset",
-                "source": {"declaration": historical, "digest": expected_digest},
-                "planner_binding": None,
-            }
+            {"declaration": historical, "digest": expected_digest}
         )
-        restored = DeclaredSourceStageConfig.model_validate_json(wire, strict=True)
-        runtime = restored.repository_config
+        restored = SourceDeclaration.model_validate_json(wire, strict=True)
+        runtime = restored.repository_config("dataset")
         (origin,) = runtime.origins("dataset")
 
-        self.assertEqual(restored.source.digest, expected_digest)
-        self.assertIsInstance(restored.source.declaration, RepositoryBranchConfig)
+        self.assertEqual(restored.digest, expected_digest)
+        self.assertIsInstance(restored.declaration, RepositoryBranchConfig)
         self.assertEqual(restored.model_dump_json().encode(), wire)
         self.assertEqual(runtime.source_weight("dataset", "cheat"), 0.59)
         self.assertEqual(origin.transform.options_json, old_options)

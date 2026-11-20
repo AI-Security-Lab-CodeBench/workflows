@@ -1,13 +1,12 @@
 import re
 from dataclasses import dataclass
 from hashlib import sha256
-from pathlib import Path
 from typing import Final, assert_never
 
 import pandas as pd
 from pydantic import JsonValue, TypeAdapter
 
-from codebench_pipeline.dataset_config import DatasetBuildSpec
+from codebench_pipeline.collection_config import DeclaredCollection
 from codebench_pipeline.dataset_records import CandidateRecord
 from codebench_pipeline.grounding_policy import (
     GroundingRecord,
@@ -23,7 +22,7 @@ from codebench_pipeline.models import Digest
 from codebench_pipeline.repository_branch_config import RepositoryAcquisitionConfig
 from codebench_pipeline.repository_config import RepositoryOrigin, check_path
 from codebench_pipeline.repository_etl import SourceSpan, source_span
-from codebench_pipeline.repository_receipts import RepositoryReceipt
+from codebench_pipeline.repository_receipts import RepositoryReceipt, RepositoryRun
 from codebench_pipeline.repository_tree import tree_url
 from codebench_pipeline.storage import IntegrityError, fingerprint
 
@@ -87,7 +86,7 @@ class RepositoryBranchEvidence:
     config: RepositoryAcquisitionConfig
     receipt: RepositoryReceipt
     rows: dict[str, RepositoryCandidate]
-    root: Path
+    run: RepositoryRun
 
     def current_origin(self, origin_id: str) -> RepositoryOrigin:
         origins = {origin.origin_id: origin for origin in self.config.origins(self.receipt.branch)}
@@ -117,11 +116,7 @@ class RepositoryBranchEvidence:
         ):
             raise IntegrityError("Candidate provenance differs from its current repository authorization")
         check_path(source.capture_key)
-        path = (self.root / source.capture_key).resolve()
-        if not path.is_relative_to(self.root.resolve()):
-            raise IntegrityError("Repository capture escapes its dataset root")
-        with path.open("rb") as stream:
-            body = stream.read(self.config.maximum_file_bytes + 1)
+        body = self.run.read_capture(source.capture_key, self.config.maximum_file_bytes)
         if len(body) > self.config.maximum_file_bytes or sha256(body).hexdigest() != source.capture_sha256:
             raise IntegrityError("Repository candidate capture digest mismatch")
         start, end = source.source_span.byte_start, source.source_span.byte_end
@@ -155,28 +150,27 @@ class CandidateEvidence:
     provider_rows: dict[str, CandidateReceipt]
 
     @classmethod
-    def from_frame(cls, frame: pd.DataFrame, home: Path, spec: DatasetBuildSpec) -> "CandidateEvidence":
-        if spec.declared_collection is None:
-            raise IntegrityError("Candidate evidence requires a registered collection declaration")
-        spec.declared_collection.require_current_declarations()
+    def from_frame(
+        cls, frame: pd.DataFrame, run: RepositoryRun, collection: DeclaredCollection
+    ) -> "CandidateEvidence":
+        collection.require_current_declarations()
         attrs = BRANCH_METADATA.validate_python(frame.attrs.get("branch_metadata"))
         repositories: dict[str, RepositoryBranchEvidence] = {}
-        root = home / "repository-v2" / spec.dataset_id
         for branch in ("dataset", "documentation"):
-            config = spec.declared_collection.repository_config(branch)
+            config = collection.repository_config(branch)
             receipt = RepositoryReceipt.model_validate_json(str(attrs[branch]["repository_receipt_json"]))
             if (
                 receipt.branch != branch
-                or receipt.dataset_id != spec.dataset_id
+                or receipt.dataset_id != run.dataset_id
                 or receipt.stage != "command_candidates"
                 or receipt.config_digest != config.branch_digest(branch)
                 or receipt.observations.get("complete") is not True
-                or (root / "receipts" / f"{receipt.digest}.json").read_bytes() != receipt.body
+                or run.read_evidence(f"receipts/{receipt.digest}.json") != receipt.body
             ):
                 raise IntegrityError("Repository terminal receipt does not match the registered branch")
             rows = REPOSITORY_CANDIDATES.validate_python(receipt.observations["candidates"])
-            repositories[branch] = RepositoryBranchEvidence(config, receipt, rows, root)
-        provider = KeenableCollection(home, spec.declared_collection.keenable_declaration)
+            repositories[branch] = RepositoryBranchEvidence(config, receipt, rows, run)
+        provider = KeenableCollection(run.dataset_home, collection.keenable_declaration)
         lock = CaptureLock.model_validate_json(str(attrs["keenable"]["keenable_capture_lock"]))
         provider.adapters(lock)
         return cls(

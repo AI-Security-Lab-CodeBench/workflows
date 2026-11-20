@@ -1,5 +1,4 @@
 import json
-import os
 import socket
 import ssl
 from contextlib import closing
@@ -44,8 +43,9 @@ def search_payload(base: str, scopes: tuple[str, ...]) -> bytes:
     ).encode()
 
 
-def search_request(case: Case, scopes: tuple[str, ...] = (), *, payload: bytes | None = None) -> Request:
-    api_key = os.getenv("KEENABLE_API_KEY", "")
+def search_request(
+    case: Case, scopes: tuple[str, ...] = (), *, api_key: str, payload: bytes | None = None
+) -> Request:
     if not fullmatch(r"[!-~]{1,512}", api_key):
         raise KeenableError("provider_credential_unavailable")
     return Request(PROVIDER, "application/json", payload or search_payload(QUERIES[case], scopes), api_key)

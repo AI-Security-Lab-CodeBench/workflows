@@ -1,6 +1,7 @@
 import hashlib
 import json
 import os
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -9,7 +10,7 @@ from unittest.mock import patch
 
 from codebench_pipeline.inference_capacity import CapacityConfig, CapacityUnavailable
 from codebench_pipeline.openai_transport import HTTPResponse
-from codebench_pipeline.synthetic_pilot import run_pilot
+from codebench_pipeline.synthetic_pilot import PilotConfiguration, execute_pilot, run_pilot
 from codebench_pipeline.synthetic_pilot_policy import PilotError, Seed, VendorConfig
 from codebench_pipeline.synthetic_pilot_vendor import ENV_PREFIX, GuardedBackend, Runtime, ScopedMessages
 
@@ -167,6 +168,26 @@ class SyntheticPilotTests(unittest.TestCase):
                 run_pilot(self.root)
 
         self.assertFalse(self.runtime.output_dir.exists())
+
+    def test_vendor_report_cannot_be_read_from_outside_the_work_directory(self) -> None:
+        external_report = self.root / "report.json"
+        external_report.write_text('{"calls":{"ok":1},"final_rows":1}', encoding="utf-8")
+        configuration = PilotConfiguration(_CONFIG, (_SEED,), b"fixture", ())
+
+        def finish_vendor(
+            _command: list[str], *, cwd: Path, **_options: object
+        ) -> subprocess.CompletedProcess[bytes]:
+            run_dir = cwd / _CONFIG.run_name
+            run_dir.mkdir()
+            (run_dir / "report.json").symlink_to(external_report)
+            (run_dir / "dataset.csv").touch()
+            return subprocess.CompletedProcess(_command, 0)
+
+        with (
+            patch("codebench_pipeline.synthetic_pilot.subprocess.run", side_effect=finish_vendor),
+            self.assertRaises(PilotError),
+        ):
+            execute_pilot(configuration, self.runtime)
 
     def test_guard_unavailability_never_returns_a_candidate_to_vendor(self) -> None:
         with (

@@ -1,38 +1,43 @@
 import json
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final, Literal, assert_never
 
 import pandas as pd
-from dagster import AssetKey, AssetRecordsFilter, build_input_context
 from pandera.typing import DataFrame
-from pydantic import Field, JsonValue, TypeAdapter
+from pydantic import Field, JsonValue
 
 from codebench_pipeline.category_rules import CategoryRules
 from codebench_pipeline.data_view_models import DatasetViewError
 from codebench_pipeline.data_views import DatasetDataService
 from codebench_pipeline.dataframe_io import AssetReference, DataFrameIOManager
 from codebench_pipeline.dataframe_schemas import ProposedAnnotationsTable, frame_records, model_records
-from codebench_pipeline.dataset_asset_types import DATASET_PARTITIONS
 from codebench_pipeline.dataset_branches import (
-    FINALIZATION_STAGES,
+    COLLECTION_BRANCHES,
     Branch,
-    collection_branches,
-    stage_branch,
     stage_name,
 )
+from codebench_pipeline.dataset_collection_binding import FINALIZATION_BINDING
 from codebench_pipeline.dataset_config import PublicationConfig
-from codebench_pipeline.dataset_finalization import FINALIZATION_BINDING
-from codebench_pipeline.dataset_plan import plan_dataset, preparation_stages
 from codebench_pipeline.dataset_records import CandidateRecord
 from codebench_pipeline.dataset_tables import review_queue
 from codebench_pipeline.human_review import ReviewModel, ReviewSnapshot
 from codebench_pipeline.human_review_store import HumanReviewStore
 from codebench_pipeline.models import Digest, Identifier
 from codebench_pipeline.object_store import ObjectStore, StorageConfig, sha256
+from codebench_pipeline.review_artifact_admission import checked_review_artifacts
+from codebench_pipeline.review_artifacts import (
+    read_review_artifact,
+    review_artifact_key,
+    write_review_artifact,
+)
 from codebench_pipeline.review_identity import review_identity
-from codebench_pipeline.stage_configuration import stage_configs
-from codebench_pipeline.storage import IntegrityError, digest
+from codebench_pipeline.stage_configuration import DeclaredGlobalConfig
+from codebench_pipeline.stage_implementation import capture_implementation
+from codebench_pipeline.storage import IntegrityError, digest, fingerprint
+
+type ReviewArtifactReader = Callable[[StorageConfig, AssetReference], pd.DataFrame | CategoryRules]
 
 REVIEW_POLICY_FILES: Final = (
     "human_review.py",
@@ -49,11 +54,11 @@ REVIEW_POLICY_FILES: Final = (
     "review_stages.py",
     "review_service.py",
     "review_identity.py",
+    "review_artifact_admission.py",
     "review_preparation.py",
     "review_postgres_lifecycle.py",
     "review_postgres_queries.py",
     "review_postgres_values.py",
-    "source_review_inputs.py",
     "source_review_guard.py",
     "review_policy.py",
     "publication_authorization.py",
@@ -66,13 +71,12 @@ REVIEW_POLICY_FILES: Final = (
     "annotation_cache.py",
     "category_eligibility.py",
     "label_corrections.py",
-    "stage_cache_compatibility.py",
     "stage_implementation.py",
 )
 
 
 class ReviewManifest(ReviewModel):
-    version: Literal[1] = 1
+    version: Literal[1, 2] = 1
     dataset_id: Identifier
     branch: Branch = "dataset"
     storage: StorageConfig
@@ -101,60 +105,118 @@ class ResolvedReview:
     rules: CategoryRules
 
 
-def manifest_store(home: Path) -> ObjectStore:
-    return ObjectStore(StorageConfig(local_root=str(home.resolve() / "human-review"), prefix="snapshots"))
+def release_configuration_digest(registered: DeclaredGlobalConfig) -> Digest:
+    """Bind approval to effective registered settings while ignoring the revision label."""
+    return fingerprint(registered.model_dump_json(exclude={"revision", "registration_digest"}))
 
 
-def load_manifest(home: Path, snapshot_id: str) -> ReviewManifest:
-    key = TypeAdapter(Digest).validate_python(snapshot_id, strict=True)
-    payload = manifest_store(home).read(f"{key}.json")
-    if sha256(payload) != key:
-        raise IntegrityError("Review manifest digest mismatch")
-    return ReviewManifest.model_validate_json(payload)
+def load_manifest(home: Path, snapshot_id: str, store: ObjectStore | None = None) -> ReviewManifest:
+    if store is not None:
+        return load_bound_manifest(snapshot_id, store)
+    manifest = ReviewManifest.model_validate_json(read_review_artifact(home, "snapshots", snapshot_id, None))
+    if manifest.version != 1:
+        raise IntegrityError("Configured review manifest requires an explicit storage binding")
+    return manifest
+
+
+def load_bound_manifest(snapshot_id: str, store: ObjectStore) -> ReviewManifest:
+    payload = store.read(review_artifact_key("snapshots", snapshot_id))
+    if sha256(payload) != snapshot_id:
+        raise IntegrityError("Review artifact digest mismatch")
+    manifest = ReviewManifest.model_validate_json(payload)
+    if manifest.version != 2 or store.config != manifest.storage:
+        raise IntegrityError("Review manifest differs from its storage binding")
+    return manifest
 
 
 class ReviewSnapshots:
-    def __init__(self, home: Path, data: DatasetDataService, branch: Branch = "dataset") -> None:
+    def __init__(
+        self,
+        home: Path,
+        data: DatasetDataService,
+        reader: ReviewArtifactReader,
+        branch: Branch = "dataset",
+        *,
+        manifest_reader: Callable[[ReviewSnapshot], ReviewManifest],
+    ) -> None:
         self.data = data
         self.home = home.resolve()
         self.branch: Branch = branch
-        self.store = manifest_store(home)
+        self._read_version = reader
+        self._manifest_reader = manifest_reader
 
-    def capture(self, dataset_id: str, review_columns: tuple[str, ...]) -> ResolvedReview:
-        """Capture verified immutable inputs during preparation, never during a page read."""
+    @staticmethod
+    def from_environment(
+        home: Path, data: DatasetDataService, branch: Branch = "dataset"
+    ) -> "ReviewSnapshots":
+        managers: dict[str, DataFrameIOManager] = {}
+
+        def manager_for(storage: StorageConfig) -> DataFrameIOManager:
+            key = storage.model_dump_json()
+            if key not in managers:
+                managers[key] = DataFrameIOManager.from_environment(storage)
+            return managers[key]
+
+        return ReviewSnapshots(
+            home,
+            data,
+            lambda storage, reference: manager_for(storage).read_version(reference),
+            branch,
+            manifest_reader=lambda snapshot: load_manifest(
+                home,
+                snapshot.snapshot_id,
+                None
+                if snapshot.artifact_storage is None
+                else manager_for(snapshot.artifact_storage).object_store(),
+            ),
+        )
+
+    @staticmethod
+    def for_manager(
+        home: Path, data: DatasetDataService, manager: DataFrameIOManager, branch: Branch = "dataset"
+    ) -> "ReviewSnapshots":
+        def manifest_reader(snapshot: ReviewSnapshot) -> ReviewManifest:
+            if snapshot.artifact_storage != manager.storage:
+                raise IntegrityError("Review manifest storage differs from the bound dataset storage")
+            return load_bound_manifest(snapshot.snapshot_id, manager.object_store())
+
+        return ReviewSnapshots(
+            home, data, manager.read_registered_version, branch, manifest_reader=manifest_reader
+        )
+
+    def capture(self, dataset_id: str, review_columns: tuple[str, ...] | None = None) -> ResolvedReview:
         spec = self.data.specification(dataset_id)
-        plan = plan_dataset(spec, stage_configs(spec), self.data.instance, home=self.home)
+        manager = DataFrameIOManager.from_environment(spec.storage)
+        manager.bind_review_store(
+            HumanReviewStore(self.home, implementation=capture_implementation(manager.implementation_source))
+        )
+        return self.capture_registered(
+            DeclaredGlobalConfig.from_spec(spec),
+            manager,
+            tuple(spec.publication.review_columns) if review_columns is None else review_columns,
+        )
+
+    def capture_registered(
+        self,
+        registered: DeclaredGlobalConfig,
+        manager: DataFrameIOManager,
+        review_columns: tuple[str, ...],
+    ) -> ResolvedReview:
+        """Capture verified immutable inputs during preparation, never during a page read."""
+        dataset_id = registered.dataset_id
+        publication = registered.scopes.human_review_queue.human_review_queue
+        if review_columns != tuple(publication.review_columns):
+            raise DatasetViewError("not_ready", "Review columns differ from the registered policy")
         if self.branch != "dataset":
             raise DatasetViewError("not_ready", "Annotation review is shared across collection branches")
-        if plan.waiting_for:
-            raise DatasetViewError(
-                "not_ready", "Complete Source selection on source_catalog, then continue the pipeline."
-            )
-        input_stages = tuple(
-            stage
-            for stage in preparation_stages(declared=spec.has_declared_collection)
-            if stage != "human_review_queue"
-            if stage in ("category_rules", *FINALIZATION_STAGES)
-            or stage_branch(stage) not in plan.unconfigured
-        )
-        if set(plan.selected) - {"human_review_queue"} or plan.blocked:
-            raise DatasetViewError("not_ready", "Preparation is incomplete or changed")
-        manager = DataFrameIOManager(storage=spec.storage)
+        artifacts = checked_review_artifacts(manager, self.data.instance, registered, include_queue=False)
+        references = {stage: artifact.snapshot.reference for stage, artifact in artifacts.items()}
         binding: dict[str, JsonValue] = {}
-        for descriptor in collection_branches(declared=spec.has_declared_collection):
+        for descriptor in COLLECTION_BRANCHES:
             branch = descriptor.namespace
-            if branch in plan.unconfigured:
-                binding[branch] = {"state": "unconfigured"}
-                continue
             stage = stage_name("command_candidates", branch)
-            catalog = stage_name("source_catalog", branch)
-            if (
-                not spec.has_declared_collection
-                and plan.source_authorizations[stage] != plan.source_authorizations[catalog]
-            ):
-                raise DatasetViewError("not_ready", "Collection inputs changed during snapshot capture")
-            binding[branch] = {"state": "configured", "digest": plan.references[stage].digest}
-        annotations = manager.read_version(plan.references["category_eligible_annotations"])
+            binding[branch] = {"state": "configured", "digest": references[stage].digest}
+        annotations = artifacts["category_eligible_annotations"].snapshot.value
         match annotations:
             case pd.DataFrame():
                 if annotations.attrs.get(FINALIZATION_BINDING) != binding:
@@ -165,55 +227,21 @@ class ReviewSnapshots:
                 raise IntegrityError("Annotations are not a table")
             case _:
                 assert_never(annotations)
-        rules = manager.read_version(plan.references["category_rules"])
-        match rules:
-            case CategoryRules():
-                if rules != spec.rules:
-                    raise DatasetViewError("not_ready", "Stored rules differ from registered rules")
-            case pd.DataFrame():
-                raise IntegrityError("Category rules are not a taxonomy")
-            case _:
-                assert_never(rules)
-        references: dict[str, AssetReference] = {}
-        for stage in input_stages:
-            with build_input_context(
-                asset_key=AssetKey(["datasets", *stage.split("/")]),
-                partition_key=dataset_id,
-                asset_partitions_def=DATASET_PARTITIONS,
-                instance=self.data.instance,
-            ) as context:
-                reference = manager.current_reference(context)
-            if reference != plan.references[stage]:
-                raise DatasetViewError("not_ready", "Preparation changed during snapshot capture")
-            references[stage] = reference
-        evidence: dict[str, JsonValue] = {}
-        for stage in input_stages:
-            if stage == "category_rules":
-                continue
-            records = self.data.instance.fetch_materializations(
-                AssetRecordsFilter(
-                    asset_key=AssetKey(["datasets", *stage.split("/")]), asset_partitions=[dataset_id]
-                ),
-                limit=1,
-            ).records
-            materialization = records[0].asset_materialization
-            if materialization is None:
-                raise IntegrityError("Preparation evidence has no materialization")
-            if materialization.metadata["codebench/content_digest"].value != references[stage].digest:
-                raise DatasetViewError("not_ready", "Preparation evidence changed during snapshot capture")
-            evidence[stage] = TypeAdapter(JsonValue).validate_python(
-                materialization.metadata["evidence"].value
-            )
+        rules = registered.rules
+        evidence = {
+            stage: artifact.evidence() for stage, artifact in artifacts.items() if stage != "category_rules"
+        }
         package = Path(__file__).parent
         implementation = {name: digest(package / name) for name in REVIEW_POLICY_FILES}
         record_fingerprints = {
             str(row["candidate_id"]): review_identity(row, review_columns) for row in frame_records(reviewed)
         }
         manifest = ReviewManifest(
+            version=2,
             dataset_id=dataset_id,
             branch=self.branch,
-            storage=spec.storage,
-            publication=spec.publication,
+            storage=manager.storage,
+            publication=publication,
             references=references,
             evidence=evidence,
             implementation=implementation,
@@ -233,52 +261,70 @@ class ReviewSnapshots:
             dataset_id=dataset_id,
             review_stage="annotations",
             snapshot_id=snapshot_id,
+            artifact_storage=manager.storage,
             candidate_ids=candidate_ids,
             record_fingerprints={identifier: record_fingerprints[identifier] for identifier in candidate_ids},
             review_columns=review_columns,
             eligible_candidate_ids=eligible_candidate_ids,
         )
-        self.store.write(f"{snapshot_id}.json", payload)
+        store = manager.object_store()
         for name, expected in implementation.items():
             source = (package / name).read_bytes()
             if sha256(source) != expected:
                 raise IntegrityError("Review implementation changed during snapshot capture")
-            self.store.write(f"implementation/{expected}/{name}", source)
+            store.write(f"review/snapshots/implementation/{expected}/{name}", source)
+        write_review_artifact("snapshots", payload, store)
         return ResolvedReview(manifest, snapshot, reviewed, rules)
 
     def current(self, dataset_id: str) -> ResolvedReview:
-        with HumanReviewStore(self.home).reader() as tx:
+        return self.current_with_store(dataset_id, HumanReviewStore(self.home))
+
+    def current_with_store(self, dataset_id: str, review_store: HumanReviewStore) -> ResolvedReview:
+        with review_store.reader() as tx:
             snapshot = tx.get_current_batch(dataset_id, "annotations").snapshot
-        manifest = self.manifest(snapshot.snapshot_id)
-        manager = DataFrameIOManager(storage=manifest.storage)
+        manifest = self.manifest(snapshot)
         reviewed = ProposedAnnotationsTable.validate(self.frame(manifest, "category_eligible_annotations"))
-        rules = manager.read_version(manifest.references["category_rules"])
+        rules = self._read_version(manifest.storage, manifest.references["category_rules"])
         if not isinstance(rules, CategoryRules):
             raise IntegrityError("Prepared review rules are not a taxonomy")
         return ResolvedReview(manifest, snapshot, reviewed, rules)
 
     def authoritative(self, dataset_id: str) -> ResolvedReview:
-        resolved = self.current(dataset_id)
         spec = self.data.specification(dataset_id)
-        plan = plan_dataset(spec, stage_configs(spec), self.data.instance, home=self.home)
-        if plan.selected or plan.blocked:
-            raise DatasetViewError("not_ready", "Preparation changed after review")
+        manager = DataFrameIOManager.from_environment(spec.storage)
+        manager.bind_review_store(
+            HumanReviewStore(self.home, implementation=capture_implementation(manager.implementation_source))
+        )
+        return self.authoritative_registered(DeclaredGlobalConfig.from_spec(spec), manager)
+
+    def authoritative_registered(
+        self, registered: DeclaredGlobalConfig, manager: DataFrameIOManager
+    ) -> ResolvedReview:
+        resolved = self.current_with_store(registered.dataset_id, manager.review_store)
+        artifacts = checked_review_artifacts(manager, self.data.instance, registered, include_queue=True)
         if (
-            resolved.rules != spec.rules
-            or resolved.manifest.publication != spec.publication
-            or any(
-                plan.references.get(stage) != reference
-                for stage, reference in resolved.manifest.references.items()
-            )
+            resolved.rules != registered.rules
+            or resolved.manifest.storage != manager.storage
+            or resolved.manifest.publication != registered.scopes.human_review_queue.human_review_queue
+            or resolved.manifest.implementation != manager.review_store.bound_implementation().review_policy
+            or resolved.manifest.references
+            != {
+                stage: artifact.snapshot.reference
+                for stage, artifact in artifacts.items()
+                if stage != "human_review_queue"
+            }
         ):
             raise DatasetViewError("not_ready", "Publication inputs differ from prepared review")
         return resolved
 
-    def manifest(self, snapshot_id: str) -> ReviewManifest:
-        return load_manifest(self.home, snapshot_id)
+    def manifest(self, snapshot: ReviewSnapshot) -> ReviewManifest:
+        manifest = self._manifest_reader(snapshot)
+        if manifest.dataset_id != snapshot.dataset_id or manifest.branch != self.branch:
+            raise IntegrityError("Review manifest belongs to another dataset or branch")
+        return manifest
 
     def frame(self, manifest: ReviewManifest, stage: str) -> pd.DataFrame:
-        value = DataFrameIOManager(storage=manifest.storage).read_version(manifest.references[stage])
+        value = self._read_version(manifest.storage, manifest.references[stage])
         match value:
             case pd.DataFrame():
                 return value

@@ -15,23 +15,23 @@ from codebench_pipeline.human_review import (
     PublicationReference,
     ReviewSnapshot,
 )
+from codebench_pipeline.human_review_store import HumanReviewStore
 from codebench_pipeline.label_corrections import annotation_review_validation, validate_review_edits
 from codebench_pipeline.object_store import ObjectStore
 from codebench_pipeline.review_api_models import EvidenceResponse, EvidenceTarget, PublicationTarget
 from codebench_pipeline.review_evidence import review_evidence
-from codebench_pipeline.review_snapshots import ReviewSnapshots
+from codebench_pipeline.review_snapshots import ResolvedReview, ReviewSnapshots
 from codebench_pipeline.review_stages import ReviewInput, annotation_stage
 from codebench_pipeline.review_workflow import ReviewWorkflow
 
 
 class AnnotationReviewSource:
-    def __init__(self, snapshots: ReviewSnapshots) -> None:
+    def __init__(self, snapshots: ReviewSnapshots, capture: Callable[[str], ResolvedReview]) -> None:
         self.snapshots = snapshots
+        self.capture = capture
 
     def current(self, dataset_id: str) -> ReviewInput:
-        spec = self.snapshots.data.specification(dataset_id)
-        columns = tuple(spec.publication.review_columns)
-        resolved = self.snapshots.capture(dataset_id, columns)
+        resolved = self.capture(dataset_id)
         reviewed = pd.DataFrame(resolved.reviewed, copy=False)
         uncertain = reviewed.loc[reviewed["candidate_id"].isin(resolved.snapshot.candidate_ids)].copy()
         return ReviewInput(
@@ -40,7 +40,7 @@ class AnnotationReviewSource:
             "candidate_id",
             validation=annotation_review_validation(resolved.rules),
             evidence={"manifest": resolved.manifest.model_dump(mode="json")},
-            column_schema={"command": {"editable": False}} if spec.has_declared_collection else {},
+            column_schema={"command": {"editable": False}},
         )
 
     def evidence(self, snapshot: ReviewSnapshot, candidate_id: str) -> EvidenceResponse:
@@ -58,7 +58,7 @@ class ReviewService(ReviewWorkflow):
         branch: Branch = "dataset",
     ) -> None:
         self.branch: Branch = branch
-        self.snapshots = ReviewSnapshots(home, data, branch)
+        self.snapshots = ReviewSnapshots.from_environment(home, data, branch)
 
         def on_complete(token: CompletionToken) -> CompletionEffect:
             result = publish(token)
@@ -71,7 +71,10 @@ class ReviewService(ReviewWorkflow):
                     assert_never(result)
 
         super().__init__(
-            home, annotation_stage(), AnnotationReviewSource(self.snapshots), on_complete=on_complete
+            HumanReviewStore(home),
+            annotation_stage(),
+            AnnotationReviewSource(self.snapshots, lambda dataset_id: self.snapshots.capture(dataset_id)),
+            on_complete=on_complete,
         )
 
     def validate_edits(
@@ -100,7 +103,10 @@ class ReviewService(ReviewWorkflow):
                 not in {"annotations", "automatic", "documentation_annotations", "documentation_automatic"}
             ):
                 raise HumanReviewError("not_found", "Publication does not belong to this dataset and stage")
-        manifest = self.snapshots.manifest(reference.authorization.snapshot_id)
+            snapshot = tx.get_batch(reference.authorization.batch_id).snapshot
+        if snapshot.snapshot_id != reference.authorization.snapshot_id:
+            raise HumanReviewError("conflict", "Publication review snapshot binding mismatch")
+        manifest = self.snapshots.manifest(snapshot)
         if manifest.dataset_id != target.dataset_id:
             raise HumanReviewError("conflict", "Publication manifest has a different dataset binding")
         if reference.authorization.review_stage not in {
@@ -108,4 +114,4 @@ class ReviewService(ReviewWorkflow):
             automatic_stage_id(manifest.branch),
         }:
             raise HumanReviewError("conflict", "Publication manifest has a different branch binding")
-        return ObjectStore(manifest.storage).read(reference.csv_reference)
+        return ObjectStore.from_environment(manifest.storage).read(reference.csv_reference)

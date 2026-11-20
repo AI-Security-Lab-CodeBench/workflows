@@ -5,6 +5,7 @@ from typing import Annotated, Literal, Self, assert_never
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, model_serializer, model_validator
 
+from codebench_pipeline.object_store import StorageConfig
 from codebench_pipeline.storage import fingerprint
 
 Text = Annotated[str, Field(min_length=1, pattern=r"\S")]
@@ -91,6 +92,9 @@ class ReviewSnapshot(ReviewModel):
     partition_key: str | None = None
     review_stage: Text = "annotations"
     snapshot_id: Digest
+    artifact_storage: StorageConfig | None = Field(
+        default=None, repr=False, exclude_if=lambda value: value is None
+    )
     candidate_ids: tuple[Text, ...]
     eligible_candidate_ids: tuple[Text, ...]
     record_fingerprints: dict[Text, Digest] = Field(default_factory=dict)

@@ -14,6 +14,7 @@ from pydantic import (
 from pydantic_core import PydanticCustomError
 
 from codebench_pipeline.dataset_branches import Branch
+from codebench_pipeline.inference_capacity import ScopedCapacityConfig
 from codebench_pipeline.keenable_policy import (
     CurrentKeenableDeclaration,
     Declaration,
@@ -189,10 +190,18 @@ class DeclaredCollection(TypedConfig):
         return self.keenable_use_cases.keenable_config()
 
 
+class AdaptivePlannerConfig(TypedConfig):
+    base_url: str
+    model: str
+    api_key_env: str | None
+    capacity: ScopedCapacityConfig
+    backend_revision: str
+
+
 class DeclaredSourceStageConfig(TypedConfig):
     branch: Branch
     source: SourceDeclaration
-    planner_binding: Digest | None = None
+    planner: AdaptivePlannerConfig | None = None
 
     @model_validator(mode="after")
     def require_current_source(self) -> Self:
@@ -208,8 +217,8 @@ class DeclaredSourceStageConfig(TypedConfig):
     @property
     def declaration_digest(self) -> str:
         if self.branch == "keenable":
-            if self.planner_binding is not None:
-                return fingerprint([self.source.digest, self.planner_binding])
+            if self.planner is not None:
+                return fingerprint([self.source.digest, self.planner.model_dump(mode="json")])
             return self.source.digest
         return self.repository_config.branch_digest(self.branch)
 

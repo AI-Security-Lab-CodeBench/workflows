@@ -7,6 +7,7 @@ import sys
 import tempfile
 from pathlib import Path
 
+from category_config import add_policy_options, cli_taxonomy
 from validate_dataset import (
     CANDIDATE_FIELDS,
     FIELDS,
@@ -34,10 +35,16 @@ def prepare(candidates):
         if set(candidate) != set(CANDIDATE_FIELDS):
             raise DatasetError(f"Candidate entry {position}: incorrect schema")
         row = candidate.get("row")
-        if not isinstance(row, dict) or set(row) != set(FIELDS) or not all(present(row[field]) for field in FIELDS):
+        if (
+            not isinstance(row, dict)
+            or set(row) != set(FIELDS)
+            or not all(present(row[field]) for field in FIELDS)
+        ):
             raise DatasetError(f"Candidate entry {position}: expected nine nonempty string row fields")
         if not string_list(candidate.get("paired_candidate_ids")):
-            raise DatasetError(f"Candidate entry {position}: paired candidate IDs must be an explicit string list")
+            raise DatasetError(
+                f"Candidate entry {position}: paired candidate IDs must be an explicit string list"
+            )
         accepted.append(candidate)
     accepted.sort(key=lambda candidate: candidate["candidate_id"])
     rows = []
@@ -65,7 +72,9 @@ def serialize(rows, provenance):
     parsed = list(csv.reader(io.StringIO(csv_text, newline=""), strict=True))
     if parsed != [list(FIELDS)] + [[row[field] for field in FIELDS] for row in rows]:
         raise DatasetError("CSV serialization changed parsed field values")
-    provenance_text = "".join(json.dumps(item, ensure_ascii=False, allow_nan=False) + "\n" for item in provenance)
+    provenance_text = "".join(
+        json.dumps(item, ensure_ascii=False, allow_nan=False) + "\n" for item in provenance
+    )
     return csv_text, provenance_text
 
 
@@ -78,8 +87,15 @@ def persist(root, csv_text, provenance_text):
     try:
         for destination, text in destinations:
             destination.parent.mkdir(parents=True, exist_ok=True)
-            with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", newline="", dir=destination.parent,
-                                             prefix=".dataset-", suffix=".tmp", delete=False) as stream:
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                newline="",
+                dir=destination.parent,
+                prefix=".dataset-",
+                suffix=".tmp",
+                delete=False,
+            ) as stream:
                 staged.append((Path(stream.name), destination))
                 stream.write(text)
                 stream.flush()
@@ -92,17 +108,25 @@ def persist(root, csv_text, provenance_text):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Integrate only accepted CAT-3 candidates after inert validation; overwrite final CSV/provenance only on success.")
+    parser = argparse.ArgumentParser(
+        description="Integrate only accepted CAT-3 candidates after inert validation; overwrite final CSV/provenance only on success."
+    )
     parser.add_argument("root", nargs="?", type=Path, default=Path.cwd())
+    add_policy_options(parser)
     args = parser.parse_args()
     try:
-        candidates = load_candidates(args.root)
+        taxonomy = cli_taxonomy(args)
+        candidates = load_candidates(args.root, taxonomy)
         rows, provenance = prepare(candidates)
         errors = validate_bundle(
-            rows, provenance, candidates, load_jsonl(args.root / "research/sources.jsonl"),
+            rows,
+            provenance,
+            candidates,
+            load_jsonl(args.root / "research/sources.jsonl"),
             load_jsonl(args.root / "data/review/pending.jsonl"),
+            taxonomy,
         )
-        result = summary(rows, errors)
+        result = summary(rows, errors, taxonomy)
         if errors:
             print(json.dumps(result, ensure_ascii=False, indent=2))
             return 1
@@ -111,8 +135,21 @@ def main():
         result["written"] = ["commands.csv", "data/processed/provenance.jsonl"]
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0
-    except (DatasetError, OSError, UnicodeError, csv.Error, TypeError, KeyError, AttributeError, RecursionError) as error:
-        message = str(error) if isinstance(error, DatasetError) else "Dataset artifact processing failed; inspect input structure and filesystem permissions"
+    except (
+        DatasetError,
+        OSError,
+        UnicodeError,
+        csv.Error,
+        TypeError,
+        KeyError,
+        AttributeError,
+        RecursionError,
+    ) as error:
+        message = (
+            str(error)
+            if isinstance(error, DatasetError)
+            else "Dataset artifact processing failed; inspect input structure and filesystem permissions"
+        )
         print(json.dumps({"valid": False, "errors": [message]}, ensure_ascii=False))
         return 1
 

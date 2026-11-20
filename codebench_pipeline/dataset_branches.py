@@ -52,11 +52,17 @@ DECLARED_SOURCE_STAGES: Final = frozenset(
 )
 
 
-def collection_branches(*, declared: bool) -> tuple[CollectionBranch, ...]:
-    return COLLECTION_BRANCHES if declared else COLLECTION_BRANCHES[:2]
-
-
 HISTORICAL_PROCESSING_STAGES = (
+    "source_catalog",
+    "source_documents",
+    "document_adapters",
+    "documentation/source_catalog",
+    "documentation/source_documents",
+    "documentation/document_adapters",
+    "keenable/source_catalog",
+    "keenable/source_documents",
+    "keenable/document_adapters",
+    "labeling_documentation",
     "semantic_evidence",
     "human_review_snapshot",
     "merged_proposed_annotations",
@@ -67,7 +73,6 @@ HISTORICAL_PROCESSING_STAGES = (
 FINALIZATION_GROUPS: Final = {
     "merged_command_candidates": "filtering",
     "filtered_commands": "filtering",
-    "labeling_documentation": "labeling",
     "labeling_attempts": "labeling",
     "proposed_annotations": "labeling",
     "labeling_failures": "dataset_audit",

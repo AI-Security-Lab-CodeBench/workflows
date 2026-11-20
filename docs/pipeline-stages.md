@@ -18,8 +18,11 @@ collection. Parser bindings belong to the extraction that consumes them.
 
 `merged_command_candidates` joins the configured branches and retains original
 identities. `filtered_commands` applies the common eligibility filters. The
-`prepare_dataset` job (CLI: `build --prepare-only`) stops here; inspect branch
-yields and source spans before spending model capacity.
+`prepare_dataset` job (CLI: `build --prepare-only`) selects `filtered_commands`
+and its Dagster ancestors. Each collection job selects only the ancestors of
+its own `command_candidates` output, including that output. The build job
+extends through the review queue and labeling failures. It does not run review
+decisions or release; inspect branch yields before spending model capacity.
 
 `datasets/bashguard_syntax_audit` is an optional side output of the merge.
 Its independent `audit_bashguard_syntax` job inspects the original command text
@@ -56,11 +59,15 @@ not active assets. The existing supported/failure split, exact deduplication,
 category eligibility, uncertainty queue and single release follow labeling.
 No configuration receipt or successful model response constitutes human approval.
 
-## V1: prepared-source collection
+## Configuration and stage contracts
 
-The following reference describes independent dataset and documentation collection branches
-and one shared finalization path. In both graph variants, `dataset_configuration`
-contains only `global_config` and `category_rules`. Each mapping appears in the
+`configuration` contains `config_directory`, `global_config`, and `category_rules`.
+Materialize `config_directory` to observe the declared category's live files.
+Its Dagster data version covers the relative filenames and their contents. An
+observation does not approve new policy or source rights: `global_config`
+consumes the persisted capture and rejects a digest that differs from the
+approved registration. Planned processing can consume an approved capture
+with the authored directory offline. Each mapping appears in the
 same group as its consumers. `filtering` contains candidate merging and filtering;
 `labeling` contains labeling inputs, attempts and supported proposals. `deduplication`
 contains `deduplicated_annotations` and can be selected without running review or release.
@@ -69,13 +76,12 @@ labeling failures alongside the BashGuard syntax audit in `dataset_audit`.
 Each dataset has its own `dataset_builds` partition.
 Run `refresh_dataset_configuration` for a dataset partition to materialize just
 its configuration assets and `category_rules`. `global_config` outputs a validated Pydantic model:
-declared runs carry pinned, path-free settings grouped by scope; prepared-source
-runs carry the registered build spec. Each mapping passes a strict Pydantic contract
+declared runs carry pinned, path-free settings grouped by scope. Each mapping passes a strict Pydantic contract
 with settings for its branch or finalization stage. A stage with no settings has
 no mapping. Policy-only consumers receive `CategoryRules` directly; consumers with
 scoped settings receive the corresponding typed input. Policy is checked against the run's config snapshot
-before projection. When a stage also accepts its settings in launch config,
-the stage rejects disagreements with the mapping before consulting the cache.
+before projection. Processing stages do not accept a second copy of these
+settings in launch config.
 The mapped value drives both computation and the cache signature. Completion
 authorization and runner-local paths remain separate from declared mappings.
 Named jobs and planned selective runs include their config assets. When manually
@@ -94,29 +100,9 @@ Pandera models in `dataframe_schemas.py` also supply Dagster types. Table schema
 reject extra columns and coerce column types; record models and helper checks
 add constraints that column schemas alone don't express.
 
-All source commands, context, snippets and model responses are inert, untrusted
-data. No stage executes a collected command. Source selection decides which
-documents to process. Filtering decides which extracted records can enter
-inference. One isolated labeling invocation assesses each eligible record.
-Both branches automatically crawl or load eligible sources, enforcing provenance,
-license/reuse terms, content eligibility and inspected-source bindings. Agent
-proposals aren't human approval. Final human review covers only rows with any
-`medium` or `low` among the four label confidences. All four `high` means low uncertainty and automatic admission only
-if machine eligible. Conservative exact normalized
-deduplication runs on the combined labeled dataset, followed by category eligibility
-filtering before human review. Rejected labels, other categories and low category
-confidence are excluded; medium/high category confidence remains eligible for review.
-Fuzzy linking and safe-counterpart pairing remain deferred.
-
-The sections below describe common stage behavior and the dataset paths.
-Documentation instantiates collection stages through `command_candidates` at
-`datasets/documentation/<stage>`, except shared `category_rules`.
-`human_source_decisions` is removed from the active graph; neither branch waits
-on human source admission.
-Both branches converge at `merged_command_candidates` before shared filtering,
-semantic documentation, labeling, deduplication, final human review and release.
-See [independent branch contracts](independent-branches.md) for configuration
-and source-binding rules.
+All source commands, context, snippets and model responses are inert data.
+See [independent branch contracts](independent-branches.md) for branch ownership
+and [the confidence policy](confidence-review-policy.md) for review admission.
 
 ## Reading an artifact's algorithm in the UI
 
@@ -164,7 +150,7 @@ Severity names are limited to `low`, `medium`, `high`, `critical`.
 Patterns support routing, never a safety verdict; policy text remains evidence
 for model judgment, not a complete executable policy validator.
 
-## `datasets/source_catalog`
+## Historical `datasets/source_catalog`
 
 **Input:** Category scope and a category-bound source manifest, or inline sources.
 
@@ -187,10 +173,8 @@ model runs. Inspect the retained manifest and its referenced preparation evidenc
 
 This source-admission stage is removed from the active graph. Its historical
 decisions and snapshots remain inspectable evidence, not current authorization.
-The active collection path goes from the catalog to automatic acquisition of
-eligible sources without a human decision or completion token.
 
-## `datasets/source_documents`
+## Historical `datasets/source_documents`
 
 **Input:** The validated catalog and manifest sources, size limits and worker count.
 
@@ -211,7 +195,7 @@ Transport connection/DNS/timeout failures get at most three attempts per missing
 file, with each failure retained. HTTP status failures and integrity/content
 failures are not retried. Exhausted transport attempts still fail the stage.
 
-## `datasets/document_adapters`
+## Historical `datasets/document_adapters`
 
 **Input:** Full documents and their manifest-declared format/field mappings.
 
@@ -230,8 +214,7 @@ transformation hashes preserved. Downloaded commands are never executable code.
 
 ## `datasets/command_candidates`
 
-**Input:** Full source documents, their adapters and the context-window setting
-(100 characters on either side by default).
+**Input:** Each branch's verified captures and reviewed extraction settings.
 
 **Goal:** Extract broad candidate records with enough source location and context
 to inspect them later.
@@ -243,22 +226,16 @@ source ID/URL/position, transformation markers and initially empty risk routing.
 IDs hash source identity, position and command, so identical commands at distinct
 source positions remain separate records.
 
-**Gate/inspection:** Structured formats must decode and yield textual command
-and context fields. Text extraction handles recognized shell Markdown fences,
-inline backticks and eligible plain lines; it skips comments and some Markdown
-lines and strips a leading `$ ` prompt. Positions refer to character offsets
-within the decoded document or selected record field. Markers identify fence or
-inline extraction, not a complete normalization audit.
-
-Utility is the first shell token's basename, with a basic split fallback for
-unbalanced quotes. It isn't a full compound-command utility analysis. Extraction
-is line-oriented, not a general shell parser: prose or console output can become
-candidates, and multiline shell constructs aren't reconstructed. Invalid
-structured fields fail the stage instead of silently dropping the record.
+**Gate/inspection:** A branch can extract only from verified captures under its
+current declaration. Inspect extracted records against their original source
+spans and parser evidence. Scope and parsing vary by branch and origin; see
+[repository acquisition](../business-configs/categories/cat3/collection/README.md)
+and the [Keenable declaration](../business-configs/categories/cat3/keenable/README.md).
+Extraction does not assign command safety.
 
 ## `datasets/merged_command_candidates`
 
-**Input:** Current authorized `command_candidates` from both collection branches.
+**Input:** Current authorized `command_candidates` from the configured collection branches.
 
 **Goal:** Merge extracted rows before any shared processing or labeling.
 
@@ -273,8 +250,8 @@ configured branch's exact candidate digest, or an explicit unconfigured/waiting 
 Missing, changed or unauthorized configured inputs become waiting placeholders,
 never historical substitutes. Only the merge can materialize partial waiting
 inputs for inspection; filtering and every later stage require all configured
-branches to be current. `build_documentation` stops at its own command candidates;
-the registered build performs this merge and the shared tail.
+branches to be current. `prepare_dataset` performs the merge and stops after
+shared filtering.
 
 ## `datasets/filtered_commands`
 
@@ -301,7 +278,7 @@ Quarantined rows stay here and never enter labeling automatically. They also
 don't enter `human_review_queue`, whose input is deduplicated labels, not this
 table. Inspect this asset separately to account for extraction/filter losses.
 
-## `datasets/labeling_documentation`
+## Historical `datasets/labeling_documentation`
 
 **Input:** Eligible operations, category rules and prepared semantic references.
 
@@ -315,20 +292,18 @@ full snippet and version limits, plus retained coverage and manifest evidence.
 **Gate/inspection:** Only provided snippets or a semantic manifest are accepted.
 Invalid category, record fields, URLs, sensitive indicators or byte limits fail.
 No online discovery occurs in this stage. Missing operation coverage remains
-explicit; enhanced labeling may retrieve the missing evidence within its bounded
-tool conversation. Native single-command labeling still requires supplied
-documentation before inference. Operation-prefix and option
+explicit in historical runs. Operation-prefix and option
 matching selects relevant references, not a claim of complete semantic proof.
 Semantic use does not authorize corpus redistribution.
 
 ## `datasets/labeling_attempts`
 
-**Input:** Only eligible filtered records, the documentation table, compiled
+**Input:** Eligible filtered records, verified capture bindings, compiled
 generic/category instructions, applicable operation-family examples, rules and
-labeler model configuration.
+guarded labeler settings.
 
-**Goal:** Account for every eligible record with a supported label or an explicit
-failure, preserving independent judgments and original evidence.
+**Goal:** Account for eligible records with a supported label, explicit failure
+or quota deferral, preserving independent judgments and original evidence.
 
 **Why:** Filtering can establish routing and parse eligibility, but can't decide
 category, risk, severity, class or factual description.
@@ -337,15 +312,11 @@ category, risk, severity, class or factual description.
 status, validated label JSON or failure details, row fingerprint, document-manifest
 digest, assigned documentation and original inference reference.
 
-Enhanced mode reuses valid rows before deterministic TF-IDF cosine grouping.
-Pending records share a bounded conversation in batches of up to 25 or 50.
-The model can submit immediately or request shared Keenable/Context7 documentation;
-the final-answer tool returns independent outcomes. Model turns, retrieval rounds,
-provider calls, response bytes and exact tokenized context are bounded in code.
-Similarity never merges commands or supplies a neighboring record's judgment.
-Native mode retains the isolated no-tools baseline runner.
+Rows in each batch share bounded model context,
+but similarity never merges their judgments. Evidence requests use applicable
+passages from the frozen collection; they do not start another crawl.
 
-Every enhanced model call, including evaluation grading, uses the shared admission
+Every guarded model call uses the shared admission
 guard. It combines fresh per-rank scheduler snapshots with Prometheus metrics and
 reserves a complete configured context window. New calls pause above the configured
 half-capacity slot/token boundary or while serving queues exist. Missing/stale
@@ -369,9 +340,10 @@ approval, production, backups or hidden behavior; structural validation doesn't
 prove those requirements or citation relevance. Confidence is self-reported,
 not calibrated proof. Expected protocol/grounding failures become explicit outcomes;
 corrupt accounting or upstream identity changes fail the stage. Capacity pauses
-remain operational state. Completed rows are checkpointed before later model turns.
-Failed-row retries retain successful peers. Explicit documentation refresh changes
-the stage generation, but unchanged relevant evidence reuses original row receipts.
+remain operational state. A retry of an interrupted materialization resumes
+completed batches and repeats an incomplete batch. After a successful
+materialization, an explicit new materialization labels every row again. Changes
+to sources, inputs or the I/O contract invalidate all earlier batch checkpoints.
 
 ## `datasets/proposed_annotations`
 
@@ -475,16 +447,17 @@ identities and revalidates labels. This single asset publishes machine-eligible
 all-high rows without human decisions, marked `human_reviewed=false`, plus
 machine-eligible uncertain rows actually approved by a human, marked
 `human_reviewed=true`. If the queue is nonempty, release waits for real terminal
-decisions and explicit completion of the current snapshot. An empty queue lets
-the build release automatically without a fabricated reviewer, decision or
-human completion token. Supported `needs_review` labels require explicit human
-resolution and cannot release automatically. Missing documentation, rejected
+decisions and explicit completion of the current snapshot. An empty queue
+requires no human reviewer, decision or completion. Both paths require
+resolved sampling, no operator hold and steward attestation of the exact
+proposal. Supported `needs_review` labels require explicit human resolution.
+Missing documentation, rejected
 labels and invalid taxonomy remain ineligible. Approved human value corrections
 are applied to a copy of the annotation table; original model labels remain immutable.
-Eligibility and required human approval precede the cap in input order.
-Final validation checks nonblank fields,
-column order and allowed taxonomy/class/severity values. No random sampling or
-pairing is performed; exact deduplication is the preceding shared stage.
+Eligibility and required human approval precede capped selection.
+Final validation checks nonblank fields, column order and allowed
+taxonomy/class/severity values. Exact deduplication precedes review;
+the proposal retains representative selection and sampling evidence.
 There is no fresh source licensing or
 source-body audit here; consult the catalog and snapshots.
 
@@ -607,24 +580,28 @@ materialization. Inference receipts include hashes, requested/observed model,
 timestamps and response evidence. No automatic response repair or provider
 fallback supplies missing judgments. Storage integrity failures surface as errors.
 
-CLI builds and the stopped-by-default sensor use selective planning. A first
-build selects preparation stages only; later plans compare partition history and fingerprints,
-select changed stages and affected descendants, and load unchanged dependencies
-from storage. An unchanged CLI build reports `status: unchanged`, creates no run
-and emits no new materializations. A partial selection isn't missing work by
-itself; check selected/skipped stages and reasons in `build-<run-id>.json` for a
-successful CLI run. Top-level revision alone doesn't request source refresh;
-`seeds.revision` does.
+The default CLI build refreshes the registered partition's configuration. Dagster's
+`dataset_build_requests` automation sensor evaluates processing assets; look at
+partition materializations to see what actually ran. A configuration refresh is
+not a labeling run. To explicitly run preparation through `filtered_commands`,
+use `build --force --prepare-only`. Use the branch's reviewed refresh setting
+when the branch needs new receipts without other effective changes.
 
 A selected stage can reuse its cached table and still materialize with
 `cache_hit: true`. That differs from a skipped stage, which has no new event.
 An empty table is another distinct outcome: a successful materialization with
-row count zero. The UI's explicit **Materialize all** selects the full graph;
-it isn't the CLI/sensor no-op planner.
+row count zero. The UI's explicit **Materialize all** selects the full graph.
 
-The UI and build must use the same persistent home. Use `dataset_cli ui --home`
-to align the registry and Dagster history, and `dataset_cli show --home --dataset
---stage` to inspect full cell values without inference. See the exact viewing
+For labeling, distinguish the decision to select an asset partition from recovery
+inside the selected step. A fresh labeling materialization infers its batches
+again. A retry of the failed labeling step can recover completed batches from
+that execution when the inputs and implementation still match. To avoid paying
+for unchanged labeling, leave the current partition out of the run; a batch
+checkpoint is not a substitute for that selection.
+
+The shared UI and build must use the same persistent home. Use
+`dataset_cli show --home --dataset --stage` inside the Compose service
+to inspect full cell values without inference. See the exact viewing
 commands in [orchestration](orchestration.md). Missing or stale display behavior
 must be investigated against the actual partition, events and stored output.
 

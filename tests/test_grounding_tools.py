@@ -89,7 +89,7 @@ class GroundingToolsTests(unittest.TestCase):
         )
 
     def broker(self, config: GroundingConfig | None = None, name: str = "out") -> GroundingBroker:
-        return GroundingBroker(config or self.config, self.root / name, self.root / "cache")
+        return GroundingBroker.from_environment(config or self.config, self.root / name, self.root / "cache")
 
     def wire(self, *responses: JsonValue | bytes | HTTPError | URLError) -> Wire:
         wire = Wire(*responses)
@@ -353,6 +353,35 @@ class GroundingToolsTests(unittest.TestCase):
             self.assertNotIn("Authorization", text)
             self.assertNotIn("X-API-Key", text)
 
+    def test_bound_credentials_are_scoped_to_provider_and_filter_echo_after_environment_changes(self) -> None:
+        broker = self.broker(self.config.model_copy(update={"pinned_library_ids": ["/example/tool"]}))
+        url = "https://docs.example.org/volumes"
+        wire = self.wire(
+            self.search_page(url), self.context(), {"url": url, "content": "fixture-context-key"}
+        )
+
+        with patch.dict("os.environ", {}, clear=True):
+            self.assertIsNone(broker.execute(self.query()).error)
+            self.assertIsNone(
+                broker.execute(self.query("context7_context", library_id="/example/tool")).error
+            )
+            echoed = broker.execute(self.query("keenable_fetch", url=url))
+
+        self.assertEqual(echoed.error.code if echoed.error else None, "sensitive_response")
+        search, context, fetch = wire.requests
+        self.assertEqual(
+            [urlsplit(request.full_url).hostname for request in wire.requests],
+            ["api.keenable.ai", "context7.com", "api.keenable.ai"],
+        )
+        self.assertEqual(search.get_header("X-api-key"), "fixture-keenable-key")
+        self.assertEqual(context.get_header("Authorization"), "Bearer fixture-context-key")
+        self.assertIsNone(context.get_header("X-api-key"))
+        self.assertIsNone(fetch.get_header("Authorization"))
+        self.assertEqual(parse_qs(urlsplit(fetch.full_url).query)["url"], [url])
+        for path in self.root.rglob("*.json"):
+            self.assertNotIn(b"fixture-context-key", path.read_bytes())
+            self.assertNotIn(b"fixture-keenable-key", path.read_bytes())
+
     def test_sensitive_and_malformed_responses_never_enter_evidence_or_cache(self) -> None:
         for index, body in enumerate(
             (
@@ -484,14 +513,32 @@ class GroundingToolsTests(unittest.TestCase):
         self.assertEqual(result.provider_calls, 1)
 
     def test_missing_key_and_sensitive_query_do_not_consume_budget(self) -> None:
-        broker = self.broker()
         wire = self.wire()
-        with patch.dict("os.environ", {"KEENABLE_API_KEY": ""}):
-            missing = broker.execute(self.query())
-        sensitive = broker.execute(self.query(query="api_key=abcdefghijklmnop012345"))
+        with patch.dict("os.environ", {"CONTEXT7_API_KEY": "fixture-context-key"}, clear=True):
+            missing_key_broker = self.broker(name="missing")
+        missing = missing_key_broker.execute(self.query())
         self.assertEqual(missing.error.code if missing.error else None, "missing_api_key")
+        self.assertEqual(
+            (
+                missing_key_broker.provider_calls,
+                missing_key_broker.response_bytes,
+                missing_key_broker.evidence_bytes,
+            ),
+            (0, 0, 0),
+        )
+        self.assertEqual(wire.requests, [])
+
+        valid_key_broker = self.broker(name="sensitive")
+        sensitive = valid_key_broker.execute(self.query(query="api_key=abcdefghijklmnop012345"))
         self.assertEqual(sensitive.error.code if sensitive.error else None, "sensitive_query")
-        self.assertEqual(broker.provider_calls, 0)
+        self.assertEqual(
+            (
+                valid_key_broker.provider_calls,
+                valid_key_broker.response_bytes,
+                valid_key_broker.evidence_bytes,
+            ),
+            (0, 0, 0),
+        )
         self.assertEqual(wire.requests, [])
         for path in self.root.rglob("*.json"):
             self.assertNotIn("abcdefghijklmnop012345", path.read_text())

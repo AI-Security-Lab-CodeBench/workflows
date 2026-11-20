@@ -2,11 +2,12 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from configuration_fixture import write_fixture
-from dagster import AssetKey, build_output_context
+import pandas as pd
+from dagster import AssetKey, asset, build_output_context, materialize
 from httpx import Response
 from pydantic import TypeAdapter
 from starlette.testclient import TestClient
+from test_declared_dataset_graph import fixture_spec
 
 from codebench_pipeline.data_api import make_dataset_api
 from codebench_pipeline.data_view_models import DatasetList, DatasetQueryRequest, TableResponse
@@ -14,7 +15,6 @@ from codebench_pipeline.data_views import DatasetDataService
 from codebench_pipeline.dataframe_io import DataFrameIOManager
 from codebench_pipeline.dataframe_schemas import CommandCandidatesTable, validated_frame
 from codebench_pipeline.dataset_asset_types import DATASET_PARTITIONS
-from codebench_pipeline.dataset_config import load_build_config
 from codebench_pipeline.dataset_registry import DatasetRegistry
 from codebench_pipeline.human_review import DecisionChange, ReviewSnapshot
 from codebench_pipeline.human_review_store import HumanReviewStore
@@ -88,7 +88,7 @@ class DatasetAPITests(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.home = Path(temporary.name)
-        self.spec = load_build_config(write_fixture(self.home), self.home)
+        self.spec = fixture_spec(self.home)
         DatasetRegistry(self.home).register(self.spec)
         self.instance = self.enterContext(dataset_instance(self.home))
         self.instance.add_dynamic_partitions("dataset_builds", [self.spec.dataset_id])
@@ -156,15 +156,40 @@ class DatasetAPITests(unittest.TestCase):
 
     def test_artifact_endpoints_discover_partitions_and_read_full_asset_keys(self) -> None:
         key = ["datasets", "command_candidates"]
+        before = self.client.post(
+            "/artifacts/partitions", headers={"Origin": ORIGIN}, json={"asset_key": key}
+        )
+        self.assertEqual(before.json()["partitions"], [])
+
+        @asset(key=AssetKey(key), partitions_def=DATASET_PARTITIONS, io_manager_key="dataset_io_manager")
+        def fixture_candidates() -> pd.DataFrame:
+            return self.frame
+
+        materialize(
+            [fixture_candidates],
+            instance=self.instance,
+            partition_key=self.spec.dataset_id,
+            resources={"dataset_io_manager": DataFrameIOManager(storage=self.spec.storage)},
+            run_config={
+                "resources": {
+                    "dataset_io_manager": {"config": {"storage": self.spec.storage.model_dump(mode="json")}}
+                }
+            },
+        )
         partitions = self.client.post(
             "/artifacts/partitions", headers={"Origin": ORIGIN}, json={"asset_key": key}
         )
         self.assertEqual(partitions.status_code, 200)
-        self.assertEqual(partitions.json(), {
-            "asset_key": key, "partitions": [self.spec.dataset_id],
-        })
+        self.assertEqual(
+            partitions.json(),
+            {
+                "asset_key": key,
+                "partitions": [self.spec.dataset_id],
+            },
+        )
         response = self.client.post(
-            "/artifacts/data", headers={"Origin": ORIGIN},
+            "/artifacts/data",
+            headers={"Origin": ORIGIN},
             json={"asset_key": key, "partition_key": self.spec.dataset_id, "query": {"limit": 1}},
         )
         self.assertEqual(response.status_code, 200)

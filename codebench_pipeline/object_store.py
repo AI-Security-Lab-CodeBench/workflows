@@ -3,18 +3,24 @@ from __future__ import annotations
 import hashlib
 import os
 import re
-from contextlib import closing
+from contextlib import ExitStack, closing, suppress
 from pathlib import Path, PurePosixPath
-from tempfile import TemporaryDirectory
 from typing import TYPE_CHECKING, Literal, Protocol, assert_never
 from urllib.parse import urlsplit
+from uuid import uuid4
 
 import boto3
 from botocore.config import Config as ClientConfig
 from botocore.exceptions import ClientError
 from pydantic import ConfigDict, Field, model_validator
 
-from codebench_pipeline.storage import IntegrityError, exclusive
+from codebench_pipeline.storage import (
+    IntegrityError,
+    open_child_directory,
+    open_directory,
+    open_regular_file,
+    write_new_file,
+)
 from codebench_pipeline.typed_config import TypedConfig
 
 if TYPE_CHECKING:
@@ -126,14 +132,70 @@ def sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+def _read_local(directory: int, key: str) -> bytes:
+    try:
+        with open_regular_file(directory, "current") as pointer:
+            digest = pointer.read(65)
+    except FileNotFoundError:
+        if any(name != ".lock" for name in os.listdir(directory)):
+            raise IntegrityError(f"Missing completion metadata: {key}") from None
+        raise FileNotFoundError(key) from None
+    if not re.fullmatch(rb"[a-f0-9]{64}", digest):
+        raise IntegrityError(f"Invalid completion metadata: {key}")
+    try:
+        with open_child_directory(directory, digest.decode("ascii")) as version:
+            with open_regular_file(version, "data") as stream:
+                data = stream.read()
+    except FileNotFoundError as error:
+        raise IntegrityError(f"Incomplete object: {key}") from error
+    if sha256(data).encode("ascii") != digest:
+        raise IntegrityError(f"Object content mismatch: {key}")
+    return data
+
+
+def _retain_local_version(directory: int, key: str, data: bytes, digest: str) -> None:
+    with ExitStack() as stack:
+        try:
+            version = stack.enter_context(open_child_directory(directory, digest))
+        except FileNotFoundError:
+            staging = f".write-{uuid4().hex}"
+            os.mkdir(staging, mode=0o700, dir_fd=directory)
+            with open_child_directory(directory, staging) as target:
+                installed = False
+                try:
+                    write_new_file(target, "data", data, mode=0o666)
+                    os.rename(staging, digest, src_dir_fd=directory, dst_dir_fd=directory)
+                    installed = True
+                finally:
+                    if not installed:
+                        with suppress(FileNotFoundError):
+                            os.unlink("data", dir_fd=target)
+                        os.rmdir(staging, dir_fd=directory)
+        else:
+            try:
+                with open_regular_file(version, "data") as stream:
+                    if stream.read(len(data) + 1) != data:
+                        raise IntegrityError(f"Object content mismatch: {key}")
+            except FileNotFoundError as error:
+                raise IntegrityError(f"Incomplete object: {key}") from error
+
+
 class ObjectStore:
     """Hash-checked objects; replacement is reserved for asset references."""
 
-    def __init__(self, config: StorageConfig) -> None:
+    def __init__(self, config: StorageConfig, *, client: S3Client | None = None) -> None:
         self.config = config
+        self._s3_client = client
+
+    @staticmethod
+    def from_environment(config: StorageConfig) -> ObjectStore:
+        client = configured_client(boto3, config) if config.backend == "s3" else None
+        return ObjectStore(config, client=client)
 
     def _client(self) -> S3Client:
-        return configured_client(boto3, self.config)
+        if self._s3_client is None:
+            raise IntegrityError("S3 client is not bound to the object store")
+        return self._s3_client
 
     def _bucket(self) -> str:
         if self.config.bucket is None:
@@ -141,14 +203,10 @@ class ObjectStore:
         return self.config.bucket
 
     def _key(self, key: str) -> str:
-        return f"{self.config.prefix}/{safe_key(key)}"
+        return safe_key(f"{self.config.prefix}/{key}")
 
     def _directory(self, key: str) -> Path:
-        root = Path(self.config.local_root).resolve()
-        directory = root / self._key(key)
-        if not directory.resolve().is_relative_to(root):
-            raise IntegrityError("Storage path escapes local_root")
-        return directory
+        return Path(self.config.local_root).absolute().joinpath(self._key(key))
 
     def _read_s3(self, client: S3Client, key: str) -> tuple[bytes, str] | None:
         try:
@@ -166,22 +224,11 @@ class ObjectStore:
     def read(self, key: str) -> bytes:
         match self.config.backend:
             case "local":
-                directory = self._directory(key)
                 try:
-                    digest = (directory / "current").read_text(encoding="ascii")
+                    with open_directory(self._directory(key)) as directory:
+                        return _read_local(directory, key)
                 except FileNotFoundError:
-                    if directory.exists() and any(path.name != ".lock" for path in directory.iterdir()):
-                        raise IntegrityError(f"Missing completion metadata: {key}") from None
                     raise FileNotFoundError(key) from None
-                if not re.fullmatch(r"[a-f0-9]{64}", digest):
-                    raise IntegrityError(f"Invalid completion metadata: {key}")
-                try:
-                    data = (directory / digest / "data").read_bytes()
-                except FileNotFoundError as error:
-                    raise IntegrityError(f"Incomplete object: {key}") from error
-                if sha256(data) != digest:
-                    raise IntegrityError(f"Object content mismatch: {key}")
-                return data
             case "s3":
                 with closing(self._client()) as client:
                     result = self._read_s3(client, key)
@@ -195,35 +242,34 @@ class ObjectStore:
         digest = sha256(data)
         match self.config.backend:
             case "local":
-                directory = self._directory(key)
-                with exclusive(directory / ".lock"):
+                path = self._directory(key)
+                with open_directory(path, create=True) as directory:
                     try:
-                        previous = self.read(key)
-                    except FileNotFoundError:
-                        previous = None
-                    if previous is not None:
-                        if previous == data:
-                            return self.uri(key)
-                        if not replace:
-                            raise IntegrityError(f"Immutable object already exists: {key}")
-                    with TemporaryDirectory(prefix=".write-", dir=directory) as temporary:
-                        staging = Path(temporary)
-                        with (staging / "data").open("wb") as stream:
-                            stream.write(data)
-                            stream.flush()
-                            os.fsync(stream.fileno())
-                        version = directory / digest
-                        if not version.exists():
-                            os.rename(staging, version)
-                        elif (version / "data").read_bytes() != data:
-                            raise IntegrityError(f"Object content mismatch: {key}")
-                    with TemporaryDirectory(prefix=".commit-", dir=directory) as temporary:
-                        pointer = Path(temporary) / "current"
-                        with pointer.open("w", encoding="ascii") as stream:
-                            stream.write(digest)
-                            stream.flush()
-                            os.fsync(stream.fileno())
-                        os.replace(pointer, directory / "current")
+                        write_new_file(directory, ".lock", str(os.getpid()).encode("ascii"))
+                    except FileExistsError as error:
+                        raise IntegrityError(
+                            f"Another run owns {path / '.lock'}; inspect it before retrying"
+                        ) from error
+                    try:
+                        try:
+                            previous = _read_local(directory, key)
+                        except FileNotFoundError:
+                            previous = None
+                        if previous is not None:
+                            if previous == data:
+                                return self.uri(key)
+                            if not replace:
+                                raise IntegrityError(f"Immutable object already exists: {key}")
+                        _retain_local_version(directory, key, data, digest)
+                        pointer = f".commit-{uuid4().hex}"
+                        write_new_file(directory, pointer, digest.encode("ascii"), mode=0o666)
+                        try:
+                            os.replace(pointer, "current", src_dir_fd=directory, dst_dir_fd=directory)
+                        finally:
+                            with suppress(FileNotFoundError):
+                                os.unlink(pointer, dir_fd=directory)
+                    finally:
+                        os.unlink(".lock", dir_fd=directory)
             case "s3":
                 with closing(self._client()) as client:
                     previous = self._read_s3(client, key)

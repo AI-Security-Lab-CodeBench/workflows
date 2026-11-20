@@ -24,27 +24,22 @@ commits, and the policy against co-author trailers.
 - `bashguard/`: standalone Go Bash AST analysis and CEL policy evaluation,
   integrated from source commit `671172026a2c0f4f6ce420f5e7bef10f53fb0732`.
 
-Both collection branches feed one shared processing flow:
+Three independently selectable collection branches feed one shared processing flow:
 
 ```text
-Existing datasets: source collection -> command_candidates
-Documentation crawl: source collection -> command_candidates
-Both -> merged_command_candidates -> filtered_commands -> labeling_documentation
-     -> labeling_attempts -> proposed_annotations -> conservative exact dedup
-     -> uncertain human queue -> one dataset_release
-        labeling_attempts -> labeling_failures (audit only)
+Existing datasets: pinned corpus inventory -> verified captures -> command_candidates
+Documentation crawl: pinned scope and verified captures -> command_candidates
+Keenable: bounded discovery -> verified origin captures -> command_candidates
+All -> merged_command_candidates -> filtered_commands -> labeling_attempts
+    -> proposed_annotations -> conservative exact dedup -> category eligibility
+    -> uncertainty queue -> dataset_release
+       labeling_attempts -> labeling_failures (audit only)
 ```
 
-The local agent discovers sources, reads README/license/origin evidence and
-prepares category-bound manifests outside Dagster. Unresolved eligibility stays
-explicitly withheld in the local inventory. Both branches retrieve complete
-declared files with integrity checks; neither searches for sources nor calls
-source-selector or adapter models.
-Enhanced labeling groups pending commands by vector similarity and shares bounded
-Keenable/Context7 retrieval across batches, preserving independent row judgments.
-Every eligible command receives a typed success or failure outcome; unsupported
-rows remain inspectable in `labeling_failures` and cannot enter release.
-Native single-command labeling remains available for baseline compatibility.
+The repository branches acquire from reviewed pins; only Keenable searches for
+new origins. Guarded batch labeling uses applicable passages from the same
+verified captures and preserves independent row judgments. Unsupported outcomes
+remain inspectable in `labeling_failures`; quota deferrals are tracked separately.
 There is no independent per-command LLM reviewer stage; historical
 `reviewed_annotations` artifacts remain readable. Current rows don't receive
 manufactured `review_verdict` or `review_confidence` fields.
@@ -54,58 +49,21 @@ high means low uncertainty, not proof of eligibility.
 
 Machine-eligible low-uncertainty rows need no human decision and carry
 `human_reviewed=false`. Actually approved uncertain rows carry `human_reviewed=true`;
-approval never overrides machine ineligibility. An empty queue lets the build
-complete under a policy actor with zero human decisions and publish automatically
-through the same `dataset_release`. Otherwise the single release waits for real
-terminal queue decisions and explicit
-completion. Unchanged model results and human decisions are reused per record.
+approval never overrides machine ineligibility. An empty queue completes under
+a policy actor with zero human decisions. A nonempty queue requires real terminal
+decisions and explicit completion. Both paths use the same `dataset_release`
+and remain subject to guarded publication controls. Unchanged model results
+and human decisions are reused per record.
 Changed snapshots invalidate publication and require fresh completion when the
 queue is nonempty. Collected shell strings are never executed.
 
-## Install and inspect
+## Operate the shared deployment
 
-Use Python 3.12 or 3.13 and the committed dependency lock:
-
-```sh
-uv sync --frozen
-```
-
-Set `CODEBENCH_HOME` to the existing registered dataset home. The declared
-configuration inherits its model settings from that registry. Validate the
-configuration, inspect a stage, or register a snapshot:
-
-```sh
-uv run python -m codebench_pipeline.dataset_cli validate \
-  --config business-configs/datasets/cat3.json --home "${CODEBENCH_HOME:?}"
-uv run python -m codebench_pipeline.dataset_cli inspect-config \
-  --config business-configs/datasets/cat3.json --stage labeling_attempts --home "${CODEBENCH_HOME:?}"
-uv run python -m codebench_pipeline.dataset_cli register \
-  --config business-configs/datasets/cat3.json --home "${CODEBENCH_HOME:?}"
-```
-
-Validation and registration do not run inference or collect commands. A fresh
-home has no materialized tables. The supplied config preserves the user's model
-roles and CAT-3 policy. Its native provider requires an authenticated `omo`
-installation, optionally selected with `CODEBENCH_OMO_EXECUTABLE`. Alternatively,
-configure each role's supported `openai_compatible` provider and endpoint;
-credentials are referenced by environment-variable name, never stored here.
-
-Build the native UI using Node >=20 and the builder's pinned Dagster/Yarn inputs:
-
-```sh
-uv run python -m codebench_pipeline.ui_build
-uv run python -m codebench_pipeline.dataset_cli ui \
-  --home .codebench-datasets --port 3020
-```
-
-Open `http://127.0.0.1:3020/asset-groups` for lineage. The builder needs network
-access and disk space; generated frontend files are not versioned.
-See `dagster_ui/BUILD.md` for exact pins and build ownership.
-
-To inspect an existing local dataset, pass its existing home instead. Do not
-register the example config over an existing registered collection merely to
-view it. Build and viewer must use the same home. When reusing an already-built
-bundle, the server also accepts `--bundle /path/to/dagster_ui/build`.
+Run `make remote-up` and open `http://localhost:3041`. Follow the
+[operator guide](docs/orchestration.md) to inspect the selected dataset
+partition, validate and apply a declaration, or run preparation and labeling
+inside the existing Compose service. Viewing persisted rows does not require
+registration, inference or rematerialization.
 
 ## CAT-3 configuration inputs
 
@@ -114,33 +72,13 @@ The CAT-3 template selects the category. Its collection inputs are maintained
 separately: `collection/existing-datasets.json`, `collection/documentation-crawl.json`
 and `keenable/declaration.json` under the category directory. The loader
 embeds their validated contents in the configuration assets.
-The separate `cat3-prepared.json` configuration uses historical prepared manifests.
-
-Keep preparation inventories, exclusions, reports and downloaded captures
-in the local preparation workspace. The configuration bundle contains the
-admitted source declarations and labeling references.
-Each source has a local path or exact remote URL, provenance, license, declared
-format and SHA-256 or Git blob SHA-1. Remote acquisition rejects incomplete,
-oversized, mismatched, non-UTF8 or sensitive bodies.
-
-Optional trusted Python functions/classes implement the batch contract in
-`codebench_pipeline/source_transform_contract.py`. Pin reviewed module bytes in
-the source manifest; examples live in `transforms/`. Dataset strings are never
-executed. Changing manifest, source or transformation bytes invalidates outputs.
-
-Then build the registered CAT-3 collection:
-
-```sh
-uv run python -m codebench_pipeline.dataset_cli build \
-  --dataset cloud_infrastructure_commands_grounded_v1 --home "${CODEBENCH_HOME:?}"
-```
-
-This invokes the labeler for missing eligible rows. Declared sources load automatically; only
-the final uncertainty queue requires human decisions. Inspect full persisted cells
-in the native Data/Review tabs;
-viewing does not require running inference again.
+See [business configuration](business-configs/README.md) for declaration fields
+and retained historical evidence. Keep new inventories, captures and run
+receipts in approved local storage.
 
 ## Verify
+
+Run these checks in the [Compose test environment](docs/test-suite.md):
 
 ```sh
 make lint

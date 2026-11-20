@@ -11,9 +11,9 @@ Risk IDs follow `CAT-N.M`, must use their category prefix, and must be unique;
 canonical CSV values include both the configured ID and name.
 
 The current dataset pipeline carries this rules snapshot through filtering,
-single-invocation per-command annotation and release. `command_patterns` routes candidates;
-the complete policy, definitions and guidance are part of the isolated model
-instruction. Patterns never assign a safety class or severity.
+guarded batch annotation and release. `command_patterns` routes candidates;
+the model receives the complete policy, definitions and guidance and returns
+independent row judgments. Patterns never assign a safety class or severity.
 
 ## Standalone tooling and historical CAT-3
 
@@ -21,7 +21,7 @@ The standalone scripts default explicitly to the shipped
 business configuration. Their legacy `CATEGORY` and `RISKS` exports are
 derived from the same category source, not separate taxonomies. Historical labeling packets and
 export commands retain their CAT-3 workflow, now backed by this configuration.
-Use the current dataset pipeline for another category's full annotation workflow.
+The shipped declared dataset template selects CAT-3.
 
 `command_filter.py`, `prefilter.py`, `postfilter.py`,
 `prepare_review_candidates.py` and `validate_dataset.py` accept

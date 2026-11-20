@@ -51,6 +51,9 @@ class KeenableCollection:
         self.planner = planner
 
     def discover(self) -> CatalogReceipt:
+        return self.discover_with_credential(os.getenv("KEENABLE_API_KEY", ""))
+
+    def discover_with_credential(self, api_key: str) -> CatalogReceipt:
         """Search reviewed administrative cases and freeze the authorized selection."""
         with open_ledger(self.root, self.declaration) as ledger:
             ledger.require_healthy()
@@ -69,13 +72,15 @@ class KeenableCollection:
             plan = None
             if self.declaration.search_plan is not None:
                 hits, receipts, plan = SearchSession(ledger, self.declaration, self.planner).run(
-                    lambda option: _search(ledger, self.declaration, option.case, option=option)
+                    lambda option: _search(
+                        ledger, self.declaration, option.case, api_key=api_key, option=option
+                    )
                 )
                 leads.extend(hits)
                 searches.extend(receipts)
             else:
                 for case in self.declaration.search_cases:
-                    receipt, hits = _search(ledger, self.declaration, case)
+                    receipt, hits = _search(ledger, self.declaration, case, api_key=api_key)
                     leads.extend(hits)
                     searches.append(receipt)
             self.declaration.check_current(datetime.now(UTC))
@@ -84,6 +89,9 @@ class KeenableCollection:
             return catalog
 
     def capture(self, catalog: CatalogReceipt) -> CaptureLock:
+        return self.capture_with_credential(catalog, os.getenv("KEENABLE_API_KEY", ""))
+
+    def capture_with_credential(self, catalog: CatalogReceipt, api_key: str) -> CaptureLock:
         """Capture permitted pinned pages and publish one all-or-nothing lock."""
         with open_ledger(self.root, self.declaration) as ledger:
             ledger.require_healthy()
@@ -98,7 +106,7 @@ class KeenableCollection:
             calls: list[CallReceipt] = []
             rights_calls: list[CallReceipt] = []
             for url, expected in self.declaration.raw_licenses:
-                receipt, body = _capture(ledger, url, None, rights_sha256=expected)
+                receipt, body = _capture(ledger, url, None, api_key=api_key, rights_sha256=expected)
                 if body is None:
                     raise KeenableError("rights_bytes_unavailable")
                 rights_calls.append(receipt)
@@ -113,7 +121,7 @@ class KeenableCollection:
                 case = selection.lead.case
                 if url is None or self.declaration.authority(url, case) != permission:
                     raise KeenableError("origin_not_authorized")
-                receipt, body = _capture(ledger, url, permission)
+                receipt, body = _capture(ledger, url, permission, api_key=api_key)
                 calls.append(receipt)
                 if body is None:
                     withheld.append(url)
@@ -221,7 +229,7 @@ class KeenableCollection:
 
 
 def _search(
-    ledger: Ledger, declaration: Declaration, case: Case, *, option: SearchOption | None = None
+    ledger: Ledger, declaration: Declaration, case: Case, *, api_key: str, option: SearchOption | None = None
 ) -> tuple[CallReceipt, tuple[Lead, ...]]:
     slot = f"search:{case if option is None else option.id}"
     if (prior := ledger.call(slot)) is not None:
@@ -247,7 +255,9 @@ def _search(
             )
         )
     )
-    request = search_request(case, scopes, payload=option.payload if option is not None else None)
+    request = search_request(
+        case, scopes, api_key=api_key, payload=option.payload if option is not None else None
+    )
     assert request.payload is not None
     receipt = ledger.reserve(
         "search",
@@ -317,6 +327,7 @@ def _capture(
     url: str,
     permission: Permission | None,
     *,
+    api_key: str,
     rights_sha256: str | None = None,
 ) -> tuple[CallReceipt, bytes | None]:
     if canonical_url(url) != url:
@@ -344,7 +355,6 @@ def _capture(
         text = response.body.decode("utf-8")
         if permission is not None and permission.valid_until <= datetime.now(UTC):
             raise KeenableError("authorization_expired", 200)
-        api_key = os.getenv("KEENABLE_API_KEY")
         sensitive = any(pattern.search(text) for pattern in SECRET_PATTERNS) or bool(
             api_key and api_key in text
         )

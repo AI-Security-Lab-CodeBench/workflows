@@ -1,35 +1,48 @@
 import json
+from collections.abc import Callable
 from pathlib import Path
 from typing import Literal, assert_never
 
 import pandas as pd
-from dagster import DagsterInstance, OutputContext
+from dagster import DagsterInstance, InputContext, OutputContext
 from pydantic import ValidationError
 
+from codebench_pipeline.dagster_table_metadata import MetadataSink
 from codebench_pipeline.data_view_models import DatasetViewError
 from codebench_pipeline.data_views import DatasetDataService
 from codebench_pipeline.dataframe_io import (
     AssetReference,
     AssetSnapshot,
     DataFrameIOManager,
-    MetadataSink,
     read_frame,
 )
-from codebench_pipeline.dataframe_schemas import CommandsTable, frame_records, validated_frame
+from codebench_pipeline.dataframe_schemas import frame_records
 from codebench_pipeline.dataset_branches import Branch, asset_branch
 from codebench_pipeline.dataset_export import csv_text
-from codebench_pipeline.dataset_registry import DatasetRegistry
-from codebench_pipeline.dataset_tables import publication
 from codebench_pipeline.guarded_publication import ReleaseInputs, prepare_guarded_release
 from codebench_pipeline.guarded_publication_controls import require_proposal_authorized
-from codebench_pipeline.guarded_publication_runtime import require_current_release
-from codebench_pipeline.human_review import CompletionToken, HumanReviewError, PublicationPayload
+from codebench_pipeline.guarded_publication_runtime import bound_proposal, verify_current_release
+from codebench_pipeline.human_review import (
+    CompletionToken,
+    HumanReviewError,
+    PublicationPayload,
+    PublicationReference,
+    ReviewSnapshot,
+)
 from codebench_pipeline.human_review_store import HumanReviewStore
-from codebench_pipeline.label_corrections import apply_label_corrections
-from codebench_pipeline.object_store import ObjectStore, sha256
+from codebench_pipeline.human_review_transactions import HumanReviewTransaction
+from codebench_pipeline.input_provenance import producer_run_id
+from codebench_pipeline.object_store import StorageConfig, sha256
 from codebench_pipeline.publication_authorization import authorize_publication
 from codebench_pipeline.review_frames import REVIEW_BINDING, decision_frame, require_decision_frame
-from codebench_pipeline.review_snapshots import ReviewSnapshots, load_manifest
+from codebench_pipeline.review_snapshots import (
+    ReviewManifest,
+    ReviewSnapshots,
+    load_bound_manifest,
+    load_manifest,
+)
+from codebench_pipeline.stage_configuration import DeclaredGlobalConfig
+from codebench_pipeline.stage_implementation import capture_implementation
 from codebench_pipeline.storage import IntegrityError
 
 
@@ -65,11 +78,10 @@ def write_review_output(
     home = Path(manager.review_home)
     data = DatasetDataService(home, context.step_context.instance)
     branch = asset_branch(context.asset_key.path)
-    snapshots = ReviewSnapshots(home, data, branch)
-    with HumanReviewStore(home).transaction(timeout=10, dataset_id=context.asset_partition_key) as tx:
-        resolved = snapshots.authoritative(context.asset_partition_key)
-        if manager.storage.model_dump() != resolved.manifest.storage.model_dump():
-            raise HumanReviewError("conflict", "Release storage differs from the registered dataset")
+    snapshots = ReviewSnapshots.for_manager(home, data, manager, branch)
+    with manager.review_store.transaction(timeout=10, dataset_id=context.asset_partition_key) as tx:
+        registered = manager.run_configuration(context.run_id, context.asset_partition_key)
+        resolved = snapshots.authoritative_registered(registered, manager)
         authorization_snapshot = authorize_publication(resolved, token, tx)
         decisions = tx.list_decisions(token.batch_id)
         expected_decisions = decision_frame(token, decisions)
@@ -79,38 +91,31 @@ def write_review_output(
             manager.publish_reference(context, reference)
             record_review(context, token)
             return reference
-        spec = DatasetRegistry(home).get_snapshot(context.asset_partition_key)
-        proposal = None
-        if spec.has_declared_collection:
-            proposal = prepare_guarded_release(
-                ReleaseInputs(snapshots, resolved, token, decisions), home, spec
-            )
-            require_proposal_authorized(tx, spec.dataset_id, proposal)
-            expected = proposal.output
-            prepared = proposal.publication
-        else:
-            approved = frozenset(row.candidate_id for row in decisions if row.decision == "approve")
-            prepared = publication(
-                apply_label_corrections(resolved.reviewed, decisions, resolved.rules),
-                resolved.rules,
-                resolved.manifest.publication,
-                approved_ids=approved,
-            )
-            expected = validated_frame(
-                [{key: value for key, value in row.items()} for row in prepared.commands], CommandsTable
-            )
+        proposal = prepare_guarded_release(
+            ReleaseInputs(snapshots, resolved, token, decisions),
+            manager.repository_run(context.asset_partition_key, context.run_id),
+            registered,
+            publication_versions=manager.review_store.publication_versions(),
+        )
+        require_proposal_authorized(tx, registered.dataset_id, proposal)
+        expected = proposal.output
         if not frame.equals(expected):
             raise HumanReviewError("stale", "Release rows differ from approved eligible records")
         expected.attrs[REVIEW_BINDING] = token.model_dump(mode="json")
         reference = manager.persist_value(expected)
-        if proposal is not None and reference.digest != proposal.manifest["parquet_sha256"]:
+        if reference.digest != proposal.manifest["parquet_sha256"]:
             raise IntegrityError("Persisted release table differs from its attested bytes")
         prefix = f"releases/{resolved.snapshot.dataset_id}/{branch}/{context.run_id}"
-        store = ObjectStore(manager.storage)
-        for name, text in prepared.files.items():
+        store = manager.object_store()
+        for name, text in proposal.publication.files.items():
             store.write(f"{prefix}/{name}", text.encode())
-        if proposal is not None:
-            store.write(f"{prefix}/proposal-manifest.json", proposal.body)
+        store.write(f"{prefix}/proposal-manifest.json", proposal.body)
+        store.write(
+            f"{prefix}/registration.json",
+            json.dumps(
+                {"registered_spec": registered.registration_digest, "revision": registered.revision}
+            ).encode(),
+        )
         store.write(
             f"{prefix}/deduplication.json",
             json.dumps(
@@ -150,7 +155,7 @@ def write_review_output(
                 csv_reference=f"{prefix}/commands.csv",
                 bundle_reference=prefix,
                 dagster_run_id=context.run_id,
-                proposal_digest=proposal.digest if proposal is not None else None,
+                proposal_digest=proposal.digest,
             ),
         )
         record_review(context, token, registered.publication_id)
@@ -160,29 +165,125 @@ def write_review_output(
 def read_publication(
     home: Path, dataset_id: str, instance: DagsterInstance, branch: Branch = "dataset"
 ) -> AssetSnapshot | None:
+    review = HumanReviewStore(home, implementation=capture_implementation())
+
+    def storage_manager(storage: StorageConfig) -> DataFrameIOManager:
+        manager = DataFrameIOManager.from_environment(storage, review_home=str(home))
+        manager.bind_review_store(review)
+        return manager
+
+    def verify(published: PublicationReference, transaction: HumanReviewTransaction) -> bool:
+        data = DatasetDataService(home, instance)
+        spec = data.specification(dataset_id)
+        if not spec.has_declared_collection:
+            return False
+        manager = storage_manager(spec.storage)
+        snapshots = ReviewSnapshots.for_manager(home, data, manager, branch)
+        proposal = bound_proposal(
+            snapshots, published.authorization, transaction, DeclaredGlobalConfig.from_spec(spec), manager
+        )
+        verify_current_release(published, transaction, proposal, manager.object_store)
+        return True
+
+    def manifest_reader(snapshot: ReviewSnapshot) -> ReviewManifest:
+        storage = snapshot.artifact_storage
+        store = None if storage is None else storage_manager(storage).object_store()
+        return load_manifest(home, snapshot.snapshot_id, store)
+
+    return publication_snapshot(dataset_id, branch, review, storage_manager, verify, manifest_reader)
+
+
+def read_bound_publication(
+    manager: DataFrameIOManager, run_id: str, dataset_id: str, instance: DagsterInstance, branch: Branch
+) -> AssetSnapshot | None:
+    if manager.review_home is None:
+        return None
+    home = Path(manager.review_home)
+
+    def verify(published: PublicationReference, transaction: HumanReviewTransaction) -> bool:
+        registered = manager.run_configuration(run_id, dataset_id)
+        snapshots = ReviewSnapshots.for_manager(home, DatasetDataService(home, instance), manager, branch)
+        proposal = bound_proposal(snapshots, published.authorization, transaction, registered, manager)
+        verify_current_release(published, transaction, proposal, manager.object_store)
+        return True
+
+    def storage_manager(storage: StorageConfig) -> DataFrameIOManager:
+        if storage != manager.storage:
+            raise HumanReviewError("stale", "Publication storage differs from the bound dataset storage")
+        return manager
+
+    def manifest_reader(snapshot: ReviewSnapshot) -> ReviewManifest:
+        if snapshot.artifact_storage != manager.storage:
+            raise HumanReviewError("stale", "Publication snapshot differs from the bound dataset storage")
+        return load_bound_manifest(snapshot.snapshot_id, manager.object_store())
+
+    return publication_snapshot(
+        dataset_id,
+        branch,
+        manager.review_store,
+        storage_manager,
+        verify,
+        manifest_reader,
+    )
+
+
+def load_authorized_release(context: InputContext, manager: DataFrameIOManager) -> pd.DataFrame:
+    if manager.review_home is None or manager.registered_revision is None:
+        raise HumanReviewError("stale", "No current authorized dataset release is available")
+    manager.bind_configuration_producer(context)
+    published = read_bound_publication(
+        manager,
+        context.step_context.run_id,
+        context.asset_partition_key,
+        context.instance,
+        asset_branch(context.asset_key.path),
+    )
+    if published is None or published.publication_state != "published":
+        raise HumanReviewError("stale", "No current authorized dataset release is available")
+    if (
+        producer_run_id(context.upstream_output) is not None
+        and manager.input_reference(context) != published.reference
+    ):
+        raise HumanReviewError("stale", "The selected release producer is no longer authorized")
+    if not isinstance(published.value, pd.DataFrame):
+        raise IntegrityError("An authorized release must be a table")
+    return published.value
+
+
+def publication_snapshot(
+    dataset_id: str,
+    branch: Branch,
+    review: HumanReviewStore,
+    storage_manager: Callable[[StorageConfig], DataFrameIOManager],
+    verify: Callable[[PublicationReference, HumanReviewTransaction], bool],
+    manifest_reader: Callable[[ReviewSnapshot], ReviewManifest],
+) -> AssetSnapshot | None:
     state: Literal["published", "stale"] = "published"
     try:
-        with HumanReviewStore(home).reader() as tx:
+        with review.reader() as tx:
             published = tx.last_publication(dataset_id, branch=branch)
+            snapshot = tx.get_batch(published.authorization.batch_id).snapshot if published else None
             if published is not None:
-                try:
-                    snapshots = ReviewSnapshots(home, DatasetDataService(home, instance), branch)
-                    if snapshots.data.specification(dataset_id).has_declared_collection:
-                        require_current_release(snapshots, published, tx)
-                    elif published.proposal_digest is not None:
-                        state = "stale"
-                    else:
-                        authorize_publication(snapshots.current(dataset_id), published.authorization, tx)
-                except (HumanReviewError, DatasetViewError):
+                if published.proposal_digest is None:
                     state = "stale"
+                else:
+                    try:
+                        if not verify(published, tx):
+                            state = "stale"
+                    except (HumanReviewError, DatasetViewError):
+                        state = "stale"
     except HumanReviewError as error:
         if error.code == "not_found":
             return None
         raise
-    if published is None:
+    if published is None or snapshot is None:
         return None
-    manifest = load_manifest(home, published.authorization.snapshot_id)
-    payload = ObjectStore(manifest.storage).read(published.payload_key)
+    if snapshot.snapshot_id != published.authorization.snapshot_id:
+        raise IntegrityError("Publication review snapshot binding mismatch")
+    manifest = manifest_reader(snapshot)
+    if manifest.dataset_id != dataset_id or manifest.branch != branch:
+        raise IntegrityError("Publication manifest belongs to another dataset or branch")
+    payload = storage_manager(manifest.storage).object_store().read(published.payload_key)
     if sha256(payload) != published.payload_hash:
         raise IntegrityError("Published Parquet digest mismatch")
     value = read_frame(payload)

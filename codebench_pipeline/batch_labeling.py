@@ -5,7 +5,9 @@ import json
 import os
 import uuid
 from collections import deque
-from contextlib import ExitStack
+from collections.abc import Callable, Mapping
+from contextlib import ExitStack, nullcontext
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal, Protocol, TypedDict
@@ -17,12 +19,21 @@ from pydantic import BaseModel, ConfigDict, Field, JsonValue, RootModel, TypeAda
 
 from codebench_pipeline.annotation_cache import reviewer_cache_lock
 from codebench_pipeline.batch_labeling_config import BatchLabelingConfig
+from codebench_pipeline.batch_labeling_rows import BatchRow, RowEvidence
 from codebench_pipeline.category_rules import CategoryRules
-from codebench_pipeline.command_batches import GROUPING_VERSION, similarity_batches
+from codebench_pipeline.command_batches import GROUPING_VERSION, CommandEncoder, similarity_batches
 from codebench_pipeline.dataset_annotation import relevant_documentation, request
 from codebench_pipeline.dataset_records import CandidateRecord, LabelDecision, index_records, validate_label
-from codebench_pipeline.grounding_tools import DocumentationQuery, GroundingBroker, GroundingDocument
+from codebench_pipeline.grounding_tools import (
+    DocumentationQuery,
+    GroundingBroker,
+    GroundingCredentials,
+    GroundingDocument,
+    GroundingFiles,
+    ResponseCache,
+)
 from codebench_pipeline.inference_capacity import ContextBudgetExceeded, guarded_complete
+from codebench_pipeline.labeling_checkpoint_store import LabelingCheckpointCache
 from codebench_pipeline.labeling_outcomes import (
     LabelingAttempt,
     failed_attempt,
@@ -38,14 +49,15 @@ from codebench_pipeline.storage import IntegrityError, digest, fingerprint
 JSON = RootModel[JsonValue]
 
 
+@dataclass(frozen=True, slots=True)
+class BatchExecution:
+    model_api_key: str | None = field(repr=False)
+    encoder: CommandEncoder | None
+    grounding: GroundingCredentials = field(default_factory=GroundingCredentials)
+
+
 class _Frozen(BaseModel):
     model_config = ConfigDict(strict=True, frozen=True, extra="forbid")
-
-
-class RowEvidence(_Frozen):
-    evidence_id: str
-    snippet: SemanticSnippet
-    provider_metadata: JsonValue = None
 
 
 class EvidenceAdmission(Protocol):
@@ -121,7 +133,7 @@ class _BatchState(TypedDict):
     calls: list[_ToolCall]
 
 
-class _CachedRow(_Frozen):
+class CachedRow(_Frozen):
     attempt: LabelingAttempt
     evidence: list[RowEvidence]
     queries: list[DocumentationQuery]
@@ -129,10 +141,34 @@ class _CachedRow(_Frozen):
     artifacts: dict[str, str]
 
 
+@dataclass(frozen=True, slots=True)
+class PreparedBatchRow:
+    fingerprint: str
+    evidence: tuple[RowEvidence, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class ReusableBatchRow:
+    receipt: CachedRow
+    files: dict[str, bytes]
+
+
+@dataclass(frozen=True, slots=True)
+class LabelingGeneration:
+    cache: LabelingCheckpointCache
+    identity: str
+    operation_receipts: Callable[[list[BatchRow]], dict[str, bytes]]
+    persisted_admission: EvidenceAdmission
+
+
+def _json_bytes(value: JsonValue) -> bytes:
+    return json.dumps(value, ensure_ascii=False, allow_nan=False, indent=2).encode()
+
+
 def _save(path: Path, value: JsonValue) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("x", encoding="utf-8") as stream:
-        json.dump(value, stream, ensure_ascii=False, allow_nan=False, indent=2)
+    with path.open("xb") as stream:
+        stream.write(_json_bytes(value))
 
 
 def _row_path(out: Path, identity: str) -> Path:
@@ -175,6 +211,7 @@ def _logical_input(
     rules: CategoryRules,
     model: ModelConfig,
     config: BatchLabelingConfig,
+    implementation: dict[str, JsonValue] | str,
 ) -> str:
     system, payload = request(candidate, docs, rules)
     payload["documentation"] = [doc.model_dump(mode="json", exclude={"retrieved_at"}) for doc in docs]
@@ -184,7 +221,7 @@ def _logical_input(
             "payload": payload,
             "model": model.model_dump(mode="json"),
             "backend_revision": config.backend_revision,
-            "expected_model_path": config.capacity.expected_model_path
+            "expected_model_binding": fingerprint(config.capacity.expected_model_path)
             if config.inference_mode == "guarded"
             else None,
             "grounding_policy": config.grounding.model_dump(mode="json", exclude={"revision"}),
@@ -193,64 +230,54 @@ def _logical_input(
             "grounding_rounds": config.maximum_grounding_rounds,
             "reasoning_effort": config.reasoning_effort,
             "schema": SubmittedOutcome.model_json_schema(),
-            "implementation": {
-                name: digest(Path(__file__).parent / name)
-                for name in (
-                    "batch_labeling.py",
-                    "labeling_outcomes.py",
-                    "dataset_records.py",
-                    "grounding_tools.py",
-                )
-            },
+            "implementation": implementation,
         }
     )
 
 
-def _restore_row(cache: _CachedRow, store: ObjectStore, target: Path) -> None:
+def _restore_row(cache: ReusableBatchRow, target: Path) -> None:
     target.mkdir(parents=True, exist_ok=True)
-    for name, content_digest in cache.artifacts.items():
+    for name, payload in cache.files.items():
         path = target / name
         if not path.resolve().is_relative_to(target.resolve()):
             raise IntegrityError("Grounded cache artifact escaped its row directory")
-        payload = store.read(f"artifacts/{content_digest}")
-        if hashlib.sha256(payload).hexdigest() != content_digest:
-            raise IntegrityError("Grounded row evidence digest mismatch")
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("xb") as stream:
             stream.write(payload)
     _save(
         target / "reuse.json",
-        {"cache_hit": True, "original_row_input": cache.attempt.row_input_fingerprint},
+        {"cache_hit": True, "original_row_input": cache.receipt.attempt.row_input_fingerprint},
     )
 
 
-def _store_row(
-    store: ObjectStore,
-    attempt: LabelingAttempt,
-    evidence: list[RowEvidence],
-    queries: list[DocumentationQuery],
-    revision: str,
-    path: Path,
-) -> None:
+def load_reusable_row(store: ObjectStore, receipt: CachedRow) -> ReusableBatchRow:
+    files: dict[str, bytes] = {}
+    for name, content_digest in receipt.artifacts.items():
+        payload = store.read(f"artifacts/{content_digest}")
+        if hashlib.sha256(payload).hexdigest() != content_digest:
+            raise IntegrityError("Grounded row evidence digest mismatch")
+        files[name] = payload
+    return ReusableBatchRow(receipt, files)
+
+
+def store_batch_row(store: ObjectStore, row: BatchRow, revision: str) -> None:
     artifacts: dict[str, str] = {}
     artifact_locks = Path(store.config.local_root) / store.config.prefix / "locks" / "artifacts"
-    for source in sorted(path.rglob("*")):
-        if source.is_file() and source.name != "reuse.json":
-            payload = source.read_bytes()
-            content_digest = hashlib.sha256(payload).hexdigest()
-            with reviewer_cache_lock(artifact_locks / content_digest):
-                store.write(f"artifacts/{content_digest}", payload)
-            artifacts[source.relative_to(path).as_posix()] = content_digest
-    cached = _CachedRow(
-        attempt=attempt,
-        evidence=evidence,
-        queries=queries,
+    for name, payload in sorted(row.files.items()):
+        content_digest = hashlib.sha256(payload).hexdigest()
+        with reviewer_cache_lock(artifact_locks / content_digest):
+            store.write(f"artifacts/{content_digest}", payload)
+        artifacts[name] = content_digest
+    cached = CachedRow(
+        attempt=row.attempt,
+        evidence=row.evidence,
+        queries=row.queries,
         refresh_revision=revision,
         artifacts=artifacts,
     )
     payload = cached.model_dump_json().encode()
     store.write(f"records/{hashlib.sha256(payload).hexdigest()}.json", payload)
-    store.write(f"requests/{attempt.row_input_fingerprint}.json", payload, replace=True)
+    store.write(f"requests/{row.attempt.row_input_fingerprint}.json", payload, replace=True)
 
 
 def _tool(name: str, description: str, schema: type[BaseModel]) -> dict[str, JsonValue]:
@@ -299,13 +326,12 @@ def _run_batch(
     config: BatchLabelingConfig,
     out: Path,
     broker: GroundingBroker,
-    row_root: Path,
-    store: ObjectStore | None,
     maximum_context_characters: int,
     admission: EvidenceAdmission | None,
-) -> list[LabelingAttempt]:
+    model_api_key: str | None,
+) -> list[BatchRow]:
     indexed = index_records(candidates)
-    results: dict[str, LabelingAttempt] = {}
+    results: dict[str, BatchRow] = {}
     row_errors: dict[str, str] = {}
     submitted: dict[str, str] = {}
     system, _ = request(candidates[0], [], rules)
@@ -398,27 +424,24 @@ def _run_batch(
     completions: list[JsonValue] = []
     output_exhausted = False
 
-    def checkpoint(attempt: LabelingAttempt) -> None:
+    def record_outcome(
+        attempt: LabelingAttempt, *, support: JsonValue = None, verified: JsonValue = None
+    ) -> None:
         identity = attempt.candidate_id
-        row_path = _row_path(row_root, identity)
         queries = [
             receipt.query for receipt in broker.query_history if identity in receipt.query.candidate_ids
         ]
         row_evidence = list(assigned[identity].values())
-        _save(row_path / "response.json", attempt.model_dump(mode="json"))
-        _save(
-            row_path / "transcript.json",
-            {
+        artifacts: dict[str, JsonValue] = {
+            "response.json": attempt.model_dump(mode="json"),
+            "transcript.json": {
                 "messages": JSON.model_validate(messages).root,
                 "completions": completions,
                 "logical_batch_id": broker.out.parent.name,
                 "provider_calls": broker.provider_calls,
                 "backend_revision": config.backend_revision,
             },
-        )
-        _save(
-            row_path / "grounding.json",
-            {
+            "grounding.json": {
                 "evidence": [item.model_dump(mode="json") for item in row_evidence],
                 "queries": [query.model_dump(mode="json") for query in queries],
                 **(
@@ -433,10 +456,7 @@ def _run_batch(
                     else {}
                 ),
             },
-        )
-        _save(
-            row_path / "receipt.json",
-            {
+            "receipt.json": {
                 "candidate_id": identity,
                 "batch_id": out.name,
                 "status": attempt.status,
@@ -451,9 +471,14 @@ def _run_batch(
                 "tools_enabled": True,
                 "recorded_at": datetime.now(UTC).isoformat(),
             },
+        }
+        if support is not None:
+            artifacts["support.json"] = support
+        if verified is not None:
+            artifacts["verified.json"] = verified
+        results[identity] = BatchRow(
+            attempt, row_evidence, queries, {name: _json_bytes(value) for name, value in artifacts.items()}
         )
-        if store is not None and attempt.status == "success":
-            _store_row(store, attempt, row_evidence, queries, config.grounding.revision, row_path)
 
     for candidate in unsupported:
         identity = candidate.candidate_id
@@ -465,8 +490,7 @@ def _run_batch(
             row_fingerprints[identity],
             str(_row_path(Path("."), identity) / "receipt.json"),
         )
-        results[identity] = attempt
-        checkpoint(attempt)
+        record_outcome(attempt)
 
     def complete(state: _BatchState) -> Command[str]:
         nonlocal failure_code, last_error, output_exhausted
@@ -507,20 +531,22 @@ def _run_batch(
         _save(turn_path / "request.json", body)
         if model.base_url is None:
             raise ValueError("Grounded labeling requires a configured remote base URL")
-        key = os.environ.get(model.api_key_env) if model.api_key_env else None
         try:
             body_bytes = json.dumps(body, ensure_ascii=False).encode()
             if len(body_bytes) > maximum_context_characters:
                 raise ContextBudgetExceeded("serialized_request_budget_exceeded")
             if config.inference_mode == "plain":
                 response = plain_complete(
-                    model.base_url.rstrip("/") + "/chat/completions", body_bytes, key, model.timeout_seconds
+                    model.base_url.rstrip("/") + "/chat/completions",
+                    body_bytes,
+                    model_api_key,
+                    model.timeout_seconds,
                 )
             else:
                 response = guarded_complete(
                     model.base_url,
                     body_bytes,
-                    key,
+                    model_api_key,
                     model.timeout_seconds,
                     config.capacity,
                     turn_path / "capacity",
@@ -531,8 +557,17 @@ def _run_batch(
             failure_code = "context_limit"
             last_error = "The accumulated conversation exceeds the exact tokenizer context bound."
             return Command(goto=END)
-        _save(turn_path / "raw_response.json", JSON.model_validate_json(response.body).root)
         try:
+            decoded = JSON.model_validate_json(response.body).root
+            if broker.credentials.contains(
+                response.body.decode(errors="replace")
+            ) or broker.credentials.contains(json.dumps(decoded, ensure_ascii=False)):
+                last_error = "The model response contained sensitive data."
+                messages.append(
+                    {"role": "user", "content": last_error + " Submit outcomes without sensitive data."}
+                )
+                return Command(update={"turn": turn}, goto=next_turn)
+            _save(turn_path / "raw_response.json", decoded)
             completion = _Completion.model_validate_json(response.body)
             if config.inference_mode == "plain" and completion.model != model.model:
                 raise ValueError("Inference response does not match the configured model")
@@ -736,28 +771,26 @@ def _run_batch(
                                 row_fingerprints[identity],
                                 reference,
                             )
-                        _save(
-                            _row_path(row_root, identity) / "support.json",
-                            JSON.model_validate(
+                        record_outcome(
+                            attempt,
+                            support=JSON.model_validate(
                                 outcome.model_dump(
                                     mode="json",
                                     include={"evidence_ids", "grounding_quotes", "grounding_rationale"},
                                 )
                             ).root,
-                        )
-                        if admission is not None and attempt.status == "success":
-                            _save(
-                                _row_path(row_root, identity) / "verified.json",
+                            verified=(
                                 {
                                     "evidence": {
                                         identifier: assigned[identity][identifier].model_dump(mode="json")
                                         for identifier in outcome.evidence_ids
                                     },
                                     "quotes": dict(outcome.grounding_quotes),
-                                },
-                            )
-                        checkpoint(attempt)
-                        results[identity] = attempt
+                                }
+                                if admission is not None and attempt.status == "success"
+                                else None
+                            ),
+                        )
                         submitted[identity] = canonical
                         accepted.append(identity)
                     except ValidationError as error:
@@ -810,15 +843,16 @@ def _run_batch(
 
     for identity, candidate in indexed.items():
         if identity not in results:
-            results[identity] = failed_attempt(
-                candidate,
-                failure_code,
-                row_errors.get(identity, last_error),
-                [item.snippet for item in assigned[identity].values()],
-                row_fingerprints[identity],
-                str(_row_path(Path("."), identity) / "receipt.json"),
+            record_outcome(
+                failed_attempt(
+                    candidate,
+                    failure_code,
+                    row_errors.get(identity, last_error),
+                    [item.snippet for item in assigned[identity].values()],
+                    row_fingerprints[identity],
+                    str(_row_path(Path("."), identity) / "receipt.json"),
+                )
             )
-            checkpoint(results[identity])
     transcript: dict[str, JsonValue] = {
         "messages": JSON.model_validate(messages).root,
         "completions": completions,
@@ -843,39 +877,72 @@ def annotate_batches(
     documentation_by_candidate: dict[str, list[SemanticSnippet]] | None = None,
     maximum_context_characters: int = 1048576,
     admission: EvidenceAdmission | None = None,
+    execution: BatchExecution | None = None,
+) -> list[LabelingAttempt]:
+    return annotate_batches_bound(
+        candidates,
+        docs,
+        rules,
+        model,
+        config,
+        out,
+        cache=cache,
+        documentation_by_candidate=documentation_by_candidate,
+        maximum_context_characters=maximum_context_characters,
+        admission=admission,
+        execution=execution
+        or BatchExecution(
+            os.environ.get(model.api_key_env) if model.api_key_env else None,
+            None,
+            GroundingCredentials.from_environment(config.grounding),
+        ),
+        response_cache=GroundingFiles(cache / "grounding-responses")
+        if cache is not None and admission is None
+        else None,
+    )
+
+
+def annotate_batches_bound(
+    candidates: list[CandidateRecord],
+    docs: list[SemanticSnippet],
+    rules: CategoryRules,
+    model: ModelConfig,
+    config: BatchLabelingConfig,
+    out: Path,
+    *,
+    execution: BatchExecution,
+    cache: Path | None = None,
+    documentation_by_candidate: dict[str, list[SemanticSnippet]] | None = None,
+    maximum_context_characters: int = 1048576,
+    admission: EvidenceAdmission | None = None,
+    response_cache: ResponseCache | None = None,
 ) -> list[LabelingAttempt]:
     indexed = index_records(candidates)
-    seed_docs = {
-        identity: (
-            documentation_by_candidate[identity]
-            if documentation_by_candidate is not None
-            else relevant_documentation(candidate, docs)
-        )
-        for identity, candidate in indexed.items()
-    }
-    fingerprints = {
-        identity: _logical_input(candidate, seed_docs[identity], rules, model, config)
-        for identity, candidate in indexed.items()
-    }
-    assigned = {
-        identity: {evidence.evidence_id: evidence for evidence in map(_seed_evidence, seed_docs[identity])}
-        for identity in indexed
-    }
-    if admission is not None:
-        for identity, candidate in indexed.items():
-            binding, verified = admission.source(candidate)
-            fingerprints[identity] = fingerprint(
-                {
-                    "logical_input": fingerprints[identity],
-                    "source_binding": binding,
-                    "grounding_revision": config.grounding.revision,
-                }
+    prepared = prepare_batch_rows(
+        candidates,
+        docs,
+        rules,
+        model,
+        config,
+        implementation={
+            name: digest(Path(__file__).parent / name)
+            for name in (
+                "batch_labeling.py",
+                "labeling_outcomes.py",
+                "dataset_records.py",
+                "grounding_tools.py",
             )
-            assigned[identity] = {item.evidence_id: item for item in verified}
+        },
+        documentation_by_candidate=documentation_by_candidate,
+        admission=admission,
+    )
+    fingerprints = {identity: row.fingerprint for identity, row in prepared.items()}
+    assigned = {
+        identity: {item.evidence_id: item for item in row.evidence} for identity, row in prepared.items()
+    }
     store = ObjectStore(StorageConfig(local_root=str(cache), prefix="grounded-labels")) if cache else None
     completed: dict[str, LabelingAttempt] = {}
-    stale: dict[str, _CachedRow] = {}
-    retrieval_cache = cache / "grounding-responses" if cache else None
+    stale: dict[str, CachedRow] = {}
     out.mkdir(parents=True, exist_ok=True)
     with ExitStack() as locks:
         if cache is not None:
@@ -887,7 +954,7 @@ def annotate_batches(
             if store is None:
                 continue
             try:
-                previous = _CachedRow.model_validate_json(
+                previous = CachedRow.model_validate_json(
                     store.read(f"requests/{fingerprints[identity]}.json")
                 )
             except FileNotFoundError:
@@ -909,70 +976,206 @@ def annotate_batches(
                 stale[identity] = previous
                 continue
             validate_attempts([candidate], [previous.attempt], rules)
-            _restore_row(previous, store, _row_path(out, identity))
+            _restore_row(load_reusable_row(store, previous), _row_path(out, identity))
             completed[identity] = previous.attempt
-        pending = [candidate for candidate in candidates if candidate.candidate_id not in completed]
-        batches: deque[tuple[list[CandidateRecord], Path, GroundingBroker]] = deque()
-        for batch in similarity_batches(pending, config.batch_size):
-            batch_path = out / "batches" / uuid.uuid4().hex
-            broker = GroundingBroker(
-                config.grounding,
-                batch_path / "grounding",
-                retrieval_cache if admission is None else None,
-                retain_responses=admission is None,
-            )
+
+        def reuse_stale(batch: list[CandidateRecord], broker: GroundingBroker) -> None:
+            if store is None:
+                return
+            for candidate in batch:
+                identity = candidate.candidate_id
+                previous = stale.get(identity)
+                if previous is None:
+                    continue
+                refreshed = assigned[identity]
+                refresh_failed = False
+                for query in previous.queries:
+                    with reviewer_cache_lock(broker.cache):
+                        result = broker.execute(query.model_copy(update={"candidate_ids": [identity]}))
+                    refresh_failed |= result.error is not None
+                    for document in result.documents:
+                        item = _retrieved_evidence(candidate, document)
+                        refreshed[item.evidence_id] = item
+                if refresh_failed or set(refreshed) != {item.evidence_id for item in previous.evidence}:
+                    continue
+                previous = previous.model_copy(update={"refresh_revision": config.grounding.revision})
+                payload = previous.model_dump_json().encode()
+                store.write(f"records/{hashlib.sha256(payload).hexdigest()}.json", payload)
+                store.write(f"requests/{fingerprints[identity]}.json", payload, replace=True)
+                validate_attempts([candidate], [previous.attempt], rules)
+                _restore_row(load_reusable_row(store, previous), _row_path(out, identity))
+                completed[identity] = previous.attempt
+
+        def commit(rows: list[BatchRow]) -> None:
             if store is not None:
-                for candidate in batch:
-                    identity = candidate.candidate_id
-                    previous = stale.get(identity)
-                    if previous is None:
-                        continue
-                    refreshed = assigned[identity]
-                    refresh_failed = False
-                    for query in previous.queries:
-                        with reviewer_cache_lock(broker.cache):
-                            result = broker.execute(query.model_copy(update={"candidate_ids": [identity]}))
-                        refresh_failed |= result.error is not None
-                        for document in result.documents:
-                            item = _retrieved_evidence(candidate, document)
-                            refreshed[item.evidence_id] = item
-                    if refresh_failed or set(refreshed) != {item.evidence_id for item in previous.evidence}:
-                        continue
-                    previous = previous.model_copy(update={"refresh_revision": config.grounding.revision})
-                    payload = previous.model_dump_json().encode()
-                    store.write(f"records/{hashlib.sha256(payload).hexdigest()}.json", payload)
-                    store.write(f"requests/{fingerprints[identity]}.json", payload, replace=True)
-                    validate_attempts([candidate], [previous.attempt], rules)
-                    _restore_row(previous, store, _row_path(out, identity))
-                    completed[identity] = previous.attempt
-            remaining = [candidate for candidate in batch if candidate.candidate_id not in completed]
-            if remaining:
-                batches.append((remaining, batch_path, broker))
-        _save(
-            out / "label-packets.json",
-            {
-                "grouping_version": GROUPING_VERSION,
-                "batch_size": config.batch_size,
-                "cache_hits": len(completed),
-                "packets": [[candidate.candidate_id for candidate in batch] for batch, _, _ in batches],
-            },
+                for row in rows:
+                    if row.attempt.status == "success":
+                        store_batch_row(store, row, config.grounding.revision)
+
+        return _run_conversations(
+            candidates,
+            fingerprints,
+            assigned,
+            completed,
+            rules,
+            model,
+            config,
+            out,
+            execution,
+            maximum_context_characters,
+            admission,
+            response_cache,
+            reuse_stale,
+            commit,
         )
-        while batches:
-            batch, batch_path, broker = batches.popleft()
+
+
+def prepare_batch_rows(
+    candidates: list[CandidateRecord],
+    docs: list[SemanticSnippet],
+    rules: CategoryRules,
+    model: ModelConfig,
+    config: BatchLabelingConfig,
+    *,
+    implementation: dict[str, JsonValue] | str,
+    documentation_by_candidate: dict[str, list[SemanticSnippet]] | None = None,
+    admission: EvidenceAdmission | None = None,
+) -> dict[str, PreparedBatchRow]:
+    indexed = index_records(candidates)
+    seed_docs = {
+        identity: (
+            documentation_by_candidate[identity]
+            if documentation_by_candidate is not None
+            else relevant_documentation(candidate, docs)
+        )
+        for identity, candidate in indexed.items()
+    }
+    fingerprints = {
+        identity: _logical_input(candidate, seed_docs[identity], rules, model, config, implementation)
+        for identity, candidate in indexed.items()
+    }
+    assigned = {identity: tuple(map(_seed_evidence, seed_docs[identity])) for identity in indexed}
+    if admission is not None:
+        for identity, candidate in indexed.items():
+            binding, verified = admission.source(candidate)
+            fingerprints[identity] = fingerprint(
+                {
+                    "logical_input": fingerprints[identity],
+                    "source_binding": binding,
+                    "grounding_revision": config.grounding.revision,
+                }
+            )
+            assigned[identity] = tuple(verified)
+    return {identity: PreparedBatchRow(value, assigned[identity]) for identity, value in fingerprints.items()}
+
+
+def run_prepared_batches(
+    candidates: list[CandidateRecord],
+    prepared: Mapping[str, PreparedBatchRow],
+    rules: CategoryRules,
+    model: ModelConfig,
+    config: BatchLabelingConfig,
+    out: Path,
+    execution: BatchExecution,
+    maximum_context_characters: int,
+    admission: EvidenceAdmission,
+    generation: LabelingGeneration,
+) -> list[LabelingAttempt]:
+    fingerprints = {row.candidate_id: prepared[row.candidate_id].fingerprint for row in candidates}
+    assigned = {
+        row.candidate_id: {item.evidence_id: item for item in prepared[row.candidate_id].evidence}
+        for row in candidates
+    }
+    out.mkdir(parents=True, exist_ok=True)
+    return _run_conversations(
+        candidates,
+        fingerprints,
+        assigned,
+        {},
+        rules,
+        model,
+        config,
+        out,
+        execution,
+        maximum_context_characters,
+        admission,
+        None,
+        None,
+        None,
+        generation=generation,
+    )
+
+
+def _run_conversations(
+    candidates: list[CandidateRecord],
+    fingerprints: dict[str, str],
+    assigned: dict[str, dict[str, RowEvidence]],
+    completed: dict[str, LabelingAttempt],
+    rules: CategoryRules,
+    model: ModelConfig,
+    config: BatchLabelingConfig,
+    out: Path,
+    execution: BatchExecution,
+    maximum_context_characters: int,
+    admission: EvidenceAdmission | None,
+    response_cache: ResponseCache | None,
+    reuse_stale: Callable[[list[CandidateRecord], GroundingBroker], None] | None,
+    commit: Callable[[list[BatchRow]], None] | None,
+    *,
+    generation: LabelingGeneration | None = None,
+) -> list[LabelingAttempt]:
+    pending = [candidate for candidate in candidates if candidate.candidate_id not in completed]
+    batches: deque[tuple[list[CandidateRecord], Path, GroundingBroker]] = deque()
+    for batch in similarity_batches(pending, config.batch_size, encoder=execution.encoder):
+        batch_path = out / "batches" / uuid.uuid4().hex
+        broker = GroundingBroker(
+            config.grounding,
+            execution.grounding,
+            GroundingFiles(batch_path / "grounding"),
+            response_cache=response_cache,
+            retain_responses=admission is None,
+        )
+        if reuse_stale is not None:
+            reuse_stale(batch, broker)
+        remaining = [candidate for candidate in batch if candidate.candidate_id not in completed]
+        if remaining:
+            batches.append((remaining, batch_path, broker))
+    _save(
+        out / "label-packets.json",
+        {
+            "grouping_version": GROUPING_VERSION,
+            "batch_size": config.batch_size,
+            "cache_hits": len(completed),
+            "packets": [[candidate.candidate_id for candidate in batch] for batch, _, _ in batches],
+        },
+    )
+    while batches:
+        batch, batch_path, broker = batches.popleft()
+        address = fingerprint([fingerprints[candidate.candidate_id] for candidate in batch])
+        lease = (
+            generation.cache.claim(generation.identity, address) if generation is not None else nullcontext()
+        )
+        with lease:
+            resumed = (
+                generation.cache.resume(generation.identity, address) if generation is not None else None
+            )
             try:
-                attempts = _run_batch(
-                    batch,
-                    fingerprints,
-                    assigned,
-                    rules,
-                    model,
-                    config,
-                    batch_path,
-                    broker,
-                    out,
-                    store,
-                    maximum_context_characters,
-                    admission,
+                rows = (
+                    resumed
+                    if resumed is not None
+                    else _run_batch(
+                        batch,
+                        fingerprints,
+                        assigned,
+                        rules,
+                        model,
+                        config,
+                        batch_path,
+                        broker,
+                        maximum_context_characters,
+                        admission,
+                        execution.model_api_key,
+                    )
                 )
             except ContextBudgetExceeded:
                 if len(batch) > 1:
@@ -992,7 +1195,38 @@ def annotate_batches(
                 )
                 _save(_row_path(out, identity) / "response.json", attempt.model_dump(mode="json"))
                 attempts = [attempt]
-            completed.update({attempt.candidate_id: attempt for attempt in attempts})
+            else:
+                attempts = [row.attempt for row in rows]
+                validate_attempts(batch, attempts, rules)
+                if resumed is not None and generation is not None:
+                    for candidate, row in zip(batch, rows, strict=True):
+                        if row.attempt.row_input_fingerprint != fingerprints[candidate.candidate_id]:
+                            raise IntegrityError(
+                                "Labeling checkpoint does not match its ordered row fingerprints"
+                            )
+                        validate_guarded_support(
+                            generation.persisted_admission, candidate, row.attempt, row.files["verified.json"]
+                        )
+                for row in rows:
+                    row_path = _row_path(out, row.attempt.candidate_id)
+                    row_path.mkdir(parents=True, exist_ok=True)
+                    for name, payload in row.files.items():
+                        if "/" in name or name in {"", ".", ".."}:
+                            raise IntegrityError("Labeling checkpoint contains a nonlocal evidence filename")
+                        with (row_path / name).open("xb") as stream:
+                            stream.write(payload)
+                    if resumed is not None:
+                        _save(
+                            row_path / "reuse.json",
+                            {"cache_hit": True, "original_row_input": row.attempt.row_input_fingerprint},
+                        )
+                if resumed is None and generation is not None:
+                    generation.cache.complete(
+                        generation.identity, address, rows, generation.operation_receipts(rows)
+                    )
+                elif commit is not None:
+                    commit(rows)
+        completed.update({attempt.candidate_id: attempt for attempt in attempts})
     result = [completed[candidate.candidate_id] for candidate in candidates]
     validate_attempts(candidates, result, rules)
     return result

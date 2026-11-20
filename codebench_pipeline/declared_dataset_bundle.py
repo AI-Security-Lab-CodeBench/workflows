@@ -5,8 +5,10 @@ from pydantic import Field, JsonValue, field_validator, model_validator
 from pydantic_core import PydanticCustomError
 
 from codebench_pipeline.batch_labeling_config import DeclaredBatchLabelingConfig
-from codebench_pipeline.business_config import load_business_rules
+from codebench_pipeline.business_config import compile_business_rules
+from codebench_pipeline.category_rules import CategoryRules
 from codebench_pipeline.collection_config import DeclaredCollection, SourceDeclaration
+from codebench_pipeline.config_directory import ConfigDirectorySnapshot
 from codebench_pipeline.dataset_config import (
     AdapterConfig,
     AnnotationConfig,
@@ -24,9 +26,33 @@ from codebench_pipeline.dataset_config import (
 from codebench_pipeline.model_config import ModelConfig
 from codebench_pipeline.models import Identifier
 from codebench_pipeline.object_store import StorageConfig
-from codebench_pipeline.repository_branch_config import load_repository_branch
+from codebench_pipeline.repository_branch_config import RepositoryBranchDeclaration
 from codebench_pipeline.repository_config import SourceWeight
 from codebench_pipeline.storage import IntegrityError
+
+
+def compile_directory(
+    directory: ConfigDirectorySnapshot, dataset_id: Identifier, keenable_weight: SourceWeight | None
+) -> tuple[CategoryRules, DeclaredCollection]:
+    from codebench_pipeline.keenable_policy import parse_declaration
+
+    category = directory.category_directory
+    rules = compile_business_rules(category / "category.json", directory.category_id, directory.read)
+    dataset = RepositoryBranchDeclaration.model_validate_json(
+        directory.read(category / "collection/existing-datasets.json")
+    )
+    documentation = RepositoryBranchDeclaration.model_validate_json(
+        directory.read(category / "collection/documentation-crawl.json")
+    )
+    keenable = parse_declaration(directory.read(category / "keenable/declaration.json"))
+    if keenable.dataset != dataset_id:
+        raise IntegrityError("Keenable source list belongs to a different dataset partition")
+    return rules, DeclaredCollection(
+        existing_datasets=SourceDeclaration.from_declaration(dataset),
+        documentation_crawl=SourceDeclaration.from_declaration(documentation),
+        keenable_use_cases=SourceDeclaration.from_declaration(keenable),
+        merge_keenable_weight=keenable_weight,
+    )
 
 
 class FromRegistration(StrictStageConfig):
@@ -79,26 +105,15 @@ class DeclaredMerge(StrictStageConfig):
     keenable_weight: SourceWeight | None = None
 
 
-class DeclaredStorageNamespace(StrictStageConfig):
-    key_prefix: str = "datasets"
-    preview_rows: Annotated[int, Field(ge=0, le=100)] = 10
-
-
-class DeclaredLocalStorage(DeclaredStorageNamespace):
-    backend: Literal["local"]
-    root_directory: str
-
-
-class DeclaredS3Storage(DeclaredStorageNamespace):
+class DeclaredS3Storage(StrictStageConfig):
     backend: Literal["s3"]
     bucket: str
     endpoint_url: str | None = Field(default=None, repr=False)
     region: str = "us-east-1"
     access_key_env: str | None = None
     secret_key_env: str | None = None
-
-
-DeclaredStorage = Annotated[DeclaredLocalStorage | DeclaredS3Storage, Field(discriminator="backend")]
+    key_prefix: str = "datasets"
+    preview_rows: Annotated[int, Field(ge=0, le=100)] = 10
 
 
 class DeclaredDatasetBundle(StrictStageConfig):
@@ -106,15 +121,20 @@ class DeclaredDatasetBundle(StrictStageConfig):
     category_id: Literal["CAT-3"]
     revision_label: str = Field(min_length=1)
     labeling: DeclaredLabeling | FromRegistration
-    storage: DeclaredStorage | FromRegistration | None = None
+    storage: DeclaredS3Storage | FromRegistration
     filtering: FilteringConfig = FilteringConfig()
     merge: DeclaredMerge = DeclaredMerge()
     review: DeclaredReview = DeclaredReview()
     release: DeclaredRelease = DeclaredRelease()
 
-    def resolve(self, parent: Path, *, home: Path | None = None) -> DatasetBuildSpec:
+    def resolve(
+        self,
+        parent: Path,
+        *,
+        home: Path | None = None,
+        observed_directory: ConfigDirectorySnapshot | None = None,
+    ) -> DatasetBuildSpec:
         from codebench_pipeline.dataset_registry import DatasetRegistry
-        from codebench_pipeline.keenable_policy import load_declaration
 
         dataset_home = home if home is not None else Path(".codebench-datasets")
         registry = DatasetRegistry(dataset_home)
@@ -139,17 +159,13 @@ class DeclaredDatasetBundle(StrictStageConfig):
                     )
                 except FileNotFoundError as error:
                     raise IntegrityError(
-                        "Declared collection requires existing registered storage settings; select the canonical dataset --home"
+                        "Declared collection requires existing registered storage settings on S3; "
+                        "select the canonical dataset --home or declare S3 storage explicitly"
                     ) from error
-            case DeclaredLocalStorage() as local:
-                storage = StorageConfig(
-                    local_root=local.root_directory,
-                    prefix=local.key_prefix,
-                    sample_rows=local.preview_rows,
-                )
-                root = Path(storage.local_root)
-                if not root.is_absolute():
-                    storage = storage.model_copy(update={"local_root": str((parent / root).resolve())})
+                if storage.backend != "s3":
+                    raise IntegrityError(
+                        "Registered storage is local; declare S3 storage explicitly for a new declared run"
+                    )
             case DeclaredS3Storage() as s3:
                 storage = StorageConfig(
                     backend="s3",
@@ -161,19 +177,17 @@ class DeclaredDatasetBundle(StrictStageConfig):
                     prefix=s3.key_prefix,
                     sample_rows=s3.preview_rows,
                 )
-            case None:
-                storage = StorageConfig(local_root=str((dataset_home / "dataframes").resolve()))
-        category = (parent.parent / "categories" / self.category_id.replace("-", "").lower()).resolve()
-        rules = load_business_rules(source_path(category, "category.json"), self.category_id)
-        dataset = load_repository_branch(source_path(category, "collection/existing-datasets.json"))
-        documentation = load_repository_branch(source_path(category, "collection/documentation-crawl.json"))
-        keenable = load_declaration(source_path(category, "keenable/declaration.json"))
-        if keenable.dataset != self.dataset_id:
-            raise IntegrityError("Keenable source list belongs to a different dataset partition")
+        directory = (
+            ConfigDirectorySnapshot.capture(parent.parent, self.category_id)
+            if observed_directory is None
+            else observed_directory.require_complete(self.category_id)
+        )
+        rules, collection = compile_directory(directory, self.dataset_id, self.merge.keenable_weight)
         return DatasetBuildSpec(
             dataset_id=self.dataset_id,
             revision=self.revision_label,
             rules=rules,
+            config_directory=directory,
             catalog=CatalogConfig(),
             adapters=AdapterConfig(),
             extraction=ExtractionConfig(),
@@ -184,17 +198,5 @@ class DeclaredDatasetBundle(StrictStageConfig):
                 review_columns=self.review.review_columns,
             ),
             storage=storage,
-            declared_collection=DeclaredCollection(
-                existing_datasets=SourceDeclaration.from_declaration(dataset),
-                documentation_crawl=SourceDeclaration.from_declaration(documentation),
-                keenable_use_cases=SourceDeclaration.from_declaration(keenable),
-                merge_keenable_weight=self.merge.keenable_weight,
-            ),
+            declared_collection=collection,
         )
-
-
-def source_path(category: Path, relative: str) -> Path:
-    path = (category / relative).resolve()
-    if not path.is_relative_to(category):
-        raise IntegrityError("Business declaration escapes its category directory")
-    return path

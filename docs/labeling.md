@@ -2,12 +2,10 @@
 
 This guide describes the standalone exchange CLI and its legacy numeric-confidence,
 nine-column export contract, not the current Dagster release path. The active
-dataset pipeline uses four low/medium/high label confidences and one isolated LLM
-invocation per eligible command. The local agent prepares source manifests outside
-Dagster after reading README/license/origin evidence and withholding unresolved
-eligibility. Complete declared-source retrieval feeds extraction/filtering,
-semantic docs and `proposed_annotations`; branch outputs merge before conservative
-exact deduplication, uncertainty-only human review and one `dataset_release`.
+dataset pipeline uses four low/medium/high label confidences and guarded batch
+labeling against verified captures. Declared branches merge candidates before
+shared filtering, labeling, conservative exact deduplication, uncertainty-only
+human review and one `dataset_release`.
 There is no active independent per-command reviewer or `reviewed_annotations`
 stage, and no manufactured `review_verdict` or `review_confidence`. Historical
 artifacts remain readable. Any medium/low among category, risk, severity and class
@@ -21,7 +19,7 @@ snapshot validity and the ten-column release contract.
 Everything below describes the legacy standalone exchange, including its separate
 review invocation, numeric confidences and export gate. Those commands aren't the
 operational recipe for the current workflow. Retain historical policy snapshots
-with historical packets rather than treating the current single-command policy
+with historical packets rather than treating the current dataset policy
 as a new standalone review contract.
 
 This CLI uses only the Python standard library and repository inert validators.

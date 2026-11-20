@@ -21,7 +21,9 @@ from urllib.request import Request, build_opener
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, JsonValue, ValidationError
 
 from .agent_events import InferenceError, parse_json
+from .models import Digest
 from .openai_transport import HTTPResponse, NoRedirect, complete
+from .storage import IntegrityError, fingerprint
 from .typed_config import TypedConfig
 
 _LOG: Final = logging.getLogger(__name__)
@@ -67,6 +69,50 @@ class CapacityConfig(TypedConfig):
     max_snapshot_age_seconds: float = Field(default=10, gt=0, allow_inf_nan=False)
     poll_seconds: float = Field(default=5, gt=0, allow_inf_nan=False)
     maximum_wait_seconds: float = Field(default=900, gt=0, allow_inf_nan=False)
+
+
+class CapacityPaths(BaseModel):
+    model_config = ConfigDict(strict=True, frozen=True)
+
+    state_directory: str = Field(min_length=1, pattern=r"\S")
+    expected_model_path: str = Field(min_length=1, pattern=r"\S")
+
+
+class ScopedCapacityConfig(BaseModel):
+    model_config = ConfigDict(strict=True, frozen=True, extra="forbid")
+
+    expected_model_binding: Digest
+    context_length: int = Field(default=262144, gt=0)
+    max_fraction: float = Field(default=0.5, gt=0, le=0.5, allow_inf_nan=False)
+    max_snapshot_age_seconds: float = Field(default=10, gt=0, allow_inf_nan=False)
+    poll_seconds: float = Field(default=5, gt=0, allow_inf_nan=False)
+    maximum_wait_seconds: float = Field(default=900, gt=0, allow_inf_nan=False)
+
+    @classmethod
+    def from_capacity(cls, capacity: CapacityConfig) -> "ScopedCapacityConfig":
+        return cls(
+            expected_model_binding=fingerprint(capacity.expected_model_path),
+            context_length=capacity.context_length,
+            max_fraction=capacity.max_fraction,
+            max_snapshot_age_seconds=capacity.max_snapshot_age_seconds,
+            poll_seconds=capacity.poll_seconds,
+            maximum_wait_seconds=capacity.maximum_wait_seconds,
+        )
+
+    def bind(self, state_directory: str, expected_model_path: str) -> CapacityConfig:
+        if not Path(state_directory).is_absolute():
+            raise IntegrityError("Guarded inference requires an absolute shared capacity state directory")
+        if fingerprint(expected_model_path) != self.expected_model_binding:
+            raise IntegrityError("Inference resource does not match the bound model identity")
+        return CapacityConfig(
+            state_directory=state_directory,
+            expected_model_path=expected_model_path,
+            context_length=self.context_length,
+            max_fraction=self.max_fraction,
+            max_snapshot_age_seconds=self.max_snapshot_age_seconds,
+            poll_seconds=self.poll_seconds,
+            maximum_wait_seconds=self.maximum_wait_seconds,
+        )
 
 
 class _MemoryPools(BaseModel):

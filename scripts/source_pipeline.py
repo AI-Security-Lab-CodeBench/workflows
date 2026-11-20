@@ -6,27 +6,29 @@ from dataclasses import asdict
 from pathlib import Path
 
 if __package__:
+    from .category_config import Taxonomy, add_policy_options, cli_taxonomy
     from .command_filter import assess_command, extract_commands
     from .source_io import capture_sources, inventory_tables, source_eligible, write_csv, write_jsonl
     from .validate_dataset import contains_secret, load_candidates, load_jsonl
 else:
+    from category_config import Taxonomy, add_policy_options, cli_taxonomy
     from command_filter import assess_command, extract_commands
     from source_io import capture_sources, inventory_tables, source_eligible, write_csv, write_jsonl
     from validate_dataset import contains_secret, load_candidates, load_jsonl
 
 
-def import_candidates(root: Path, out: Path) -> dict[str, int]:
+def import_candidates(root: Path, out: Path, *, taxonomy: Taxonomy) -> dict[str, int]:
     sources = load_jsonl(root / "research/sources.jsonl")
     indexed = {source["source_id"]: source for source in sources}
     selected, pending, extracted, raw_records = [], [], [], []
     seen = set()
-    for candidate in load_candidates(root):
+    for candidate in load_candidates(root, taxonomy):
         candidate_id = candidate["candidate_id"]
         if candidate_id in seen:
             raise ValueError(f"Duplicate candidate record identifier: {candidate_id}")
         seen.add(candidate_id)
         command = candidate["row"]["command"]
-        assessment = assess_command(command)
+        assessment = assess_command(command, taxonomy)
         reason = assessment.reason
         allowed = assessment.status == "eligible"
         if not candidate["source_ids"] or any(
@@ -151,7 +153,7 @@ def select_candidates(inputs: Path, eligible: Path, out: Path) -> dict[str, int]
     return {"selected_for_labeling": len(candidates)}
 
 
-def extract_documents(manifest: Path, out: Path) -> dict[str, int]:
+def extract_documents(manifest: Path, out: Path, *, taxonomy: Taxonomy) -> dict[str, int]:
     extracted = []
     for document in load_jsonl(manifest):
         if not source_eligible(document):
@@ -160,7 +162,7 @@ def extract_documents(manifest: Path, out: Path) -> dict[str, int]:
         if not path.is_absolute():
             path = manifest.parent / path
         text = path.read_text(encoding="utf-8")
-        for result in extract_commands(text):
+        for result in extract_commands(text, taxonomy=taxonomy):
             record = asdict(result)
             if contains_secret(record):
                 continue
@@ -206,9 +208,11 @@ def main() -> None:
     legacy = actions.add_parser("import")
     legacy.add_argument("--root", type=Path, default=Path.cwd())
     legacy.add_argument("--out", type=Path, required=True)
+    add_policy_options(legacy)
     extract = actions.add_parser("extract")
     extract.add_argument("--manifest", type=Path, required=True)
     extract.add_argument("--out", type=Path, required=True)
+    add_policy_options(extract)
     inventory = actions.add_parser("inventory")
     inventory.add_argument("--research", type=Path, required=True)
     inventory.add_argument("--out", type=Path, required=True)
@@ -222,9 +226,9 @@ def main() -> None:
     args = parser.parse_args()
     match args.action:
         case "import":
-            report = import_candidates(args.root, args.out)
+            report = import_candidates(args.root, args.out, taxonomy=cli_taxonomy(args))
         case "extract":
-            report = extract_documents(args.manifest, args.out)
+            report = extract_documents(args.manifest, args.out, taxonomy=cli_taxonomy(args))
         case "inventory":
             report = inventory_tables(args.research, args.out)
         case "capture":

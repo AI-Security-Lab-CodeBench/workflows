@@ -3,30 +3,34 @@ import io
 import json
 import tempfile
 import unittest
-from contextlib import ExitStack, redirect_stdout
+from contextlib import ExitStack
+from functools import partial
 from hashlib import sha256
 from pathlib import Path
 from unittest.mock import patch
 
 import pandas as pd
-from configuration_fixture import write_fixture
-from dagster import AssetKey, build_input_context
-from pydantic import BaseModel, JsonValue, TypeAdapter
-from test_dataset_incremental import provider_response
+from dagster import AssetKey, build_input_context, build_sensor_context
+from guarded_labeling_fixture import LabelingFixture
+from native_dataset_cycle import NativeDatasetCycle
+from pydantic import JsonValue, TypeAdapter
 from test_dataset_rules import make_candidate, make_label, make_rules
+from test_review_release import attest_fixture_release
 
+from codebench_pipeline.batch_labeling import SubmittedLabels
 from codebench_pipeline.data_view_models import DatasetQueryRequest, DatasetViewError, TableResponse
 from codebench_pipeline.data_views import DatasetDataService
 from codebench_pipeline.dataframe_io import REVIEW_PREPARATION, DataFrameIOManager
 from codebench_pipeline.dataset_asset_types import DATASET_PARTITIONS
-from codebench_pipeline.dataset_cli import execute_build, execute_registered_build
-from codebench_pipeline.dataset_config import load_build_config
 from codebench_pipeline.dataset_export import prepare_dataset
-from codebench_pipeline.dataset_records import LabelDecision
-from codebench_pipeline.human_review import DecisionChange
+from codebench_pipeline.dataset_registry import DatasetRegistry
+from codebench_pipeline.dataset_run import refresh_registered_configuration, run_registered
+from codebench_pipeline.definitions import build_definitions, dataset_run_config
+from codebench_pipeline.human_review import DecisionChange, HumanReviewError
 from codebench_pipeline.human_review_store import HumanReviewStore
+from codebench_pipeline.inference_capacity import CapacityConfig
 from codebench_pipeline.object_store import ObjectStore
-from codebench_pipeline.model_config import ModelConfig
+from codebench_pipeline.openai_transport import HTTPResponse
 from codebench_pipeline.publication_authorization import authorize_publication
 from codebench_pipeline.release_runner import ReleaseRunner
 from codebench_pipeline.review_api_models import (
@@ -40,31 +44,42 @@ from codebench_pipeline.review_snapshots import ReviewSnapshots
 from codebench_pipeline.runtime_instance import dataset_instance
 
 
-def mixed_confidence_response(
-    schema: type[BaseModel], system: str, prompt: str, model: ModelConfig, out: Path
-) -> BaseModel:
-    result = provider_response(schema, system, prompt, model, out)
-    payload = json.loads(prompt[prompt.index("{") :])
-    if isinstance(result, LabelDecision):
-        return result.model_copy(
-            update={
-                "category_confidence": "medium"
-                if any(
-                    flag in payload["candidate"]["command"] for flag in ("-auto-approve", "-compact-warnings")
-                )
-                else "high"
+def mixed_confidence_reply(
+    fixture: LabelingFixture,
+    url: str,
+    body: bytes,
+    key: str | None,
+    timeout: float,
+    capacity: CapacityConfig,
+    out: Path,
+) -> HTTPResponse:
+    response = fixture.infer(url, body, key, timeout, capacity, out)
+    envelope = TypeAdapter(dict[str, JsonValue]).validate_json(response.body)
+    (choice,) = TypeAdapter(list[dict[str, JsonValue]]).validate_python(envelope["choices"])
+    message = TypeAdapter(dict[str, JsonValue]).validate_python(choice["message"])
+    (call,) = TypeAdapter(list[dict[str, JsonValue]]).validate_python(message["tool_calls"])
+    function = TypeAdapter(dict[str, str]).validate_python(call["function"])
+    if function["name"] != "submit_labels":
+        return response
+    submitted = SubmittedLabels.model_validate_json(function["arguments"])
+    outcomes = [
+        row.model_copy(update={"label": row.label.model_copy(update={"category_confidence": "medium"})})
+        if row.label is not None and row.label.util == "docker"
+        else row
+        for row in submitted.outcomes
+    ]
+    function["arguments"] = SubmittedLabels(outcomes=outcomes).model_dump_json(by_alias=True)
+    return HTTPResponse(
+        json.dumps(
+            {
+                **envelope,
+                "choices": [
+                    {**choice, "message": {**message, "tool_calls": [{**call, "function": function}]}}
+                ],
             }
-        )
-    return result
-
-
-def high_confidence_response(
-    schema: type[BaseModel], system: str, prompt: str, model: ModelConfig, out: Path
-) -> BaseModel:
-    result = provider_response(schema, system, prompt, model, out)
-    if isinstance(result, LabelDecision):
-        return result.model_copy(update={"category_confidence": "high"})
-    return result
+        ).encode(),
+        response.request_id,
+    )
 
 
 class ConfidencePublicationTests(unittest.TestCase):
@@ -157,30 +172,21 @@ class ConfidencePublicationTests(unittest.TestCase):
     def test_only_uncertain_rows_wait_for_human_review_and_retraction_stales_release(self) -> None:
         with ExitStack() as stack:
             home = Path(stack.enter_context(tempfile.TemporaryDirectory()))
-            original = write_fixture(home, "CAT-98")
-            config = json.loads(original.read_text())
-            config["seeds"] = config.pop("documentation_sources")
-            for seed in config["seeds"]["documents"]:
-                seed["local_path"] = str((original.parent / seed["local_path"]).resolve())
-            config["storage"] = {"local_root": str(home / "tables")}
-            path = home / "config.json"
-            path.write_text(json.dumps(config))
-            for module in ("dataset_annotation",):
-                stack.enter_context(
-                    patch(f"codebench_pipeline.{module}.infer_typed", side_effect=mixed_confidence_response)
-                )
-            with redirect_stdout(io.StringIO()):
-                first = execute_build(path, home)
-            self.assertIn("source_documents", first)
+            fixture = LabelingFixture(self, home, limit_per_risk=4)
+            spec = fixture.spec
+            DatasetRegistry(home).register(spec)
+            fixture.inference.side_effect = partial(mixed_confidence_reply, fixture)
+            instance = stack.enter_context(dataset_instance(home))
+            refresh_registered_configuration(spec.dataset_id, home)
+            cycle = NativeDatasetCycle(home)
+            first = cycle.drain(instance, partition=spec.dataset_id)
+            self.assertIn("documentation/capture_documentation", first)
             self.assertNotIn("human_source_decisions", first)
             self.assertNotIn("automatic_dataset_release", first)
-            spec = load_build_config(path, home)
-            with redirect_stdout(io.StringIO()):
-                prepared = execute_registered_build(spec.dataset_id, home)
+            prepared = cycle.drain(instance, partition=spec.dataset_id)
             self.assertIn("human_review_queue", first)
             self.assertEqual(prepared, {})
             self.assertNotIn("automatic_dataset_release", prepared)
-            instance = stack.enter_context(dataset_instance(home))
             data = DatasetDataService(home, instance)
             service = ReviewService(home, data, ReleaseRunner(home, instance))
             query = DatasetQueryRequest(dataset_id=spec.dataset_id)
@@ -189,15 +195,13 @@ class ConfidencePublicationTests(unittest.TestCase):
             self.assertEqual(
                 {str(row.values["command"]) for row in view.page.rows},
                 {
-                    "terraform destroy -auto-approve",
-                    "terraform destroy -compact-warnings",
+                    "docker compose ps",
+                    "docker ps --all",
                 },
             )
             self.assertIsNone(view.publication)
             selected = next(
-                row.review_record_id
-                for row in view.page.rows
-                if row.values["command"] == "terraform destroy -compact-warnings"
+                row.review_record_id for row in view.page.rows if row.values["command"] == "docker ps --all"
             )
             for row in view.decisions:
                 service.decide(
@@ -215,13 +219,18 @@ class ConfidencePublicationTests(unittest.TestCase):
                     )
                 )
             saved = service.view(query)
-            completed = service.complete(
-                CompletionRequest(
-                    dataset_id=spec.dataset_id,
-                    snapshot_id=saved.batch.snapshot.snapshot_id,
-                    expected=saved.batch,
-                    reviewer="fixture human",
-                )
+            request = CompletionRequest(
+                dataset_id=spec.dataset_id,
+                snapshot_id=saved.batch.snapshot.snapshot_id,
+                expected=saved.batch,
+                reviewer="fixture human",
+            )
+            with self.assertRaises(HumanReviewError) as pending:
+                service.complete(request)
+            self.assertEqual(pending.exception.code, "pending")
+            attest_fixture_release(home, instance, spec.dataset_id)
+            completed = service.continue_review(
+                request.model_copy(update={"expected": service.view(query).batch})
             )
             assert completed.publication is not None
             union_csv = service.download(
@@ -235,8 +244,9 @@ class ConfidencePublicationTests(unittest.TestCase):
                     for row in csv.DictReader(io.StringIO(union_csv.decode()))
                 },
                 {
-                    ("terraform destroy", "false"),
-                    ("terraform destroy -compact-warnings", "true"),
+                    ("kubectl get pods", "false"),
+                    ("terraform plan", "false"),
+                    ("docker ps --all", "true"),
                 },
             )
             with HumanReviewStore(home).transaction() as transaction:
@@ -244,7 +254,7 @@ class ConfidencePublicationTests(unittest.TestCase):
                 authorize_publication(resolved, completed.publication.authorization, transaction)
             current = data.query("dataset_release", query)
             assert isinstance(current, TableResponse)
-            self.assertEqual(current.page.total_rows, 2)
+            self.assertEqual(current.page.total_rows, 3)
             self.assertEqual(current.publication_state, "published")
             final_view = service.view(query)
             service.retract(
@@ -260,7 +270,7 @@ class ConfidencePublicationTests(unittest.TestCase):
             stale_release = data.query("dataset_release", query)
             assert isinstance(stale_release, TableResponse)
             self.assertEqual(stale_release.publication_state, "stale")
-            self.assertEqual(stale_release.page.total_rows, 2)
+            self.assertEqual(stale_release.page.total_rows, 3)
             self.assertIsNone(service.view(query).publication)
             self.assertEqual(
                 service.download(
@@ -272,19 +282,63 @@ class ConfidencePublicationTests(unittest.TestCase):
                 union_csv,
             )
 
+    def test_native_build_and_release_sensor_publish_empty_queue_without_cli(self) -> None:
+        with ExitStack() as stack:
+            home = Path(stack.enter_context(tempfile.TemporaryDirectory()))
+            spec = LabelingFixture(self, home, limit_per_risk=4).spec
+            DatasetRegistry(home).register(spec)
+            instance = stack.enter_context(dataset_instance(home))
+            instance.add_dynamic_partitions("dataset_builds", [spec.dataset_id])
+            definitions = build_definitions(home)
+            built = definitions.resolve_job_def("build_dataset").execute_in_process(
+                instance=instance, partition_key=spec.dataset_id, run_config=dataset_run_config(spec)
+            )
+            self.assertTrue(built.success)
+            sensor = definitions.resolve_sensor_def("dataset_release_requests")
+            context = stack.enter_context(
+                build_sensor_context(instance=instance, repository_def=definitions.get_repository_def())
+            )
+            self.assertFalse(sensor.evaluate_tick(context).run_requests)
+            attest_fixture_release(home, instance, spec.dataset_id)
+            requests = sensor.evaluate_tick(context).run_requests
+            assert requests is not None
+            (request,) = requests
+            self.assertEqual(request.partition_key, spec.dataset_id)
+            released = definitions.resolve_job_def("release_dataset").execute_in_process(
+                instance=instance, partition_key=request.partition_key, run_config=request.run_config
+            )
+            self.assertTrue(released.success)
+            self.assertFalse(sensor.evaluate_tick(context).run_requests)
+            result = DatasetDataService(home, instance).query(
+                "dataset_release", DatasetQueryRequest(dataset_id=spec.dataset_id)
+            )
+            assert isinstance(result, TableResponse)
+            self.assertEqual(result.publication_state, "published")
+            self.assertEqual(result.page.total_rows, 4)
+            self.assertEqual([row.values["human_reviewed"] for row in result.page.rows], ["false"] * 4)
+
     def test_all_high_confidence_build_publishes_without_human_decisions_and_reuses_release(self) -> None:
         with ExitStack() as stack:
             home = Path(stack.enter_context(tempfile.TemporaryDirectory()))
-            config = write_fixture(home)
-            for module in ("dataset_annotation",):
-                stack.enter_context(
-                    patch(f"codebench_pipeline.{module}.infer_typed", side_effect=high_confidence_response)
-                )
-            with redirect_stdout(io.StringIO()):
-                built = execute_build(config, home)
-            self.assertIn("dataset_release", built)
-            spec = load_build_config(config, home)
+            spec = LabelingFixture(self, home, limit_per_risk=4).spec
+            DatasetRegistry(home).register(spec)
+            built = run_registered(spec.dataset_id, home).materialized_stages
+            self.assertNotIn("dataset_release", built)
             instance = stack.enter_context(dataset_instance(home))
+            attest_fixture_release(home, instance, spec.dataset_id)
+            with HumanReviewStore(home).reader() as transaction:
+                token = transaction.get_current_batch(spec.dataset_id).completion
+            assert token is not None
+            published = ReleaseRunner(home, instance)(token)
+            self.assertEqual(
+                {
+                    "/".join(record.asset_materialization.asset_key.path[1:])
+                    for record in instance.get_records_for_run(published.dagster_run_id).records
+                    if record.asset_materialization is not None
+                }
+                - {"global_config"},
+                {"human_review_decisions", "dataset_release"},
+            )
             data = DatasetDataService(home, instance)
             query = DatasetQueryRequest(dataset_id=spec.dataset_id)
             released = data.query("dataset_release", query)
@@ -292,10 +346,15 @@ class ConfidencePublicationTests(unittest.TestCase):
             self.assertEqual(released.publication_state, "published")
             self.assertEqual(
                 {(row.values["command"], row.values["human_reviewed"]) for row in released.page.rows},
-                {("git status", "false"), ("git status --show-stash", "false")},
+                {
+                    ("docker compose ps", "false"),
+                    ("docker ps --all", "false"),
+                    ("kubectl get pods", "false"),
+                    ("terraform plan", "false"),
+                },
             )
             with patch.object(data, "read_current", side_effect=AssertionError("Unexpected upstream read")):
-                resolved = ReviewSnapshots(home, data).current(spec.dataset_id)
+                resolved = ReviewSnapshots.from_environment(home, data).current(spec.dataset_id)
             self.assertEqual(
                 set(resolved.manifest.references),
                 set(built) - {"human_review_queue", "human_review_decisions", "dataset_release"},
@@ -311,7 +370,7 @@ class ConfidencePublicationTests(unittest.TestCase):
                 manager.publish_reference(context, reference.model_copy(update={"digest": "0" * 64}))
                 try:
                     with self.assertRaises(DatasetViewError) as changed:
-                        ReviewSnapshots(home, data).authoritative(spec.dataset_id)
+                        ReviewSnapshots.from_environment(home, data).authoritative(spec.dataset_id)
                     self.assertEqual(changed.exception.code, "not_ready")
                 finally:
                     manager.publish_reference(context, reference)
@@ -327,20 +386,27 @@ class ConfidencePublicationTests(unittest.TestCase):
                 TypeAdapter(str).validate_python(row.values["candidate_id"]) for row in labeled.page.rows
             ]
             self.assertEqual(
-                set(receipts),
-                {
-                    "label-packets.json",
-                    *(f"label/{sha256(identity.encode()).hexdigest()}/reuse.json" for identity in identities),
-                },
+                {path for path in receipts if path.endswith("/receipt.json")},
+                {f"label/{sha256(identity.encode()).hexdigest()}/receipt.json" for identity in identities},
             )
+            store = ObjectStore(spec.storage)
+            scheduled: list[str] = []
+            for path, uri in receipts.items():
+                if path.startswith("ranked-packets/") and path.endswith("/label-packets.json"):
+                    key = "/".join(uri.rsplit("/", 2)[-2:])
+                    packet = TypeAdapter(dict[str, JsonValue]).validate_json(store.read(key))
+                    self.assertEqual(packet["cache_hits"], 0)
+                    for batch_ids in TypeAdapter(list[list[str]]).validate_python(packet["packets"]):
+                        scheduled.extend(batch_ids)
+            self.assertCountEqual(scheduled, identities)
             with HumanReviewStore(home).reader() as transaction:
                 publication = transaction.last_publication(spec.dataset_id)
             assert publication is not None
-            sidecar = ObjectStore(spec.storage).read(f"{publication.bundle_reference}/review/reviewed.jsonl")
+            sidecar = store.read(f"{publication.bundle_reference}/review/reviewed.jsonl")
             exported = [json.loads(line) for line in sidecar.splitlines()]
             self.assertEqual(
                 [set(row) & {"review", "review_confidence", "review_verdict"} for row in exported],
-                [set(), set()],
+                [set(), set(), set(), set()],
             )
             with HumanReviewStore(home).reader() as transaction:
                 batch = transaction.get_current_batch(spec.dataset_id, "annotations")
@@ -354,6 +420,6 @@ class ConfidencePublicationTests(unittest.TestCase):
                 {"batch_id": batch.batch_id, "snapshot_id": batch.snapshot.snapshot_id},
             )
             before = len(instance.get_runs())
-            with redirect_stdout(io.StringIO()):
-                self.assertEqual(execute_registered_build(spec.dataset_id, home), {})
+            self.assertEqual(NativeDatasetCycle(home).drain(instance, partition=spec.dataset_id), {})
+            self.assertEqual(ReleaseRunner(home, instance)(token), publication)
             self.assertEqual(len(instance.get_runs()), before)

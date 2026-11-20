@@ -67,7 +67,11 @@ class HumanReviewTransaction(ReviewLifecycle):
                 raise HumanReviewError(
                     "ineligible", "Prepared rows must contain finite JSON values"
                 ) from error
-            review_identity(row, snapshot.review_columns)
+            record_hash = review_identity(row, snapshot.review_columns)
+            if snapshot.record_fingerprints and snapshot.record_fingerprints.get(candidate_id) != record_hash:
+                raise HumanReviewError(
+                    "conflict", "Prepared review values differ from the snapshot fingerprint"
+                )
             ids.append(candidate_id)
         if tuple(ids) != snapshot.candidate_ids:
             raise HumanReviewError("conflict", "Prepared identities differ from the snapshot")

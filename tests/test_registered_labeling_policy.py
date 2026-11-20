@@ -5,14 +5,16 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from configuration_fixture import example_config
+from configuration_fixture import example_config, seed_prepared_snapshot
+from pydantic import JsonValue, TypeAdapter
 from test_batch_labeling import batch_config, remote_model
 from test_dataset_annotation import documentation
-from test_dataset_bundle import JSON_OBJECT, write_bundle
 from test_dataset_rules import make_candidate, make_rules
+from test_declared_dataset_graph import fixture_spec
 
 from codebench_pipeline.dataset_annotation import request
-from codebench_pipeline.dataset_config import AnnotationConfig, load_build_config
+from codebench_pipeline.dataset_config import AnnotationConfig
+from codebench_pipeline.dataset_registry import DatasetRegistry
 from codebench_pipeline.labeling_eval import CohortRecord, EvaluationCohort, run_evaluation
 
 
@@ -27,17 +29,15 @@ class RegisteredLabelingPolicyTests(unittest.TestCase):
     def test_evaluation_records_the_exact_registered_policy(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            path = write_bundle(root)
-            raw = JSON_OBJECT.validate_json(path.read_bytes())
-            finalization = JSON_OBJECT.validate_python(raw["finalization"])
-            finalization["rules"] = (
-                make_rules()
-                .model_copy(update={"base_prompt": "  Registered evaluation policy.\n"})
-                .model_dump(mode="json")
+            rules = make_rules().model_copy(update={"base_prompt": "  Registered evaluation policy.\n"})
+            spec = fixture_spec(root).model_copy(update={"rules": rules, "config_directory": None})
+            archived, revision = seed_prepared_snapshot(root, spec, example_config().documentation)
+            registry = DatasetRegistry(root)
+            registry.register(spec.model_copy(update={"rules": make_rules()}))
+            self.assertNotEqual(registry.get(spec.dataset_id).rules, archived.rules)
+            (root / "spec.json").write_bytes(
+                (registry.root / spec.dataset_id / f"{revision}.json").read_bytes()
             )
-            path.write_bytes(JSON_OBJECT.dump_json({**raw, "finalization": finalization}))
-            spec = load_build_config(path, root)
-            (root / "spec.json").write_text(spec.model_dump_json(), encoding="utf-8")
             model = remote_model()
             record = CohortRecord(
                 row=make_candidate().model_dump(mode="json"),
@@ -50,7 +50,7 @@ class RegisteredLabelingPolicyTests(unittest.TestCase):
             cohort = root / "cohort.json"
             cohort.write_text(
                 EvaluationCohort(
-                    dataset=example_config().dataset_id,
+                    dataset=spec.dataset_id,
                     selection_version="fixture",
                     baseline_model=model,
                     snapshots={},
@@ -63,8 +63,14 @@ class RegisteredLabelingPolicyTests(unittest.TestCase):
                 AnnotationConfig(model=model, batch=batch_config(root)).model_dump_json(),
                 encoding="utf-8",
             )
-            with patch("codebench_pipeline.labeling_eval.annotate_batches", return_value=[]):
-                run_evaluation(cohort, annotation, root / "evaluation", "development", None)
+            with patch("codebench_pipeline.labeling_eval.annotate_batches", return_value=[]) as batches:
+                summary = run_evaluation(cohort, annotation, root / "evaluation", "heldout", None)
 
-            receipt = JSON_OBJECT.validate_json((root / "evaluation/run-input.json").read_bytes())
+            self.assertEqual(summary["rows"], 1)
+            batches.assert_called_once()
+            self.assertEqual(batches.call_args.args[0], [record.candidate()])
+            self.assertEqual(batches.call_args.args[2], archived.rules)
+            receipt = TypeAdapter(dict[str, JsonValue]).validate_json(
+                (root / "evaluation/run-input.json").read_bytes()
+            )
             self.assertEqual(receipt["rules"], spec.rules.model_dump(mode="json"))

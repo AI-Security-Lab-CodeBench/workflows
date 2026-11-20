@@ -1,31 +1,24 @@
 # Automatic collection and uncertainty-only human review
 
-The current contract places source discovery and assessment in the local agent,
-not Dagster. Each eligible command receives one isolated labeling invocation.
+The three declared branches acquire sources independently. Guarded batch labeling
+uses verified captures and preserves independent row decisions.
 Historical CSVs, decisions and evidence remain unchanged.
 
-## Manifest-driven source collection
+## Declared source collection
 
-The local agent follows `skills/codebench-source-preparation/SKILL.md`, reads
-actual README/license/origin evidence and enumerates complete declared scopes.
-It writes category-bound source manifests, semantic references, exclusions and
-preparation evidence. Unresolved eligibility is withheld, never inferred.
-Dagster retrieves every admitted file, verifies byte identity and validates
-provenance/content before extraction. A failed file fails acquisition rather
-than producing a silently partial successful table.
-
-No source search, source-selector model or adapter model runs inside Dagster.
-Manifest-backed catalog confidence is `not_applicable`, not a fabricated model
-judgment. Optional reviewed local Python transformations require explicit trust
-and pinned module hashes. Collected content remains inert.
+Review origin, scope, rights and parser declarations before registration.
+The repository branches enumerate pinned scopes; only Keenable searches for
+new origins inside reviewed scopes. The branches verify captured bytes and
+retain provenance and exclusions. Unresolved rights are not permission.
+A failed acquisition is not a successful partial table. Collected content
+remains inert, and parser bindings must match the reviewed deployment.
 `human_source_decisions` is historical, not an active source gate.
 
 The branches remain independently executable through extraction. They converge
-at `merged_command_candidates` before shared filtering, semantic documentation
-and `proposed_annotations`, with one isolated labeling invocation
-per eligible command, followed
-by conservative exact deduplication, category eligibility filtering, the uncertain human queue and one
-`dataset_release`. `reviewed_annotations` is removed from the active graph;
+at `merged_command_candidates` before shared filtering and `labeling_attempts`.
+Supported `proposed_annotations` pass through conservative exact deduplication,
+category eligibility, the uncertainty queue and one `dataset_release`.
+`reviewed_annotations` is removed from the active graph;
 historical artifacts remain readable. Current rows must not receive manufactured
 `review_verdict` or `review_confidence` values.
 A configured blocked branch cannot be silently
@@ -67,18 +60,19 @@ one final `annotations` review stage, not branch-specific final reviews.
 ## Single release and human markers
 
 `dataset_release` is the only terminal dataset asset. When the uncertainty queue
-is empty, the build releases eligible rows automatically through this same asset,
-without human decisions or a human reviewer. The ledger completes the empty
-snapshot under the explicit `automatic low-uncertainty policy` actor and issues
-the same snapshot-bound authorization used at publication. No row approval is created.
+is empty, the ledger completes the snapshot under the explicit
+`automatic low-uncertainty policy` actor and issues snapshot-bound review
+authorization. No human reviewer or row approval is needed.
 If uncertain rows exist, the single release waits for their real terminal
 decisions and explicit completion of the current snapshot. Low-uncertainty rows
 need no decision even in that mixed release. Waiting doesn't occupy a worker.
 
 Admission combines machine-eligible all-high rows and machine-eligible uncertain
 rows actually approved by a human. Rejected rows are excluded. Category-wide
-per-risk caps apply after eligibility and required approval across both branches,
-in input order. Caps don't reduce the uncertainty queue or bypass decisions.
+per-risk caps apply after eligibility and required approval across the merged
+branches. Caps don't reduce the uncertainty queue or bypass decisions. Guarded
+publication also requires resolved sampling, no operator hold and steward
+attestation of the exact proposal, including when human review is automatic.
 
 New releases have these ten columns:
 

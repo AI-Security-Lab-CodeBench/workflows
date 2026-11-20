@@ -1,13 +1,22 @@
-from dagster import AssetExecutionContext, AssetsDefinition, Output, ResourceParam, asset
+from dagster import AssetIn, AssetKey, AssetsDefinition, DataVersion, Output, asset
 from pandera.typing import DataFrame
 
-from codebench_pipeline.config_assets import mapped_input
-from codebench_pipeline.dataframe_io import DataFrameIOManager
+from codebench_pipeline.config_assets import (
+    GLOBAL_CONFIG,
+    REGISTERED_CONFIG_TYPE,
+    RegisteredConfig,
+    mapped_input,
+    mapping_key,
+)
 from codebench_pipeline.dataframe_schemas import CommandCandidatesTable
-from codebench_pipeline.dataset_asset_types import DATASET_PARTITIONS, TABLE_TYPES, table_input
-from codebench_pipeline.dataset_branches import COLLECTION_BRANCHES
-from codebench_pipeline.dataset_finalization import merge_output
+from codebench_pipeline.dataset_asset_types import DATASET_PARTITIONS, TABLE_TYPES
+from codebench_pipeline.dataset_branches import COLLECTION_BRANCHES, asset_path
+from codebench_pipeline.dataset_collection_binding import FINALIZATION_BINDING
+from codebench_pipeline.dataset_finalization import merge_candidates
+from codebench_pipeline.finalization_table_asset import FINALIZATION_TABLE_IO, MERGE_INPUT, MergeInput
+from codebench_pipeline.finalization_table_io import retain_failed_finalization
 from codebench_pipeline.stage_configuration import DeclaredMergeConfig
+from codebench_pipeline.storage import IntegrityError
 
 
 def collection_merge_asset() -> AssetsDefinition:
@@ -15,35 +24,51 @@ def collection_merge_asset() -> AssetsDefinition:
         key_prefix=["datasets"],
         group_name="dataset_finalization",
         partitions_def=DATASET_PARTITIONS,
-        io_manager_key="dataset_io_manager",
+        io_manager_key=FINALIZATION_TABLE_IO,
         dagster_type=TABLE_TYPES[CommandCandidatesTable],
+        hooks={retain_failed_finalization},
         ins={
-            "mapped_config": mapped_input("merged_command_candidates", DeclaredMergeConfig),
+            "mapped_config": AssetIn(
+                key=mapping_key("merged_command_candidates"),
+                dagster_type=mapped_input("merged_command_candidates", DeclaredMergeConfig).dagster_type,
+                input_manager_key=FINALIZATION_TABLE_IO,
+            ),
+            "registered": AssetIn(
+                key=GLOBAL_CONFIG,
+                dagster_type=REGISTERED_CONFIG_TYPE,
+                input_manager_key=FINALIZATION_TABLE_IO,
+            ),
             **{
-                f"{branch.namespace}_candidates": table_input(
-                    "command_candidates", CommandCandidatesTable, branch.namespace
+                f"{branch.namespace}_candidates": AssetIn(
+                    key=AssetKey(asset_path("command_candidates", branch.namespace)),
+                    dagster_type=MERGE_INPUT
+                    if branch.namespace == "dataset"
+                    else TABLE_TYPES[CommandCandidatesTable],
+                    input_manager_key=FINALIZATION_TABLE_IO,
                 )
                 for branch in COLLECTION_BRANCHES
             },
         },
     )
     def merged_command_candidates(
-        context: AssetExecutionContext,
-        dataset_candidates: DataFrame[CommandCandidatesTable],
+        dataset_candidates: MergeInput,
         documentation_candidates: DataFrame[CommandCandidatesTable],
         keenable_candidates: DataFrame[CommandCandidatesTable],
         mapped_config: DeclaredMergeConfig,
-        dataset_io_manager: ResourceParam[DataFrameIOManager],
+        registered: RegisteredConfig,
     ) -> Output[DataFrame[CommandCandidatesTable]]:
-        return merge_output(
-            context,
-            {
-                "dataset": dataset_candidates,
-                "documentation": documentation_candidates,
-                "keenable": keenable_candidates,
-            },
-            dataset_io_manager,
-            mapped_config.merged_command_candidates,
-        )
+        if dataset_candidates.signature is None:
+            raise IntegrityError("Merge input hooks did not prepare the table")
+        if dataset_candidates.cached is None:
+            table = merge_candidates(
+                dataset_candidates.frames["dataset"],
+                documentation_candidates,
+                keenable_candidates,
+                keenable_source_weight=mapped_config.merged_command_candidates.keenable_source_weight,
+            )
+            table.attrs[FINALIZATION_BINDING] = dataset_candidates.binding
+        else:
+            table = CommandCandidatesTable.validate(dataset_candidates.cached)
+        return Output(table, data_version=DataVersion(dataset_candidates.signature))
 
     return merged_command_candidates

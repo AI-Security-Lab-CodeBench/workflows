@@ -15,10 +15,11 @@ implementations. Keep historical receipts and their original hashes intact.
 
 Work directly on `master`; do not create feature branches or linked worktrees
 unless the user explicitly requests them. Preserve unrelated working changes.
-When a commit is authorized, verify the relevant changes, create an atomic commit,
-then immediately push it to `origin master` without asking again. A task is not
+Agents have standing authorization to commit and push work within the user's
+requested scope. Verify the relevant changes, create an atomic commit, and
+immediately push it to `origin master` without asking for separate approval. A task is not
 complete while its authorized commits remain unpushed; report a rejected push
-instead of silently deferring it. This standing push authorization does not
+instead of silently deferring it. This standing authorization does not
 authorize unrelated commits, force-pushes or history rewrites.
 
 Preserve the user's primary author identity. Never add `Co-authored-by` trailers,
@@ -87,6 +88,17 @@ and authored tests, not binaries or benchmark outputs.
 
 ## Authority and evidence
 
+Use Dagster's native orchestration and execution semantics. Never invent,
+redefine or reimplement how the engine selects, orders, schedules, executes,
+retries or tracks assets and runs without prior, explicit human authorization
+for that specific change. If a requirement appears to need different semantics,
+describe the gap and the proposed behavior, then wait for a human to approve it.
+A general feature request or refactor is not authorization for custom orchestration.
+An asset may reuse a result for the same record inputs. For example, human
+review reuses the decision for the original values in the review columns.
+Keep this lookup with the owning stage; it does not determine which Dagster
+assets run or replace the checks for current eligibility and release approval.
+
 Follow the current user request first. `business-configs/labeling/instructions.md` carries
 generic labeling instructions; `business-configs/categories/<category>/` carries
 category taxonomy, policy and illustrative examples. These are the editable
@@ -120,9 +132,9 @@ existing data before replacing it; never overwrite concurrent work.
   Reject unknown keys, ignored settings, duplicate sources of truth and defaults
   copied from another branch. A reviewer must be able to inspect one branch's
   effective inputs without sorting through declarations for unrelated branches.
-- Maintain independently executable **Existing datasets** and **Documentation
-  crawl** collection branches. Show each as a named surrounding group in Dagster
-  lineage, with a separately named shared finalization group.
+- Group each collection branch and its mapping together. Keep filtering,
+  labeling, deduplication, release with human review, and audit with failures
+  independently identifiable in Dagster lineage.
 - For declared sources, the independently executable Existing datasets, Documentation
   crawl and Keenable use-case branches own acquisition. The config declares
   corpus scopes, pins, parser trust, and search budgets; the assets persist
@@ -136,26 +148,29 @@ existing data before replacing it; never overwrite concurrent work.
   Schedule eligible rows by source trust: documentation above datasets above
   Keenable. Stop inference for a subrisk at 250 distinct eligible, all-high
   labels or when applicable input is exhausted. Report deferrals and deficits.
-  The two-branch prepared-source and labeling-documentation rules remain in
-  force for historical prepared manifests. See `docs/architecture/cat3-collection-increment.md`.
-- For prepared manifests, the local agent discovers and assesses sources outside Dagster, reading actual
-  README/license/origin evidence and enumerating complete declared scopes.
-  Follow `skills/codebench-source-preparation/SKILL.md`; preserve evidence and
-  unresolved exclusions in local inventories. Dagster accepts category-bound
-  manifests and retrieves every admitted file with pinned integrity checks.
-  No source search, selector model or adapter model runs inside the pipeline.
-  `human_source_decisions` is not part of the active graph.
-- Source manifests may reference reviewed local Python batch transformations
-  with explicit trust and pinned module hashes. Only those modules are imported;
-  collected commands and downloaded scripts remain inert. Preserve source
-  positions and actual transformations; core code owns canonical validation.
+  Historical prepared manifests and their outputs are read-only. They cannot
+  register a dataset or select a different graph.
+- **Filesystem and configuration boundary:** Only assets in `configuration`
+  may load local configuration files. This group currently contains
+  `global_config` and `category_rules`; the latter consumes the former.
+  `global_config` is the single source of loaded, validated business settings.
+  A mapping projects that structure and belongs beside its consumer. Processing
+  assets and their helpers must not open local files to discover inputs, load
+  policy or settings from the environment or registry, or accept a second copy
+  of mapped settings in launch config. Every upstream data input must have an
+  asset edge; inject infrastructure (artifact IO, credentials and clients) as
+  declared resources. Resources may read addressed artifacts, but must not
+  conceal business configuration or substitute an untracked input. Keep machine
+  paths and credentials out of configuration structures and run snapshots.
+  Verify changes with authored files unavailable after registration. Treat
+  an undeclared dependency as a build failure.
 - Each branch independently acquires sources, applies adapters and extracts raw
   `command_candidates`. Preserve raw extraction and transformation/exclusion evidence.
 - Converge authorized, current branch candidates at `merged_command_candidates`
-  before shared `filtered_commands`, `labeling_documentation` and `labeling_attempts`.
+  before shared `filtered_commands` and `labeling_attempts`.
   Enhanced labeling groups pending commands by vector similarity into bounded
   multi-turn batches with Keenable/Context7 grounding. Preserve independent row
-  judgments and per-row reuse. Project successful outcomes to `proposed_annotations`
+  judgments and completed-batch checkpoints. Project successful outcomes to `proposed_annotations`
   and unsupported/invalid outcomes to `labeling_failures`, then apply conservative
   exact deduplication only to the supported annotations.
   Namespace candidate and source identities by branch and retain original identities.
@@ -195,6 +210,25 @@ existing data before replacing it; never overwrite concurrent work.
 
 ## Dagster execution and human review
 
+Before working on Dagster assets, partitions, automation, materialization, or
+the Dagster UI, load
+[Dagster Expert](.agents/skills/dagster-expert/SKILL.md) and read the relevant
+references from its index. Agents that discover `.agents/skills/` can load it
+from the checkout; otherwise, open that `SKILL.md` directly.
+
+This copy comes from `dagster-io/skills`, under
+`plugins/dagster/skills/dagster-expert`, at commit
+`6cb4b0a050eb7c8ac03c5f7635a7afdd7c3907c9` from `release-stable`.
+Keep the skill and its references together, with the upstream
+[Apache 2.0 license](.agents/skills/dagster-expert/LICENSE). When updating,
+replace them from a verified upstream commit and update the pin here.
+
+Use the skill for Dagster guidance. This repository's shared Compose workflow,
+review rules, and authorization requirements take precedence over upstream
+examples. Run `make remote-up` before operational Dagster work as described
+above, and run project commands inside the existing Compose service. The
+local skill does not install or authorize the Dagster Plus MCP server.
+
 - Use typed Dagster assets, explicit dependencies, category partitions and
   persisted outputs. Keep category configurations independent and selective
   execution available.
@@ -210,10 +244,13 @@ existing data before replacing it; never overwrite concurrent work.
 - Unchanged inputs reuse persisted outputs without repeating inference or asking
   for equivalent approval. Preserve immutable historical outputs and decisions
   while clearly distinguishing their currentness.
-- Reuse labeling and human decisions at record granularity, not merely whole-table granularity.
-  Adding or changing a neighboring record must not repeat an unchanged record's
-  LLM labeling or erase its human decision. Labeling reuse binds complete relevant
-  evidence, semantic documentation and labeling policy. Human decision identity
+- Labeling checkpoints provide crash recovery only. A retry with the same asset
+  inputs, source versions and I/O contract may resume completed batches. If a
+  change to any of these requires rematerialization, label the whole input again,
+  even rows identical to the previous materialization. A failed batch may retry
+  in full. Historical receipts remain evidence, not input to the new labeling run.
+- Human decisions remain reusable per record. Adding or changing a neighboring
+  record does not erase a human decision. Human decision identity
   binds only original values in configured review columns, which are also the
   only editable columns. Do not include candidate IDs, code, policy or unselected
   evidence in human reuse keys. Preserve durable hash decisions across batches
@@ -227,7 +264,7 @@ existing data before replacing it; never overwrite concurrent work.
   Every remote inference turn uses a shared metrics-based admission guard capped
   at 50% of measured request-slot and token capacity; side load pauses new calls.
   Missing/stale metrics fail closed. This is not a GPU compute-isolation guarantee.
-  Execute only missing or invalidated labels, independently of ordering.
+  During recovery, skip only completed batches from the interrupted materialization.
   Preserve original inference receipts and explicit human-decision carry-forward
   provenance. A new release snapshot with a nonempty uncertainty queue still
   requires explicit completion; an empty queue is revalidated automatically.

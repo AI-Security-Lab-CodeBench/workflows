@@ -1,192 +1,186 @@
 from pathlib import Path
+from tempfile import mkdtemp
 
-from dagster import AssetExecutionContext, AssetsDefinition, MetadataValue, Output, ResourceParam, asset
+from dagster import (
+    AssetExecutionContext,
+    AssetIn,
+    AssetKey,
+    AssetsDefinition,
+    DataVersion,
+    MetadataValue,
+    Output,
+    ResourceParam,
+    asset,
+)
 from pandera.typing import DataFrame
 from pydantic import JsonValue, TypeAdapter
 
 from codebench_pipeline.category_rules import CategoryRules
 from codebench_pipeline.config_assets import (
+    GLOBAL_CONFIG,
+    REGISTERED_CONFIG_TYPE,
     RegisteredConfig,
     mapped_input,
-    registered_input,
-    require_registered_rules,
 )
 from codebench_pipeline.dataframe_io import DataFrameIOManager
 from codebench_pipeline.dataframe_schemas import (
-    DocumentationTable,
-    FilteredCommandsTable,
     LabelingAttemptsTable,
     LabelingFailuresTable,
     ProposedAnnotationsTable,
+    SourceDocumentsTable,
 )
-from codebench_pipeline.dataset_asset_types import DATASET_PARTITIONS, TABLE_TYPES, rules_input, table_input
-from codebench_pipeline.dataset_config import AnnotationConfig
-from codebench_pipeline.dataset_engine import cached_table
-from codebench_pipeline.dataset_registry import DatasetRegistry
-from codebench_pipeline.grounding_tables import GuardedLabeling
+from codebench_pipeline.dataset_asset_types import DATASET_PARTITIONS, RULES_TYPE, TABLE_TYPES
+from codebench_pipeline.finalization_table_asset import (
+    FINALIZATION_TABLE_IO,
+    LABELING_INPUT,
+    PROJECTION_INPUT,
+    LabelingInput,
+    ProjectionInput,
+    projection_output,
+)
+from codebench_pipeline.finalization_table_io import retain_failed_finalization
+from codebench_pipeline.grounding_tables import GuardedLabeling, LabelingEvidenceInputs
+from codebench_pipeline.labeling_checkpoint_io import LABELING_ATTEMPTS, labeling_generation_identity
+from codebench_pipeline.labeling_checkpoint_store import LabelingCheckpointCache
+from codebench_pipeline.labeling_runtime import LabelingRuntime
 from codebench_pipeline.labeling_tables import (
     failures_from_attempts,
-    labeling_attempts_table,
     proposed_from_attempts,
 )
-from codebench_pipeline.stage_configuration import (
-    GuardedLabelingConfig,
-    PreparedLabelingConfig,
-    labeling_settings,
-    require_mapped_config,
-)
+from codebench_pipeline.stage_configuration import GuardedLabelingConfig
 from codebench_pipeline.storage import IntegrityError
-from codebench_pipeline.typed_config import TypedConfig
 
 
-def annotation_assets(*, declared: bool = False) -> list[AssetsDefinition]:
+def annotation_assets() -> list[AssetsDefinition]:
     @asset(
-        key_prefix=["datasets"],
-        group_name="dataset_building",
+        key=LABELING_ATTEMPTS,
+        group_name="dataset_finalization",
         partitions_def=DATASET_PARTITIONS,
-        io_manager_key="dataset_io_manager",
+        io_manager_key=FINALIZATION_TABLE_IO,
+        hooks={retain_failed_finalization},
         dagster_type=TABLE_TYPES[LabelingAttemptsTable],
         ins={
-            "filtered_commands": table_input("filtered_commands", FilteredCommandsTable),
-            "labeling_documentation": table_input("labeling_documentation", DocumentationTable),
-            "mapped_config": mapped_input("labeling_attempts", PreparedLabelingConfig),
+            "filtered_commands": AssetIn(
+                key=AssetKey(["datasets", "filtered_commands"]),
+                dagster_type=LABELING_INPUT,
+                input_manager_key=FINALIZATION_TABLE_IO,
+            ),
+            "documentation_capture": AssetIn(
+                key=AssetKey(["datasets", "documentation", "capture_documentation"]),
+                dagster_type=TABLE_TYPES[SourceDocumentsTable],
+                input_manager_key=FINALIZATION_TABLE_IO,
+            ),
+            "mapped_config": mapped_input(
+                "labeling_attempts", GuardedLabelingConfig, input_manager_key=FINALIZATION_TABLE_IO
+            ),
         },
     )
     def labeling_attempts(
         context: AssetExecutionContext,
-        config: AnnotationConfig,
-        filtered_commands: DataFrame[FilteredCommandsTable],
-        labeling_documentation: DataFrame[DocumentationTable],
-        mapped_config: PreparedLabelingConfig,
-        dataset_io_manager: ResourceParam[DataFrameIOManager],
-    ) -> Output[DataFrame[LabelingAttemptsTable]]:
-        settings = require_mapped_config(context.asset_key, config, mapped_config.labeling_attempts)
-        category_rules = mapped_config.category_rules
-        return cached_table(
-            context,
-            dataset_io_manager,
-            settings,
-            {
-                "commands": filtered_commands,
-                "documentation": labeling_documentation,
-                "category_rules": category_rules,
-            },
-            LabelingAttemptsTable,
-            lambda evidence: labeling_attempts_table(
-                filtered_commands,
-                labeling_documentation,
-                category_rules,
-                settings,
-                evidence,
-                cache=Path(dataset_io_manager.review_home) / "row-inference" / context.partition_key
-                if dataset_io_manager.review_home is not None
-                else None,
-            ),
-        )
-
-    @asset(
-        name="labeling_attempts",
-        key_prefix=["datasets"],
-        group_name="dataset_finalization",
-        partitions_def=DATASET_PARTITIONS,
-        io_manager_key="dataset_io_manager",
-        dagster_type=TABLE_TYPES[LabelingAttemptsTable],
-        ins={
-            "filtered_commands": table_input("filtered_commands", FilteredCommandsTable),
-            "mapped_config": mapped_input("labeling_attempts", GuardedLabelingConfig),
-        },
-    )
-    def guarded_labeling_attempts(
-        context: AssetExecutionContext,
-        filtered_commands: DataFrame[FilteredCommandsTable],
+        filtered_commands: LabelingInput,
+        documentation_capture: DataFrame[SourceDocumentsTable],
         mapped_config: GuardedLabelingConfig,
         dataset_io_manager: ResourceParam[DataFrameIOManager],
+        labeling_runtime: ResourceParam[LabelingRuntime],
+        labeling_checkpoints: ResourceParam[LabelingCheckpointCache],
     ) -> Output[DataFrame[LabelingAttemptsTable]]:
-        if dataset_io_manager.review_home is None:
-            raise IntegrityError("Guarded labeling requires a registered dataset home")
-        home = Path(dataset_io_manager.review_home)
-        spec = DatasetRegistry(home).get_snapshot(context.partition_key)
-        rules = mapped_config.category_rules
-        if (
-            not spec.has_declared_collection
-            or mapped_config.labeling_attempts != labeling_settings(spec.annotation)
-            or spec.rules != rules
-            or spec.storage != dataset_io_manager.storage
-        ):
-            raise IntegrityError("Guarded labeling inputs differ from the registered guarded configuration")
-        labeling = GuardedLabeling(home, spec)
-        output = cached_table(
-            context,
-            dataset_io_manager,
-            spec.annotation,
-            {"commands": filtered_commands, "category_rules": rules},
-            LabelingAttemptsTable,
-            lambda evidence: labeling.attempts(filtered_commands, evidence),
+        if filtered_commands.attempt is None:
+            raise IntegrityError("Labeling input hooks did not prepare the attempt")
+        signature, scratch_root = filtered_commands.attempt
+        capacity_paths = labeling_runtime.require_current(
+            context.run_id, context.partition_key, dataset_io_manager
         )
-        labeling.verify(output.value)
+        settings = mapped_config.labeling_attempts
+        evidence_inputs = LabelingEvidenceInputs(
+            dataset_io_manager.repository_run(context.partition_key, context.run_id),
+            mapped_config.collection,
+            settings.batch.grounding,
+            documentation_capture,
+        )
+        labeling = GuardedLabeling(
+            mapped_config,
+            evidence_inputs,
+            settings.batch.bind_capacity(capacity_paths.state_directory, capacity_paths.expected_model_path),
+            labeling_runtime.execution(settings.model.api_key_env, settings.batch.grounding),
+        )
+        identity = labeling_generation_identity(
+            context.partition_key, signature, capacity_paths.expected_model_path
+        )
+        commands = filtered_commands.commands
+        scratch = Path(mkdtemp(prefix="dataset-inference-", dir=scratch_root))
+        filtered_commands.scratch = scratch
+        table = LabelingAttemptsTable.validate(
+            labeling.attempts_for_generation(commands, scratch, labeling_checkpoints, identity)
+        )
+        table.attrs = {**commands.attrs, **table.attrs}
+        evidence_inputs.verify(table)
         metadata = TypeAdapter(dict[str, JsonValue])
         context.add_output_metadata(
             {
-                key: MetadataValue.json(metadata.validate_python(output.value.attrs[key]))
+                key: MetadataValue.json(metadata.validate_python(table.attrs[key]))
                 for key in ("labeling_coverage", "labeling_quota")
-                if key in output.value.attrs
+                if key in table.attrs
             }
         )
-        return output
+        return Output(table, data_version=DataVersion(signature))
+
+    attempts_edge = AssetIn(
+        key=AssetKey(["datasets", "labeling_attempts"]),
+        input_manager_key=FINALIZATION_TABLE_IO,
+        dagster_type=PROJECTION_INPUT,
+    )
+    registered_edge = AssetIn(
+        key=GLOBAL_CONFIG, dagster_type=REGISTERED_CONFIG_TYPE, input_manager_key=FINALIZATION_TABLE_IO
+    )
 
     @asset(
         key_prefix=["datasets"],
         group_name="dataset_building",
         partitions_def=DATASET_PARTITIONS,
-        io_manager_key="dataset_io_manager",
+        io_manager_key=FINALIZATION_TABLE_IO,
         dagster_type=TABLE_TYPES[ProposedAnnotationsTable],
+        hooks={retain_failed_finalization},
         ins={
-            "labeling_attempts": table_input("labeling_attempts", LabelingAttemptsTable),
-            "category_rules": rules_input(),
-            "registered": registered_input(),
+            "labeling_attempts": attempts_edge,
+            "category_rules": AssetIn(
+                key=AssetKey(["datasets", "category_rules"]),
+                dagster_type=RULES_TYPE,
+                input_manager_key=FINALIZATION_TABLE_IO,
+            ),
+            "registered": registered_edge,
         },
     )
     def proposed_annotations(
-        context: AssetExecutionContext,
-        labeling_attempts: DataFrame[LabelingAttemptsTable],
+        labeling_attempts: ProjectionInput,
         category_rules: CategoryRules,
         registered: RegisteredConfig,
-        dataset_io_manager: ResourceParam[DataFrameIOManager],
     ) -> Output[DataFrame[ProposedAnnotationsTable]]:
-        require_registered_rules(registered, category_rules)
-        return cached_table(
-            context,
-            dataset_io_manager,
-            TypedConfig(),
-            {"attempts": labeling_attempts, "category_rules": category_rules},
+        return projection_output(
+            labeling_attempts,
             ProposedAnnotationsTable,
-            lambda evidence: proposed_from_attempts(labeling_attempts, category_rules),
+            lambda attempts: proposed_from_attempts(attempts, category_rules),
         )
 
     @asset(
         key_prefix=["datasets"],
         group_name="dataset_building",
         partitions_def=DATASET_PARTITIONS,
-        io_manager_key="dataset_io_manager",
+        io_manager_key=FINALIZATION_TABLE_IO,
         dagster_type=TABLE_TYPES[LabelingFailuresTable],
-        ins={"labeling_attempts": table_input("labeling_attempts", LabelingAttemptsTable)},
+        hooks={retain_failed_finalization},
+        ins={
+            "labeling_attempts": attempts_edge,
+            "registered": registered_edge,
+        },
     )
     def labeling_failures(
-        context: AssetExecutionContext,
-        labeling_attempts: DataFrame[LabelingAttemptsTable],
-        dataset_io_manager: ResourceParam[DataFrameIOManager],
+        labeling_attempts: ProjectionInput,
+        registered: RegisteredConfig,
     ) -> Output[DataFrame[LabelingFailuresTable]]:
-        return cached_table(
-            context,
-            dataset_io_manager,
-            TypedConfig(),
-            {"attempts": labeling_attempts},
-            LabelingFailuresTable,
-            lambda evidence: failures_from_attempts(labeling_attempts),
-        )
+        return projection_output(labeling_attempts, LabelingFailuresTable, failures_from_attempts)
 
     return [
-        guarded_labeling_attempts if declared else labeling_attempts,
+        labeling_attempts,
         proposed_annotations,
         labeling_failures,
     ]

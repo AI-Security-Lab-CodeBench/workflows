@@ -2,7 +2,7 @@ import re
 from dataclasses import dataclass
 from typing import Final, Literal
 
-from codebench_pipeline.dataset_branches import collection_branches
+from codebench_pipeline.dataset_branches import COLLECTION_BRANCHES
 from codebench_pipeline.grounding_policy import command_tokens
 from codebench_pipeline.guarded_publication_selection import REQUIRED_CONTRIBUTIONS, Survivor
 from codebench_pipeline.labeling_outcomes import LabelingAttempt
@@ -90,7 +90,7 @@ def sample_survivors(rows: list[Survivor], attempts: dict[str, LabelingAttempt])
     """Choose a stable witness for each populated stratum, then fill the per-branch minimum."""
     ordered = sorted(rows, key=lambda row: row.stable_key)
     sampling: dict[str, BranchSample] = {}
-    for branch in collection_branches(declared=True):
+    for branch in COLLECTION_BRANCHES:
         population = [row for row in ordered if row.branch == branch.namespace]
         origins = {row.origin for row in population}
         if branch.namespace == "dataset":

@@ -1,5 +1,9 @@
 # CAT-3 collection increment: independent architecture review
 
+Historical review record. Its findings, source line references and verdict refer
+to the proposal under review at the time. For current operations, use
+[the operator guide](../orchestration.md).
+
 **Verdict: BLOCK.** Keep the proposed direction: extend the active graph, preserve the canonical `cloud_infrastructure_commands_grounded_v1` partition in `dataset_builds`, and publish through the existing `datasets/dataset_release`. Before approving implementation, resolve the acquisition authority, Keenable capture, guarded labeling, and publication contracts below. This is a static review of the proposal and repository, with read-only checks of public source pins. It is not a source admission receipt, deployment authorization, or claim that any runtime gate passed.
 
 ## Blocking findings and approval criteria

@@ -1,14 +1,14 @@
 from dataclasses import asdict, dataclass
-from pathlib import Path
 
 import pandas as pd
 from pandera.typing import DataFrame
-from pydantic import JsonValue, TypeAdapter
+from pydantic import JsonValue, RootModel, TypeAdapter
 
 from codebench_pipeline.dataframe_io import frame_bytes
 from codebench_pipeline.dataframe_schemas import (
     CommandsTable,
     LabelingAttemptsTable,
+    SourceDocumentsTable,
     frame_records,
     model_records,
     validated_frame,
@@ -18,7 +18,7 @@ from codebench_pipeline.dataset_export import Publication, prepare_dataset
 from codebench_pipeline.dataset_finalization import FINALIZATION_BINDING, normalized_command
 from codebench_pipeline.dataset_records import CandidateRecord, LabelDecision
 from codebench_pipeline.grounding_policy import command_tokens
-from codebench_pipeline.grounding_tables import GuardedLabeling, labeling_supports
+from codebench_pipeline.grounding_tables import LabelingEvidenceInputs, labeling_supports
 from codebench_pipeline.guarded_publication_sampling import BranchSample, sample_survivors
 from codebench_pipeline.guarded_publication_selection import (
     REQUIRED_CONTRIBUTIONS,
@@ -30,11 +30,11 @@ from codebench_pipeline.human_review import CompletionToken, HumanReviewError, R
 from codebench_pipeline.label_corrections import apply_label_corrections
 from codebench_pipeline.labeling_outcomes import LabelingAttempt
 from codebench_pipeline.repository_config import SourceWeight
-from codebench_pipeline.repository_receipts import canonical, sha256
+from codebench_pipeline.repository_receipts import RepositoryRun, canonical, sha256
 from codebench_pipeline.review_frames import REVIEW_BINDING
 from codebench_pipeline.review_policy import requires_human_review
-from codebench_pipeline.review_snapshots import ResolvedReview, ReviewSnapshots
-from codebench_pipeline.storage import digest, fingerprint
+from codebench_pipeline.review_snapshots import ResolvedReview, ReviewSnapshots, release_configuration_digest
+from codebench_pipeline.stage_configuration import DeclaredGlobalConfig
 
 
 @dataclass(frozen=True, slots=True)
@@ -134,10 +134,21 @@ def reconciled_counts(inputs: ReleaseInputs) -> dict[str, JsonValue]:
     }
 
 
-def prepare_guarded_release(inputs: ReleaseInputs, home: Path, spec: DatasetBuildSpec) -> ReleaseProposal:
+def prepare_guarded_release(
+    inputs: ReleaseInputs,
+    run: RepositoryRun,
+    settings: DeclaredGlobalConfig | DatasetBuildSpec,
+    *,
+    publication_versions: dict[str, str],
+) -> ReleaseProposal:
+    registered = (
+        DeclaredGlobalConfig.from_spec(settings) if isinstance(settings, DatasetBuildSpec) else settings
+    )
+    if run.dataset_id != registered.dataset_id:
+        raise HumanReviewError("stale", "Release evidence belongs to another dataset")
     resolved = inputs.resolved
     publication = resolved.manifest.publication
-    if spec.publication != publication:
+    if registered.scopes.human_review_queue.human_review_queue != publication:
         raise HumanReviewError("stale", "Registered release policy differs from the completed snapshot")
     rules = resolved.rules
     counts = reconciled_counts(inputs)
@@ -155,7 +166,13 @@ def prepare_guarded_release(inputs: ReleaseInputs, home: Path, spec: DatasetBuil
         decision.candidate_id for decision in inputs.decisions if decision.decision == "approve"
     )
     attempts = LabelingAttemptsTable.validate(inputs.frame("labeling_attempts"))
-    labeling = GuardedLabeling(home, spec)
+    labeling_config = registered.scopes.labeling_attempts
+    labeling = LabelingEvidenceInputs(
+        run,
+        labeling_config.collection,
+        labeling_config.labeling_attempts.batch.grounding,
+        SourceDocumentsTable.validate(inputs.frame("documentation/capture_documentation")),
+    )
     admission = labeling.admission(attempts)
     baseline: set[str] = set()
     collection = admission.sources
@@ -192,7 +209,7 @@ def prepare_guarded_release(inputs: ReleaseInputs, home: Path, spec: DatasetBuil
             "rights_and_source_binding": source.source_binding,
         }
         if source_weights is not None and reviewed_weights is not None:
-            weight = TypeAdapter(SourceWeight).validate_python(reviewed_weights.at[identity])
+            weight = RootModel[SourceWeight].model_validate(reviewed_weights.at[identity]).root
             source_bindings[identity]["source_weight"] = weight
             source_weights[identity] = weight
         branch = identity.partition(":")[0]
@@ -258,13 +275,13 @@ def prepare_guarded_release(inputs: ReleaseInputs, home: Path, spec: DatasetBuil
     csv = published.files["commands.csv"].encode()
     manifest = TypeAdapter(dict[str, JsonValue]).validate_python(
         {
-            "partition": spec.dataset_id,
-            "registered_spec": fingerprint(spec.model_dump_json()),
+            "partition": registered.dataset_id,
+            "release_configuration": release_configuration_digest(registered),
             "review_snapshot": resolved.snapshot.snapshot_id,
             "review_completion": inputs.token.model_dump(mode="json"),
             "implementation": {
                 **resolved.manifest.implementation,
-                **{path.name: digest(path) for path in Path(__file__).parent.glob("guarded_publication*.py")},
+                **publication_versions,
             },
             "selection_revision": "source-trust-cap-1" if source_weights is not None else SELECTION_REVISION,
             "branch_terminals": resolved.reviewed.attrs[FINALIZATION_BINDING],

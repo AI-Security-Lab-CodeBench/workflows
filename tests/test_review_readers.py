@@ -16,9 +16,11 @@ class ReviewReaderTests(unittest.TestCase):
     def test_existing_review_view_does_not_compete_with_an_active_writer(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             home = Path(temporary)
-            workflow = ReviewWorkflow(
+            workflow = ReviewWorkflow.for_home(
                 home,
-                ReviewStage(stage_id="selection", title="Selection", asset_keys=(("input",),), review_columns=("id",)),
+                ReviewStage(
+                    stage_id="selection", title="Selection", asset_keys=(("input",),), review_columns=("id",)
+                ),
                 LifecycleSource("selection"),
             )
             query = DatasetQueryRequest(dataset_id="CAT-3.1")
@@ -77,9 +79,11 @@ class ReviewReaderTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             home = Path(temporary)
             source = LifecycleSource("selection")
-            workflow = ReviewWorkflow(
+            workflow = ReviewWorkflow.for_home(
                 home,
-                ReviewStage(stage_id="selection", title="Selection", asset_keys=(("input",),), review_columns=("id",)),
+                ReviewStage(
+                    stage_id="selection", title="Selection", asset_keys=(("input",),), review_columns=("id",)
+                ),
                 source,
             )
             with patch.object(source, "current", side_effect=AssertionError("Read resolved upstream")):

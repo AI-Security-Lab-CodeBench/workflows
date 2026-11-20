@@ -22,7 +22,9 @@ from codebench_pipeline.repository_branch_config import (
     load_repository_branch,
 )
 from codebench_pipeline.repository_config import RepositoryBranch, RepositoryConfig, RepositoryOrigin
+from codebench_pipeline.repository_etl import authorize_adapter, reviewed_parser
 from codebench_pipeline.repository_receipts import read_receipt
+from codebench_pipeline.stage_implementation import ImplementationSource
 from codebench_pipeline.storage import IntegrityError
 
 COLLECTION = Path("business-configs/categories/cat3/collection")
@@ -317,3 +319,16 @@ class RepositoryStagesTests(unittest.TestCase):
 
         with self.assertRaisesRegex(IntegrityError, "absent from the deployment allowlist"):
             repository_adapters(documents, config, self.run_context)
+
+    def test_installed_parser_rejects_changed_bytes_even_at_approved_address(self) -> None:
+        transform = reviewed_parser("tldr")
+        installed = ImplementationSource()
+        self.assertEqual(authorize_adapter(transform, source=installed).transform, transform)
+        with TemporaryDirectory() as isolated:
+            root = Path(isolated)
+            (root / "uv.lock").write_bytes(installed.read("uv.lock"))
+            module = root / transform.module_path
+            module.parent.mkdir(parents=True)
+            module.write_bytes(installed.read(transform.module_path) + b"\n")
+            with self.assertRaisesRegex(IntegrityError, "differs from its manifest hash"):
+                authorize_adapter(transform, source=ImplementationSource(root))

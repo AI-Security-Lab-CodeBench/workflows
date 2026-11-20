@@ -32,6 +32,7 @@ from codebench_pipeline.repository_etl import (
     repository_rows,
     source_span,
 )
+from codebench_pipeline.repository_legacy import PreparedCaptureCache
 from codebench_pipeline.repository_receipts import (
     RepositoryReceipt,
     RepositoryRun,
@@ -41,6 +42,7 @@ from codebench_pipeline.repository_receipts import (
 )
 from codebench_pipeline.repository_tree import raw_url
 from codebench_pipeline.source_transform_contract import TRANSFORM_OPTIONS, TransformContext
+from codebench_pipeline.stage_implementation import ImplementationSource
 from codebench_pipeline.storage import IntegrityError
 
 
@@ -101,7 +103,11 @@ def repository_catalog(
 
 
 def repository_documents(
-    catalog: DataFrame[SourceCatalogTable], config: RepositoryAcquisitionConfig, run: RepositoryRun
+    catalog: DataFrame[SourceCatalogTable],
+    config: RepositoryAcquisitionConfig,
+    run: RepositoryRun,
+    *,
+    prepared_cache: PreparedCaptureCache | None = None,
 ) -> DataFrame[SourceDocumentsTable]:
     """Capture the complete authorized scope with byte-level integrity and replay."""
     receipt = read_receipt(catalog, "source_catalog", run)
@@ -111,7 +117,9 @@ def repository_documents(
     indexed = {str(row["source_id"]): row for row in frame_records(catalog)}
     rows: list[dict[str, JsonValue]] = []
     captures: list[JsonValue] = []
-    runtime = CaptureRuntime(limit=config.maximum_file_bytes, workers=config.workers, run=run)
+    runtime = CaptureRuntime(
+        limit=config.maximum_file_bytes, workers=config.workers, run=run, prepared_cache=prepared_cache
+    )
     inherited = SourceDocumentsTable.to_schema().columns.keys() - {"content", "sha256", "retrieved_at"}
     for origin in config.origins(receipt.branch):
         eligible = tuple(
@@ -138,14 +146,19 @@ def repository_documents(
 
 
 def repository_adapters(
-    documents: DataFrame[SourceDocumentsTable], config: RepositoryAcquisitionConfig, run: RepositoryRun
+    documents: DataFrame[SourceDocumentsTable],
+    config: RepositoryAcquisitionConfig,
+    run: RepositoryRun,
+    *,
+    implementation_source: ImplementationSource | None = None,
 ) -> DataFrame[DocumentAdaptersTable]:
     """Resolve adapters against the independent deployment allowlist before imports."""
     receipt = read_receipt(documents, "source_documents", run)
     if receipt.config_digest != config.branch_digest(receipt.branch):
         raise IntegrityError("Repository documents are stale for the declared configuration")
     origins = {
-        origin.origin_id: authorize_adapter(origin.transform) for origin in config.origins(receipt.branch)
+        origin.origin_id: authorize_adapter(origin.transform, source=implementation_source)
+        for origin in config.origins(receipt.branch)
     }
     captures = CAPTURED_SOURCES.validate_python(receipt.observations["captures"])
     bindings: dict[str, JsonValue] = {
@@ -173,6 +186,8 @@ def repository_candidates(
     adapters: DataFrame[DocumentAdaptersTable],
     config: RepositoryAcquisitionConfig,
     run: RepositoryRun,
+    *,
+    implementation_source: ImplementationSource | None = None,
 ) -> DataFrame[CommandCandidatesTable]:
     """Extract inert examples with capture, adapter and exact source span bindings."""
     receipt = read_receipt(documents, "source_documents", run)
@@ -188,7 +203,8 @@ def repository_candidates(
         for capture in CAPTURED_SOURCES.validate_python(receipt.observations["captures"])
     }
     approved = {
-        origin.origin_id: authorize_adapter(origin.transform) for origin in config.origins(receipt.branch)
+        origin.origin_id: authorize_adapter(origin.transform, source=implementation_source)
+        for origin in config.origins(receipt.branch)
     }
     rows: list[dict[str, JsonValue]] = []
     evidence: dict[str, JsonValue] = {}
@@ -201,12 +217,12 @@ def repository_candidates(
             raise IntegrityError(f"Repository adapter identity no longer matches deployment: {source_id}")
         text, url = str(document["content"]), str(document["source_url"])
         body = text.encode()
-        if sha256(body) != capture.sha256 or (run.root / capture.capture_key).read_bytes() != body:
+        if sha256(body) != capture.sha256 or run.read_evidence(capture.capture_key) != body:
             raise IntegrityError(f"Repository capture differs from its persisted bytes: {source_id}")
         options = TRANSFORM_OPTIONS.validate_json(adapter.transform.options_json)
         context = TransformContext(source_id, url, capture.sha256, options)
         previous_count = len(rows)
-        for row in repository_rows(text, adapter, context):
+        for row in repository_rows(text, adapter, context, source=implementation_source):
             try:
                 words = shlex.split(row.command)
             except ValueError:

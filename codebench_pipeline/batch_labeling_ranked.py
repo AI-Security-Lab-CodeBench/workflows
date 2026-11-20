@@ -1,4 +1,5 @@
 from collections import Counter, deque
+from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from itertools import groupby
@@ -7,7 +8,7 @@ from typing import Final
 
 from pydantic import JsonValue, TypeAdapter
 
-from codebench_pipeline.batch_labeling import EvidenceAdmission, annotate_batches
+from codebench_pipeline.batch_labeling import BatchExecution, EvidenceAdmission, annotate_batches_bound
 from codebench_pipeline.batch_labeling_config import BatchLabelingConfig
 from codebench_pipeline.category_rules import CategoryRules
 from codebench_pipeline.command_batches import similarity_batches
@@ -35,12 +36,66 @@ class RankedLabeling:
     maximum_context_characters: int
     admission: EvidenceAdmission
     workers: int = 1
+    execution: BatchExecution = BatchExecution(None, None)
+
+    def _commit_packet_evidence(self, packet_path: Path) -> None:
+        root = self.out.resolve()
+        packet_rows = root / packet_path / "label"
+        row_root = root / "label"
+        if (
+            not packet_rows.is_relative_to(root / "ranked-packets")
+            or packet_rows.resolve() != packet_rows
+            or row_root.resolve() != row_root
+        ):
+            raise IntegrityError("Labeling evidence directories cannot be links")
+        if packet_rows.is_dir():
+            directories = tuple(packet_rows.iterdir())
+            if any(
+                directory.is_symlink()
+                or not directory.is_dir()
+                or any(entry.is_symlink() for entry in directory.rglob("*"))
+                for directory in directories
+            ):
+                raise IntegrityError("Packet labeling evidence must contain unlinked row directories")
+            row_root.mkdir(exist_ok=True)
+            for directory in directories:
+                directory.rename(row_root / directory.name)
+
+    def verified_support(self, attempt: LabelingAttempt) -> str:
+        root = self.out.resolve()
+        path = (root / attempt.attempt_evidence_reference).with_name("verified.json").resolve()
+        if not path.is_relative_to(root / "label"):
+            raise IntegrityError("Verified labeling support is outside the attempt workspace")
+        return path.read_text(encoding="utf-8")
 
     def run(
         self,
         candidates: list[CandidateRecord],
         weights: dict[str, SourceWeight],
         source_failures: list[LabelingAttempt],
+    ) -> tuple[list[LabelingAttempt], dict[str, JsonValue]]:
+        def run_packet(packet: list[CandidateRecord], path: Path) -> list[LabelingAttempt]:
+            return annotate_batches_bound(
+                packet,
+                [],
+                self.rules,
+                self.model,
+                self.config,
+                path,
+                cache=self.cache,
+                maximum_context_characters=self.maximum_context_characters,
+                admission=self.admission,
+                execution=self.execution,
+            )
+
+        return self.run_packets(candidates, weights, source_failures, run_packet)
+
+    def run_packets(
+        self,
+        candidates: list[CandidateRecord],
+        weights: dict[str, SourceWeight],
+        source_failures: list[LabelingAttempt],
+        run_packet: Callable[[list[CandidateRecord], Path], list[LabelingAttempt]],
     ) -> tuple[list[LabelingAttempt], dict[str, JsonValue]]:
         weights = _WEIGHTS.validate_python(weights)
         all_candidates = [*candidates, *source_failures]
@@ -88,12 +143,7 @@ class RankedLabeling:
             """Apply results in rank order, then release unused quota reservations."""
             packet_path, packet_reservations, future = in_flight.popleft()
             attempts = future.result()
-            packet_rows = self.out / packet_path / "label"
-            if packet_rows.is_dir():
-                row_root = self.out / "label"
-                row_root.mkdir(exist_ok=True)
-                for directory in packet_rows.iterdir():
-                    directory.rename(row_root / directory.name)
+            self._commit_packet_evidence(packet_path)
             for attempt in attempts:
                 identity = attempt.candidate_id
                 reference = Path(attempt.attempt_evidence_reference)
@@ -129,7 +179,11 @@ class RankedLabeling:
                     for candidate in tier_rows
                     if any(len(credits[risk]) < SUBRISK_QUOTA for risk in routes[candidate.candidate_id])
                 ]
-                clustered = similarity_batches(schedulable, self.config.batch_size)
+                clustered = similarity_batches(
+                    schedulable,
+                    self.config.batch_size,
+                    encoder=self.execution.encoder,
+                )
                 clustered_ids = {candidate.candidate_id for group in clustered for candidate in group}
                 pending = deque(candidate for group in clustered for candidate in group)
                 pending.extend(
@@ -185,18 +239,7 @@ class RankedLabeling:
                         continue
                     packet_count += 1
                     packet_path = Path("ranked-packets") / f"{packet_count:06}"
-                    future = executor.submit(
-                        annotate_batches,
-                        packet,
-                        [],
-                        self.rules,
-                        self.model,
-                        self.config,
-                        self.out / packet_path,
-                        cache=self.cache,
-                        maximum_context_characters=self.maximum_context_characters,
-                        admission=self.admission,
-                    )
+                    future = executor.submit(run_packet, packet, self.out / packet_path)
                     reserved.update(packet_reservations)
                     in_flight.append((packet_path, packet_reservations, future))
                 while in_flight:

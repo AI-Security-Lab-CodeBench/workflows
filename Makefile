@@ -15,6 +15,8 @@ endif
 
 .PHONY: lint
 lint:
+	$(PYTHON) -B -m unittest discover -s tests -p test_asset_boundary.py
+	$(PYTHON) -B -m scripts.asset_boundary
 	$(UV) run --locked ruff check --no-cache codebench_pipeline
 	$(UV) run --locked basedpyright
 

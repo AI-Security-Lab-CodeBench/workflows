@@ -8,8 +8,6 @@ For CAT-3, start at `datasets/cat3.json`. This template selects the category by
 ID. The loader resolves the category policy and each branch declaration by
 convention. Branches create file inventories and captures at run time; source
 bodies and documentation snippets do not belong in the active configuration.
-`datasets/cat3-prepared.json` preserves the prepared manifest references used by
-historical builds.
 
 | File | What to edit |
 | --- | --- |
@@ -22,8 +20,6 @@ historical builds.
 | `categories/cat3/collection/existing-datasets.json` | Pinned repository corpora and their acquisition settings. |
 | `categories/cat3/collection/documentation-crawl.json` | Pinned original documentation repositories and their acquisition settings. |
 | `categories/cat3/keenable/declaration.json` | Discovery generation, reviewed source scopes, rights evidence, reference URLs, cases and budgets. |
-| `categories/cat3/reference-examples/sources.jsonl` | The relocated, pinned historical source declaration, kept only as a reference example for source preparation. |
-| `categories/cat3/reference-examples/semantics.jsonl` | The relocated historical Terraform semantic snippets, kept as reference examples rather than a complete current semantic manifest. |
 
 The logical `CAT-3` ID resolves to `categories/cat3/category.json` under this
 directory. The loader finds `instructions.md` and `examples.json` next to the
@@ -40,32 +36,32 @@ Read the dataset file from top to bottom:
 
 | Field | Meaning |
 | --- | --- |
-| `dataset_id` | Dataset partition to configure. The Keenable declaration's `dataset` must match. |
+| `dataset_id` | Dataset partition to configure. The Keenable declaration's `dataset_id` must match. |
 | `category_id` | `CAT-3` selects the category policy and independently loads the corpus, documentation and Keenable declarations. |
-| `revision` | Identifier for this dataset configuration. |
-| `finalization.annotation` | Model, context limit, parallelism and guarded batch settings. `{"mode":"registered"}` reuses existing registration settings. |
-| `finalization.filtering` | Optional routing and candidate filtering settings. |
-| `finalization.publication` | Optional review and release settings. |
-| `finalization.keenable_source_weight` | Optional merge weight for Keenable candidates; defaults to `0.30`. |
-| `storage` | Artifact storage; `null` uses the dataset home's local storage. |
+| `revision_label` | Identifier for this dataset configuration. |
+| `labeling` | Model, request-byte bound, workers and guarded batch settings. `{"from_registration":true}` inherits existing settings. |
+| `filtering` | Optional routing and candidate filtering settings. |
+| `review.review_columns` | Columns used for review edits and decision reuse. |
+| `release.release_cap_per_risk` | Cap applied after eligibility and required approval. |
+| `merge.keenable_weight` | Optional merge weight for Keenable candidates; defaults to `0.30`. |
+| `storage` | Required. Declare `backend: "s3"` and `bucket`, or use `{"from_registration":true}` to inherit an existing S3 registration. |
 
-The two repository branch files use the same field names and contain only the
-origins for their own branch:
+The canonical CAT-3 template inherits its deployment's S3 configuration. If
+the existing registration uses local storage, supply explicit S3 settings
+in the new declaration. Set `endpoint_url` for an S3-compatible endpoint,
+or omit it to use the SDK's endpoint selection. Credentials, when specified,
+are named by `access_key_env` and `secret_key_env`, not stored in the declaration.
+Changing storage does not copy existing artifacts or rewrite prior registrations.
 
-| Field | Meaning |
-| --- | --- |
-| `revision` | Reviewed revision of the branch declaration. |
-| `origins` | Nonempty list of origins. Each declares `origin_id`, `repository`, `commit`, `tree_digest`, `scope`, `license_id`, `license`, `attribution`, `source_type`, `provenance_type`, `format`, `use`, and `transform`. `included_paths`, `excluded_paths`, and `notices` are optional. Scope paths and rights paths identify files in the pinned upstream repository. |
-| `origins[].transform` | Reviewed `parser_id` (`cheatsheets_front_matter`, `tldr`, `aws_cli_examples`, or `markdown_shell`), pinned `sha256`, optional `options_json` (a JSON object encoded as text), and optional `batch_size` (default `128`). Deployment code checks the pin for that ID and supplies the module and entrypoint. |
-| `source_weights` | Optional overrides by origin ID in this branch. Default weights are `0.60` for a corpus and `0.90` for documentation. All weights must be finite numbers from 0 to 1. Every documentation origin must outrank every corpus, and every corpus must outrank Keenable. |
-| `maximum_file_bytes`, `workers` | Optional per-branch capture size limit (default `524288`, range 1 to 8388608) and download concurrency (default `12`, range 1 to 24). |
+The repository branch files contain only their own origins and settings.
+See [repository acquisition](categories/cat3/collection/README.md) for pinned
+trees, rights evidence, file selectors, parser authorization and capture limits.
 
-The Keenable branch keeps its own declaration with `dataset`, `revision`,
-`generation`, `generation_review`, and `cases`. Its current source-scoped
-format also defines `sources`, `budget` and `search_plan`. `sources` identifies
-permitted origins and rights. `budget` bounds requests and bytes; `search_plan`
-selects discovery behavior within reviewed scopes. These collection settings
-are separate from label-time remote lookup.
+The [Keenable declaration](categories/cat3/keenable/README.md) uses
+`schema_version`, `dataset_id`, `generation`, `sources`, `budget` and
+`search_plan`. `sources` identifies permitted origins, cases and rights.
+`budget` bounds acquisition and `search_plan` selects discovery behavior within
+reviewed scopes. The labeler uses verified captures from that generation.
 
 Register a new configuration after changing a declaration. Registration
 resolves policy and stores the branch declarations and their digests without
@@ -97,36 +93,22 @@ the directory **inside that worker**. The encoder groups pending commands;
 it does not index documents or supply citations. Changing batch membership
 does not by itself invalidate an otherwise reusable row label.
 
-## Local inputs and source preparation
+## Historical CAT-3 evidence
 
-The historical prepared template declares three companion config documents. They are
-separate so the main stage settings remain readable:
+The retired prepared-source registration used these original inputs:
 
 - `manifests/cat3/datasets.json`
 - `manifests/cat3/documentation-sources.json`
 - `manifests/cat3/semantics.json`
 
-Prepare actual source and semantic manifests through the source-preparation
-workflow, with provenance, reuse eligibility, exact positions, integrity hashes,
-version limits and reviewed transformation evidence. Don't create empty
-placeholders to hide missing inputs or substitute a stale manifest.
-Keep collected records, downloaded captures, model receipts, review decisions
-and dataset output in the local dataset home or another approved untracked
-data location, not among published business files.
+The two files in `categories/cat3/reference-examples/` likewise preserve
+historical provenance and snippets. The referenced local capture is not shipped.
+Keep the original bytes, paths and hashes intact. These files do not configure
+the current collection or supply current labeling evidence.
 
-Semantic snippets identify real operation paths or flags. Use `<default>` only
-for the exact invocation of a utility without arguments, never as a wildcard
-for all of its subcommands or flags. Missing operation documentation blocks
-labeling; demonstrations do not fill a target's evidence gap.
-
-The two files in `reference-examples/` aren't selected by the active template.
-They preserve a small historical declaration and snippets for inspection, not a
-full source inventory, fresh eligibility decision or replacement for current
-candidate documentation. The source example's `local_path` now resolves to
-`inputs/cat3/reference-captures/terraform-destroy.md` under this directory.
-That capture is deliberately not shipped or generated. Before using the example,
-acquire the pinned source through source preparation and verify its declared
-hash and reuse evidence; reference snippets retain their original retrieval dates.
+Use the [source preparation skill](../skills/codebench-source-preparation/SKILL.md)
+for new declarations. Keep downloaded captures, new inventories, model receipts,
+review decisions and dataset outputs outside published business files.
 
 ## Editing demonstrations
 

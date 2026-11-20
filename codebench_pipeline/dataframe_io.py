@@ -2,36 +2,45 @@ from __future__ import annotations
 
 import base64
 import json
+import os
+import stat
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
-from typing import Final, Literal, Protocol, assert_never
+from typing import Final, Literal, assert_never
 
 import pandas as pd
 import pyarrow
 import pyarrow.parquet as parquet
 from dagster import (
+    AssetKey,
+    Config,
     ConfigurableIOManager,
+    DagsterInstance,
+    EventLogRecord,
     InputContext,
-    MetadataValue,
     OutputContext,
-    TableColumn,
-    TableMetadataValue,
-    TableRecord,
-    TableSchema,
-    TableSchemaMetadataValue,
+    TextMetadataValue,
 )
-from pydantic import BaseModel, ConfigDict, Field, JsonValue, TypeAdapter
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, PrivateAttr, TypeAdapter
 
 from codebench_pipeline.category_rules import CategoryRules
+from codebench_pipeline.dagster_table_metadata import MetadataSink, record_preview
 from codebench_pipeline.dataframe_schemas import current_labeling_attempts
-from codebench_pipeline.dataset_branches import asset_branch
 from codebench_pipeline.dataset_records import LabelDecision
 from codebench_pipeline.human_review_store import HumanReviewStore
-from codebench_pipeline.models import SemanticSnippet
+from codebench_pipeline.input_provenance import (
+    configuration_producer,
+    input_materialization,
+    producer_run_id,
+)
+from codebench_pipeline.models import Digest, SemanticSnippet
 from codebench_pipeline.object_store import ObjectStore, StorageConfig, sha256
-from codebench_pipeline.storage import IntegrityError
+from codebench_pipeline.repository_receipts import RepositoryRun
+from codebench_pipeline.stage_configuration import DeclaredGlobalConfig
+from codebench_pipeline.stage_implementation import ImplementationSource
+from codebench_pipeline.storage import IntegrityError, open_directory
 
 REVIEW_PREPARATION: Final = "codebench_review_preparation"
 _LABELING_NESTED_TYPES: Final = {
@@ -69,6 +78,35 @@ class AssetReference(BaseModel):
     digest: str = Field(pattern=r"^[a-f0-9]{64}$")
 
 
+class PlannedOutputReferenceMismatch(IntegrityError):
+    """A current table pointer disagrees with the planned materialization."""
+
+
+def materialized_reference(
+    instance: DagsterInstance, record: EventLogRecord, output_name: str = "result"
+) -> AssetReference:
+    from codebench_pipeline.finalization_cache_reuse import materialization_attempt_succeeded
+
+    asset = record.asset_materialization
+    if asset is None or not materialization_attempt_succeeded(
+        instance, record, output_name=output_name, retry_number="native"
+    ):
+        raise IntegrityError("Materialization does not belong to a successful output")
+    digest = asset.metadata.get("codebench/content_digest")
+    format_name = asset.metadata.get("codebench/storage_format")
+    if not isinstance(digest, TextMetadataValue) or not isinstance(format_name, TextMetadataValue):
+        raise IntegrityError("Table materialization does not identify immutable bytes")
+    return AssetReference.model_validate({"format": format_name.value, "digest": digest.value})
+
+
+class UpstreamTableReference(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    asset_key: tuple[str, ...] = Field(strict=False)
+    partition: str
+    reference: AssetReference
+
+
 class CategoryDtype(BaseModel):
     categories: str
     ordered: bool
@@ -79,12 +117,6 @@ class AssetSnapshot:
     reference: AssetReference
     value: pd.DataFrame | CategoryRules
     publication_state: Literal["published", "legacy_unreviewed", "stale"] | None = None
-
-
-class MetadataSink(Protocol):
-    def add_output_metadata(
-        self, metadata: Mapping[str, str | int | TableMetadataValue | TableSchemaMetadataValue]
-    ) -> None: ...
 
 
 def record_reference(context: MetadataSink, reference: AssetReference) -> None:
@@ -143,48 +175,111 @@ def read_frame(payload: bytes) -> pd.DataFrame:
     return frame
 
 
-def preview_value(value: JsonValue) -> str | int | float | bool | None:
-    match value:
-        case None | bool() | int() | float():
-            return value
-        case str():
-            return value[:500]
-        case list() | dict():
-            return json.dumps(value, ensure_ascii=False)[:500]
-        case _:
-            assert_never(value)
-
-
-def record_preview(context: MetadataSink, frame: pd.DataFrame, sample_rows: int) -> None:
-    schema = TableSchema(
-        columns=[TableColumn(name=str(name), type=str(dtype)) for name, dtype in frame.dtypes.items()]
-    )
-    rows = TypeAdapter(list[dict[str, JsonValue]]).validate_json(
-        frame.head(sample_rows).to_json(
-            orient="records",
-            date_format="iso",
-            default_handler=str,
-        )
-    )
-    sample = [TableRecord({name: preview_value(value) for name, value in row.items()}) for row in rows]
-    context.add_output_metadata(
-        {
-            "dagster/row_count": len(frame),
-            "dagster/column_schema": MetadataValue.table_schema(schema),
-            "sample": MetadataValue.table(sample, schema=schema),
-        }
-    )
-
-
 class DataFrameIOManager(ConfigurableIOManager):
     """Persist pandas tables and taxonomy; asset functions own Pandera validation."""
 
     storage: StorageConfig
     review_home: str | None = None
     review_token: str | None = None
+    registered_revision: Digest | None = None
+    _review_store: HumanReviewStore | None = PrivateAttr(default=None)
+    _object_store: ObjectStore | None = PrivateAttr(default=None)
+    _configuration_producers: dict[str, str] = PrivateAttr(default_factory=dict)
 
-    def _store(self) -> ObjectStore:
-        return ObjectStore(self.storage)
+    @staticmethod
+    def from_environment(storage: StorageConfig, *, review_home: str | None = None) -> DataFrameIOManager:
+        manager = DataFrameIOManager(storage=storage, review_home=review_home)
+        manager.bind_object_store(ObjectStore.from_environment(storage))
+        return manager
+
+    def bind_object_store(self, store: ObjectStore) -> None:
+        if store.config != self.storage:
+            raise IntegrityError("Object store does not match the manager's storage configuration")
+        self._object_store = store
+
+    def read_registered_version(
+        self, storage: StorageConfig, reference: AssetReference
+    ) -> pd.DataFrame | CategoryRules:
+        if storage != self.storage:
+            raise IntegrityError("Review manifest storage differs from the bound object store")
+        return self.read_version(reference)
+
+    def bind_review_store(self, store: HumanReviewStore) -> None:
+        self._review_store = store
+
+    @property
+    def review_store(self) -> HumanReviewStore:
+        if self._review_store is None:
+            from codebench_pipeline.human_review import HumanReviewError
+
+            raise HumanReviewError("conflict", "Review database is not bound to this run")
+        return self._review_store
+
+    def run_configuration(self, run_id: str, dataset_id: str) -> DeclaredGlobalConfig:
+        from codebench_pipeline.config_assets import ConfigRunIOManager
+        from codebench_pipeline.dataset_registry import DatasetRegistry
+        from codebench_pipeline.human_review import HumanReviewError
+
+        if self.review_home is None or self.registered_revision is None:
+            raise IntegrityError("Dataset processing requires a pinned registration")
+        producer = self._configuration_producers.get(run_id, run_id)
+        registered = ConfigRunIOManager(home=self.review_home).registered(producer)
+        if (
+            registered.dataset_id != dataset_id
+            or registered.registration_digest != self.registered_revision
+            or DatasetRegistry(Path(self.review_home)).current_revision(dataset_id)
+            != self.registered_revision
+        ):
+            raise HumanReviewError("stale", "Registered dataset configuration changed during the run")
+        return registered
+
+    def bind_configuration_producer(self, context: InputContext) -> None:
+        """Bind indirect registration reads to Dagster's producer for this run."""
+        if self.review_home is None:
+            return
+        from codebench_pipeline.config_assets import (
+            GLOBAL_CONFIG,
+            ConfigRunIOManager,
+            current_configuration_record,
+        )
+
+        step = context.step_context
+        if step.run_id in self._configuration_producers:
+            return
+        producer = configuration_producer(step, GLOBAL_CONFIG)
+        if producer is None:
+            record = current_configuration_record(context.instance, GLOBAL_CONFIG, context.partition_key)
+            producer = record.run_id
+            ConfigRunIOManager(home=self.review_home).registered(producer, materialization=record)
+        self._configuration_producers[step.run_id] = producer
+
+    def object_store(self) -> ObjectStore:
+        return self._object_store or ObjectStore(self.storage)
+
+    def repository_run(self, dataset_id: str, run_id: str) -> RepositoryRun:
+        if self.review_home is None:
+            raise IntegrityError("Declared source acquisition requires a registered dataset home")
+        return RepositoryRun(Path(self.review_home), dataset_id, run_id)
+
+    @property
+    def implementation_source(self) -> ImplementationSource:
+        return ImplementationSource()
+
+    def stage_signature(
+        self,
+        stage: str,
+        config: Config,
+        inputs: Mapping[str, pd.DataFrame | CategoryRules | AssetSnapshot],
+    ) -> str:
+        from codebench_pipeline.dataset_engine import stage_signature
+
+        return stage_signature(
+            stage,
+            config,
+            inputs,
+            source=self.implementation_source,
+            storage_identity=self.storage.model_dump_json(),
+        )
 
     def _asset_key(self, context: InputContext | OutputContext) -> str:
         return asset_storage_key(
@@ -193,80 +288,15 @@ class DataFrameIOManager(ConfigurableIOManager):
         )
 
     def handle_output(self, context: OutputContext, obj: pd.DataFrame | CategoryRules) -> None:
-        if context.asset_key.path[0] == "datasets" and context.asset_key.path[-1] in {
-            "human_review_decisions",
-            "dataset_release",
-            "automatic_dataset_release",
-        }:
-            from codebench_pipeline.release_admission import write_review_output
+        reference = self.persist_value(obj)
+        self.publish_reference(context, reference)
+        self.record_output(context, obj, reference)
 
-            match obj:
-                case pd.DataFrame():
-                    reference = write_review_output(self, context, obj)
-                case CategoryRules():
-                    raise IntegrityError("Review outputs must be tables")
-                case _:
-                    assert_never(obj)
-        else:
-            reference = self.persist_value(obj)
-            if self.review_home is not None and context.asset_key.path[0] == "datasets":
-                from codebench_pipeline.source_review_guard import SOURCE_GATED_STAGES, authorize_output
-
-                with HumanReviewStore(Path(self.review_home)).transaction(
-                    timeout=10, dataset_id=context.asset_partition_key
-                ) as tx:
-                    from codebench_pipeline.dataset_branches import (
-                        DECLARED_SOURCE_STAGES,
-                        FINALIZATION_STAGES,
-                    )
-
-                    if context.asset_key.path[-1] in FINALIZATION_STAGES:
-                        from codebench_pipeline.dataset_finalization import authorize_finalization_output
-
-                        match obj:
-                            case pd.DataFrame():
-                                authorize_finalization_output(
-                                    Path(self.review_home),
-                                    context.step_context.instance,
-                                    context.asset_partition_key,
-                                    obj,
-                                    complete=context.asset_key.path[-1]
-                                    not in {
-                                        "merged_command_candidates",
-                                        "reviewed_annotations",
-                                    },
-                                )
-                            case CategoryRules():
-                                raise IntegrityError("Finalization outputs must be tables")
-                            case _:
-                                assert_never(obj)
-                    if context.asset_key.path[-1] in SOURCE_GATED_STAGES | DECLARED_SOURCE_STAGES | {
-                        "source_catalog"
-                    }:
-                        match obj:
-                            case pd.DataFrame():
-                                authorize_output(context, self, obj)
-                            case CategoryRules():
-                                raise IntegrityError("Source-dependent outputs must be tables")
-                            case _:
-                                assert_never(obj)
-                    if context.asset_key.path[-1] != "human_review_queue":
-                        try:
-                            previous = self.current_reference(context)
-                        except FileNotFoundError:
-                            previous = None
-                        if previous != reference:
-                            tx.invalidate(context.asset_partition_key, "Upstream asset reference changed")
-                    self.publish_reference(context, reference)
-            else:
-                self.publish_reference(context, reference)
-        match obj:
-            case pd.DataFrame():
-                record_preview(context, obj, self.storage.sample_rows)
-            case CategoryRules():
-                pass
-            case _:
-                assert_never(obj)
+    def record_output(
+        self, context: OutputContext, obj: pd.DataFrame | CategoryRules, reference: AssetReference
+    ) -> None:
+        if isinstance(obj, pd.DataFrame):
+            record_preview(context, obj, self.storage.sample_rows)
         record_reference(context, reference)
 
     def persist_value(self, obj: pd.DataFrame | CategoryRules) -> AssetReference:
@@ -279,12 +309,12 @@ class DataFrameIOManager(ConfigurableIOManager):
             case _:
                 assert_never(obj)
         reference = AssetReference(format=format_name, digest=sha256(payload))
-        store = self._store()
+        store = self.object_store()
         store.write(self._payload_key(reference), payload)
         return reference
 
     def publish_reference(self, context: InputContext | OutputContext, reference: AssetReference) -> None:
-        store = self._store()
+        store = self.object_store()
         key = self._asset_key(context)
         try:
             previous = store.read(key)
@@ -302,10 +332,28 @@ class DataFrameIOManager(ConfigurableIOManager):
         return f"objects/{reference.digest}.{suffix}"
 
     def current_reference(self, context: InputContext | OutputContext) -> AssetReference:
-        return AssetReference.model_validate_json(self._store().read(self._asset_key(context)))
+        return self.reference_at(
+            context.asset_key.path, context.asset_partition_key if context.has_asset_partitions else None
+        )
+
+    def reference_at(self, asset_key: Sequence[str], partition: str | None) -> AssetReference:
+        return AssetReference.model_validate_json(
+            self.object_store().read(asset_storage_key(asset_key, partition))
+        )
 
     def read_version(self, reference: AssetReference) -> pd.DataFrame | CategoryRules:
-        store = self._store()
+        return self._read_version(self.object_store(), reference)
+
+    def read_planned_output(self, key: AssetKey, partition: str, recorded_digest: str) -> AssetSnapshot:
+        store = self.object_store()
+        reference = AssetReference.model_validate_json(store.read(asset_storage_key(key.path, partition)))
+        if reference.digest != recorded_digest:
+            raise PlannedOutputReferenceMismatch(
+                f"Current output differs from its recorded materialization: {key.to_user_string()}"
+            )
+        return AssetSnapshot(reference, self._read_version(store, reference))
+
+    def _read_version(self, store: ObjectStore, reference: AssetReference) -> pd.DataFrame | CategoryRules:
         payload = store.read(self._payload_key(reference))
         if sha256(payload) != reference.digest:
             raise IntegrityError("Asset reference content mismatch")
@@ -318,69 +366,74 @@ class DataFrameIOManager(ConfigurableIOManager):
                 assert_never(reference.format)
 
     def load_input(self, context: InputContext) -> pd.DataFrame | CategoryRules:
-        if (
-            context.asset_key.path[-1] == "command_candidates"
-            and self.review_home is not None
-            and context.has_input_name
-            and context.name == f"{asset_branch(context.asset_key.path)}_candidates"
-        ):
-            from codebench_pipeline.data_views import DatasetDataService
-            from codebench_pipeline.dataset_finalization import available_candidates
+        return self.load_versioned_input(context).value
 
-            home = Path(self.review_home)
-            frames, _ = available_candidates(
-                home, DatasetDataService(home, context.instance), context.asset_partition_key
-            )
-            branch = asset_branch(context.asset_key.path)
-            return frames[branch]
-        snapshot = self.read_current(context)
-        if snapshot.publication_state in {"stale", "legacy_unreviewed"}:
-            from codebench_pipeline.human_review import HumanReviewError
+    def input_reference(self, context: InputContext) -> AssetReference:
+        upstream = context.upstream_output
+        if upstream is None:
+            return self.current_reference(context)
 
-            raise HumanReviewError("stale", "This materialization is no longer authorized by current review")
-        return snapshot.value
+        producer = producer_run_id(upstream)
+        record = input_materialization(context)
+        if record is None:
+            raise IntegrityError(f"No materialization for input {context.asset_key.to_user_string()}")
+        reference = materialized_reference(
+            context.instance, record, upstream.name if producer is not None else "result"
+        )
+        if producer is None and reference != self.current_reference(context):
+            raise IntegrityError("Current table reference differs from its recorded materialization")
+        return reference
 
-    def read_current(self, context: InputContext) -> AssetSnapshot:
-        state: Literal["published", "legacy_unreviewed", "stale"] | None = None
-        if context.asset_key.path[-1] == "dataset_release" and self.review_home is not None:
-            from codebench_pipeline.release_admission import read_publication
-
-            published = read_publication(
-                Path(self.review_home),
-                context.asset_partition_key,
-                context.instance,
-                asset_branch(context.asset_key.path),
-            )
-            if published is not None:
-                return published
-            state = "legacy_unreviewed"
-        reference = self.current_reference(context)
-        value = self.read_version(reference)
-        if self.review_home is not None:
-            from codebench_pipeline.review_output_state import materialization_stale
-
-            if materialization_stale(Path(self.review_home), context, value):
-                state = "stale"
-        return AssetSnapshot(reference, value, state)
+    def load_versioned_input(self, context: InputContext) -> AssetSnapshot:
+        reference = self.input_reference(context)
+        return AssetSnapshot(reference, self.read_version(reference))
 
     def cached_frame(self, key: str, compute: Callable[[], pd.DataFrame]) -> tuple[pd.DataFrame, bool]:
         """The caller supplies a key containing every content and schema version."""
-        storage_key = f"cache/{sha256(key.encode())}.parquet"
-        store = self._store()
+        frame = self.read_cached_frame(key)
+        if frame is not None:
+            return frame, True
+        frame = compute()
+        self.write_cached_frame(key, frame)
+        return frame, False
+
+    def read_cached_frame(self, key: str) -> pd.DataFrame | None:
         try:
-            payload = store.read(storage_key)
+            payload = self.object_store().read(f"cache/{sha256(key.encode())}.parquet")
         except FileNotFoundError:
-            frame = compute()
-            store.write(storage_key, frame_bytes(frame))
-            return frame, False
-        return read_frame(payload), True
+            return None
+        return read_frame(payload)
+
+    def write_cached_frame(self, key: str, frame: pd.DataFrame) -> None:
+        self.object_store().write(f"cache/{sha256(key.encode())}.parquet", frame_bytes(frame))
+
+    def retain_attempt_evidence(self, directory: Path, prefix: str) -> dict[str, JsonValue]:
+        """Retain the files produced in one computation's private scratch directory."""
+        receipts: dict[str, JsonValue] = {}
+        with open_directory(directory) as root_fd:
+            for parent, children, files, parent_fd in os.fwalk(".", follow_symlinks=False, dir_fd=root_fd):
+                for child in children:
+                    if not stat.S_ISDIR(os.stat(child, dir_fd=parent_fd, follow_symlinks=False).st_mode):
+                        raise IntegrityError(
+                            "Attempt evidence must contain only directories and regular files"
+                        )
+                for filename in sorted(files):
+                    if not stat.S_ISREG(os.stat(filename, dir_fd=parent_fd, follow_symlinks=False).st_mode):
+                        raise IntegrityError("Attempt evidence must contain only regular files")
+                    fd = os.open(filename, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent_fd)
+                    with os.fdopen(fd, "rb") as stream:
+                        if not stat.S_ISREG(os.fstat(fd).st_mode):
+                            raise IntegrityError("Attempt evidence must contain only regular files")
+                        name = Path(parent, filename).as_posix()
+                        receipts[name] = self.write_evidence(f"{prefix}/{name}", stream.read())
+        return receipts
 
     def write_evidence(self, key: str, data: bytes) -> str:
         """Evidence keys are immutable; a different receipt needs a different key."""
-        return self._store().write(f"evidence/{sha256(key.encode())}", data)
+        return self.object_store().write(f"evidence/{sha256(key.encode())}", data)
 
     def read_evidence(self, key: str) -> bytes:
-        return self._store().read(f"evidence/{sha256(key.encode())}")
+        return self.object_store().read(f"evidence/{sha256(key.encode())}")
 
     def exists(self, key: str) -> bool:
         """Check evidence existence while still rejecting corrupted content."""

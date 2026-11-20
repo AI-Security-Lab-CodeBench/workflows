@@ -4,14 +4,17 @@ from __future__ import annotations
 
 import json
 import re
+import sys
+from argparse import ArgumentParser, Namespace
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Final, TypeAlias
+from typing import Final
 
 DEFAULT_CATEGORY_CONFIG: Final = (
     Path(__file__).resolve().parents[1] / "business-configs/categories/cat3/category.json"
 )
-JsonValue: TypeAlias = str | int | float | bool | None | list["JsonValue"] | dict[str, "JsonValue"]
+type JsonValue = str | int | float | bool | None | list[JsonValue] | dict[str, JsonValue]
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,15 +70,17 @@ class CategoryConfigError(ValueError):
     pass
 
 
-def category_document(path: Path) -> tuple[Path, dict[str, JsonValue]]:
-    document: JsonValue = json.loads(path.read_text(encoding="utf-8"))
+def category_document(
+    path: Path, read_bytes: Callable[[Path], bytes] = Path.read_bytes
+) -> tuple[Path, dict[str, JsonValue]]:
+    document: JsonValue = json.loads(read_bytes(path))
     if not isinstance(document, dict):
         raise CategoryConfigError("Expected an initial category configuration")
     reference = document.get("business_config")
     if reference is not None:
         if document.get("rules") is not None or not isinstance(reference, str) or not reference.strip():
             raise CategoryConfigError("Choose exactly one of rules or business_config")
-        return category_document((path.parent / reference).resolve())
+        return category_document((path.parent / reference).resolve(), read_bytes)
     return path, document
 
 
@@ -104,7 +109,9 @@ def business_paths(path: Path = DEFAULT_CATEGORY_CONFIG) -> tuple[Path, ...]:
     return _business_paths(category, document)
 
 
-def _effective_rules(path: Path, document: dict[str, JsonValue]) -> dict[str, JsonValue]:
+def _effective_rules(
+    path: Path, document: dict[str, JsonValue], read_bytes: Callable[[Path], bytes] = Path.read_bytes
+) -> dict[str, JsonValue]:
     rules = document.get("rules")
     if not isinstance(rules, dict):
         raise CategoryConfigError("Missing category rules")
@@ -119,7 +126,7 @@ def _effective_rules(path: Path, document: dict[str, JsonValue]) -> dict[str, Js
     }:
         raise CategoryConfigError("Authored category declarations contain category rules only")
     policy_path = _business_paths(path, document)[1]
-    policy: JsonValue = json.loads(policy_path.read_text(encoding="utf-8"))
+    policy: JsonValue = json.loads(read_bytes(policy_path))
     if not isinstance(policy, dict) or set(policy) != {"classes", "severities", "description_language"}:
         raise CategoryConfigError("Expected shared classes, severities and description language")
     effective = {key: value for key, value in rules.items() if key != "allowed_severities"}
@@ -164,34 +171,108 @@ def _label_names(rules: dict[str, JsonValue], field: str) -> tuple[str, ...]:
     return tuple(names)
 
 
-def load_labeling_prompt(commands: list[str], path: Path = DEFAULT_CATEGORY_CONFIG) -> str:
-    path, document = category_document(path)
-    *_, base, instructions, examples_path = _business_paths(path, document)
-    texts = [file.read_text(encoding="utf-8") for file in (base, instructions)]
-    if any(not text.strip() for text in texts):
+@dataclass(frozen=True, slots=True)
+class ScriptPolicy:
+    taxonomy: Taxonomy
+    base: str
+    instructions: str
+    rules: dict[str, JsonValue]
+    examples: tuple[dict[str, JsonValue], ...]
+
+    def render_prompt(self, commands: list[str]) -> str:
+        allowed = {
+            risk.id
+            for risk in self.taxonomy.risks
+            if any(re.search(pattern, command) for pattern in risk.patterns for command in commands)
+        }
+        return "\n\n".join(
+            (
+                self.base,
+                self.instructions,
+                json.dumps(self.rules, ensure_ascii=False, allow_nan=False),
+                json.dumps(
+                    {"examples": [family for family in self.examples if family["risk_id"] in allowed]},
+                    ensure_ascii=False,
+                    allow_nan=False,
+                ),
+            )
+        )
+
+    def to_json(self) -> str:
+        return json.dumps(
+            {
+                "base": self.base,
+                "instructions": self.instructions,
+                "rules": self.rules,
+                "examples": self.examples,
+            },
+            ensure_ascii=False,
+            allow_nan=False,
+        )
+
+
+def _script_policy(
+    rules: dict[str, JsonValue], base: JsonValue, instructions: JsonValue, examples: JsonValue
+) -> ScriptPolicy:
+    if (
+        not isinstance(base, str)
+        or not base.strip()
+        or not isinstance(instructions, str)
+        or not instructions.strip()
+    ):
         raise CategoryConfigError("Empty labeling instructions")
-    rules = _effective_rules(path, document)
-    taxonomy = _taxonomy(rules)
-    allowed = {
-        risk.id
-        for risk in taxonomy.risks
-        if any(re.search(pattern, command) for pattern in risk.patterns for command in commands)
-    }
-    examples: JsonValue = json.loads(examples_path.read_text(encoding="utf-8"))
     if not isinstance(examples, list):
         raise CategoryConfigError("Expected example families")
-    selected = []
+    families: list[dict[str, JsonValue]] = []
     for family in examples:
         if not isinstance(family, dict) or not isinstance(family.get("risk_id"), str):
             raise CategoryConfigError("Invalid example family")
-        if family["risk_id"] in allowed:
-            selected.append(family)
-    return "\n\n".join(
-        [
-            *texts,
-            json.dumps(rules, ensure_ascii=False, allow_nan=False),
-            json.dumps({"examples": selected}, ensure_ascii=False, allow_nan=False),
-        ]
+        families.append(family)
+    return ScriptPolicy(_taxonomy(rules), base, instructions, rules, tuple(families))
+
+
+def parse_script_policy(payload: str) -> ScriptPolicy:
+    value: JsonValue = json.loads(payload)
+    if not isinstance(value, dict) or set(value) != {"base", "instructions", "rules", "examples"}:
+        raise CategoryConfigError("Expected compiled script policy")
+    rules = value["rules"]
+    if not isinstance(rules, dict):
+        raise CategoryConfigError("Expected compiled script policy rules")
+    return _script_policy(rules, value["base"], value["instructions"], value["examples"])
+
+
+def load_script_policy(
+    path: Path = DEFAULT_CATEGORY_CONFIG, *, read_bytes: Callable[[Path], bytes] = Path.read_bytes
+) -> ScriptPolicy:
+    path, document = category_document(path, read_bytes)
+    *_, base, instructions, examples = _business_paths(path, document)
+    return _script_policy(
+        _effective_rules(path, document, read_bytes),
+        read_bytes(base).decode("utf-8").replace("\r\n", "\n").replace("\r", "\n"),
+        read_bytes(instructions).decode("utf-8").replace("\r\n", "\n").replace("\r", "\n"),
+        json.loads(read_bytes(examples)),
+    )
+
+
+def add_policy_options(parser: ArgumentParser) -> None:
+    inputs = parser.add_mutually_exclusive_group()
+    inputs.add_argument("--category-config", type=Path, default=DEFAULT_CATEGORY_CONFIG)
+    inputs.add_argument("--compiled-policy", action="store_true", help="Read compiled policy JSON from stdin")
+
+
+def cli_taxonomy(args: Namespace) -> Taxonomy:
+    return (
+        parse_script_policy(sys.stdin.read()).taxonomy
+        if args.compiled_policy
+        else load_taxonomy(args.category_config)
+    )
+
+
+def cli_script_policy(args: Namespace) -> ScriptPolicy:
+    return (
+        parse_script_policy(sys.stdin.read())
+        if args.compiled_policy
+        else load_script_policy(args.category_config)
     )
 
 

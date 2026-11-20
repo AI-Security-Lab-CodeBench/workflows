@@ -1,29 +1,30 @@
-import copy
 import io
 import json
 import tempfile
 import unittest
-from contextlib import ExitStack, redirect_stdout
+from contextlib import redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
 import pandas as pd
-from configuration_fixture import write_fixture
-from dagster import AssetKey, AssetRecordsFilter, build_sensor_context, partition_loading_context
+from dagster import AssetKey, AssetRecordsFilter
+from guarded_labeling_fixture import LabelingFixture
+from native_dataset_cycle import NativeDatasetCycle
 from pydantic import BaseModel
 
+from codebench_pipeline.collection_config import SourceDeclaration
 from codebench_pipeline.data_views import DatasetDataService
 from codebench_pipeline.dataframe_io import REVIEW_PREPARATION
-from codebench_pipeline.dataset_cli import execute_build, execute_registered_build
-from codebench_pipeline.dataset_config import load_build_config
+from codebench_pipeline.dataset_cli import execute_registered_build
+from codebench_pipeline.dataset_config import DatasetBuildSpec
 from codebench_pipeline.dataset_records import LabelDecision
 from codebench_pipeline.dataset_registry import DatasetRegistry
 from codebench_pipeline.dataset_source_models import SourceSelection
-from codebench_pipeline.definitions import build_definitions, dataset_run_config
 from codebench_pipeline.human_review import DecisionChange, HumanReviewError
 from codebench_pipeline.human_review_store import HumanReviewStore
+from codebench_pipeline.keenable_policy import KeenableDeclaration
 from codebench_pipeline.model_config import ModelConfig
-from codebench_pipeline.models import AdapterSpec
+from codebench_pipeline.repository_branch_config import RepositoryBranchDeclaration
 from codebench_pipeline.review_snapshots import ReviewSnapshots
 from codebench_pipeline.runtime_instance import dataset_instance
 
@@ -47,8 +48,6 @@ def provider_response(
                 ]
             }
         )
-    if schema is AdapterSpec:
-        return AdapterSpec(format="markdown", rationale="Markdown example source.")
     if issubclass(schema, LabelDecision):
         candidate = payload["candidate"]
         risk = payload["allowed_risk_ids"][0]
@@ -75,34 +74,33 @@ def provider_response(
 
 class IncrementalDatasetTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.stack = ExitStack()
-        self.addCleanup(self.stack.close)
-        self.home = Path(self.stack.enter_context(tempfile.TemporaryDirectory()))
-        original = write_fixture(self.home)
-        self.configuration = json.loads(original.read_text(encoding="utf-8"))
-        if self.configuration.get("documentation_sources") is not None:
-            self.configuration["seeds"] = self.configuration["documentation_sources"]
-            self.configuration["documentation_sources"] = None
-        for seed in self.configuration["seeds"]["documents"]:
-            seed["local_path"] = str((original.parent / seed["local_path"]).resolve())
-        self.configuration["storage"] = {"local_root": str(self.home / "tables")}
-        self.path = self.home / "category.json"
-        for module in ("dataset_annotation",):
-            self.stack.enter_context(
-                patch(f"codebench_pipeline.{module}.infer_typed", side_effect=provider_response)
-            )
+        self.home = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.fixture = LabelingFixture(self, self.home, category_confidence="medium")
+        self.spec: DatasetBuildSpec = self.fixture.spec
+        self.cycle = NativeDatasetCycle(self.home)
         self.first = self.build()
 
     def build(self) -> dict[str, bool]:
-        self.path.write_text(json.dumps(self.configuration), encoding="utf-8")
+        DatasetRegistry(self.home).register(self.spec)
         with redirect_stdout(io.StringIO()):
-            return execute_build(self.path, self.home)
+            execute_registered_build(self.spec.dataset_id, self.home)
+        with dataset_instance(self.home) as instance:
+            return self.cycle.drain(instance, partition=self.spec.dataset_id)
+
+    def update_labeler(self) -> None:
+        annotation = self.spec.annotation
+        model = annotation.model.model_copy(update={"timeout_seconds": annotation.model.timeout_seconds + 1})
+        self.spec = self.spec.model_copy(
+            update={"annotation": annotation.model_copy(update={"model": model})}
+        )
 
     def materializations(self, dataset: str) -> dict[str, int]:
         with dataset_instance(self.home) as instance:
             return {
                 stage: instance.fetch_materializations(
-                    AssetRecordsFilter(asset_key=AssetKey(["datasets", stage]), asset_partitions=[dataset]),
+                    AssetRecordsFilter(
+                        asset_key=AssetKey(["datasets", *stage.split("/")]), asset_partitions=[dataset]
+                    ),
                     limit=1,
                 )
                 .records[0]
@@ -110,33 +108,33 @@ class IncrementalDatasetTests(unittest.TestCase):
                 for stage in self.first
             }
 
-    def test_unchanged_build_creates_no_run_or_materialization(self) -> None:
-        before = self.materializations(self.configuration["dataset_id"])
+    def test_unchanged_refresh_creates_no_processing_run_or_materialization(self) -> None:
+        before = self.materializations(self.spec.dataset_id)
         with dataset_instance(self.home) as instance:
             runs_before = len(instance.get_runs())
         self.assertEqual(self.build(), {})
-        self.assertEqual(self.materializations(self.configuration["dataset_id"]), before)
+        self.assertEqual(self.materializations(self.spec.dataset_id), before)
         with dataset_instance(self.home) as instance:
-            self.assertEqual(len(instance.get_runs()), runs_before)
+            self.assertEqual(len(instance.get_runs()), runs_before + 1)
+            self.assertEqual(instance.get_runs(limit=1)[0].job_name, "refresh_dataset_configuration")
 
-    def test_added_documentation_branch_preserves_current_dataset_outputs(self) -> None:
-        before = self.materializations(self.configuration["dataset_id"])
-        registry = DatasetRegistry(self.home)
-        spec = registry.get(self.configuration["dataset_id"])
-        registry.register(
-            spec.model_copy(
-                update={
-                    "documentation_catalog": spec.catalog,
-                    "documentation_snapshots": spec.snapshots,
-                }
-            )
+    def test_revised_documentation_branch_preserves_current_dataset_outputs(self) -> None:
+        before = self.materializations(self.spec.dataset_id)
+        collection = self.spec.declared_collection
+        assert collection is not None
+        declaration = collection.documentation_crawl.declaration
+        assert isinstance(declaration, RepositoryBranchDeclaration)
+        changed_doc = SourceDeclaration.from_declaration(
+            declaration.model_copy(update={"refresh_revision": "new-documentation-scope"})
         )
-        with redirect_stdout(io.StringIO()):
-            changed = execute_registered_build(spec.dataset_id, self.home)
-        finalization = {
+        self.spec = self.spec.model_copy(
+            update={"declared_collection": collection.model_copy(update={"documentation_crawl": changed_doc})}
+        )
+        expected = {
+            "documentation/capture_documentation",
+            "documentation/command_candidates",
             "merged_command_candidates",
             "filtered_commands",
-            "labeling_documentation",
             "labeling_attempts",
             "proposed_annotations",
             "labeling_failures",
@@ -144,24 +142,15 @@ class IncrementalDatasetTests(unittest.TestCase):
             "category_eligible_annotations",
             "human_review_queue",
         }
-        self.assertEqual(
-            set(changed),
-            {
-                f"documentation/{stage}"
-                for stage in self.first
-                if stage not in finalization | {"category_rules"}
-            }
-            | finalization,
-        )
-        after = self.materializations(spec.dataset_id)
-        self.assertEqual({stage for stage in before if before[stage] != after[stage]}, finalization)
-        with redirect_stdout(io.StringIO()):
-            self.assertEqual(execute_registered_build(spec.dataset_id, self.home), {})
+        self.assertEqual(set(self.build()), expected)
+        after = self.materializations(self.spec.dataset_id)
+        self.assertEqual({stage for stage in before if before[stage] != after[stage]}, expected)
+        self.assertEqual(self.build(), {})
 
     def test_labeler_change_materializes_only_labels_and_finalization(self) -> None:
-        before = self.materializations(self.configuration["dataset_id"])
-        self.configuration["models"]["labeler"]["timeout_seconds"] += 1
-        self.configuration["revision"] = "label-settings-update"
+        before = self.materializations(self.spec.dataset_id)
+        self.update_labeler()
+        self.spec = self.spec.model_copy(update={"revision": "label-settings-update"})
         changed = self.build()
         expected = {
             "labeling_attempts",
@@ -172,18 +161,21 @@ class IncrementalDatasetTests(unittest.TestCase):
             "human_review_queue",
         }
         self.assertEqual(set(changed), expected)
-        after = self.materializations(self.configuration["dataset_id"])
+        after = self.materializations(self.spec.dataset_id)
         self.assertEqual({stage for stage in before if before[stage] != after[stage]}, expected)
         self.assertEqual(self.build(), {})
 
     def test_policy_change_does_not_rematerialize_source_or_filter_tables(self) -> None:
-        self.configuration["rules"]["policy"] += " Check the supplied evidence carefully."
-        self.configuration["rules"]["version"] = "policy-update"
+        rules = self.spec.rules.model_copy(
+            update={
+                "policy": self.spec.rules.policy + " Check evidence carefully.",
+                "version": "policy-update",
+            }
+        )
+        self.spec = self.spec.model_copy(update={"rules": rules})
         self.assertEqual(
             set(self.build()),
             {
-                "category_rules",
-                "labeling_documentation",
                 "labeling_attempts",
                 "proposed_annotations",
                 "labeling_failures",
@@ -194,7 +186,7 @@ class IncrementalDatasetTests(unittest.TestCase):
         )
 
     def test_publication_cap_replaces_completion_without_changing_review_rows(self) -> None:
-        dataset_id = self.configuration["dataset_id"]
+        dataset_id = self.spec.dataset_id
         store = HumanReviewStore(self.home)
         with dataset_instance(self.home) as instance, store.transaction() as tx:
             data = DatasetDataService(self.home, instance)
@@ -218,13 +210,15 @@ class IncrementalDatasetTests(unittest.TestCase):
             )
             self.assertEqual(tx.authorize_completion(original.snapshot, token), token)
 
-        self.configuration["publication"]["limit_per_risk"] = 1
+        self.spec = self.spec.model_copy(
+            update={"publication": self.spec.publication.model_copy(update={"limit_per_risk": 1})}
+        )
         self.assertEqual(set(self.build()), {"human_review_queue"})
         with dataset_instance(self.home) as instance:
             run = instance.get_runs(limit=1)[0]
             data = DatasetDataService(self.home, instance)
             after = data.read_current(dataset_id, "human_review_queue").value
-            snapshots = ReviewSnapshots(self.home, data)
+            snapshots = ReviewSnapshots.from_environment(self.home, data)
             self.assertEqual(snapshots.current(dataset_id).manifest.publication.limit_per_risk, 1)
         assert isinstance(before, pd.DataFrame) and isinstance(after, pd.DataFrame)
         pd.testing.assert_frame_equal(before, after)
@@ -238,121 +232,103 @@ class IncrementalDatasetTests(unittest.TestCase):
             with self.assertRaises(HumanReviewError) as rejected:
                 tx.authorize_completion(fresh.snapshot, token)
             self.assertEqual(rejected.exception.code, "stale")
-        receipt = json.loads((self.home / f"build-{run.run_id}.json").read_text())
-        self.assertEqual(receipt["status"], "awaiting_human_review")
+        self.assertEqual(run.job_name, "__ASSET_JOB")
 
     def test_registered_metadata_revision_refreshes_only_review_authority(self) -> None:
-        before = self.materializations(self.configuration["dataset_id"])
-        self.configuration["revision"] = "metadata-only"
+        before = self.materializations(self.spec.dataset_id)
+        self.spec = self.spec.model_copy(update={"revision": "metadata-only"})
         with patch(
-            "codebench_pipeline.dataset_annotation.infer_typed", side_effect=AssertionError("Inference reran")
+            "codebench_pipeline.batch_labeling.guarded_complete",
+            side_effect=AssertionError("Inference reran"),
         ):
             self.assertEqual(self.build(), {"human_review_queue": True})
-        after = self.materializations(self.configuration["dataset_id"])
+        after = self.materializations(self.spec.dataset_id)
         self.assertEqual({stage for stage in before if before[stage] != after[stage]}, {"human_review_queue"})
         with dataset_instance(self.home) as instance:
             data = DatasetDataService(self.home, instance)
-            queue = data.read_current(self.configuration["dataset_id"], "human_review_queue").value
+            queue = data.read_current(self.spec.dataset_id, "human_review_queue").value
             assert isinstance(queue, pd.DataFrame)
             with HumanReviewStore(self.home).reader() as transaction:
-                batch = transaction.get_current_batch(self.configuration["dataset_id"], "annotations")
+                batch = transaction.get_current_batch(self.spec.dataset_id, "annotations")
             self.assertEqual(
                 queue.attrs[REVIEW_PREPARATION],
                 {"batch_id": batch.batch_id, "snapshot_id": batch.snapshot.snapshot_id},
             )
         self.assertEqual(self.build(), {})
 
-    def test_failed_labeling_retries_only_unfinished_dependent_stages(self) -> None:
-        before = self.materializations(self.configuration["dataset_id"])
-        self.configuration["models"]["labeler"]["timeout_seconds"] += 1
+    def test_unchanged_refresh_does_not_retry_failed_native_labeling_run(self) -> None:
+        before = self.materializations(self.spec.dataset_id)
+        self.update_labeler()
         with patch(
-            "codebench_pipeline.dataset_annotation.infer_typed",
+            "codebench_pipeline.batch_labeling.guarded_complete",
             side_effect=RuntimeError("Provider rejected this request"),
         ):
             with self.assertRaisesRegex(RuntimeError, "Provider rejected this request"):
                 self.build()
-        self.assertEqual(self.materializations(self.configuration["dataset_id"]), before)
-        self.assertEqual(
-            set(self.build()),
-            {
-                "labeling_attempts",
-                "proposed_annotations",
-                "labeling_failures",
-                "deduplicated_annotations",
-                "category_eligible_annotations",
-                "human_review_queue",
-            },
-        )
-
-    def test_sensor_skips_unchanged_categories_and_selects_only_changed_labels(self) -> None:
-        definitions = build_definitions(self.home)
-        sensor = definitions.get_sensor_def("dataset_build_requests")
-        with (
-            dataset_instance(self.home) as instance,
-            partition_loading_context(dynamic_partitions_store=instance),
+        self.assertEqual(self.materializations(self.spec.dataset_id), before)
+        with patch(
+            "codebench_pipeline.batch_labeling.guarded_complete",
+            side_effect=AssertionError("Refresh retried a failed run instead of leaving it for native retry"),
         ):
-            with build_sensor_context(
-                instance=instance, repository_def=definitions.get_repository_def()
-            ) as ctx:
-                self.assertEqual(list(sensor.evaluate_tick(ctx).run_requests or []), [])
-        self.configuration["models"]["labeler"]["timeout_seconds"] += 1
-        self.path.write_text(json.dumps(self.configuration), encoding="utf-8")
-        DatasetRegistry(self.home).register(load_build_config(self.path, self.home))
-        with (
-            dataset_instance(self.home) as instance,
-            partition_loading_context(dynamic_partitions_store=instance),
-        ):
-            with build_sensor_context(
-                instance=instance, repository_def=definitions.get_repository_def()
-            ) as ctx:
-                requests = list(sensor.evaluate_tick(ctx).run_requests or [])
-        self.assertEqual(len(requests), 1)
-        self.assertEqual(requests[0].partition_key, self.configuration["dataset_id"])
-        resolved = DatasetRegistry(self.home).get(self.configuration["dataset_id"])
-        pinned = dataset_run_config(resolved, self.home).to_config_dict()
-        self.assertEqual(requests[0].run_config, pinned)
-        DatasetRegistry(self.home).register(
-            resolved.model_copy(
-                update={"rules": resolved.rules.model_copy(update={"policy": "Edited policy."})}
-            )
-        )
-        self.assertEqual(requests[0].run_config, pinned)
-        self.assertEqual(
-            set(requests[0].asset_selection or []),
-            {
-                AssetKey(["datasets", stage])
-                for stage in (
-                    "labeling_attempts",
-                    "proposed_annotations",
-                    "labeling_failures",
-                    "deduplicated_annotations",
-                    "category_eligible_annotations",
-                    "human_review_queue",
-                    "global_config",
-                    "map_labeling_attempts_config",
-                    "map_human_review_queue_config",
-                )
-            },
-        )
+            self.assertEqual(self.build(), {})
+        self.assertEqual(self.materializations(self.spec.dataset_id), before)
 
-    def test_seed_revision_preserves_rules_and_refreshes_source_bound_documentation(self) -> None:
-        before = self.materializations(self.configuration["dataset_id"])
-        self.configuration["seeds"]["revision"] = "source-refresh"
+    def test_native_sensor_reads_persisted_config_updates_after_refresh(self) -> None:
+        with dataset_instance(self.home) as instance:
+            self.assertEqual(self.cycle.tick(instance), ())
+        self.update_labeler()
+        DatasetRegistry(self.home).register(self.spec)
+        with dataset_instance(self.home) as instance:
+            self.assertEqual(self.cycle.tick(instance), ())
+        self.assertIn("labeling_attempts", self.build())
+
+    def test_source_revision_preserves_rules_and_refreshes_source_bound_labeling(self) -> None:
+        before = self.materializations(self.spec.dataset_id)
+        collection = self.spec.declared_collection
+        assert collection is not None
+        declaration = collection.existing_datasets.declaration
+        assert isinstance(declaration, RepositoryBranchDeclaration)
+        source = SourceDeclaration.from_declaration(
+            declaration.model_copy(update={"refresh_revision": "dataset-source-refresh"})
+        )
+        self.spec = self.spec.model_copy(
+            update={"declared_collection": collection.model_copy(update={"existing_datasets": source})}
+        )
         changed = self.build()
-        self.assertEqual(set(changed), set(self.first) - {"category_rules"})
-        after = self.materializations(self.configuration["dataset_id"])
-        self.assertEqual(after["category_rules"], before["category_rules"])
-        self.assertNotEqual(after["labeling_documentation"], before["labeling_documentation"])
+        unaffected = {"category_rules", *(stage for stage in before if "/" in stage)}
+        self.assertEqual(set(changed), set(self.first) - unaffected)
+        after = self.materializations(self.spec.dataset_id)
+        self.assertNotEqual(after["labeling_attempts"], before["labeling_attempts"])
 
     def test_adding_and_changing_category_leaves_existing_category_events_untouched(self) -> None:
-        original = copy.deepcopy(self.configuration)
-        identity = original["dataset_id"]
+        original = self.spec
+        identity = original.dataset_id
         before = self.materializations(identity)
-        self.configuration["dataset_id"] = "another_category"
-        self.configuration["rules"]["category_id"] = "CAT-9"
-        self.configuration["rules"]["risks"][0]["id"] = "CAT-9.1"
+        collection = original.declared_collection
+        assert collection is not None
+        keenable = collection.keenable_declaration
+        assert isinstance(keenable, KeenableDeclaration)
+        dataset_id = "another_category"
+        revised = SourceDeclaration.from_declaration(keenable.model_copy(update={"dataset": dataset_id}))
+        rules = original.rules.model_copy(
+            update={
+                "category_id": "CAT-9",
+                "risks": [
+                    rule.model_copy(update={"id": f"CAT-9.{index}"})
+                    for index, rule in enumerate(original.rules.risks, 1)
+                ],
+            }
+        )
+        self.spec = original.model_copy(
+            update={
+                "dataset_id": dataset_id,
+                "rules": rules,
+                "config_directory": None,
+                "declared_collection": collection.model_copy(update={"keenable_use_cases": revised}),
+            }
+        )
         self.assertEqual(set(self.build()), set(self.first))
-        self.configuration["models"]["labeler"]["timeout_seconds"] += 1
+        self.update_labeler()
         self.assertEqual(
             set(self.build()),
             {
@@ -365,5 +341,5 @@ class IncrementalDatasetTests(unittest.TestCase):
             },
         )
         self.assertEqual(self.materializations(identity), before)
-        self.configuration = original
+        self.spec = original
         self.assertEqual(self.build(), {})

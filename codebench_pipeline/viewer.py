@@ -13,8 +13,9 @@ from codebench_pipeline.dataframe_io import DataFrameIOManager
 from codebench_pipeline.dataframe_schemas import frame_records
 from codebench_pipeline.dataset_asset_types import DATASET_PARTITIONS
 from codebench_pipeline.dataset_branches import HISTORICAL_PROCESSING_STAGES
-from codebench_pipeline.dataset_plan import KNOWN_STAGES
+from codebench_pipeline.dataset_dependencies import KNOWN_STAGES
 from codebench_pipeline.dataset_registry import DatasetRegistry
+from codebench_pipeline.review_output_state import read_current_snapshot
 from codebench_pipeline.runtime_instance import dataset_instance
 
 
@@ -58,8 +59,8 @@ def preview_asset(home: Path, dataset: str, stage: str, limit: int) -> dict[str,
         raise ValueError(f"Unknown dataset stage: {stage}")
     if not 1 <= limit <= 1000:
         raise ValueError("Preview limit must be between 1 and 1000")
-    spec = DatasetRegistry(home).get(dataset)
-    manager = DataFrameIOManager(storage=spec.storage, review_home=str(home))
+    spec = DatasetRegistry(home).get_snapshot(dataset)
+    manager = DataFrameIOManager.from_environment(spec.storage)
     with dataset_instance(home) as instance:
         with build_input_context(
             asset_key=AssetKey(["datasets", *stage.split("/")]),
@@ -67,7 +68,7 @@ def preview_asset(home: Path, dataset: str, stage: str, limit: int) -> dict[str,
             asset_partitions_def=DATASET_PARTITIONS,
             instance=instance,
         ) as context:
-            snapshot = manager.read_current(context)
+            snapshot = read_current_snapshot(home, manager, context)
             value = snapshot.value
     result: dict[str, JsonValue] = {
         "home": str(home.resolve()),

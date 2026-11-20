@@ -17,7 +17,7 @@ from dagster import AssetKey, OutputContext, build_input_context
 from pandas.testing import assert_frame_equal
 
 from codebench_pipeline.dataframe_io import DataFrameIOManager
-from codebench_pipeline.object_store import StorageConfig, configured_client
+from codebench_pipeline.object_store import ObjectStore, StorageConfig, configured_client
 
 
 class ContextFactory(Protocol):
@@ -75,6 +75,7 @@ def verify(binary: Path, report: Path) -> None:
             try:
                 client.create_bucket(Bucket="dataset-qa")
                 manager = DataFrameIOManager(storage=settings)
+                manager.bind_object_store(ObjectStore(settings, client=client))
                 frame = pd.DataFrame(
                     {"command": ["git status", "terraform destroy"], "accepted": [True, False]}
                 )

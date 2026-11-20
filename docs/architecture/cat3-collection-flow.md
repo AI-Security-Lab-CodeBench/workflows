@@ -23,7 +23,7 @@ flowchart LR
 Only Keenable searches for new origins. Its discovery output is a set of leads;
 capture checks permission before retaining origin bytes. Repository branches use
 reviewed pins instead. Configuration edges after the first stage are omitted
-for clarity. The separate prepared-manifest graph remains readable.
+for clarity. Persisted prepared-manifest outputs are historical evidence.
 
 ```mermaid
 flowchart TD

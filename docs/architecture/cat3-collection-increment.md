@@ -56,7 +56,7 @@ On restart reuse committed search results and verified captures, and send only r
 
 ## Native assets and acceptance
 
-Use named groups `existing_datasets`, `documentation_crawl`, `keenable_use_cases`, `dataset_finalization` and `dataset_configuration`. Preserve current key shapes; add `datasets/keenable/<stage>` and an independent `build_keenable` acquisition job through candidates. The active global-config asset exposes declarations, hashes and paths or object keys, never retrieved text or secrets. Use typed stage config, typed Pandera tables, explicit Dagster dependencies and the configured object-store/DataFrame I/O contracts. A collection-only job must select the configuration assets and all dependencies it needs without selecting labeling.
+The `configuration` group owns the loaded business settings. The three collection groups and the filtering, labeling, deduplication, release, and audit groups consume declared assets and resources. The global config exposes typed declarations and integrity pins without local paths or credentials. A collection-only job selects its configuration inputs and can stop at candidates without running labeling.
 
 ### Asset keys and direct dependencies
 

@@ -4,7 +4,7 @@ import re
 import shlex
 from pathlib import Path
 
-from category_config import load_labeling_prompt
+from category_config import Taxonomy
 from command_filter import command_words
 from label_inputs import SEMANTICS_FIELDS as SEMANTICS_FIELDS
 from label_inputs import load_inputs as load_inputs
@@ -12,9 +12,6 @@ from label_inputs import validate_semantics
 from label_io import digest, indexed, read_json, require, timestamp
 from validate_dataset import (
     CANDIDATE_FIELDS,
-    CATEGORY,
-    DEFAULT_TAXONOMY,
-    RISKS,
     SOURCE_FIELDS,
     present,
     string_list,
@@ -75,7 +72,7 @@ def facts(candidate, sources, semantics):
     return item
 
 
-def response_schema(stage, ids=(), documentation_urls=()):
+def response_schema(stage, ids=(), documentation_urls=(), *, taxonomy: Taxonomy):
     properties = {
         "candidate_id": {"type": "string", "minLength": 1},
         "rationale": {"type": "string", "minLength": 1, "maxLength": 400},
@@ -84,10 +81,10 @@ def response_schema(stage, ids=(), documentation_urls=()):
         properties.update(
             {
                 "decision": {"enum": ["accept", "needs_review", "reject"]},
-                "category": {"enum": [CATEGORY]},
-                "risk": {"enum": list(RISKS)},
-                "severity": {"enum": list(reversed(DEFAULT_TAXONOMY.severities))},
-                "class": {"enum": list(DEFAULT_TAXONOMY.classes)},
+                "category": {"enum": [taxonomy.canonical]},
+                "risk": {"enum": list(taxonomy.risk_names)},
+                "severity": {"enum": list(reversed(taxonomy.severities))},
+                "class": {"enum": list(taxonomy.classes)},
                 "description": {"type": "string", "minLength": 1},
                 "util": {"type": "string", "minLength": 1},
                 "documentation_urls": {
@@ -120,7 +117,7 @@ def response_schema(stage, ids=(), documentation_urls=()):
     return {"type": "object", "additionalProperties": False, "required": [key], "properties": {key: array}}
 
 
-def make_packet(stage, ids, payload, system_prompt=None, schema=None):
+def make_packet(stage, ids, payload, system_prompt: str, schema=None, *, taxonomy: Taxonomy):
     instruction = (
         "Label independently from evidence; no previous verdict is supplied."
         if stage == "label"
@@ -132,17 +129,13 @@ def make_packet(stage, ids, payload, system_prompt=None, schema=None):
         if stage == "label"
         else []
     )
-    schema = response_schema(stage, ids, urls) if schema is None else schema
+    schema = response_schema(stage, ids, urls, taxonomy=taxonomy) if schema is None else schema
     packet = {
         "stage": stage,
         "candidate_ids": ids,
         "input": payload,
         "response_schema": schema,
-        "system_prompt": system_prompt
-        if system_prompt is not None
-        else load_labeling_prompt(
-            [item["row"]["command"] for item in payload["candidates"]] if stage == "label" else []
-        ),
+        "system_prompt": system_prompt,
         "prompt": instruction + "\nReturn exactly one result for each TARGET_CANDIDATE_ID below. "
         "Assess each record independently; linking and deduplication are deferred. "
         "Give a rationale of at most 400 characters. For a withheld label, name the "
@@ -158,7 +151,7 @@ def make_packet(stage, ids, payload, system_prompt=None, schema=None):
     return packet
 
 
-def validate_packet(packet, stage):
+def validate_packet(packet, stage, taxonomy: Taxonomy):
     require(
         isinstance(packet, dict)
         and set(packet)
@@ -188,8 +181,8 @@ def validate_packet(packet, stage):
     require(
         packet["response_schema"]
         in (
-            response_schema(stage, packet["candidate_ids"]),
-            response_schema(stage, packet["candidate_ids"], urls),
+            response_schema(stage, packet["candidate_ids"], taxonomy=taxonomy),
+            response_schema(stage, packet["candidate_ids"], urls, taxonomy=taxonomy),
         ),
         "Altered response schema",
     )
@@ -202,13 +195,14 @@ def validate_packet(packet, stage):
             packet["input"],
             packet["system_prompt"],
             packet["response_schema"],
+            taxonomy=taxonomy,
         ),
         "Altered packet prompt",
     )
     return packet
 
 
-def validate_result(result, stage, ids):
+def validate_result(result, stage, ids, taxonomy: Taxonomy):
     key = "labels" if stage == "label" else "reviews"
     require(
         isinstance(result, dict) and set(result) == {key} and isinstance(result[key], list),
@@ -226,17 +220,20 @@ def validate_result(result, stage, ids):
             require(item["verdict"] in {"approve", "needs_review", "reject"}, "Invalid review verdict")
             continue
         require(item["decision"] in {"accept", "needs_review", "reject"}, "Invalid label decision")
-        require(item["category"] == CATEGORY and item["risk"] in RISKS, "Invalid category/risk")
-        require(item["severity"] in DEFAULT_TAXONOMY.severities, "Invalid severity")
-        require(item["class"] in DEFAULT_TAXONOMY.classes, "Invalid class")
+        require(
+            item["category"] == taxonomy.canonical and item["risk"] in taxonomy.risk_names,
+            "Invalid category/risk",
+        )
+        require(item["severity"] in taxonomy.severities, "Invalid severity")
+        require(item["class"] in taxonomy.classes, "Invalid class")
         description = item["description"]
         require(
             present(item["util"])
             and present(item["description"])
-            and (DEFAULT_TAXONOMY.description_language != "Russian" or re.search(r"[А-Яа-яЁё]", description))
+            and (taxonomy.description_language != "Russian" or re.search(r"[А-Яа-яЁё]", description))
             and "\n" not in description
             and len(re.split(r"[.!?]+(?:\s|$)", description.strip().rstrip(".!?"))) == 1,
-            f"Expected one {DEFAULT_TAXONOMY.description_language} description sentence and utility",
+            f"Expected one {taxonomy.description_language} description sentence and utility",
         )
         require(
             string_list(item["documentation_urls"], nonempty=True)
@@ -252,8 +249,8 @@ def validate_result(result, stage, ids):
     return records
 
 
-def validate_response(packet, result):
-    records = validate_result(result, packet["stage"], packet["candidate_ids"])
+def validate_response(packet, result, taxonomy: Taxonomy):
+    records = validate_result(result, packet["stage"], packet["candidate_ids"], taxonomy)
     if packet["stage"] == "label":
         payload = validate_label_input(packet)
         for item in payload["candidates"]:
@@ -328,7 +325,7 @@ def validate_label_input(packet):
     return payload
 
 
-def load_exchange(packets_dir, responses_dir, stage):
+def load_exchange(packets_dir, responses_dir, stage, taxonomy: Taxonomy):
     packets_dir, responses_dir = Path(packets_dir), Path(responses_dir)
     packet_files = sorted(packets_dir.glob("*.json"))
     require(bool(packet_files), "No exchange packets")
@@ -338,7 +335,7 @@ def load_exchange(packets_dir, responses_dir, stage):
     )
     packets, envelopes, records = {}, {}, {}
     for path in packet_files:
-        packet = validate_packet(read_json(path), stage)
+        packet = validate_packet(read_json(path), stage, taxonomy)
         if stage == "label":
             validate_label_input(packet)
         envelope = read_json(responses_dir / path.name)
@@ -354,7 +351,7 @@ def load_exchange(packets_dir, responses_dir, stage):
         require(envelope["packet_sha256"] == packet["packet_sha256"], "Response packet hash mismatch")
         require(present(envelope["model"]), "Missing model identifier or honest alias")
         timestamp(envelope["responded_at"], "Response")
-        results = validate_response(packet, envelope["result"])
+        results = validate_response(packet, envelope["result"], taxonomy)
         require(not set(results).intersection(records), "Duplicate candidate across packets")
         records.update(results)
         packets[path.name], envelopes[path.name] = packet, envelope

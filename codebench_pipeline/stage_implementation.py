@@ -1,30 +1,34 @@
 import ast
 import hashlib
 import json
+import os
 import re
 import tomllib
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from fnmatch import fnmatchcase
 from functools import lru_cache
 from pathlib import Path
 from typing import Final, assert_never
 
 from pydantic import JsonValue, TypeAdapter
 
-from codebench_pipeline.storage import IntegrityError
+from codebench_pipeline.storage import IntegrityError, open_directory, open_regular_file
 
 STAGE_ROOTS: Final = {
-    "source_catalog": ("dataset_assets_sources", "source_catalog"),
-    "source_documents": ("dataset_assets_sources", "source_documents"),
-    "document_adapters": ("dataset_assets_sources", "document_adapters"),
-    "command_candidates": ("dataset_assets_sources", "command_candidates"),
+    "enumerate_corpus_files": ("declared_source_assets", "index_sources"),
+    "capture_corpus_files": ("declared_source_assets", "capture_indexed_sources"),
+    "command_candidates": ("declared_source_assets", "command_candidates"),
+    "documentation/capture_documentation": ("declared_source_assets", "capture_documentation"),
+    "documentation/command_candidates": ("declared_source_assets", "command_candidates"),
+    "keenable/discover_use_cases": ("declared_source_assets", "discover_use_cases"),
+    "keenable/capture_origin_pages": ("declared_source_assets", "capture_use_case_pages"),
+    "keenable/command_candidates": ("declared_source_assets", "keenable_command_candidates"),
     "filtered_commands": ("dataset_assets_sources", "filtered_commands"),
-    "labeling_documentation": ("dataset_assets_sources", "labeling_documentation"),
     "labeling_attempts": ("dataset_assets_annotations", "labeling_attempts"),
-    "guarded_labeling_attempts": ("dataset_assets_annotations", "guarded_labeling_attempts"),
     "proposed_annotations": ("dataset_assets_annotations", "proposed_annotations"),
     "labeling_failures": ("dataset_assets_annotations", "labeling_failures"),
-    "merged_command_candidates": ("dataset_finalization", "merged_command_candidates"),
+    "merged_command_candidates": ("collection_merge", "merged_command_candidates"),
     "deduplicated_annotations": ("dataset_finalization", "deduplicated_annotations"),
     "category_eligible_annotations": ("dataset_finalization", "category_eligible_annotations"),
     "human_review_queue": ("dataset_finalization", "human_review_queue"),
@@ -42,6 +46,59 @@ RUNTIME_FILES: Final = ("pyproject.toml", "uv.lock", "scripts/dataset_schema.py"
 ENGINE_FILE: Final = "codebench_pipeline/dataset_engine.py"
 REVIEW_DEPENDENCIES: Final = frozenset({"psycopg", "psycopg-binary"})
 REVIEW_DECLARATIONS: Final = frozenset({"jsonschema"})
+
+
+def _installed_relative(name: str) -> str:
+    if any(part in {"", ".", ".."} for part in name.split("/")) or any(mark in name for mark in "\\:\0"):
+        raise IntegrityError(f"Invalid installed source name: {name!r}")
+    return name
+
+
+@dataclass(frozen=True, slots=True)
+class ImplementationIdentity:
+    publication: dict[str, str]
+    stages: dict[str, dict[str, str]]
+    review_policy: dict[str, str]
+
+
+@dataclass(frozen=True, slots=True)
+class ImplementationSource:
+    """Address the files in one installed processing checkout."""
+
+    root: Path = Path(__file__).parent.parent
+
+    def _address(self, name: str) -> Path:
+        return self.root.joinpath(_installed_relative(name))
+
+    def read(self, name: str) -> bytes:
+        path = self._address(name)
+        with open_directory(path.parent) as directory, open_regular_file(directory, path.name) as stream:
+            return stream.read()
+
+    def digest(self, name: str) -> str:
+        return hashlib.sha256(self.read(name)).hexdigest()
+
+    def publication_versions(self) -> dict[str, str]:
+        return {
+            name.rsplit("/", 1)[-1]: self.digest(name)
+            for name in self.package_matches("guarded_publication*.py")
+        }
+
+    def package_matches(self, pattern: str) -> tuple[str, ...]:
+        if "/" in pattern:
+            raise IntegrityError(f"Installed package patterns must match a single component: {pattern!r}")
+        self._address(pattern)
+        package = "codebench_pipeline"
+        with open_directory(self.root / package) as directory:
+            return tuple(f"{package}/{name}" for name in os.listdir(directory) if fnmatchcase(name, pattern))
+
+    def is_file(self, name: str) -> bool:
+        path = self._address(name)
+        try:
+            with open_directory(path.parent) as directory, open_regular_file(directory, path.name):
+                return True
+        except FileNotFoundError:
+            return False
 
 
 def processing_runtime(value: JsonValue) -> JsonValue:
@@ -209,12 +266,31 @@ def processing_versions(stage: str, read_source: Callable[[str], bytes]) -> dict
     return versions
 
 
-def stage_versions(stage: str) -> dict[str, str]:
-    root = Path(__file__).parent.parent
-    versions = processing_versions(stage, lambda name: (root / name).read_bytes())
+def capture_implementation(source: ImplementationSource = ImplementationSource()) -> ImplementationIdentity:
+    from codebench_pipeline.dataset_branches import DECLARED_SOURCE_STAGES, stage_branch
+    from codebench_pipeline.dataset_dependencies import preparation_stages
+    from codebench_pipeline.dataset_engine import review_policy_versions, scoped_code_versions
+
+    return ImplementationIdentity(
+        publication=source.publication_versions(),
+        stages={
+            stage: scoped_code_versions(
+                stage,
+                source,
+                stage_branch(stage) if stage.rsplit("/", 1)[-1] in DECLARED_SOURCE_STAGES else None,
+            )
+            for stage in preparation_stages()
+            if stage != "category_rules"
+        },
+        review_policy=review_policy_versions(source),
+    )
+
+
+def stage_versions(stage: str, source: ImplementationSource = ImplementationSource()) -> dict[str, str]:
+    versions = processing_versions(stage, source.read)
     for name in ("dataset_engine.py", "stage_implementation.py"):
         filename = f"codebench_pipeline/{name}"
-        versions[filename] = hashlib.sha256((root / filename).read_bytes()).hexdigest()
+        versions[filename] = source.digest(filename)
     return versions
 
 
@@ -230,8 +306,5 @@ def verify_processing(
             raise IntegrityError(f"Legacy implementation receipt changed: {name}")
         return payload
 
-    root = Path(__file__).parent.parent
-    if processing_versions(stage, retained) != processing_versions(
-        stage, lambda name: (root / name).read_bytes()
-    ):
+    if processing_versions(stage, retained) != processing_versions(stage, ImplementationSource().read):
         raise ProcessingChanged("Legacy processing implementation differs from current processing")

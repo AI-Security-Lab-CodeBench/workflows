@@ -10,20 +10,19 @@ from pathlib import Path
 from unittest.mock import patch
 
 from business_fixture import write_business
-from configuration_fixture import write_fixture
 from pydantic import ValidationError
 from test_dataset_annotation import config, documentation
-from test_dataset_bundle import write_bundle
-from test_dataset_rules import make_candidate, make_label, make_rules
+from test_dataset_bundle import write_declared_bundle
+from test_dataset_rules import make_candidate, make_label
 
 from codebench_pipeline.business_config import load_business_rules
 from codebench_pipeline.category_rules import CategoryRules, CategoryRulesConfig
 from codebench_pipeline.dataset_annotation import annotate, request
-from codebench_pipeline.dataset_bundle import DatasetBundleConfig
 from codebench_pipeline.dataset_cli import main
 from codebench_pipeline.dataset_config import DatasetBuildSpec, load_build_config
 from codebench_pipeline.dataset_registry import DatasetRegistry
-from scripts.category_config import load_labeling_prompt, load_taxonomy
+from codebench_pipeline.storage import fingerprint
+from scripts.category_config import load_script_policy, load_taxonomy
 
 
 class BusinessConfigurationTests(unittest.TestCase):
@@ -136,40 +135,45 @@ class BusinessConfigurationTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             load_business_rules(self.path)
 
-    def test_dataset_requires_exactly_one_inline_or_business_rules_source(self) -> None:
-        original = json.loads(write_bundle(self.root).read_text())
-        finalization = original["finalization"]
-        for changed in (
-            {**finalization, "business_config": str(self.path)},
-            {**finalization, "rules": None},
-        ):
-            with self.subTest(changed=changed), self.assertRaises(ValidationError):
-                DatasetBundleConfig.model_validate({**original, "finalization": changed})
-        finalization.pop("rules")
-        finalization["business_config"] = self.path.relative_to(self.root).as_posix()
-        file = write_bundle(self.root, finalization=finalization)
-        expected = load_business_rules(self.path)
+    def test_dataset_resolves_only_the_category_owned_rules(self) -> None:
+        file = write_declared_bundle(self.root / "declared")
+        original = json.loads(file.read_bytes())
+        for field, value in (("rules", {}), ("business_config", str(self.path)), ("rules", None)):
+            with self.subTest(field=field, value=value), self.assertRaises(ValidationError):
+                file.write_text(json.dumps({**original, field: value}), encoding="utf-8")
+                load_build_config(file, self.root)
+        file.write_text(json.dumps(original), encoding="utf-8")
+        category = file.parent.parent / "categories" / "cat3" / "category.json"
+        expected = load_business_rules(category)
         spec = load_build_config(file, self.root)
         registry = DatasetRegistry(self.root)
         registry.register(spec)
-        self.path.unlink()
+        category.unlink()
         self.assertEqual(registry.get(spec.dataset_id).rules, expected)
 
-    def test_cli_binding_and_live_refresh_preserve_runtime_settings_and_historical_snapshot(self) -> None:
-        original = load_build_config(write_fixture(self.root), self.root)
-        original = original.model_copy(update={"rules": make_rules()})
+    def test_cli_reregistration_refreshes_rules_and_preserves_runtime_settings_and_history(self) -> None:
+        file = write_declared_bundle(self.root / "declared")
+        original = load_build_config(file, self.root)
         registry = DatasetRegistry(self.root)
         registry.register(original)
+        revision = fingerprint(original.model_dump_json())
+        raw = json.loads(file.read_bytes())
+        for field in ("labeling", "storage"):
+            raw[field] = {"from_registration": True}
+        file.write_text(json.dumps(raw), encoding="utf-8")
+        business = file.parent.parent
+        (business / "labeling/instructions.md").write_text("Edited base instructions.")
+        category = business / "categories/cat3"
+        (category / "instructions.md").write_text("Edited category instructions.")
+        self.assertEqual(registry.get(original.dataset_id), original)
         with (
             patch(
                 "sys.argv",
                 [
                     "dataset_cli",
-                    "bind-business",
-                    "--dataset",
-                    original.dataset_id,
-                    "--business-config",
-                    str(self.path),
+                    "register",
+                    "--config",
+                    str(file),
                     "--home",
                     str(self.root),
                 ],
@@ -177,44 +181,45 @@ class BusinessConfigurationTests(unittest.TestCase):
             redirect_stdout(io.StringIO()),
         ):
             main()
-        bound = registry.get_snapshot(original.dataset_id)
-        self.assertEqual(
-            bound.model_dump(exclude={"rules", "business_config"}),
-            original.model_dump(exclude={"rules", "business_config"}),
-        )
-        persisted = bound.model_dump_json()
-        (self.shared / "instructions.md").write_text("Edited base instructions.")
-        (self.path.parent / "instructions.md").write_text("Edited category instructions.")
         refreshed = registry.get(original.dataset_id)
-        self.assertNotEqual(refreshed.rules, bound.rules)
-        self.assertEqual(refreshed.model_dump(exclude={"rules"}), bound.model_dump(exclude={"rules"}))
-        self.assertEqual(registry.get_snapshot(original.dataset_id).model_dump_json(), persisted)
-        self.path.unlink()
-        self.assertEqual(DatasetBuildSpec.model_validate_json(persisted), bound)
+        self.assertNotEqual(refreshed.rules, original.rules)
+        self.assertEqual(
+            refreshed.model_dump(exclude={"rules", "config_directory"}),
+            original.model_dump(exclude={"rules", "config_directory"}),
+        )
+        assert refreshed.config_directory is not None and original.config_directory is not None
+        self.assertNotEqual(refreshed.config_directory.digest, original.config_directory.digest)
+        self.assertEqual(
+            refreshed.config_directory.read(Path("categories/cat3/instructions.md")),
+            b"Edited category instructions.",
+        )
+        (category / "category.json").unlink()
+        historical = registry.get_snapshot(original.dataset_id, revision=revision)
+        self.assertEqual(historical.model_dump_json(), original.model_dump_json())
+        self.assertEqual(DatasetBuildSpec.model_validate_json(refreshed.model_dump_json()), refreshed)
         with self.assertRaises(FileNotFoundError):
-            registry.get(original.dataset_id)
+            load_build_config(file, self.root)
 
-    def test_failed_binding_keeps_previous_registered_configuration(self) -> None:
-        original = load_build_config(write_fixture(self.root), self.root)
+    def test_failed_reregistration_keeps_previous_registered_configuration(self) -> None:
+        file = write_declared_bundle(self.root / "declared")
+        original = load_build_config(file, self.root)
         registry = DatasetRegistry(self.root)
         registry.register(original)
+        (file.parent.parent / "labeling/instructions.md").write_text(" ")
         with self.assertRaises(ValueError):
-            registry.bind_business(original.dataset_id, self.path)
+            registry.register(load_build_config(file, self.root))
         self.assertEqual(registry.get_snapshot(original.dataset_id), original)
 
-    def test_binding_preserves_source_configuration_without_opening_collection_manifests(self) -> None:
-        original = load_build_config(write_fixture(self.root), self.root)
-        original = original.model_copy(
-            update={
-                "rules": make_rules(),
-                "catalog": original.catalog.model_copy(update={"manifest": str(self.root / "missing.jsonl")}),
-            }
-        )
+    def test_registry_preserves_source_configuration_without_opening_collection_declarations(self) -> None:
+        file = write_declared_bundle(self.root / "declared")
+        original = load_build_config(file, self.root)
         registry = DatasetRegistry(self.root)
         registry.register(original)
-        bound = registry.bind_business(original.dataset_id, self.path)
-        self.assertEqual(bound.catalog, original.catalog)
-        self.assertEqual(bound.snapshots, original.snapshots)
+        category = file.parent.parent / "categories/cat3"
+        (category / "collection/existing-datasets.json").unlink()
+        (category / "collection/documentation-crawl.json").unlink()
+        (category / "keenable/declaration.json").unlink()
+        self.assertEqual(registry.get(original.dataset_id).declared_collection, original.declared_collection)
 
     def test_standalone_taxonomy_follows_dataset_reference_without_collection_inputs(self) -> None:
         dataset = self.root / "dataset.json"
@@ -227,6 +232,6 @@ class BusinessConfigurationTests(unittest.TestCase):
             )
         )
         self.assertEqual(load_taxonomy(dataset).risk_ids, ("CAT-8.1", "CAT-8.2"))
-        prompt = load_labeling_prompt(["probe inspect example"], dataset)
+        prompt = load_script_policy(dataset).render_prompt(["probe inspect example"])
         examples = json.loads(prompt.rsplit("\n\n", 1)[1])["examples"]
         self.assertEqual([family["risk_id"] for family in examples], ["CAT-8.1"])

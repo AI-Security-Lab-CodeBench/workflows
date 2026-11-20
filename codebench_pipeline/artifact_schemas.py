@@ -1,4 +1,4 @@
-from typing import Annotated, Literal, get_args, get_origin, get_type_hints
+from typing import Annotated, Literal, TypeAliasType, get_args, get_origin, get_type_hints
 
 import pandera.pandas as pa
 import pyarrow as arrow
@@ -33,8 +33,13 @@ def declared_artifact_schemas(definitions: Definitions) -> dict[tuple[str, ...],
         if not isinstance(node, OpDefinition) or not isinstance(node.compute_fn, DecoratedOpFunction):
             continue
         annotation = get_type_hints(node.compute_fn.decorated_fn).get("return")
-        while get_origin(annotation) in (Annotated, Output):
-            annotation = get_args(annotation)[0]
+        while True:
+            if isinstance(annotation, TypeAliasType):
+                annotation = annotation.__value__
+            elif get_origin(annotation) in (Annotated, Output):
+                annotation = get_args(annotation)[0]
+            else:
+                break
         if get_origin(annotation) is DataFrame:
             annotation = get_args(annotation)[0]
         key = tuple(next(iter(asset.keys)).path)

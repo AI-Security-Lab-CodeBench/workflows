@@ -1,9 +1,26 @@
 # Batched documentation-grounded labeling
 
-The shared `labeling_attempts` asset accounts for every filter-eligible command.
-Successful outcomes feed `proposed_annotations`; unsupported or malformed outcomes
-feed `labeling_failures`. Similarity is a scheduling decision, never deduplication
-or evidence that two commands have the same effects.
+The current declared pipeline requires a guarded OpenAI-compatible labeler.
+Configure `labeling.batch` in the declared template or inherit the existing
+labeling settings with `labeling.from_registration`. The batch settings pin
+the backend revision and share a capacity state directory accessible by all
+workers calling that endpoint. Batch size, context, model turns and evidence
+requests are bounded.
+
+`labeling_attempts` checks operation evidence against the verified captures
+from collection. Missing evidence does not trigger another remote crawl.
+Supported outcomes feed `proposed_annotations`; unsupported outcomes feed
+`labeling_failures`; quota deferrals are reported separately. Batch membership
+does not decide a peer's label or invalidate an otherwise reusable row.
+See [the stage guide](pipeline-stages.md#datasetslabeling_attempts) for the
+current admission and inspection contract.
+
+## Historical enhanced labeling and evaluation
+
+The configuration, provider retrieval and evaluator instructions below
+describe the older prepared-input labeling workflow. Use them to interpret
+historical receipts or reproduce the standalone evaluation context; they are
+not settings or acquisition instructions for current CAT-3 registration.
 
 ## Configuration
 
@@ -80,11 +97,12 @@ after the tool budget becomes `labeling_failures`, without fabricated labels.
 
 ## Reuse and interruption
 
-Successful rows are checkpointed before subsequent model turns. Adding, reordering
-or regrouping neighboring commands does not change their logical row identities.
-Original receipts and document manifests survive reuse. Failed-row retries do not
-repeat valid peers. Retrieved evidence is immutable; refresh/retry generations
-participate in whole-stage planning and release currentness.
+Checkpoints protect work lost to interruption. A retry of the same labeling
+materialization can skip completed batches and must retry the failed batch as
+a unit. If a change to the sources, inputs, or I/O contract requires a new
+materialization, label the entire input again, including unchanged rows. Keep
+the old receipts for inspection; they do not supply results for the new run.
+Human review uses its own per-record decision identity.
 
 The admission guard permits at most one owned in-flight request and conservatively
 reserves a complete configured context window. It checks request slots, token

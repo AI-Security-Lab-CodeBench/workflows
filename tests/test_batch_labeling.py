@@ -774,23 +774,31 @@ class BatchLabelingTests(unittest.TestCase):
             raw_response = next((root / "run").glob("batches/*/turn-00/raw_response.json"))
             self.assertEqual(json.loads(raw_response.read_text()), envelope)
 
-    def test_capacity_pause_after_partial_submission_preserves_completed_peer(self) -> None:
-        calls = 0
+    def test_capacity_pause_replays_only_the_failed_conversation(self) -> None:
+        requests: list[tuple[str, ...]] = []
 
-        def provider(base_url, body, key, timeout, config, out):
-            nonlocal calls
-            calls += 1
-            if calls == 2:
-                raise CapacityUnavailable("side load")
+        def provider(
+            _base_url: str,
+            body: bytes,
+            _key: str | None,
+            _timeout: float,
+            _config: CapacityConfig,
+            _out: Path,
+        ) -> HTTPResponse:
             records = json.loads(json.loads(body)["messages"][1]["content"])["records"]
+            requests.append(tuple(row["candidate"]["candidate_id"] for row in records))
+            if len(requests) == 3:
+                raise CapacityUnavailable("side load")
+            if len(requests) == 2:
+                records = records[:1]
             return tool_reply(
-                "submit_labels",
-                {"outcomes": [submitted(records[0], records[0]["evidence_ids"])]},
+                "submit_labels", {"outcomes": [submitted(row, row["evidence_ids"]) for row in records]}
             )
 
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            candidates = [make_candidate("one"), make_candidate("two")]
+            candidates = [make_candidate(identity) for identity in ("a", "b", "c", "d")]
+            config = batch_config(root).model_copy(update={"batch_size": 2})
             with patch("codebench_pipeline.batch_labeling.guarded_complete", side_effect=provider):
                 with self.assertRaises(CapacityUnavailable):
                     annotate_batches(
@@ -798,21 +806,28 @@ class BatchLabelingTests(unittest.TestCase):
                         documentation(),
                         make_rules(),
                         remote_model(),
-                        batch_config(root),
+                        config,
                         root / "paused",
                         cache=root / "cache",
                     )
-                original = next((root / "paused" / "label").glob("*/receipt.json")).read_bytes()
+                original = {
+                    path.parent.name: path.read_bytes()
+                    for path in (root / "paused" / "label").glob("*/receipt.json")
+                    if json.loads(path.read_text())["candidate_id"] in {"a", "b"}
+                }
                 resumed = annotate_batches(
                     candidates,
                     documentation(),
                     make_rules(),
                     remote_model(),
-                    batch_config(root),
+                    config,
                     root / "resumed",
                     cache=root / "cache",
                 )
-            self.assertEqual([row.status for row in resumed], ["success", "success"])
-            self.assertEqual(calls, 3)
-            receipts = [path.read_bytes() for path in (root / "resumed" / "label").glob("*/receipt.json")]
-            self.assertIn(original, receipts)
+            self.assertEqual([row.status for row in resumed], ["success"] * 4)
+            self.assertEqual(requests, [("a", "b"), ("c", "d"), ("c", "d"), ("c", "d")])
+            self.assertEqual(len(original), 2)
+            for row_dir, receipt in original.items():
+                self.assertEqual(
+                    (root / "resumed" / "label" / row_dir / "receipt.json").read_bytes(), receipt
+                )

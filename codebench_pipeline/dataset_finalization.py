@@ -1,28 +1,24 @@
 import json
 import re
-from pathlib import Path
 
 from dagster import (
-    AssetExecutionContext,
+    AssetKey,
     AssetsDefinition,
     Output,
-    ResourceParam,
     asset,
 )
 from pandera.typing import DataFrame
-from pydantic import JsonValue
+from pydantic import JsonValue, TypeAdapter
 
 from codebench_pipeline.category_eligibility import category_eligible_annotations as filter_category
 from codebench_pipeline.category_rules import CategoryRules
-from codebench_pipeline.collection_config import CollectionMergeConfig
 from codebench_pipeline.config_assets import (
     RegisteredConfig,
     mapped_input,
     registered_input,
     require_registered_rules,
 )
-from codebench_pipeline.data_views import DatasetDataService
-from codebench_pipeline.dataframe_io import DataFrameIOManager, frame_bytes
+from codebench_pipeline.dataframe_io import frame_bytes
 from codebench_pipeline.dataframe_schemas import (
     CommandCandidatesTable,
     ProposedAnnotationsTable,
@@ -30,7 +26,7 @@ from codebench_pipeline.dataframe_schemas import (
     frame_records,
     validated_frame,
 )
-from codebench_pipeline.dataset_asset_types import DATASET_PARTITIONS, TABLE_TYPES, rules_input, table_input
+from codebench_pipeline.dataset_asset_types import DATASET_PARTITIONS, TABLE_TYPES, table_input
 from codebench_pipeline.dataset_branches import Branch
 from codebench_pipeline.dataset_collection_binding import (
     FINALIZATION_BINDING,
@@ -38,18 +34,13 @@ from codebench_pipeline.dataset_collection_binding import (
     available_candidates,
     finalization_binding,
 )
-from codebench_pipeline.dataset_config import PublicationConfig
-from codebench_pipeline.dataset_engine import cached_table
+from codebench_pipeline.dataset_dependencies import preparation_stages
 from codebench_pipeline.dataset_tables import review_queue
-from codebench_pipeline.human_review import HumanReviewError
+from codebench_pipeline.finalization_table_asset import FinalizationTable, finalization_table_assets
 from codebench_pipeline.object_store import sha256
 from codebench_pipeline.repository_config import DEFAULT_SOURCE_WEIGHTS, SourceWeight
-from codebench_pipeline.review_preparation import prepare_review_queue
-from codebench_pipeline.stage_configuration import (
-    ReviewQueueConfig,
-    require_mapped_config,
-)
-from codebench_pipeline.typed_config import TypedConfig
+from codebench_pipeline.stage_configuration import ReviewQueueConfig
+from codebench_pipeline.storage import IntegrityError
 
 __all__ = [
     "FINALIZATION_BINDING",
@@ -59,7 +50,6 @@ __all__ = [
     "finalization_assets",
     "finalization_binding",
     "merge_candidates",
-    "merge_output",
     "normalized_command",
 ]
 
@@ -147,145 +137,28 @@ def deduplicate_annotations(
     return result
 
 
-def merge_output(
-    context: AssetExecutionContext,
-    inputs: dict[Branch, DataFrame[CommandCandidatesTable]],
-    storage: DataFrameIOManager,
-    settings: TypedConfig,
-) -> Output[DataFrame[CommandCandidatesTable]]:
-    if storage.review_home is None:
-        raise HumanReviewError("pending", "Finalization requires a registered dataset")
-    home = Path(storage.review_home)
-    binding = finalization_binding(home, DatasetDataService(home, context.instance), context.partition_key)
-    if set(binding) != set(inputs):
-        raise HumanReviewError("stale", "Merge does not contain the registered collection branches")
-    for branch, frame in inputs.items():
-        expected = (
-            {"state": frame.attrs["branch_state"]}
-            if "branch_state" in frame.attrs
-            else {"state": "configured", "digest": sha256(frame_bytes(frame))}
-        )
-        if binding[branch] != expected:
-            raise HumanReviewError("stale", "Merge inputs differ from current authorized branches")
-        if "keenable" in inputs and expected["state"] != "configured":
-            raise HumanReviewError(
-                "pending", "Declared collection merge requires current outputs from all three branches"
-            )
+def deduplicated_annotations(proposed_annotations: DataFrame[ProposedAnnotationsTable]) -> FinalizationTable:
+    frame = deduplicate_annotations(proposed_annotations)
+    return FinalizationTable(frame, TypeAdapter(JsonValue).validate_python(frame.attrs["duplicates"]))
 
-    def compute(evidence: Path) -> DataFrame[CommandCandidatesTable]:
-        merged = merge_candidates(
-            inputs["dataset"],
-            inputs["documentation"],
-            inputs.get("keenable"),
-            keenable_source_weight=(
-                settings.keenable_source_weight
-                if isinstance(settings, CollectionMergeConfig)
-                else DEFAULT_SOURCE_WEIGHTS["keenable"]
-            ),
-        )
-        merged.attrs[FINALIZATION_BINDING] = binding
-        return merged
 
-    return cached_table(
-        context,
-        storage,
-        settings,
-        {f"{branch}_candidates": frame for branch, frame in inputs.items()},
-        CommandCandidatesTable,
-        compute,
+def category_eligible_annotations(
+    deduplicated_annotations: DataFrame[ProposedAnnotationsTable], category_rules: CategoryRules
+) -> FinalizationTable:
+    frame = filter_category(deduplicated_annotations, category_rules)
+    return FinalizationTable(
+        frame, TypeAdapter(JsonValue).validate_python(frame.attrs["category_exclusions"])
     )
 
 
-def finalization_assets(*, declared: bool = False) -> list[AssetsDefinition]:
-    @asset(
-        key_prefix=["datasets"],
-        group_name="dataset_building",
-        partitions_def=DATASET_PARTITIONS,
-        io_manager_key="dataset_io_manager",
-        dagster_type=TABLE_TYPES[CommandCandidatesTable],
-        ins={
-            "dataset_candidates": table_input("command_candidates", CommandCandidatesTable),
-            "documentation_candidates": table_input(
-                "command_candidates", CommandCandidatesTable, "documentation"
-            ),
-        },
+def review_evidence_keys(*excluded: str) -> tuple[AssetKey, ...]:
+    return tuple(
+        AssetKey(["datasets", *stage.split("/")]) for stage in preparation_stages() if stage not in excluded
     )
-    def merged_command_candidates(
-        context: AssetExecutionContext,
-        dataset_candidates: DataFrame[CommandCandidatesTable],
-        documentation_candidates: DataFrame[CommandCandidatesTable],
-        dataset_io_manager: ResourceParam[DataFrameIOManager],
-    ) -> Output[DataFrame[CommandCandidatesTable]]:
-        return merge_output(
-            context,
-            {"dataset": dataset_candidates, "documentation": documentation_candidates},
-            dataset_io_manager,
-            TypedConfig(),
-        )
 
-    @asset(
-        key_prefix=["datasets"],
-        group_name="dataset_building",
-        partitions_def=DATASET_PARTITIONS,
-        io_manager_key="dataset_io_manager",
-        dagster_type=TABLE_TYPES[ProposedAnnotationsTable],
-        ins={"proposed_annotations": table_input("proposed_annotations", ProposedAnnotationsTable)},
-    )
-    def deduplicated_annotations(
-        context: AssetExecutionContext,
-        proposed_annotations: DataFrame[ProposedAnnotationsTable],
-        dataset_io_manager: ResourceParam[DataFrameIOManager],
-    ) -> Output[DataFrame[ProposedAnnotationsTable]]:
-        def compute(evidence: Path) -> DataFrame[ProposedAnnotationsTable]:
-            frame = deduplicate_annotations(proposed_annotations)
-            (evidence / "duplicates.json").write_text(json.dumps(frame.attrs["duplicates"]), encoding="utf-8")
-            return frame
 
-        return cached_table(
-            context,
-            dataset_io_manager,
-            TypedConfig(),
-            {"annotations": proposed_annotations},
-            ProposedAnnotationsTable,
-            compute,
-        )
-
-    @asset(
-        key_prefix=["datasets"],
-        group_name="dataset_building",
-        partitions_def=DATASET_PARTITIONS,
-        io_manager_key="dataset_io_manager",
-        dagster_type=TABLE_TYPES[ProposedAnnotationsTable],
-        ins={
-            "deduplicated_annotations": table_input("deduplicated_annotations", ProposedAnnotationsTable),
-            "category_rules": rules_input(),
-            "registered": registered_input(),
-        },
-    )
-    def category_eligible_annotations(
-        context: AssetExecutionContext,
-        deduplicated_annotations: DataFrame[ProposedAnnotationsTable],
-        category_rules: CategoryRules,
-        registered: RegisteredConfig,
-        dataset_io_manager: ResourceParam[DataFrameIOManager],
-    ) -> Output[DataFrame[ProposedAnnotationsTable]]:
-        require_registered_rules(registered, category_rules)
-
-        def compute(evidence: Path) -> DataFrame[ProposedAnnotationsTable]:
-            frame = filter_category(deduplicated_annotations, category_rules)
-            (evidence / "category-exclusions.json").write_text(
-                json.dumps(frame.attrs["category_exclusions"]), encoding="utf-8"
-            )
-            return frame
-
-        return cached_table(
-            context,
-            dataset_io_manager,
-            TypedConfig(),
-            {"annotations": deduplicated_annotations, "category_rules": category_rules},
-            ProposedAnnotationsTable,
-            compute,
-        )
+def finalization_assets() -> list[AssetsDefinition]:
+    from codebench_pipeline.collection_merge import collection_merge_asset
 
     @asset(
         key_prefix=["datasets"],
@@ -293,46 +166,34 @@ def finalization_assets(*, declared: bool = False) -> list[AssetsDefinition]:
         partitions_def=DATASET_PARTITIONS,
         io_manager_key="dataset_io_manager",
         dagster_type=TABLE_TYPES[ReviewQueueTable],
+        config_schema={},
+        deps=review_evidence_keys("human_review_queue", "category_eligible_annotations"),
         ins={
             "category_eligible_annotations": table_input(
                 "category_eligible_annotations", ProposedAnnotationsTable
             ),
             "mapped_config": mapped_input("human_review_queue", ReviewQueueConfig),
+            "registered": registered_input(),
         },
     )
     def human_review_queue(
-        context: AssetExecutionContext,
-        config: PublicationConfig,
         category_eligible_annotations: DataFrame[ProposedAnnotationsTable],
         mapped_config: ReviewQueueConfig,
-        dataset_io_manager: ResourceParam[DataFrameIOManager],
+        registered: RegisteredConfig,
     ) -> Output[DataFrame[ReviewQueueTable]]:
-        settings = require_mapped_config(context.asset_key, config, mapped_config.human_review_queue)
-        category_rules = mapped_config.category_rules
-        result = cached_table(
-            context,
-            dataset_io_manager,
-            settings,
-            {"annotations": category_eligible_annotations, "category_rules": category_rules},
-            ReviewQueueTable,
-            lambda evidence: review_queue(
-                category_eligible_annotations, category_rules, settings.review_columns
-            ),
-        )
+        require_registered_rules(registered, mapped_config.category_rules)
+        settings = mapped_config.human_review_queue
+        if settings != registered.scopes.human_review_queue.human_review_queue:
+            raise IntegrityError("Review settings differ from the registered configuration")
         return Output(
-            prepare_review_queue(context, dataset_io_manager, result.value),
-            data_version=result.data_version,
-            metadata=result.metadata,
+            review_queue(
+                category_eligible_annotations, mapped_config.category_rules, settings.review_columns
+            ),
+            metadata={"review_input_digest": sha256(frame_bytes(category_eligible_annotations))},
         )
 
-    merge_asset = merged_command_candidates
-    if declared:
-        from codebench_pipeline.collection_merge import collection_merge_asset
-
-        merge_asset = collection_merge_asset()
     return [
-        merge_asset,
-        deduplicated_annotations,
-        category_eligible_annotations,
+        collection_merge_asset(),
+        *finalization_table_assets(deduplicated_annotations, category_eligible_annotations),
         human_review_queue,
     ]

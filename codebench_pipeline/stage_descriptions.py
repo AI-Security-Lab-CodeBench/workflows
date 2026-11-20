@@ -41,97 +41,6 @@ and the selected category's membership rules, routing, defaults and examples.
 Inspect its `rules` metadata rather than a row sample.
 Patterns route candidates but never assign safety labels.
 """,
-    "source_catalog": """
-**How it works:** A source manifest prepared outside the pipeline becomes a structured
-inventory of the declared corpus files, their formats and their provenance and reuse
-evidence. The catalog preserves the source settings needed for retrieval, so acquisition
-can follow the inspected inventory rather than rediscovering sources or asking a model
-to choose them.
-
-**Input:** Category scope and the source manifest prepared by the local agent.
-
-**Goal:** Validate the declared dataset/corpus inventory for acquisition.
-
-**Why:** Provenance, command relevance and reuse eligibility must be considered before extraction.
-Relevant benign counterexamples are included; danger is not an exclusion reason.
-
-**Output:** `SourceCatalogTable` with source URLs, licensing, revisions, samples and decision reasons.
-Only eligible declared sources proceed. Invalid provenance or manifest data fails validation.
-Source discovery, README/license assessment and scope enumeration happen outside Dagster.
-Inspect the retained manifest and local preparation inventory; no selector model is invoked.
-""",
-    "source_documents": """
-**How it works:** Each eligible catalog entry is loaded from its declared local or remote
-location and checked against its pinned integrity and content limits. The complete text
-is stored with a content hash and source attribution, giving extraction a reproducible
-copy of the source rather than a search snippet. A failed check stops acquisition instead
-of quietly substituting different bytes.
-
-**Input:** The eligible source catalog and snapshot settings.
-
-**Goal:** Capture the complete source text and its actual byte hash.
-
-**Why:** Extraction must use full source bodies, not search snippets or bounded selection samples.
-
-**Output:** `SourceDocumentsTable` with inert `content`, SHA-256 and source attribution.
-Hash mismatches, oversized bodies, invalid UTF-8 or detected sensitive content fail acquisition.
-Excluded sources remain in the catalog. UI samples truncate long cells; persisted text is complete.
-Every output is bound to its current inventory; changed evidence makes dependent materializations stale.
-Original documentation has a separately bound acquisition branch. Neither branch waits for human admission.
-""",
-    "human_source_decisions": """
-**How it works:** This historical stage converted a completed source-selection review
-into a version-bound table of human decisions, which formerly controlled acquisition.
-It is no longer part of the active pipeline: current collection follows eligible
-manifests directly. Old decisions remain evidence of past reviews, not permission
-to acquire or publish current data.
-
-**Input:** The discovered/inspected source catalog and a completed Source selection review.
-
-**Goal:** Materialize the exact source choices before any source is used downstream.
-
-**Why:** An agent's relevance/license assessment does not mean a human picked that source.
-
-**Output:** Version-bound `HumanReviewDecisionsTable` over source IDs. Only approved, eligible
-catalog rows proceed to source_documents. Manual materialization uses the same ledger gate.
-Retraction invalidates descendants; completing a revised selection continues the pipeline.
-""",
-    "document_adapters": """
-**How it works:** Each captured document is paired with its declared format and the fields
-that contain command text and context. This creates a decoding plan for extraction rather
-than guessing the document's structure with a model. When a source needs custom conversion,
-the manifest names a reviewed, hash-pinned Python transformation; downloaded content itself
-is never treated as executable code.
-
-**Input:** Full source documents and their manifest-declared format mappings.
-
-**Goal:** Bind each document to its declared format and command/context fields.
-
-**Why:** Markdown, text and structured datasets require different decoding before extraction.
-
-**Output:** `DocumentAdaptersTable`: source ID, format, text field, context field and rationale.
-Mappings are declarative; optional reviewed Python batch transformations are explicitly trusted
-and pinned by module hash in the manifest. Extraction checks actual field and output types.
-Invalid mappings fail; no adapter model is invoked.
-""",
-    "command_candidates": """
-**How it works:** Extraction follows each document's decoding plan, using the declared
-fields or a trusted batch transformation to collect commands with their surrounding
-context. Each candidate gets an identity derived from its source, position and command,
-while transformation markers retain how it was obtained. The result is a broad, traceable
-candidate table; command text is not executed or assigned a safety label here.
-
-**Input:** Source documents, per-document adapters and the surrounding-context window.
-
-**Goal:** Extract broad command candidates while retaining their original evidence.
-
-**Why:** Raw extraction must remain auditable before eligibility and safety judgments.
-
-**Output:** `CommandCandidatesTable` with command, utility, context, source URL/position,
-transformation markers and stable candidate identity. Distinct source records remain distinct.
-Declared decoders or trusted hash-pinned batch transformations preserve original positions.
-Invalid transformation hashes or canonical outputs fail extraction. Collected strings remain inert.
-""",
     "filtered_commands": """
 **How it works:** Each candidate is matched against the category's command-family patterns,
 then checked for oversized text, unresolved placeholders, opaque shell constructs and
@@ -148,43 +57,6 @@ whether an eligible command is safe.
 **Output:** `FilteredCommandsTable`, retaining every candidate and adding risk routing,
 `filter_decision` and `filter_reason`. Filtering does not assign safety labels.
 Quarantined records remain here, not in the downstream human-review queue.
-""",
-    "labeling_documentation": """
-**How it works:** Prepared semantic references are loaded and validated into a documentation
-table, with a receipt comparing their coverage against the eligible command operations.
-Missing coverage stays visible as a gap rather than being filled with invented evidence.
-The labeler uses these offline references to reason about command behavior; this stage
-does not search for sources or label commands.
-
-**Input:** Eligible filtered commands, category rules and the prepared semantic-reference manifest.
-
-**Goal:** Expose the behavior, flags and version limits used to support judgments.
-
-**Why:** Command names alone do not establish their effects or safety.
-
-**Output:** `DocumentationTable` with utility, subcommands, source URL, retrieval time, snippet and limits.
-References are prepared outside Dagster and used offline. Invalid reference records or byte limits
-fail validation. Receipts retain operation-level gaps rather than inventing evidence.
-Semantic use does not authorize corpus redistribution. Only the single labeling pass uses this table.
-""",
-    "labeling_attempts": """
-**How it works:** Eligible commands first reuse validated record-level results. Enhanced
-labeling groups the remaining commands by vector similarity and lets a bounded model
-conversation either submit independent labels or request shared Keenable/Context7
-documentation. Each outcome is checked against its original command, routing and evidence.
-Unsupported or invalid outcomes are retained as failures, never filled with guessed labels.
-The native baseline mode retains its isolated single-command invocation behavior.
-
-**Input:** Eligible filtered candidates, documentation, category rules and labeler settings.
-
-**Goal:** Account for every eligible command with a supported label or inspectable failure.
-
-**Why:** Similar commands can share retrieval without sharing judgments or losing provenance.
-
-**Output:** `LabelingAttemptsTable`, with exactly one success or failure per eligible candidate,
-original evidence, document hashes and invocation references. Enhanced remote calls require
-fresh metrics and a shared 50% slot/token admission guard. Capacity waiting does not become a
-labeling failure. Corrupt coverage or changed upstream bindings fail materialization.
 """,
     "proposed_annotations": """
 **How it works:** The current labeling-attempt table is validated, and only successful
@@ -211,27 +83,6 @@ Inspect these rows to distinguish exhausted documentation grounding from invalid
 **Output:** `LabelingFailuresTable`; these rows are excluded from deduplication, review
 admission and release. An empty failure table is valid. Malformed failure records fail
 validation; capacity pauses remain execution state, not failed command judgments.
-""",
-    "merged_command_candidates": """
-**How it works:** Current candidates from the two independent collection branches are
-combined into one table. Candidate and source identifiers are prefixed with their branch,
-and an origins map preserves the original identities, preventing collisions without
-losing provenance. Branch-state bindings distinguish an unconfigured source from one
-still waiting; shared processing requires every configured branch to be ready.
-
-**Input:** Current raw command candidates from authorized collection branches.
-
-**Goal:** Combine authorized Existing datasets and Documentation crawl records into one category table.
-
-**Why:** Collection is independent, but filtering, semantic documentation and labeling
-must run once on the combined candidate table before deduplication and release.
-
-**Output:** `CommandCandidatesTable` with branch-qualified candidate and source IDs,
-an origins map preserving original identities, branch metadata and current input bindings.
-Unconfigured branches are distinct from configured branches with empty, waiting, failed or stale outputs.
-Only current authorized inputs are accepted; historical or unauthorized outputs cannot substitute for them.
-Only the merge may expose partial waiting inputs; shared processing and publication
-require all configured branches to be current and complete.
 """,
     "deduplicated_annotations": """
 **How it works:** Commands containing only a restricted set of plain characters have
@@ -335,7 +186,7 @@ A supported needs_review label always requires explicit human resolution.
 **Output:** `ReviewQueueTable` with original candidate/label fields and `exclusion_reason`.
 Machine-eligible records have an empty reason; caps are applied only after human exclusions.
 This queue precedes human_review_decisions and release. Low-uncertainty rows remain visible in
-category_eligible_annotations and need no human decisions. Source exclusions stay in source_catalog,
+category_eligible_annotations and need no human decisions. Source exclusions stay in collection evidence,
 filtered candidates stay in filtered_commands, and inference failures stay in observations/receipts.
 Machine-rejected or unsupported rows remain ineligible. No row here implies human sign-off.
 After computing or loading the cached queue, this same asset prepares durable PostgreSQL review
@@ -355,64 +206,20 @@ class DescribedAsset(Protocol):
     def replace_attributes(self, *, description: str, group_name: str) -> AssetSpec: ...
 
 
-def describe_stage(spec: DescribedAsset, *, declared: bool = False) -> AssetSpec:
+def describe_stage(spec: DescribedAsset) -> AssetSpec:
     stage = spec.key.path[-1]
-    if declared:
-        qualified = "/".join(spec.key.path[1:])
-        if qualified in DECLARED_COLLECTION_DESCRIPTIONS:
-            group = BRANCH_BY_NAMESPACE[asset_branch(spec.key.path)].group
-            return spec.replace_attributes(
-                description=f"**How it works:** {DECLARED_COLLECTION_DESCRIPTIONS[qualified]}",
-                group_name=group,
-            )
-        if stage in FINALIZATION_DESCRIPTIONS:
-            return spec.replace_attributes(
-                description=f"**How it works:** {FINALIZATION_DESCRIPTIONS[stage]}",
-                group_name=FINALIZATION_GROUPS[stage],
-            )
-    description = DESCRIPTIONS[stage].strip()
-    group_name = "existing_datasets"
-    if stage == "category_rules":
-        group_name = "dataset_configuration"
-    elif len(spec.key.path) == 2 and stage in FINALIZATION_GROUPS:
-        group_name = FINALIZATION_GROUPS[stage]
-    if len(spec.key.path) == 3 and spec.key.path[1] == "documentation":
-        group_name = "documentation_crawl"
-        if stage == "source_catalog":
-            description = """
-**How it works:** The separately prepared documentation manifest becomes an inventory
-of original documentation sources, retaining their declared formats, provenance and
-reuse evidence. Source-kind checks reject dataset and agent-training corpora from this
-branch. Its inventory is independent of the dataset catalog, so later acquisition uses
-only the documentation sources actually declared here.
-
-**Input:** The original-documentation manifest prepared by the local agent and category scope.
-**Goal:** Validate the declared documentation inventory independently of corpus collection.
-**Why:** Documentation and corpus inputs remain separate and retain their original provenance.
-**Output:** SourceCatalogTable with declared source identity, format, provenance and reuse evidence.
-Only eligible original documentation proceeds; invalid metadata fails validation.
-Agent/SFT corpora cannot enter this branch. Discovery and license assessment occur outside Dagster;
-no selector model, human source decision or synthetic approval is created.
-""".strip()
-        elif stage == "source_documents":
-            description = """
-**How it works:** Each eligible entry in the documentation catalog is retrieved and
-checked against its own pinned content and size limits. The complete documentation text
-is saved with hashes and source attribution for extraction. Its input binding belongs
-to this branch alone, so a change to the dataset inventory cannot authorize different
-documentation or invalidate an otherwise unchanged documentation input.
-
-**Input:** The selected documentation catalog and its own snapshot configuration.
-**Goal:** Persist the exact inspected documentation bodies for command extraction.
-**Why:** Documentation processing must use its own inspected inventory rather than corpus sources.
-**Output:** SourceDocumentsTable bound to the documentation inventory and content hashes.
-Selected, eligible documentation only; changed bytes, sensitive text and oversized sources fail.
-This is a processing binding, not a human review token. Dataset inventory changes cannot authorize
-or invalidate these independent documentation inputs.
-""".strip()
-        else:
-            description = (
-                description + "\n\nDocumentation branch: uses only its own inspected-source binding "
-                "and preparation. The dataset inventory is not an input."
-            )
-    return spec.replace_attributes(description=description, group_name=group_name)
+    qualified = "/".join(spec.key.path[1:])
+    if qualified in DECLARED_COLLECTION_DESCRIPTIONS:
+        return spec.replace_attributes(
+            description=f"**How it works:** {DECLARED_COLLECTION_DESCRIPTIONS[qualified]}",
+            group_name=BRANCH_BY_NAMESPACE[asset_branch(spec.key.path)].group,
+        )
+    if stage in FINALIZATION_DESCRIPTIONS:
+        return spec.replace_attributes(
+            description=f"**How it works:** {FINALIZATION_DESCRIPTIONS[stage]}",
+            group_name=FINALIZATION_GROUPS[stage],
+        )
+    return spec.replace_attributes(
+        description=DESCRIPTIONS[stage].strip(),
+        group_name="configuration" if stage == "category_rules" else FINALIZATION_GROUPS[stage],
+    )

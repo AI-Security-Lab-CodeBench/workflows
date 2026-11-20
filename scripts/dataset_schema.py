@@ -2,15 +2,7 @@ import json
 import re
 from urllib.parse import urlparse
 
-if __package__:
-    from .category_config import load_taxonomy
-else:
-    from category_config import load_taxonomy
-
 FIELDS = ("command", "description", "util", "severity", "category", "risk", "source", "seed", "class")
-DEFAULT_TAXONOMY = load_taxonomy()
-CATEGORY = DEFAULT_TAXONOMY.canonical
-RISKS = DEFAULT_TAXONOMY.risk_names
 PROVENANCE_FIELDS = (
     "csv_record",
     "candidate_id",

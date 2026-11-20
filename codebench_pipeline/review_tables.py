@@ -2,6 +2,7 @@ import json
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Literal
 
 import pandas as pd
 from pydantic import Field, JsonValue, TypeAdapter
@@ -9,8 +10,9 @@ from pydantic import Field, JsonValue, TypeAdapter
 from codebench_pipeline.dataframe_io import frame_bytes
 from codebench_pipeline.dataframe_schemas import frame_records
 from codebench_pipeline.human_review import HumanReviewError, ReviewModel, ReviewSnapshot
-from codebench_pipeline.object_store import ObjectStore, StorageConfig, sha256
+from codebench_pipeline.object_store import ObjectStore, sha256
 from codebench_pipeline.review_api_models import EvidenceResponse
+from codebench_pipeline.review_artifacts import read_review_artifact, write_review_artifact
 from codebench_pipeline.review_identity import review_identity
 from codebench_pipeline.review_stages import ReviewInput, ReviewStage
 from codebench_pipeline.storage import IntegrityError
@@ -34,6 +36,7 @@ class ReviewTable:
 
 
 class TableReviewManifest(ReviewModel):
+    version: Literal[1, 2] = 1
     dataset_id: str
     review_stage: str
     id_column: str
@@ -57,28 +60,36 @@ class TableReviewManifest(ReviewModel):
 class TableReviewSource:
     """Adapt an authoritative table reader without imposing dataset-label columns."""
 
-    def __init__(self, home: Path, stage: ReviewStage, resolve: Callable[[str], ReviewTable]) -> None:
+    def __init__(
+        self,
+        home: Path,
+        stage: ReviewStage,
+        resolve: Callable[[str], ReviewTable],
+        store: ObjectStore,
+    ) -> None:
+        self.home = home
         self.stage = stage
         self.resolve = resolve
-        self.store = ObjectStore(
-            StorageConfig(local_root=str(home.resolve() / "human-review"), prefix="table-snapshots")
-        )
+        self.store = store
 
     def current(self, dataset_id: str) -> ReviewInput:
         table = self.resolve(dataset_id)
         if table.membership.offset or table.membership.sort:
-            raise HumanReviewError("conflict", "Preparation membership accepts search and filters, not paging or sort")
+            raise HumanReviewError(
+                "conflict", "Preparation membership accepts search and filters, not paging or sort"
+            )
         selected: list[int] = []
         query = table.membership.model_copy(update={"offset": 0, "limit": 200})
         query_table(table.frame.iloc[:0], query)
         for start in range(0, len(table.frame), 200):
-            page = query_table(table.frame.iloc[start:start + 200], query)
+            page = query_table(table.frame.iloc[start : start + 200], query)
             selected.extend(start + row.row_index for row in page.rows)
         frame = table.frame.iloc[selected].copy()
         ids = TypeAdapter(list[str]).validate_python(frame[table.id_column].tolist(), strict=True)
         eligible = set(table.eligible_ids)
         eligible_ids = tuple(identifier for identifier in ids if identifier in eligible)
         manifest = TableReviewManifest(
+            version=2,
             dataset_id=dataset_id,
             artifact_id=table.artifact_id,
             scope_id=table.scope_id,
@@ -111,6 +122,7 @@ class TableReviewSource:
             partition_key=table.partition_key,
             review_stage=self.stage.stage_id,
             snapshot_id=sha256(payload),
+            artifact_storage=self.store.config,
             candidate_ids=tuple(ids),
             eligible_candidate_ids=eligible_ids,
             min_approvals=self.stage.min_approvals,
@@ -118,22 +130,31 @@ class TableReviewSource:
             record_fingerprints=manifest.record_fingerprints,
             review_columns=self.stage.review_columns,
         )
-        self.store.write(f"{snapshot.snapshot_id}.json", payload)
+        write_review_artifact("table-snapshots", payload, self.store)
         return ReviewInput(
-            snapshot, frame, table.id_column, validation=table.validation,
+            snapshot,
+            frame,
+            table.id_column,
+            validation=table.validation,
             evidence=table.evidence,
             column_schema=table.column_schema,
         )
 
     def evidence(self, snapshot: ReviewSnapshot, candidate_id: str) -> EvidenceResponse:
-        payload = self.store.read(f"{snapshot.snapshot_id}.json")
-        if sha256(payload) != snapshot.snapshot_id:
-            raise IntegrityError("Review table manifest digest mismatch")
+        storage = snapshot.artifact_storage
+        if storage is not None and storage != self.store.config:
+            raise IntegrityError("Review table evidence differs from its storage binding")
+        payload = read_review_artifact(
+            self.home, "table-snapshots", snapshot.snapshot_id, self.store if storage is not None else None
+        )
         manifest = TableReviewManifest.model_validate_json(payload)
-        if (
-            manifest.dataset_id, manifest.review_stage, manifest.artifact_id, manifest.scope_id
-        ) != (
-            snapshot.dataset_id, snapshot.review_stage, snapshot.artifact_id, snapshot.scope_id
+        if manifest.version != (1 if storage is None else 2):
+            raise IntegrityError("Review table manifest differs from its storage binding")
+        if (manifest.dataset_id, manifest.review_stage, manifest.artifact_id, manifest.scope_id) != (
+            snapshot.dataset_id,
+            snapshot.review_stage,
+            snapshot.artifact_id,
+            snapshot.scope_id,
         ):
             raise HumanReviewError("conflict", "Review table evidence has a different scope")
         for row in manifest.rows:

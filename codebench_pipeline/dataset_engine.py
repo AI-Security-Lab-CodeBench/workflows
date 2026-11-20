@@ -1,101 +1,165 @@
 import hashlib
 import json
 import uuid
-from collections.abc import Callable, Collection, Mapping
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import TypeVar
+from typing import Protocol, TypeVar
 
 import pandas as pd
 import pandera.pandas as pa
-from dagster import AssetExecutionContext, AssetObservation, Config, DataVersion, MetadataValue, Output
+from dagster import (
+    AssetExecutionContext,
+    AssetObservation,
+    Config,
+    DagsterInstance,
+    DataVersion,
+    JsonMetadataValue,
+    MetadataValue,
+    Output,
+)
 from pandera.typing import DataFrame
-from pydantic import JsonValue, TypeAdapter
+from pydantic import JsonValue, RootModel, TypeAdapter
 
 from codebench_pipeline.category_rules import CategoryRules
 from codebench_pipeline.collection_config import DeclaredSourceStageConfig
-from codebench_pipeline.dataframe_io import AssetSnapshot, DataFrameIOManager, frame_bytes
-from codebench_pipeline.dataset_branches import asset_branch, stage_name
+from codebench_pipeline.dataframe_io import AssetReference, AssetSnapshot, DataFrameIOManager, frame_bytes
+from codebench_pipeline.dataset_branches import Branch, asset_branch, stage_name
 from codebench_pipeline.dataset_catalog import source_scope
-from codebench_pipeline.dataset_config import CatalogConfig, DocumentationConfig, SnapshotConfig
-from codebench_pipeline.source_transforms import transformation_bytes
-from codebench_pipeline.stage_implementation import STAGE_ROOTS, stage_versions, verify_processing
-from codebench_pipeline.storage import IntegrityError, digest, fingerprint
+from codebench_pipeline.stage_configuration import DeclaredGlobalConfig
+from codebench_pipeline.stage_implementation import (
+    STAGE_ROOTS,
+    ImplementationSource,
+    processing_versions,
+    stage_versions,
+    verify_processing,
+)
+from codebench_pipeline.storage import IntegrityError, fingerprint
 
 Schema = TypeVar("Schema", bound=pa.DataFrameModel)
 
 
-def code_versions(stage: str | None = None) -> dict[str, str]:
+@dataclass(frozen=True, slots=True)
+class ReusedTable[TableSchema: pa.DataFrameModel]:
+    table: DataFrame[TableSchema]
+    signature: str
+    evidence: dict[str, JsonValue]
+    reference: AssetReference
+
+
+class TableMetadataSink(Protocol):
+    def add_output_metadata(self, metadata: Mapping[str, bool | str | JsonMetadataValue]) -> None: ...
+
+
+def record_table_output_metadata(
+    output: TableMetadataSink, metadata: dict[str, bool | str | JsonMetadataValue]
+) -> None:
+    output.add_output_metadata(metadata)
+
+
+def code_versions(
+    stage: str | None = None, *, source: ImplementationSource = ImplementationSource()
+) -> dict[str, str]:
     if stage is not None and stage in STAGE_ROOTS:
-        return stage_versions(stage)
-    package = Path(__file__).parent
-    paths = [
-        *package.glob("dataset_*.py"),
-        *package.glob("dataframe_*.py"),
-        *package.glob("source_*.py"),
-        *package.glob("repository*.py"),
-        *package.glob("keenable*.py"),
-        *package.glob("grounding*.py"),
-        *package.glob("guarded_publication*.py"),
-        package / "collection_config.py",
-        package / "collection_descriptions.py",
-        package / "collection_merge.py",
-        package / "declared_dataset_bundle.py",
-        package / "declared_source_assets.py",
-        *package.glob("discovery*.py"),
-        package / "annotation_cache.py",
-        package / "publication_authorization.py",
-        package / "review_policy.py",
-        package / "documentation_authorization.py",
-        package / "typed_config.py",
-        package / "category_rules.py",
-        package / "category_eligibility.py",
-        package / "label_corrections.py",
-        package / "stage_implementation.py",
-        package / "stage_cache_compatibility.py",
-        package / "business_config.py",
-        package / "model_config.py",
-        package / "inference.py",
-        package / "models.py",
-        package / "storage.py",
-        package / "object_store.py",
-        package / "agent_events.py",
-        package / "agents.py",
-        *package.glob("*transport.py"),
-        package.parent / "scripts/dataset_schema.py",
-        package.parent / "pyproject.toml",
-        package.parent / "uv.lock",
-    ]
-    return {str(path.relative_to(package.parent)): digest(path) for path in paths if path.is_file()}
+        return stage_versions(stage, source)
+    patterns = (
+        "dataset_*.py",
+        "dataframe_*.py",
+        "source_*.py",
+        "repository*.py",
+        "keenable*.py",
+        "grounding*.py",
+        "guarded_publication*.py",
+        "collection_config.py",
+        "collection_descriptions.py",
+        "collection_merge.py",
+        "declared_dataset_bundle.py",
+        "declared_source_assets.py",
+        "discovery*.py",
+        "annotation_cache.py",
+        "publication_authorization.py",
+        "review_policy.py",
+        "documentation_authorization.py",
+        "typed_config.py",
+        "category_rules.py",
+        "category_eligibility.py",
+        "label_corrections.py",
+        "stage_implementation.py",
+        "business_config.py",
+        "model_config.py",
+        "inference.py",
+        "models.py",
+        "storage.py",
+        "object_store.py",
+        "agent_events.py",
+        "*transport.py",
+    )
+    paths = (
+        *(name for pattern in patterns for name in source.package_matches(pattern)),
+        "scripts/dataset_schema.py",
+        "pyproject.toml",
+        "uv.lock",
+    )
+    return {name: source.digest(name) for name in paths if source.is_file(name)}
 
 
-def receipt_source_versions(scoped: Mapping[str, str]) -> dict[str, str]:
+def receipt_source_versions(
+    scoped: Mapping[str, str],
+    *,
+    source: ImplementationSource = ImplementationSource(),
+    include_legacy_inventory: bool = True,
+) -> dict[str, str]:
     """Capture whole source files for every scoped implementation dependency."""
-    root = Path(__file__).parent.parent
-    versions = code_versions()
+    versions = code_versions(source=source) if include_legacy_inventory else {}
     for name in {entry.split(":", 1)[0] for entry in scoped} - versions.keys():
-        versions[name] = digest(root / name)
+        versions[name] = source.digest(name)
     return versions
 
 
 def stage_signature(
-    stage: str, config: Config, inputs: Mapping[str, pd.DataFrame | CategoryRules | AssetSnapshot]
+    stage: str,
+    config: Config,
+    inputs: Mapping[str, pd.DataFrame | CategoryRules | AssetSnapshot],
+    *,
+    source: ImplementationSource = ImplementationSource(),
+    storage_identity: str | None = None,
 ) -> str:
     """Fingerprint inputs; snapshots must be unmodified, integrity-verified storage reads."""
-    return implementation_signature(stage, config, inputs, stage_code_versions(stage, config, inputs.keys()))
+    return implementation_signature(
+        stage,
+        config,
+        inputs,
+        stage_code_versions(stage, config, source),
+        review_policy=review_policy_versions(source) if stage == "human_review_queue" else None,
+        storage_identity=storage_identity,
+    )
 
 
-def stage_code_versions(stage: str, config: Config, inputs: Collection[str]) -> dict[str, str]:
-    if stage == "labeling_attempts" and "commands" in inputs and "documentation" not in inputs:
-        versions = code_versions("guarded_labeling_attempts")
-    else:
-        versions = code_versions(stage)
-    if isinstance(config, DeclaredSourceStageConfig):
-        package = Path(__file__).parent
-        pattern = "keenable*" if config.branch == "keenable" else "repository*"
-        for path in (*package.glob(f"{pattern}.py"), package / "declared_source_assets.py"):
-            versions[f"codebench_pipeline/{path.name}"] = digest(path)
+def stage_code_versions(stage: str, config: Config, source: ImplementationSource) -> dict[str, str]:
+    return scoped_code_versions(
+        stage, source, config.branch if isinstance(config, DeclaredSourceStageConfig) else None
+    )
+
+
+def scoped_code_versions(stage: str, source: ImplementationSource, branch: Branch | None) -> dict[str, str]:
+    scope = stage if branch is None else stage_name(stage.rsplit("/", 1)[-1], branch)
+    versions = code_versions(scope, source=source)
+    if branch is not None or stage == "labeling_attempts":
+        for module in ("dataframe_io", "dataframe_schemas", "dataset_storage_io", "object_store", "storage"):
+            filename = f"codebench_pipeline/{module}.py"
+            versions[filename] = source.digest(filename)
+    if stage in {"deduplicated_annotations", "category_eligible_annotations"}:
+        for module in ("finalization_table_asset", "finalization_table_io"):
+            filename = f"codebench_pipeline/{module}.py"
+            versions[filename] = source.digest(filename)
     return versions
+
+
+def review_policy_versions(source: ImplementationSource) -> dict[str, str]:
+    from codebench_pipeline.review_snapshots import REVIEW_POLICY_FILES
+
+    return {name: source.digest(f"codebench_pipeline/{name}") for name in REVIEW_POLICY_FILES}
 
 
 def implementation_signature(
@@ -103,6 +167,9 @@ def implementation_signature(
     config: Config,
     inputs: Mapping[str, pd.DataFrame | CategoryRules | AssetSnapshot],
     implementation: Mapping[str, str],
+    *,
+    review_policy: Mapping[str, str] | None = None,
+    storage_identity: str | None = None,
 ) -> str:
     values: dict[str, JsonValue] = {
         "configuration": (
@@ -112,12 +179,12 @@ def implementation_signature(
         ),
         "implementation": dict(implementation),
     }
-    if stage in {"human_review_queue", "automatic_dataset_release"}:
-        from codebench_pipeline.review_snapshots import REVIEW_POLICY_FILES
-
-        values["publication_policy"] = {
-            name: digest(Path(__file__).parent / name) for name in REVIEW_POLICY_FILES
-        }
+    if stage == "labeling_attempts" and storage_identity is not None:
+        values["output_io"] = fingerprint(storage_identity)
+    if stage == "human_review_queue":
+        if review_policy is None:
+            raise IntegrityError("Review policy implementation is not bound to the stage signature")
+        values["publication_policy"] = {name: digest for name, digest in review_policy.items()}
     for name, value in inputs.items():
         if isinstance(value, AssetSnapshot):
             if isinstance(value.value, CategoryRules):
@@ -126,7 +193,7 @@ def implementation_signature(
                 values[name] = value.reference.digest
                 continue
         if isinstance(value, CategoryRules):
-            if stage == "source_catalog" or isinstance(config, DeclaredSourceStageConfig):
+            if isinstance(config, DeclaredSourceStageConfig):
                 values[name] = source_scope(value)
             elif stage == "filtered_commands":
                 values[name] = {
@@ -139,28 +206,6 @@ def implementation_signature(
                 values[name] = value.model_dump_json()
         else:
             values[name] = hashlib.sha256(frame_bytes(value)).hexdigest()
-    if isinstance(config, (CatalogConfig, SnapshotConfig)):
-        transforms = {
-            (source.transform.module_path, source.transform.sha256): source.transform
-            for source in config.documents
-            if source.transform is not None
-        }
-        values["transformation_code"] = {
-            f"{path}:{expected}": hashlib.sha256(transformation_bytes(transform)).hexdigest()
-            for (path, expected), transform in transforms.items()
-        }
-        values["sources"] = {
-            source.source_id: digest(Path(source.local_path))
-            if source.local_path is not None
-            else {
-                "url": source.url,
-                "sha256": source.sha256,
-                "git_blob_sha1": source.git_blob_sha1,
-            }
-            for source in config.documents
-        }
-    if isinstance(config, (CatalogConfig, DocumentationConfig)) and config.manifest is not None:
-        values["manifest_sha256"] = digest(Path(config.manifest))
     return fingerprint(values)
 
 
@@ -173,6 +218,8 @@ def verified_legacy_table(
     inputs: Mapping[str, pd.DataFrame | CategoryRules | AssetSnapshot],
     implementation: Mapping[str, str],
     content_digest: str,
+    check_processing: Callable[[str, Mapping[str, str], Callable[[str], bytes]], None] = verify_processing,
+    receipt_implementation: Mapping[str, str] | None = None,
 ) -> pd.DataFrame:
     """Read an equivalent legacy cache without computing or publishing authorization."""
     if stage not in STAGE_ROOTS:
@@ -181,12 +228,16 @@ def verified_legacy_table(
     if key.rsplit("/", 1)[-1] != signature or key.rsplit("/", 2)[-2] != stage:
         raise IntegrityError("Legacy fingerprint does not match current inputs and configuration")
 
-    verify_processing(stage, implementation, storage.read_evidence)
+    check_processing(
+        stage,
+        implementation if receipt_implementation is None else receipt_implementation,
+        storage.read_evidence,
+    )
     if TypeAdapter(dict[str, JsonValue]).validate_json(storage.read_evidence(f"{key}/evidence-index.json"))[
         "config"
     ] != config.model_dump(mode="json"):
         raise IntegrityError("Legacy evidence configuration differs from current configuration")
-    if TypeAdapter(JsonValue).validate_json(storage.read_evidence(f"{key}/stage-config.json")) != (
+    if RootModel[JsonValue].model_validate_json(storage.read_evidence(f"{key}/stage-config.json")).root != (
         config.model_dump(mode="json")
     ):
         raise IntegrityError("Legacy stage configuration differs from current configuration")
@@ -200,21 +251,19 @@ def verified_legacy_table(
     return frame
 
 
-def cached_table(
-    context: AssetExecutionContext,
+def authorize_table_inputs(
     storage: DataFrameIOManager,
-    config: Config,
+    instance: DagsterInstance,
+    stage: str,
     inputs: Mapping[str, pd.DataFrame | CategoryRules],
-    schema: type[Schema],
-    compute: Callable[[Path], DataFrame[Schema]],
-) -> Output[DataFrame[Schema]]:
+    *,
+    run_id: str,
+    partition: str,
+    registered: DeclaredGlobalConfig | None = None,
+) -> list[pd.DataFrame]:
     from codebench_pipeline.dataset_branches import FINALIZATION_STAGES
     from codebench_pipeline.dataset_finalization import FINALIZATION_BINDING, authorize_finalization_output
-    from codebench_pipeline.documentation_authorization import inventory_binding
-    from codebench_pipeline.source_evidence import retain_source_receipt, validate_source_receipt
-    from codebench_pipeline.source_review_guard import SOURCE_GATED_STAGES, authorize_compute
 
-    stage = context.asset_key.path[-1]
     shared_inputs = [
         value
         for value in inputs.values()
@@ -223,22 +272,146 @@ def cached_table(
     if stage in FINALIZATION_STAGES and stage != "merged_command_candidates":
         if storage.review_home is None or not shared_inputs:
             raise IntegrityError("Shared processing requires current merged collection inputs")
+        guard_config = registered or storage.run_configuration(run_id, partition)
         for value in shared_inputs:
             authorize_finalization_output(
-                Path(storage.review_home), context.instance, context.partition_key, value, complete=True
+                manager=storage,
+                instance=instance,
+                registered=guard_config,
+                frame=value,
+                complete=True,
             )
-    source_token = (
-        authorize_compute(context, storage, inputs)
-        if stage in SOURCE_GATED_STAGES or "source_catalog" in inputs
-        else None
+    return shared_inputs
+
+
+@dataclass(frozen=True, slots=True)
+class TableCache:
+    stage: str
+    key: str
+    signature: str
+    source: ImplementationSource
+    versions: dict[str, str]
+    scoped_versions: dict[str, str]
+    settings_json: str
+    settings: dict[str, JsonValue]
+    current_signature: Callable[[DataFrameIOManager], str]
+
+    def retain_index(
+        self, storage: DataFrameIOManager, index: dict[str, JsonValue], *, attempt: str | None = None
+    ) -> tuple[dict[str, JsonValue], str]:
+        if self.current_signature(storage) != self.signature:
+            raise IntegrityError("Inputs or implementation changed during dataset materialization")
+        payloads = {name: self.source.read(name) for name in self.versions}
+        for name, payload in payloads.items():
+            if hashlib.sha256(payload).hexdigest() != self.versions[name]:
+                raise IntegrityError(f"Implementation snapshot changed: {name}")
+        if self.stage in STAGE_ROOTS and any(
+            self.scoped_versions[name] != version
+            for name, version in processing_versions(self.stage, payloads.__getitem__).items()
+        ):
+            raise IntegrityError("Retained source differs from the scoped processing implementation")
+        for name, payload in payloads.items():
+            storage.write_evidence(f"implementation/{self.versions[name]}/{name}", payload)
+        prefix = self.key if attempt is None else f"{self.key}/{attempt}"
+        storage.write_evidence(f"{prefix}/stage-config.json", self.settings_json.encode())
+        retained: dict[str, JsonValue] = {
+            **index,
+            "config": self.settings,
+            "implementation": dict[str, JsonValue](self.versions),
+            "stage_implementation": dict[str, JsonValue](self.scoped_versions),
+        }
+        payload = json.dumps(retained, ensure_ascii=False).encode()
+        storage.write_evidence(f"{prefix}/evidence-index.json", payload)
+        return retained, hashlib.sha256(payload).hexdigest()
+
+    def retain_attempt(
+        self, storage: DataFrameIOManager, attempt: str, scratch: Path | None
+    ) -> dict[str, JsonValue]:
+        prefix = f"{self.key}/{attempt}"
+        receipts = {} if scratch is None else storage.retain_attempt_evidence(scratch, prefix)
+        storage.write_evidence(f"{prefix}/receipts.json", json.dumps(receipts, ensure_ascii=False).encode())
+        return receipts
+
+    def metadata(
+        self, storage: DataFrameIOManager, schema: type[pa.DataFrameModel], *, hit: bool
+    ) -> dict[str, bool | str | JsonMetadataValue]:
+        index = TypeAdapter(dict[str, JsonValue]).validate_json(
+            storage.read_evidence(f"{self.key}/evidence-index.json")
+        )
+        return self.output_metadata(schema, hit=hit, evidence=index)
+
+    def output_metadata(
+        self, schema: type[pa.DataFrameModel], *, hit: bool, evidence: dict[str, JsonValue]
+    ) -> dict[str, bool | str | JsonMetadataValue]:
+        return {
+            "cache_hit": hit,
+            "input_fingerprint": self.signature,
+            "schema": schema.__name__,
+            "evidence": MetadataValue.json(evidence),
+        }
+
+
+def prepare_table_cache(
+    storage: DataFrameIOManager,
+    stage: str,
+    partition: str,
+    branch: Branch,
+    config: Config,
+    inputs: Mapping[str, pd.DataFrame | CategoryRules | AssetSnapshot],
+) -> TableCache:
+    source = storage.implementation_source
+    scoped = stage_code_versions(stage, config, source)
+    signature = implementation_signature(
+        stage,
+        config,
+        inputs,
+        scoped,
+        review_policy=review_policy_versions(source) if stage == "human_review_queue" else None,
+        storage_identity=storage.storage.model_dump_json(),
     )
-    scoped_versions = stage_code_versions(stage, config, inputs.keys())
-    signature = implementation_signature(stage, config, inputs, scoped_versions)
+    return TableCache(
+        stage_name(stage, branch),
+        f"{partition}/{stage_name(stage, branch)}/{signature}",
+        signature,
+        source,
+        receipt_source_versions(
+            scoped, source=source, include_legacy_inventory=not isinstance(config, DeclaredSourceStageConfig)
+        ),
+        scoped,
+        config.model_dump_json(indent=2),
+        TypeAdapter(dict[str, JsonValue]).validate_python(config.model_dump(mode="json")),
+        lambda storage: storage.stage_signature(stage, config, inputs),
+    )
+
+
+def cached_table(
+    context: AssetExecutionContext,
+    storage: DataFrameIOManager,
+    config: Config,
+    inputs: Mapping[str, pd.DataFrame | CategoryRules],
+    schema: type[Schema],
+    compute: Callable[[Path], DataFrame[Schema]],
+    *,
+    registered: DeclaredGlobalConfig | None = None,
+    reuse_completed: bool = True,
+) -> Output[DataFrame[Schema]]:
+    stage = context.asset_key.path[-1]
+    shared_inputs = authorize_table_inputs(
+        storage,
+        context.instance,
+        stage,
+        inputs,
+        run_id=context.run_id,
+        partition=context.partition_key,
+        registered=registered,
+    )
     branch = asset_branch(context.asset_key.path)
-    key = f"{context.partition_key}/{stage_name(stage, branch)}/{signature}"
-    versions = receipt_source_versions(scoped_versions)
+    cache = prepare_table_cache(storage, stage, context.partition_key, branch, config, inputs)
+    signature = cache.signature
+    retained_index: dict[str, JsonValue] = {}
 
     def build() -> pd.DataFrame:
+        nonlocal retained_index
         attempt = uuid.uuid4().hex
         with TemporaryDirectory(prefix="dataset-inference-") as temporary:
             evidence = Path(temporary)
@@ -246,26 +419,8 @@ def cached_table(
                 frame = schema.validate(compute(evidence))
                 if shared_inputs:
                     frame.attrs = {**shared_inputs[0].attrs, **frame.attrs}
-                if stage == "source_catalog" or (
-                    isinstance(config, DeclaredSourceStageConfig) and "category_rules" in inputs
-                ):
-                    frame.attrs["codebench_source_inventory"] = {
-                        "branch": branch,
-                        "signature": signature,
-                    }
-                if source_token is not None:
-                    frame.attrs[inventory_binding(branch)] = source_token.model_dump(mode="json")
-                if isinstance(config, DeclaredSourceStageConfig):
-                    retain_source_receipt(frame, config, storage)
             finally:
-                receipts: dict[str, JsonValue] = {}
-                for path in sorted(evidence.rglob("*")):
-                    if path.is_file():
-                        name = path.relative_to(evidence).as_posix()
-                        receipts[name] = storage.write_evidence(f"{key}/{attempt}/{name}", path.read_bytes())
-                storage.write_evidence(
-                    f"{key}/{attempt}/receipts.json", json.dumps(receipts, ensure_ascii=False).encode()
-                )
+                receipts = cache.retain_attempt(storage, attempt, evidence)
                 context.log_event(
                     AssetObservation(
                         asset_key=context.asset_key,
@@ -273,44 +428,22 @@ def cached_table(
                         metadata={"inference_attempt": attempt, "receipts": MetadataValue.json(receipts)},
                     )
                 )
-            if stage_signature(stage, config, inputs) != signature:
-                raise IntegrityError("Inputs or implementation changed during dataset materialization")
-            repo = Path(__file__).parent.parent
-            for name, expected in versions.items():
-                payload = (repo / name).read_bytes()
-                if hashlib.sha256(payload).hexdigest() != expected:
-                    raise IntegrityError(f"Implementation snapshot changed: {name}")
-                storage.write_evidence(f"implementation/{expected}/{name}", payload)
-            storage.write_evidence(f"{key}/stage-config.json", config.model_dump_json(indent=2).encode())
-            storage.write_evidence(
-                f"{key}/evidence-index.json",
-                json.dumps(
-                    {
-                        "attempt": attempt,
-                        "receipts": receipts,
-                        "config": config.model_dump(mode="json"),
-                        "implementation": versions,
-                        "stage_implementation": scoped_versions,
-                    },
-                    ensure_ascii=False,
-                ).encode(),
+            retained_index, _ = cache.retain_index(
+                storage,
+                {"attempt": attempt, "receipts": receipts},
+                attempt=None if reuse_completed else attempt,
             )
             return frame
 
-    frame, hit = storage.cached_frame(key, build)
-    if isinstance(config, DeclaredSourceStageConfig):
-        validate_source_receipt(frame, config, storage)
+    if reuse_completed:
+        frame, hit = storage.cached_frame(cache.key, build)
+        metadata = cache.metadata(storage, schema, hit=hit)
+    else:
+        frame = build()
+        metadata = cache.output_metadata(schema, hit=False, evidence=retained_index)
     validated = schema.validate(frame)
-    evidence_index = TypeAdapter(dict[str, JsonValue]).validate_json(
-        storage.read_evidence(f"{key}/evidence-index.json")
-    )
     return Output(
         validated,
         data_version=DataVersion(signature),
-        metadata={
-            "cache_hit": hit,
-            "input_fingerprint": signature,
-            "schema": schema.__name__,
-            "evidence": MetadataValue.json(evidence_index),
-        },
+        metadata=metadata,
     )

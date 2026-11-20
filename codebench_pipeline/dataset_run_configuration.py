@@ -1,72 +1,43 @@
-from pathlib import Path
-
 from dagster import RunConfig
 
-from codebench_pipeline.collection_config import DeclaredSourceStageConfig
 from codebench_pipeline.config_assets import GlobalConfig
-from codebench_pipeline.dataframe_io import DataFrameIOManager
-from codebench_pipeline.dataset_branches import Branch
 from codebench_pipeline.dataset_config import DatasetBuildSpec
-from codebench_pipeline.dataset_dependencies import collection_selection, preparation_stages
+from codebench_pipeline.dataset_storage_io import StorageBinding
 from codebench_pipeline.human_review import CompletionToken
-from codebench_pipeline.review_config import HumanReviewConfig
-from codebench_pipeline.stage_configuration import stage_configs
-from codebench_pipeline.typed_config import TypedConfig
+from codebench_pipeline.storage import IntegrityError
 
 
-def dataset_run_config(
-    spec: DatasetBuildSpec,
-    home: Path,
-    branch: Branch | None = None,
-    *,
-    prepare_only: bool = False,
-    configuration_only: bool = False,
-) -> RunConfig:
-    selection = (
-        preparation_stages(declared=spec.has_declared_collection)
-        if branch is None
-        else collection_selection(branch, declared=spec.has_declared_collection)
-    )
-    if prepare_only:
-        selection = selection[: selection.index("filtered_commands") + 1]
+def dataset_run_config(spec: DatasetBuildSpec) -> RunConfig:
+    if not spec.has_declared_collection:
+        raise IntegrityError("Dataset runs require a declared collection")
+    root = GlobalConfig.for_spec(spec)
     return RunConfig(
-        ops={
-            "datasets__global_config": GlobalConfig.for_spec(spec),
-            **{
-                f"datasets__{name.replace('/', '__')}": config
-                for name, config in (() if configuration_only else stage_configs(spec).items())
-                if name in selection
-                and name != "category_rules"
-                and not (
-                    spec.has_declared_collection
-                    and name in {"labeling_attempts", "merged_command_candidates"}
+        ops={"datasets__global_config": root},
+        resources={
+            "dataset_io_manager": {
+                "config": StorageBinding(registered_revision=root.expected_revision).model_dump(
+                    exclude_none=True
                 )
-                and not isinstance(config, DeclaredSourceStageConfig)
-                and type(config) is not TypedConfig
             },
         },
-        resources={"dataset_io_manager": DataFrameIOManager(storage=spec.storage, review_home=str(home))},
     )
 
 
 def release_run_config(
     spec: DatasetBuildSpec,
-    home: Path,
     token: CompletionToken | None = None,
-    branch: Branch = "dataset",
 ) -> RunConfig:
+    if not spec.has_declared_collection:
+        raise IntegrityError("Dataset release requires a declared collection")
     authorization = token.model_dump_json() if token is not None else ""
+    root = GlobalConfig.for_spec(spec)
     return RunConfig(
-        ops={
-            "datasets__global_config": GlobalConfig.for_spec(spec),
-            **{
-                f"datasets__{name}": HumanReviewConfig(authorization=authorization)
-                for name in ("human_review_decisions", "dataset_release")
-            },
-        },
+        ops={"datasets__global_config": root},
         resources={
-            "dataset_io_manager": DataFrameIOManager(
-                storage=spec.storage, review_home=str(home), review_token=authorization or None
-            )
+            "dataset_io_manager": {
+                "config": StorageBinding(
+                    registered_revision=root.expected_revision, review_token=authorization or None
+                ).model_dump(exclude_none=True)
+            },
         },
     )

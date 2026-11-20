@@ -5,19 +5,20 @@ from time import time
 from unittest import TestCase
 from uuid import uuid4
 
-from configuration_fixture import write_fixture
 from dagster import AssetMaterialization, DagsterEvent, DagsterEventType, DagsterInstance
 from dagster._core.events import StepMaterializationData
 from dagster._core.events.log import EventLogEntry
 from jsonschema import Draft202012Validator
+from pydantic import JsonValue, TypeAdapter
 from starlette.testclient import TestClient
+from test_declared_dataset_graph import fixture_spec
 
 from codebench_pipeline.config_assets import GLOBAL_CONFIG, mapping_key
 from codebench_pipeline.data_api import make_dataset_api
 from codebench_pipeline.data_views import DatasetDataService
-from codebench_pipeline.dataset_config import load_build_config
 from codebench_pipeline.dataset_registry import DatasetRegistry
 from codebench_pipeline.object_store import sha256
+from codebench_pipeline.stage_configuration import FilterConfig
 
 ORIGIN = "http://127.0.0.1:3000"
 
@@ -25,25 +26,25 @@ ORIGIN = "http://127.0.0.1:3000"
 class ConfigArtifactAPITests(TestCase):
     def test_inspector_reads_run_config_for_the_selected_partition(self) -> None:
         home = Path(self.enterContext(TemporaryDirectory()))
-        check_config_inspector(home)
+        check_config_inspector(home, scope="filtered_commands")
 
     def test_inspector_reads_persisted_config_for_a_removed_map(self) -> None:
         home = Path(self.enterContext(TemporaryDirectory()))
         check_config_inspector(home, scope="deduplicated_annotations")
 
 
-def check_config_inspector(tmp_path: Path, *, scope: str = "labeling_documentation") -> None:
-    spec = load_build_config(write_fixture(tmp_path), tmp_path)
+def check_config_inspector(tmp_path: Path, *, scope: str) -> None:
+    spec = fixture_spec(tmp_path)
     registry = DatasetRegistry(tmp_path)
     registry.register(spec)
     registry.register(spec.model_copy(update={"dataset_id": "unmaterialized"}))
     key = mapping_key(scope)
-    expected: dict[str, dict[str, str]] = (
-        {scope: {"revision": "from the materialization"}}
-        if scope == "labeling_documentation"
-        else {scope: {}}
-    )
-    selected = dumps(expected).encode()
+    selected = (
+        FilterConfig(category_rules=spec.rules, filtered_commands=spec.filtering).model_dump_json()
+        if scope == "filtered_commands"
+        else dumps({scope: {}})
+    ).encode()
+    expected = TypeAdapter(dict[str, JsonValue]).validate_json(selected)
 
     with DagsterInstance.ephemeral() as instance:
         for partition, payload in (

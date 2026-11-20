@@ -4,10 +4,10 @@ import shlex
 
 if __package__:
     from .category_config import Taxonomy
-    from .dataset_schema import DEFAULT_TAXONOMY, FIELDS, DatasetError, contains_secret, present
+    from .dataset_schema import FIELDS, DatasetError, contains_secret, present
 else:
     from category_config import Taxonomy
-    from dataset_schema import DEFAULT_TAXONOMY, FIELDS, DatasetError, contains_secret, present
+    from dataset_schema import FIELDS, DatasetError, contains_secret, present
 
 
 def load_jsonl(path):
@@ -38,7 +38,7 @@ def unique_object(pairs):
     return result
 
 
-def load_candidates(root, taxonomy=DEFAULT_TAXONOMY):
+def load_candidates(root, taxonomy: Taxonomy):
     result = []
     for risk in taxonomy.risk_ids:
         path = root / "data/candidates" / risk / "candidates.jsonl"
@@ -60,7 +60,7 @@ def trivial_key(command):
     return tuple(normalized)
 
 
-def validate_rows(rows: list[dict[str, str]], taxonomy: Taxonomy = DEFAULT_TAXONOMY) -> list[str]:
+def validate_rows(rows: list[dict[str, str]], taxonomy: Taxonomy) -> list[str]:
     errors: list[str] = []
     for index, row in enumerate(rows, 1):
         where = f"CSV data record {index}"

@@ -1,32 +1,22 @@
-from collections.abc import Mapping
-from pathlib import Path
 from typing import Final
 
 import pandas as pd
-from dagster import AssetExecutionContext, OutputContext
+from dagster import DagsterInstance, OutputContext
 from pydantic import ValidationError
 
-from codebench_pipeline.category_rules import CategoryRules
-from codebench_pipeline.dataframe_io import DataFrameIOManager
-from codebench_pipeline.dataset_branches import BRANCH_BY_NAMESPACE, asset_branch
-from codebench_pipeline.dataset_registry import DatasetRegistry
+from codebench_pipeline.dataframe_io import AssetSnapshot, DataFrameIOManager
+from codebench_pipeline.dataset_branches import BRANCH_BY_NAMESPACE, Branch, asset_branch
 from codebench_pipeline.documentation_authorization import (
     SourceInventoryAuthorization,
     frame_inventory_authorization,
     inventory_authorization,
+    inventory_materialization,
 )
 from codebench_pipeline.human_review import CompletionToken, HumanReviewError
 from codebench_pipeline.source_evidence import require_source_rights, validate_source_receipt
-from codebench_pipeline.stage_configuration import declared_source_config
+from codebench_pipeline.stage_configuration import DeclaredGlobalConfig
 
 SOURCE_BINDING: Final = "codebench_source_review"
-SOURCE_GATED_STAGES: Final = frozenset(
-    {
-        "source_documents",
-        "document_adapters",
-        "command_candidates",
-    }
-)
 
 
 def frame_authorization(frame: pd.DataFrame, field: str = SOURCE_BINDING) -> CompletionToken:
@@ -38,23 +28,23 @@ def frame_authorization(frame: pd.DataFrame, field: str = SOURCE_BINDING) -> Com
         ) from error
 
 
-def authorize_compute(
-    context: AssetExecutionContext,
+def authorize_inventory_input(
     manager: DataFrameIOManager,
-    inputs: Mapping[str, pd.DataFrame | CategoryRules],
+    instance: DagsterInstance,
+    registered: DeclaredGlobalConfig,
+    branch: Branch,
+    snapshot: AssetSnapshot,
+    *,
+    inventory_input: bool,
 ) -> SourceInventoryAuthorization:
-    if manager.review_home is None:
-        raise HumanReviewError("pending", "A registered source inventory is required")
-    home = Path(manager.review_home)
-    branch = asset_branch(context.asset_key.path)
-    catalog, binding = inventory_authorization(home, context.instance, context.partition_key, branch)
-    for name, value in inputs.items():
-        if isinstance(value, pd.DataFrame):
-            if name == "source_catalog" or "documentation_scope_receipt_json" in catalog.attrs:
-                if not value.equals(catalog) or value.attrs != catalog.attrs:
-                    raise HumanReviewError("stale", "Source catalog differs from the current inventory")
-            elif frame_inventory_authorization(value, branch) != binding:
-                raise HumanReviewError("stale", "Input belongs to an earlier source inventory")
+    binding = inventory_materialization(manager, instance, registered, branch)
+    if not isinstance(snapshot.value, pd.DataFrame):
+        raise HumanReviewError("conflict", "Source input is not a table")
+    if inventory_input:
+        if snapshot.reference.digest != binding.catalog_digest:
+            raise HumanReviewError("stale", "Source catalog differs from the current inventory")
+    elif frame_inventory_authorization(snapshot.value, branch) != binding:
+        raise HumanReviewError("stale", "Input belongs to an earlier source inventory")
     return binding
 
 
@@ -63,22 +53,16 @@ def authorize_output(
     manager: DataFrameIOManager,
     frame: pd.DataFrame,
 ) -> None:
-    if manager.review_home is None:
-        raise HumanReviewError("pending", "A registered source inventory is required")
     branch = asset_branch(context.asset_key.path)
-    home = Path(manager.review_home)
-    spec = DatasetRegistry(home).get_snapshot(context.asset_partition_key)
-    if spec.has_declared_collection:
-        config = declared_source_config(spec, branch)
-        require_source_rights(config)
-        validate_source_receipt(frame, config, manager)
-    root = (
-        BRANCH_BY_NAMESPACE[branch].declared_stages[0] if spec.has_declared_collection else "source_catalog"
-    )
-    if context.asset_key.path[-1] == root:
+    registered = manager.run_configuration(context.run_id, context.asset_partition_key)
+    config = registered.source_config(branch)
+    stages = BRANCH_BY_NAMESPACE[branch].declared_stages
+    if context.asset_key.path[-1] not in stages:
+        raise HumanReviewError("conflict", "Only declared source stages can publish current outputs")
+    require_source_rights(config)
+    validate_source_receipt(frame, config, manager)
+    if context.asset_key.path[-1] == stages[0]:
         return
-    _, binding = inventory_authorization(
-        home, context.step_context.instance, context.asset_partition_key, branch
-    )
+    _, binding = inventory_authorization(manager, context.step_context.instance, registered, branch)
     if frame_inventory_authorization(frame, branch) != binding:
         raise HumanReviewError("stale", "Source inventory changed during computation")

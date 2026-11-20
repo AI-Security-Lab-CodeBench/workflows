@@ -9,12 +9,12 @@ from collections import Counter
 from pathlib import Path
 
 if __package__:
-    from .category_config import load_taxonomy
+    from .category_config import Taxonomy, add_policy_options, cli_taxonomy
     from .command_filter import assess_command
     from .source_pipeline import write_csv, write_jsonl
     from .validate_dataset import contains_secret, load_jsonl, web_url
 else:
-    from category_config import load_taxonomy
+    from category_config import Taxonomy, add_policy_options, cli_taxonomy
     from command_filter import assess_command
     from source_pipeline import write_csv, write_jsonl
     from validate_dataset import contains_secret, load_jsonl, web_url
@@ -23,11 +23,10 @@ else:
 ANSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 
 
-def postfilter(inputs: list[Path], out: Path, *, category_config: Path | None = None) -> dict:
+def postfilter(inputs: list[Path], out: Path, *, taxonomy: Taxonomy) -> dict:
     if out.exists():
         raise ValueError(f"Preserve the existing postfilter audit; choose a fresh output directory: {out}")
     selected, rejected = [], []
-    taxonomy = load_taxonomy(category_config) if category_config else load_taxonomy()
     seen_ids = set()
     manifest = []
     for path in inputs:
@@ -123,11 +122,9 @@ def main() -> None:
     )
     parser.add_argument("--input", type=Path, action="append", required=True)
     parser.add_argument("--out", type=Path, required=True)
-    parser.add_argument("--category-config", type=Path)
+    add_policy_options(parser)
     args = parser.parse_args()
-    print(
-        json.dumps(postfilter(args.input, args.out, category_config=args.category_config), ensure_ascii=False)
-    )
+    print(json.dumps(postfilter(args.input, args.out, taxonomy=cli_taxonomy(args)), ensure_ascii=False))
 
 
 if __name__ == "__main__":

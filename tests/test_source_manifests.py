@@ -1,41 +1,28 @@
 import hashlib
-import io
-import json
 import os
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
-from urllib.error import URLError
 
-from configuration_fixture import write_fixture
+from configuration_fixture import example_config, seed_prepared_snapshot, source_bytes
+from test_dataset_rules import make_candidate
+from test_declared_dataset_graph import fixture_spec
 
-from codebench_pipeline.dataframe_io import frame_bytes, read_frame
-from codebench_pipeline.dataframe_schemas import SourceDocumentsTable
-from codebench_pipeline.dataset_catalog import build_catalog
-from codebench_pipeline.dataset_config import DatasetBuildSpec, SnapshotConfig, load_build_config
-from codebench_pipeline.dataset_documents import document_adapters, snapshot_documents
-from codebench_pipeline.dataset_extract import extract_candidates, filter_candidates
+from codebench_pipeline.dataframe_schemas import CommandCandidatesTable, validated_frame
+from codebench_pipeline.dataset_config import CatalogConfig, DatasetBuildSpec
+from codebench_pipeline.dataset_extract import filter_candidates
 from codebench_pipeline.dataset_registry import DatasetRegistry
-from codebench_pipeline.dataset_seed_config import DocumentationSeed, SourceSeed
 from codebench_pipeline.source_manifests import (
     DocumentationManifest,
     SourceManifest,
     manifest_documentation,
     manifest_sources,
+    resolve_source_paths,
+    validate_transformations,
 )
-from codebench_pipeline.source_retrieval import retrieve_source
 from codebench_pipeline.source_transform_contract import SourceTransformConfig
 from codebench_pipeline.storage import IntegrityError
-
-
-class SourceResponse(io.BytesIO):
-    def __init__(self, url: str, body: bytes) -> None:
-        super().__init__(body)
-        self.url = url
-
-    def geturl(self) -> str:
-        return self.url
 
 
 class SourceManifestTests(unittest.TestCase):
@@ -43,31 +30,29 @@ class SourceManifestTests(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
-        self.config = write_fixture(self.root)
-        self.spec = load_build_config(self.config, self.root)
-        assert self.spec.documentation_catalog is not None
-        self.source = self.spec.documentation_catalog.documents[0]
-
-    def remote(self, body: bytes) -> SourceSeed:
-        return SourceSeed.model_validate(
-            {
-                **self.source.model_dump(),
-                "local_path": None,
-                "sha256": hashlib.sha256(body).hexdigest(),
-            }
-        )
+        fixture = example_config()
+        assert fixture.documentation_sources is not None
+        (self.root / "source.md").write_bytes(source_bytes())
+        self.source = resolve_source_paths(fixture.documentation_sources.documents[0], self.root)
+        self.catalog = CatalogConfig(documents=[self.source])
+        self.documentation = fixture.documentation
+        self.spec = fixture_spec(self.root).model_copy(update={"rules": fixture.rules})
 
     def test_registry_reuses_validation_without_sharing_mutable_values(self) -> None:
         registry = DatasetRegistry(self.root)
-        registry.register(self.spec)
+        archived, revision = seed_prepared_snapshot(
+            self.root,
+            self.spec.model_copy(update={"documentation_catalog": self.catalog}),
+            self.documentation,
+        )
         with patch.object(
             DatasetBuildSpec, "model_validate_json", wraps=DatasetBuildSpec.model_validate_json
         ) as validate:
-            first = registry.get(self.spec.dataset_id)
+            first = registry.get_snapshot(archived.dataset_id, revision=revision)
             first.rules.risks.clear()
             assert first.documentation_catalog is not None
             first.documentation_catalog.documents[0].transformations.append("caller-only")
-            second = DatasetRegistry(self.root).get(self.spec.dataset_id)
+            second = DatasetRegistry(self.root).get_snapshot(archived.dataset_id, revision=revision)
         self.assertEqual(validate.call_count, 1)
         self.assertEqual(second.rules.risks, self.spec.rules.risks)
         assert second.documentation_catalog is not None
@@ -91,7 +76,7 @@ class SourceManifestTests(unittest.TestCase):
             self.assertEqual(manifest_sources(path, "CAT-99")[0].source_id, changed.source_id)
             self.assertEqual(validate.call_count, 2)
 
-    def test_live_registry_does_not_copy_superseded_manifests_but_history_retains_them(self) -> None:
+    def test_historical_registry_does_not_resolve_superseded_manifests(self) -> None:
         sources = self.root / "live-sources.json"
         current_source = self.source.model_copy(update={"source_id": "current-source"})
         sources.write_text(
@@ -100,7 +85,7 @@ class SourceManifestTests(unittest.TestCase):
             ).model_dump_json()
         )
         semantics = self.root / "live-semantics.json"
-        current_snippet = self.spec.documentation.snippets[0].model_copy(
+        current_snippet = self.documentation.snippets[0].model_copy(
             update={"snippet": "Current documented operation."}
         )
         semantics.write_text(
@@ -108,35 +93,30 @@ class SourceManifestTests(unittest.TestCase):
                 category_id="CAT-99", revision="current", snippets=[current_snippet]
             ).model_dump_json()
         )
-        assert self.spec.documentation_catalog is not None
-        stored = self.spec.model_copy(
-            update={
-                "documentation_catalog": self.spec.documentation_catalog.model_copy(
-                    update={"manifest": str(sources)}
-                ),
-                "documentation": self.spec.documentation.model_copy(update={"manifest": str(semantics)}),
-            }
+        stored, revision = seed_prepared_snapshot(
+            self.root,
+            self.spec.model_copy(
+                update={"documentation_catalog": self.catalog.model_copy(update={"manifest": str(sources)})}
+            ),
+            self.documentation.model_copy(update={"manifest": str(semantics)}),
         )
         registry = DatasetRegistry(self.root)
-        registry.register(stored)
-        with (
-            patch.object(SourceSeed, "__deepcopy__", side_effect=AssertionError("Superseded source copied")),
-            patch.object(
-                DocumentationSeed, "__deepcopy__", side_effect=AssertionError("Superseded docs copied")
-            ),
-        ):
-            current = registry.get(stored.dataset_id)
-        assert current.documentation_catalog is not None
-        self.assertEqual(current.documentation_catalog.documents[0].source_id, "current-source")
-        self.assertEqual(current.documentation.snippets[0].snippet, "Current documented operation.")
-        historical = registry.get_snapshot(stored.dataset_id)
+        self.assertEqual(manifest_sources(sources, "CAT-99")[0].source_id, "current-source")
+        self.assertEqual(
+            manifest_documentation(semantics, "CAT-99")[0].snippet, "Current documented operation."
+        )
+        sources.unlink()
+        semantics.unlink()
+        historical = registry.get_snapshot(stored.dataset_id, revision=revision)
         self.assertEqual(historical.documentation_catalog, stored.documentation_catalog)
         self.assertEqual(historical.documentation, stored.documentation)
+        with self.assertRaisesRegex(IntegrityError, "read-only"):
+            registry.get(stored.dataset_id)
 
     def test_documentation_manifest_cache_does_not_share_subcommands(self) -> None:
         path = self.root / "cached-semantics.json"
         manifest = DocumentationManifest(
-            category_id="CAT-99", revision=self.root.name, snippets=self.spec.documentation.snippets
+            category_id="CAT-99", revision=self.root.name, snippets=self.documentation.snippets
         )
         path.write_text(manifest.model_dump_json())
         with patch.object(
@@ -146,7 +126,7 @@ class SourceManifestTests(unittest.TestCase):
             first[0].subcommands.clear()
             second = manifest_documentation(path, "CAT-99")
         self.assertEqual(validate.call_count, 1)
-        self.assertEqual(second[0].subcommands, self.spec.documentation.snippets[0].subcommands)
+        self.assertEqual(second[0].subcommands, self.documentation.snippets[0].subcommands)
         path.write_text(manifest.model_copy(update={"category_id": "CAT-98"}).model_dump_json())
         with self.assertRaises(IntegrityError):
             manifest_documentation(path, "CAT-99")
@@ -173,7 +153,7 @@ class SourceManifestTests(unittest.TestCase):
         self.assertEqual(first[0].local_path, str(original.resolve()))
         self.assertEqual(second[0].local_path, str(alternate.resolve()))
 
-    def test_cached_registry_still_rejects_changed_transformation_bytes(self) -> None:
+    def test_cached_manifest_still_rejects_changed_transformation_bytes_on_validation(self) -> None:
         module = self.root / "trusted.py"
         module.write_text("def transform(rows, context):\n    return []\n")
         transform = SourceTransformConfig(
@@ -182,199 +162,60 @@ class SourceManifestTests(unittest.TestCase):
             entrypoint="transform",
             trusted=True,
         )
-        assert self.spec.documentation_catalog is not None
-        spec = self.spec.model_copy(
-            update={
-                "documentation_catalog": self.spec.documentation_catalog.model_copy(
-                    update={
-                        "documents": [self.source.model_copy(update={"transform": transform})],
-                    }
-                ),
-            }
+        path = self.root / "transformation-sources.json"
+        path.write_text(
+            SourceManifest(
+                category_id="CAT-99",
+                revision="fixture",
+                sources=[self.source.model_copy(update={"transform": transform})],
+            ).model_dump_json()
         )
-        registry = DatasetRegistry(self.root)
-        registry.register(spec)
-        registry.get(spec.dataset_id)
+        validate_transformations(manifest_sources(path, "CAT-99"))
         module.write_text("raise RuntimeError('changed module')\n")
         with self.assertRaises(IntegrityError):
-            registry.get(spec.dataset_id)
-
-    def test_retrieval_keeps_full_body_beyond_inspection_limits_and_reuses_verified_bytes(self) -> None:
-        body = b"# reference\n" + b"ordinary source text\n" * 4000 + b"`git status --show-stash`\n"
-        source = self.remote(body)
-        with patch(
-            "codebench_pipeline.source_retrieval.urlopen",
-            return_value=SourceResponse(source.url, body),
-        ):
-            first = retrieve_source(source, len(body), self.root / "cache", self.root / "receipts")
-        with patch(
-            "codebench_pipeline.source_retrieval.urlopen",
-            side_effect=AssertionError("An unchanged source must not be fetched twice"),
-        ):
-            second = retrieve_source(source, len(body), self.root / "cache", None)
-        self.assertEqual(first.content.encode(), body)
-        self.assertEqual(second.content.encode(), body)
-        self.assertEqual(second.sha256, hashlib.sha256(body).hexdigest())
-        self.assertFalse(first.cache_hit)
-        self.assertTrue(second.cache_hit)
-
-    def test_wrong_hash_and_oversized_sources_never_enter_the_source_cache(self) -> None:
-        body = b"git status\n"
-        for maximum, received in ((len(body), b"git diff\n"), (len(body) - 1, body)):
-            with self.subTest(maximum=maximum, received=received):
-                source = self.remote(body)
-                cache = self.root / str(maximum)
-                with (
-                    patch(
-                        "codebench_pipeline.source_retrieval.urlopen",
-                        return_value=SourceResponse(source.url, received),
-                    ),
-                    self.assertRaises(IntegrityError),
-                ):
-                    retrieve_source(source, maximum, cache, None)
-                self.assertEqual(list(cache.rglob("body")), [])
-
-    def test_transport_recovery_preserves_attempt_evidence_and_verified_body(self) -> None:
-        body = b"git status\n"
-        source = self.remote(body)
-        evidence = self.root / "receipts"
-        with patch(
-            "codebench_pipeline.source_retrieval.urlopen",
-            side_effect=[URLError("temporary DNS failure"), SourceResponse(source.url, body)],
-        ):
-            result = retrieve_source(source, 100, self.root / "cache", evidence)
-        self.assertEqual(result.content.encode(), body)
-        identity = hashlib.sha256(source.source_id.encode()).hexdigest()
-        self.assertEqual(json.loads((evidence / f"{identity}.json").read_text())["download_attempts"], 2)
-        self.assertEqual(
-            json.loads((evidence / f"{identity}.attempt-1.json").read_text())["error_type"], "URLError"
-        )
-
-    def test_transport_recovery_is_bounded_and_never_caches_failed_content(self) -> None:
-        source = self.remote(b"git status\n")
-        with (
-            patch(
-                "codebench_pipeline.source_retrieval.urlopen",
-                side_effect=URLError("unavailable host"),
-            ) as fetch,
-            self.assertRaises(URLError),
-        ):
-            retrieve_source(source, 100, self.root / "cache", self.root / "receipts")
-        self.assertEqual(fetch.call_count, 3)
-        self.assertEqual(list((self.root / "cache").rglob("body")), [])
-        self.assertEqual(len(list((self.root / "receipts").glob("*.json"))), 3)
-
-    def test_git_blob_identity_is_checked_independently_of_sha256(self) -> None:
-        body = b"git status\n"
-        source = SourceSeed.model_validate(
-            {
-                **self.source.model_dump(),
-                "local_path": None,
-                "sha256": None,
-                "git_blob_sha1": hashlib.sha1(b"blob 11\0" + body, usedforsecurity=False).hexdigest(),
-            }
-        )
-        with patch(
-            "codebench_pipeline.source_retrieval.urlopen",
-            return_value=SourceResponse(source.url, body),
-        ):
-            result = retrieve_source(source, 100, None, None)
-        self.assertEqual(result.sha256, hashlib.sha256(body).hexdigest())
-        changed = source.model_copy(update={"git_blob_sha1": "0" * 40})
-        with (
-            patch(
-                "codebench_pipeline.source_retrieval.urlopen",
-                return_value=SourceResponse(source.url, body),
-            ),
-            self.assertRaises(IntegrityError),
-        ):
-            retrieve_source(changed, 100, None, None)
-
-    def test_persisted_source_metadata_preserves_trusted_extraction_and_provenance(self) -> None:
-        module = Path(__file__).resolve().parents[1] / "transforms" / "tldr.py"
-        transform = SourceTransformConfig(
-            module_path=str(module),
-            sha256=hashlib.sha256(module.read_bytes()).hexdigest(),
-            entrypoint="transform",
-            trusted=True,
-        )
-        source = self.source.model_copy(
-            update={"transform": transform, "transformations": ["source_prepared"]}
-        )
-        assert self.spec.documentation_catalog is not None
-        config = self.spec.documentation_catalog.model_copy(update={"documents": [source]})
-        catalog = build_catalog(config, self.spec.rules, self.root, branch="documentation")
-        documents = snapshot_documents(catalog, SnapshotConfig(documents=[source]))
-        restored = SourceDocumentsTable.validate(read_frame(frame_bytes(documents)))
-        self.assertNotIn("source_transformations_json", restored.attrs)
-        adapters = document_adapters(restored, self.spec.adapters, self.root)
-        candidates = extract_candidates(restored, adapters, self.spec.extraction)
-        self.assertEqual(list(candidates["command"]), ["git status", "git status --show-stash"])
-        expected = ["source_prepared", f"trusted_python:{transform.sha256}:transform"]
-        self.assertEqual([markers[:2] for markers in candidates["transformations"]], [expected, expected])
-
-    def test_legacy_snapshot_reads_prior_transformations_without_source_inputs(self) -> None:
-        assert self.spec.documentation_catalog is not None
-        catalog = build_catalog(
-            self.spec.documentation_catalog, self.spec.rules, self.root, branch="documentation"
-        )
-        documents = snapshot_documents(catalog, SnapshotConfig(documents=[self.source]))
-        del documents.attrs["source_inputs_json"]
-        documents.attrs["source_transformations_json"] = json.dumps(
-            {
-                self.source.source_id: ["legacy-source-preparation"],
-            }
-        )
-        adapters = document_adapters(documents, self.spec.adapters, self.root)
-
-        candidates = extract_candidates(documents, adapters, self.spec.extraction)
-
-        self.assertEqual(list(candidates["command"]), ["git status", "git status --show-stash"])
-        self.assertEqual(
-            [markers[0] for markers in candidates["transformations"]], ["legacy-source-preparation"] * 2
-        )
+            validate_transformations(manifest_sources(path, "CAT-99"))
 
     def test_noncommand_tokens_with_trailing_slashes_remain_inspectable_and_are_filtered(self) -> None:
-        body = b"//\nhttps://example.org/reference/\ngit status\n"
-        assert self.source.local_path is not None
-        Path(self.source.local_path).write_bytes(body)
-        source = self.source.model_copy(update={"format": "text", "sha256": hashlib.sha256(body).hexdigest()})
-        assert self.spec.documentation_catalog is not None
-        config = self.spec.documentation_catalog.model_copy(update={"documents": [source]})
-        catalog = build_catalog(config, self.spec.rules, self.root, branch="documentation")
-        documents = snapshot_documents(catalog, SnapshotConfig(documents=[source]))
-        adapters = document_adapters(documents, self.spec.adapters, self.root)
-        candidates = extract_candidates(documents, adapters, self.spec.extraction)
+        commands = [
+            ("//", "//"),
+            ("https://example.org/reference/", "https://example.org/reference/"),
+            ("git status", "git"),
+        ]
+        candidates = validated_frame(
+            [
+                make_candidate(str(index))
+                .model_copy(update={"command": command, "util": utility})
+                .model_dump(mode="json")
+                for index, (command, utility) in enumerate(commands)
+            ],
+            CommandCandidatesTable,
+        )
         filtered = filter_candidates(candidates, self.spec.rules, self.spec.filtering)
-        self.assertEqual(list(filtered["command"]), body.decode().splitlines())
+        self.assertEqual(list(filtered["command"]), [command for command, _ in commands])
         self.assertEqual(list(filtered["util"]), ["//", "https://example.org/reference/", "git"])
         self.assertEqual(
             list(filtered["filter_reason"]),
             ["outside_configured_command_families", "outside_configured_command_families", ""],
         )
 
-    def test_manifest_category_and_paths_are_bound_and_registered_changes_are_resolved(self) -> None:
+    def test_manifest_category_and_paths_are_bound_and_file_changes_are_resolved(self) -> None:
         manifest_path = self.root / "sources.json"
-        manifest = SourceManifest(category_id="CAT-99", revision="first", sources=[self.source])
+        manifest = SourceManifest(
+            category_id="CAT-99",
+            revision="first",
+            sources=[self.source.model_copy(update={"local_path": "source.md"})],
+        )
         manifest_path.write_text(manifest.model_dump_json(), encoding="utf-8")
-        config = json.loads(self.config.read_text())
-        config["models"] = {"labeler": config["models"]["labeler"]}
-        config["documentation_sources"] = {"manifest": str(manifest_path)}
-        self.config.write_text(json.dumps(config), encoding="utf-8")
-        initial = load_build_config(self.config, self.root)
-        DatasetRegistry(self.root).register(initial)
-        changed_source = self.source.model_copy(update={"source_id": "new-source"})
+        self.assertEqual(manifest_sources(manifest_path, "CAT-99"), [self.source])
+        changed_source = manifest.sources[0].model_copy(update={"source_id": "new-source"})
         manifest_path.write_text(
             manifest.model_copy(update={"sources": [changed_source]}).model_dump_json(), encoding="utf-8"
         )
-        current = DatasetRegistry(self.root).get(initial.dataset_id)
-        assert current.documentation_catalog is not None
-        self.assertEqual(
-            [source.source_id for source in current.documentation_catalog.documents], ["new-source"]
-        )
-        self.assertEqual(current.documentation_snapshots.documents, current.documentation_catalog.documents)
+        (current,) = manifest_sources(manifest_path, "CAT-99")
+        self.assertEqual(current.source_id, "new-source")
+        self.assertEqual(current.local_path, str(self.root / "source.md"))
         manifest_path.write_text(
             manifest.model_copy(update={"category_id": "CAT-98"}).model_dump_json(), encoding="utf-8"
         )
         with self.assertRaises(IntegrityError):
-            DatasetRegistry(self.root).get(initial.dataset_id)
+            manifest_sources(manifest_path, "CAT-99")

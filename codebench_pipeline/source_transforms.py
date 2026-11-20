@@ -25,9 +25,13 @@ def transformation_bytes(config: SourceTransformConfig) -> bytes:
     if path.suffix != ".py":
         raise IntegrityError("Trusted transformations must reference a Python source file")
     body = path.read_bytes()
+    verify_transformation(config, body)
+    return body
+
+
+def verify_transformation(config: SourceTransformConfig, body: bytes) -> None:
     if hashlib.sha256(body).hexdigest() != config.sha256:
         raise IntegrityError("Trusted transformation code differs from its manifest hash")
-    return body
 
 
 def source_rows(content: str, format_name: str) -> tuple[SourceRow, ...]:
@@ -54,7 +58,16 @@ def transformed_rows(
     rows: tuple[SourceRow, ...],
     context: TransformContext,
 ) -> Iterator[CanonicalSourceRow]:
-    body = transformation_bytes(config)
+    yield from execute_transformation(config, transformation_bytes(config), rows, context)
+
+
+def execute_transformation(
+    config: SourceTransformConfig,
+    body: bytes,
+    rows: tuple[SourceRow, ...],
+    context: TransformContext,
+) -> Iterator[CanonicalSourceRow]:
+    verify_transformation(config, body)
     name = f"_codebench_trusted_{config.sha256}"
     module = ModuleType(name)
     module.__file__ = config.module_path

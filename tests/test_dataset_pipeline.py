@@ -13,10 +13,10 @@ class DatasetPipelineTests(DatasetFixture):
         for total, expected_deficit in ((0, 250), (249, 1), (250, 0), (251, 0)):
             with self.subTest(total=total):
                 rows = [
-                    dict(template, risk=validator.RISKS[index % len(validator.RISKS)])
+                    dict(template, risk=self.taxonomy.risk_names[index % len(self.taxonomy.risk_names)])
                     for index in range(total)
                 ]
-                report = validator.summary(rows, [])
+                report = validator.summary(rows, [], self.taxonomy)
                 self.assertEqual(report["target"], 250)
                 self.assertEqual(report["records"], total)
                 self.assertEqual(report["deficit"], expected_deficit)
@@ -29,20 +29,20 @@ class DatasetPipelineTests(DatasetFixture):
 
     def test_summary_validity_is_independent_of_target(self):
         rows, provenance = integrator.prepare(self.candidates)
-        errors = validator.validate_bundle(rows, provenance, self.candidates, self.sources, [])
-        report = validator.summary(rows, errors)
+        errors = validator.validate_bundle(rows, provenance, self.candidates, self.sources, [], self.taxonomy)
+        report = validator.summary(rows, errors, self.taxonomy)
         self.assertTrue(report["valid"])
         self.assertEqual(report["deficit"], 248)
         self.assertEqual(report["errors"], [])
 
         errors = ["Fixture schema failure"]
-        report = validator.summary([rows[0]] * 250, errors)
+        report = validator.summary([rows[0]] * 250, errors, self.taxonomy)
         self.assertFalse(report["valid"])
         self.assertEqual(report["deficit"], 0)
         self.assertEqual(report["errors"], errors)
 
     def test_csv_roundtrip_preserves_embedded_newlines_quotes_and_unicode(self):
-        self.candidates[0]["row"]["command"] = 'printf \'первая строка\n"вторая", строка\''
+        self.candidates[0]["row"]["command"] = "printf 'первая строка\n\"вторая\", строка'"
         self.candidates[0]["row"]["description"] = 'Описание, с "кавычками"\r\nи новой строкой'
         rows, provenance = integrator.prepare(self.candidates)
         self.assertEqual(self.errors(), [])
@@ -70,19 +70,27 @@ class DatasetPipelineTests(DatasetFixture):
             with self.subTest(index=index):
                 provenance = copy.deepcopy(original)
                 provenance[0]["csv_record"] = index
-                self.assertTrue(validator.validate_bundle(rows, provenance, self.candidates, self.sources, []))
+                self.assertTrue(
+                    validator.validate_bundle(
+                        rows, provenance, self.candidates, self.sources, [], self.taxonomy
+                    )
+                )
 
     def test_rejects_provenance_for_unknown_candidate(self):
         rows, provenance = integrator.prepare(self.candidates)
         provenance[0]["candidate_id"] = "CAT-3.1-missing"
-        self.assertTrue(validator.validate_bundle(rows, provenance, self.candidates, self.sources, []))
+        self.assertTrue(
+            validator.validate_bundle(rows, provenance, self.candidates, self.sources, [], self.taxonomy)
+        )
 
     def test_accepts_historical_dangling_links_without_resolving_them(self):
         self.candidates[0]["paired_candidate_ids"] = ["CAT-3.1-missing"]
         rows, provenance = integrator.prepare(self.candidates)
         self.assertEqual([item["paired_csv_records"] for item in provenance], [[], []])
         provenance[0]["paired_csv_records"] = [len(rows) + 1]
-        self.assertEqual(validator.validate_bundle(rows, provenance, self.candidates, self.sources, []), [])
+        self.assertEqual(
+            validator.validate_bundle(rows, provenance, self.candidates, self.sources, [], self.taxonomy), []
+        )
 
     def test_accepts_historical_asymmetric_same_role_cross_scenario_links(self):
         self.candidates.extend(self.make_pair("beta"))
@@ -93,7 +101,9 @@ class DatasetPipelineTests(DatasetFixture):
         for item in provenance:
             if item["candidate_id"] == self.candidates[0]["candidate_id"]:
                 item["paired_csv_records"] = [indices[self.candidates[2]["candidate_id"]]]
-        self.assertEqual(validator.validate_bundle(rows, provenance, self.candidates, self.sources, []), [])
+        self.assertEqual(
+            validator.validate_bundle(rows, provenance, self.candidates, self.sources, [], self.taxonomy), []
+        )
 
     def test_accepts_standalone_classes_independently_of_historical_role(self):
         self.candidates = [self.candidates[0]]
@@ -106,8 +116,12 @@ class DatasetPipelineTests(DatasetFixture):
                     self.assertEqual(self.errors(), [])
 
     def test_rejects_invalid_historical_metadata_schema(self):
-        for field, value in (("role", "unknown"), ("paired_candidate_ids", None),
-                             ("paired_candidate_ids", [""]), ("paired_candidate_ids", "CAT-3.1-missing")):
+        for field, value in (
+            ("role", "unknown"),
+            ("paired_candidate_ids", None),
+            ("paired_candidate_ids", [""]),
+            ("paired_candidate_ids", "CAT-3.1-missing"),
+        ):
             with self.subTest(field=field, value=value):
                 candidates = copy.deepcopy(self.candidates)
                 candidates[0][field] = value
@@ -116,16 +130,24 @@ class DatasetPipelineTests(DatasetFixture):
                         integrator.prepare(candidates)
                 else:
                     rows, provenance = integrator.prepare(candidates)
-                    self.assertTrue(validator.validate_bundle(rows, provenance, candidates, self.sources, []))
+                    self.assertTrue(
+                        validator.validate_bundle(
+                            rows, provenance, candidates, self.sources, [], self.taxonomy
+                        )
+                    )
 
     def test_rejects_duplicate_candidate_and_source_identities(self):
         rows, provenance = integrator.prepare(self.candidates)
         candidates = self.candidates + [copy.deepcopy(self.candidates[0])]
         with self.assertRaises(validator.DatasetError):
             integrator.prepare(candidates)
-        self.assertTrue(validator.validate_bundle(rows, provenance, candidates, self.sources, []))
+        self.assertTrue(
+            validator.validate_bundle(rows, provenance, candidates, self.sources, [], self.taxonomy)
+        )
         sources = self.sources + [copy.deepcopy(self.sources[0])]
-        self.assertTrue(validator.validate_bundle(rows, provenance, self.candidates, sources, []))
+        self.assertTrue(
+            validator.validate_bundle(rows, provenance, self.candidates, sources, [], self.taxonomy)
+        )
 
     def test_rejects_duplicate_csv_and_provenance_candidate_identities(self):
         rows, original = integrator.prepare(self.candidates)
@@ -133,21 +155,35 @@ class DatasetPipelineTests(DatasetFixture):
             with self.subTest(field=field):
                 provenance = copy.deepcopy(original)
                 provenance[1][field] = provenance[0][field]
-                self.assertTrue(validator.validate_bundle(rows, provenance, self.candidates, self.sources, []))
+                self.assertTrue(
+                    validator.validate_bundle(
+                        rows, provenance, self.candidates, self.sources, [], self.taxonomy
+                    )
+                )
 
     def test_rejects_provenance_tampering(self):
         rows, original = integrator.prepare(self.candidates)
-        for field, value in (("source_ids", ["other-source"]), ("source_locator", "other locator"),
-                             ("transformations", ["unrecorded change"]),
-                             ("documentation_urls", ["https://example.org/other"]),
-                             ("label_rationale", "Changed rationale"),
-                             ("scenario_id", "other-scenario"), ("role", "unpaired")):
+        for field, value in (
+            ("source_ids", ["other-source"]),
+            ("source_locator", "other locator"),
+            ("transformations", ["unrecorded change"]),
+            ("documentation_urls", ["https://example.org/other"]),
+            ("label_rationale", "Changed rationale"),
+            ("scenario_id", "other-scenario"),
+            ("role", "unpaired"),
+        ):
             with self.subTest(field=field):
                 provenance = copy.deepcopy(original)
                 provenance[0][field] = value
-                self.assertTrue(validator.validate_bundle(rows, provenance, self.candidates, self.sources, []))
+                self.assertTrue(
+                    validator.validate_bundle(
+                        rows, provenance, self.candidates, self.sources, [], self.taxonomy
+                    )
+                )
         rows[0] = dict(rows[0], command="echo tampered")
-        self.assertTrue(validator.validate_bundle(rows, original, self.candidates, self.sources, []))
+        self.assertTrue(
+            validator.validate_bundle(rows, original, self.candidates, self.sources, [], self.taxonomy)
+        )
 
     def test_rejects_unknown_source_and_unpermitted_reuse(self):
         self.candidates[0]["source_ids"] = ["missing-source"]
@@ -207,7 +243,9 @@ class DatasetPipelineTests(DatasetFixture):
         result = self.run_script("integrate_dataset.py")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(validator.read_csv(self.root / "commands.csv"), expected_rows)
-        self.assertEqual(validator.load_jsonl(self.root / "data/processed/provenance.jsonl"), expected_provenance)
+        self.assertEqual(
+            validator.load_jsonl(self.root / "data/processed/provenance.jsonl"), expected_provenance
+        )
         validation = self.run_script("validate_dataset.py")
         self.assertEqual(validation.returncode, 0, validation.stdout + validation.stderr)
 
@@ -225,8 +263,12 @@ class DatasetPipelineTests(DatasetFixture):
 
     def test_integration_preserves_duplicate_command_text_and_near_variants(self):
         self.candidates.extend(self.make_pair("beta"))
-        commands = ("echo example-resource-1", "echo example-resource-1",
-                    "echo example-resource-2", "echo  example-resource-2")
+        commands = (
+            "echo example-resource-1",
+            "echo example-resource-1",
+            "echo example-resource-2",
+            "echo  example-resource-2",
+        )
         for candidate, command in zip(self.candidates, commands):
             candidate["row"]["command"] = command
             candidate["paired_candidate_ids"] = []
@@ -237,7 +279,9 @@ class DatasetPipelineTests(DatasetFixture):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(validator.read_csv(self.root / "commands.csv"), [item["row"] for item in expected])
         provenance = validator.load_jsonl(self.root / "data/processed/provenance.jsonl")
-        self.assertEqual([item["candidate_id"] for item in provenance], [item["candidate_id"] for item in expected])
+        self.assertEqual(
+            [item["candidate_id"] for item in provenance], [item["candidate_id"] for item in expected]
+        )
         self.assertEqual([item["paired_csv_records"] for item in provenance], [[], [], [], []])
         validation = self.run_script("validate_dataset.py")
         self.assertEqual(validation.returncode, 0, validation.stdout + validation.stderr)

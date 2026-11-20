@@ -18,8 +18,10 @@ SLOW_MODULE_SECONDS: Final = {
     "test_guarded_publication": 185,
     "test_guarded_release_views": 142,
     "test_independent_branches": 75,
+    "test_inspector_separation": 214,
     "test_labeling_tables": 67,
     "test_native_config_consumption": 207,
+    "test_review_object_storage": 426,
     "test_review_release": 70,
     "test_source_review": 70,
 }

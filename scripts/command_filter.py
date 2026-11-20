@@ -18,7 +18,6 @@ else:
     import command_families
     from category_config import Taxonomy, load_taxonomy
 
-DEFAULT_TAXONOMY: Final = load_taxonomy()
 WRAPPERS: Final = frozenset("sudo env command time xargs".split())
 SHELL_WORDS: Final = frozenset(
     "echo printf cd cat true false bash sh eval exec sg if then for while do done fi "
@@ -116,7 +115,7 @@ def _risks(tokens: list[str], taxonomy: Taxonomy) -> tuple[str, ...]:
     return taxonomy.matching_shell(utility, args)
 
 
-def classify_command(command: str, taxonomy: Taxonomy = DEFAULT_TAXONOMY) -> tuple[str, ...]:
+def classify_command(command: str, taxonomy: Taxonomy) -> tuple[str, ...]:
     """Return sorted family candidates, never allow/deny/ask or severity labels."""
     parts, _, _, _ = _shell(command)
     risks: set[str] = set()
@@ -128,7 +127,7 @@ def classify_command(command: str, taxonomy: Taxonomy = DEFAULT_TAXONOMY) -> tup
     return tuple(sorted(risks))
 
 
-def assess_command(command: str, taxonomy: Taxonomy = DEFAULT_TAXONOMY) -> Extracted:
+def assess_command(command: str, taxonomy: Taxonomy) -> Extracted:
     """Assess an entire structured command verbatim, with command-local offsets."""
     parts, _, issue, incomplete = _shell(command)
     try:
@@ -176,9 +175,7 @@ def _regions(text: str) -> Iterator[tuple[int, str, bool]]:
         yield start, "".join(lines), bool(fence)
 
 
-def extract_commands(
-    text: str, *, shortlist: bool = True, taxonomy: Taxonomy = DEFAULT_TAXONOMY
-) -> Iterator[Extracted]:
+def extract_commands(text: str, *, shortlist: bool = True, taxonomy: Taxonomy) -> Iterator[Extracted]:
     """Yield source-located command candidates without executing or expanding text."""
     for base, body, fenced in _regions(text):
         lines = body.splitlines(keepends=True)
@@ -257,7 +254,7 @@ def main() -> None:
     parser.add_argument("--category-config", type=Path)
     args = parser.parse_args()
     text = args.input.read_text(encoding="utf-8")
-    taxonomy = load_taxonomy(args.category_config) if args.category_config else DEFAULT_TAXONOMY
+    taxonomy = load_taxonomy(args.category_config) if args.category_config else load_taxonomy()
     with args.output.open("w", encoding="utf-8", newline="\n") as output:
         for record in extract_commands(text, taxonomy=taxonomy):
             output.write(json.dumps(asdict(record), ensure_ascii=False) + "\n")

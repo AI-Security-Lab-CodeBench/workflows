@@ -3,12 +3,13 @@ import tempfile
 import unittest
 from hashlib import sha256
 from pathlib import Path
-from unittest.mock import PropertyMock, patch
+from unittest.mock import patch
 
 import pandas as pd
-from configuration_fixture import write_fixture
+from configuration_fixture import example_config, seed_prepared_snapshot
 from pydantic import JsonValue, TypeAdapter
 from starlette.testclient import TestClient
+from test_declared_dataset_graph import fixture_spec
 
 from codebench_pipeline.data_api import make_dataset_api
 from codebench_pipeline.data_view_models import DatasetQueryRequest
@@ -19,7 +20,6 @@ from codebench_pipeline.dataframe_schemas import (
     ReviewedAnnotationsTable,
     validated_frame,
 )
-from codebench_pipeline.dataset_config import load_build_config
 from codebench_pipeline.dataset_registry import DatasetRegistry
 from codebench_pipeline.human_review import (
     CompletionToken,
@@ -30,7 +30,7 @@ from codebench_pipeline.human_review import (
     ReviewBatch,
     ReviewSnapshot,
 )
-from codebench_pipeline.object_store import ObjectStore
+from codebench_pipeline.object_store import ObjectStore, StorageConfig
 from codebench_pipeline.review_api_models import (
     CompletionRequest,
     DecisionRequest,
@@ -50,8 +50,11 @@ class ReviewServiceTests(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.home = Path(temporary.name)
-        self.spec = load_build_config(write_fixture(self.home), self.home)
-        DatasetRegistry(self.home).register(self.spec)
+        prepared = example_config()
+        self.declared = fixture_spec(self.home).model_copy(
+            update={"rules": prepared.rules, "config_directory": None}
+        )
+        self.spec, _ = seed_prepared_snapshot(self.home, self.declared, prepared.documentation)
         self.data = DatasetDataService(self.home, self.enterContext(dataset_instance(self.home)))
         self.service = ReviewService(self.home, self.data, self.fail_publication)
         self.manager = DataFrameIOManager(storage=self.spec.storage)
@@ -60,9 +63,10 @@ class ReviewServiceTests(unittest.TestCase):
         self.query = DatasetQueryRequest(dataset_id=self.spec.dataset_id)
         self.service.prepare(self.spec.dataset_id)
 
-    def current(self, dataset_id: str, review_columns: tuple[str, ...]) -> ResolvedReview:
+    def current(self, dataset_id: str, review_columns: tuple[str, ...] | None = None) -> ResolvedReview:
         self.data.specification(dataset_id)
-        self.assertEqual(review_columns, tuple(self.spec.publication.review_columns))
+        self.assertEqual(review_columns, None)
+        self.assertEqual(self.resolved.snapshot.review_columns, tuple(self.spec.publication.review_columns))
         return self.resolved
 
     def fail_publication(self, token: CompletionToken) -> PublicationReference:
@@ -136,7 +140,9 @@ class ReviewServiceTests(unittest.TestCase):
             implementation={},
         )
         snapshot_id = sha256(manifest.payload()).hexdigest()
-        self.service.snapshots.store.write(f"{snapshot_id}.json", manifest.payload())
+        ObjectStore(StorageConfig(local_root=str(self.home / "human-review"), prefix="snapshots")).write(
+            f"{snapshot_id}.json", manifest.payload()
+        )
         snapshot = ReviewSnapshot(
             dataset_id=self.spec.dataset_id,
             snapshot_id=snapshot_id,
@@ -213,11 +219,9 @@ class ReviewServiceTests(unittest.TestCase):
         self.assertEqual(stale.exception.code, "stale")
 
     def test_declared_command_is_visible_but_cannot_be_corrected_via_api(self) -> None:
+        DatasetRegistry(self.home).register(self.declared)
         self.resolved = self.resolve_evidence("Declared literal evidence.")
-        with patch.object(
-            type(self.spec), "has_declared_collection", new_callable=PropertyMock, return_value=True
-        ):
-            self.service.prepare(self.spec.dataset_id)
+        self.service.prepare(self.spec.dataset_id)
         view = self.service.view(self.query)
         self.assertIn("command", view.review_columns)
         self.assertIs(view.column_schema["command"]["readOnly"], True)

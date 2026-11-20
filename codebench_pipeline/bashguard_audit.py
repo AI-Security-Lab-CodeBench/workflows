@@ -89,9 +89,8 @@ class AuditProtocolError(Exception):
         return f"BashGuard audit returned {self.received} responses for {self.expected} inputs"
 
 
-def syntax_audits(inputs: Sequence[AuditInput]) -> Iterator[SyntaxAudit]:
+def syntax_audits(inputs: Sequence[AuditInput], binary: str) -> Iterator[SyntaxAudit]:
     """Send inert JSON strings to the syntax-only executable in bounded batches."""
-    binary = os.environ.get("CODEBENCH_BASHGUARD_AUDIT_BINARY", "/opt/codebench/bin/bashguard-audit")
     for batch in batched(inputs, 64):
         result = subprocess.run(
             [binary],
@@ -108,8 +107,18 @@ def syntax_audits(inputs: Sequence[AuditInput]) -> Iterator[SyntaxAudit]:
         yield from (SyntaxAudit.model_validate_json(line) for line in lines)
 
 
+@dataclass(frozen=True)
+class BashGuardAnalyzer:
+    binary: str
+
+    @classmethod
+    def from_environment(cls) -> "BashGuardAnalyzer":
+        return cls(os.environ.get("CODEBENCH_BASHGUARD_AUDIT_BINARY", "/opt/codebench/bin/bashguard-audit"))
+
+
 def audit_candidates(
     candidates: DataFrame[CommandCandidatesTable],
+    analyzer: BashGuardAnalyzer,
 ) -> tuple[DataFrame[BashGuardAuditTable], AuditMetrics]:
     """Join parser results to untouched merge provenance and count rows per status and flag."""
     inputs = model_records(candidates, AuditInput)
@@ -124,7 +133,7 @@ def audit_candidates(
             status=syntax.status,
             flags=syntax.flags,
         )
-        for item, syntax in zip(inputs, syntax_audits(inputs), strict=True)
+        for item, syntax in zip(inputs, syntax_audits(inputs, analyzer.binary), strict=True)
         for origin in (origins[item.candidate_id],)
     ]
     metrics = AuditMetrics(

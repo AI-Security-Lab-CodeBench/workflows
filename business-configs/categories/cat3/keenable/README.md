@@ -6,7 +6,8 @@ source scopes, reference URLs, search and capture budgets, license evidence,
 and whether examples may be extracted or only quoted.
 The same frozen generation supplies both candidate collection and labeling.
 
-Load the companion with `codebench_pipeline.keenable.load_declaration`.
+The registration loader reads the companion through
+`codebench_pipeline.keenable_policy.load_declaration`.
 Pass the current registered declaration and a stable directory under the
 dataset home to `KeenableCollection`. The declaration's `dataset_id` must match
 the selected partition. Store the root on a filesystem shared by the stage

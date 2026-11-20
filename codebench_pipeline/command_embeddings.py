@@ -86,9 +86,13 @@ def _load_encoder(directory: Path) -> tuple[_Tokenizer, _Session]:
 def encode_commands(commands: Sequence[str]) -> npt.NDArray[np.float32]:
     """Embed only command text, using masked mean pooling and L2 normalization."""
     directory = os.environ.get(ENCODER_DIRECTORY_ENV)
-    if not directory:
+    return encode_from_directory(commands, Path(directory) if directory else None)
+
+
+def encode_from_directory(commands: Sequence[str], directory: Path | None) -> npt.NDArray[np.float32]:
+    if directory is None:
         raise CommandEncoderError("The offline command encoder directory is not configured")
-    tokenizer, session = _load_encoder(Path(directory).resolve())
+    tokenizer, session = _load_encoder(directory.resolve())
     vectors = np.empty((len(commands), 384), dtype=np.float32)
     for start in range(0, len(commands), _INFERENCE_BATCH_SIZE):
         stop = start + _INFERENCE_BATCH_SIZE

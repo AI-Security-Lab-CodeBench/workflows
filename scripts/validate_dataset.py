@@ -5,12 +5,11 @@ from collections import Counter
 from pathlib import Path
 
 if __package__:
-    from .category_config import load_taxonomy
+    from .category_config import Taxonomy, add_policy_options, cli_taxonomy
     from .dataset_csv import read_csv
     from .dataset_csv import validate_csv_quoting as validate_csv_quoting
     from .dataset_schema import (
         CANDIDATE_FIELDS,
-        DEFAULT_TAXONOMY,
         PROVENANCE_FIELDS,
         SOURCE_FIELDS,
         DatasetError,
@@ -19,19 +18,16 @@ if __package__:
         string_list,
         web_url,
     )
-    from .dataset_schema import CATEGORY as CATEGORY
     from .dataset_schema import FIELDS as FIELDS
-    from .dataset_schema import RISKS as RISKS
     from .dataset_validation import load_candidates, load_jsonl, validate_rows
     from .dataset_validation import trivial_key as trivial_key
     from .dataset_validation import unique_object as unique_object
 else:
-    from category_config import load_taxonomy
+    from category_config import Taxonomy, add_policy_options, cli_taxonomy
     from dataset_csv import read_csv
     from dataset_csv import validate_csv_quoting as validate_csv_quoting
     from dataset_schema import (
         CANDIDATE_FIELDS,
-        DEFAULT_TAXONOMY,
         PROVENANCE_FIELDS,
         SOURCE_FIELDS,
         DatasetError,
@@ -40,9 +36,7 @@ else:
         string_list,
         web_url,
     )
-    from dataset_schema import CATEGORY as CATEGORY
     from dataset_schema import FIELDS as FIELDS
-    from dataset_schema import RISKS as RISKS
     from dataset_validation import load_candidates, load_jsonl, validate_rows
     from dataset_validation import trivial_key as trivial_key
     from dataset_validation import unique_object as unique_object
@@ -61,7 +55,7 @@ def index_records(records, field, label, errors):
     return indexed
 
 
-def validate_bundle(rows, provenance, candidates, sources, pending, taxonomy=DEFAULT_TAXONOMY):
+def validate_bundle(rows, provenance, candidates, sources, pending, taxonomy: Taxonomy):
     errors = validate_rows(rows, taxonomy)
     candidate_map = index_records(candidates, "candidate_id", "Candidate", errors)
     source_map = index_records(sources, "source_id", "Source", errors)
@@ -168,7 +162,7 @@ def validate_bundle(rows, provenance, candidates, sources, pending, taxonomy=DEF
     return errors
 
 
-def summary(rows, errors, taxonomy=DEFAULT_TAXONOMY):
+def summary(rows, errors, taxonomy: Taxonomy):
     def counts(field, selected):
         values = [row.get(field, "invalid") for row in selected]
         return dict(
@@ -210,10 +204,10 @@ def main():
         description="Validate CAT-3 artifacts as inert text; no Bash execution or semantic safety proof."
     )
     parser.add_argument("root", nargs="?", type=Path, default=Path.cwd())
-    parser.add_argument("--category-config", type=Path)
+    add_policy_options(parser)
     args = parser.parse_args()
     try:
-        taxonomy = load_taxonomy(args.category_config) if args.category_config else DEFAULT_TAXONOMY
+        taxonomy = cli_taxonomy(args)
         rows = read_csv(args.root / "commands.csv")
         errors = validate_bundle(
             rows,

@@ -38,8 +38,7 @@ class LifecycleSource:
             eligible_candidate_ids=("first", "second"),
             review_columns=("id",),
             record_fingerprints={
-                identifier: review_identity({"id": identifier}, ("id",))
-                for identifier in ("first", "second")
+                identifier: review_identity({"id": identifier}, ("id",)) for identifier in ("first", "second")
             },
         )
 
@@ -56,11 +55,14 @@ class ReviewLifecycleTests(unittest.TestCase):
         self.addCleanup(temporary.cleanup)
         self.home = Path(temporary.name)
         self.stage = ReviewStage(
-            stage_id="selection", title="Selection", asset_keys=(("input",),), can_continue=True,
+            stage_id="selection",
+            title="Selection",
+            asset_keys=(("input",),),
+            can_continue=True,
             review_columns=("id",),
         )
         self.source = LifecycleSource(self.stage.stage_id)
-        self.workflow = ReviewWorkflow(self.home, self.stage, self.source)
+        self.workflow = ReviewWorkflow.for_home(self.home, self.stage, self.source)
         self.workflow.prepare("CAT-3.1")
         self.query = DatasetQueryRequest(dataset_id="CAT-3.1")
         batch = self.workflow.view(self.query).batch
@@ -126,7 +128,7 @@ class ReviewLifecycleTests(unittest.TestCase):
 
     def test_open_row_retraction_does_not_reopen_or_change_other_stage(self) -> None:
         other_stage = self.stage.model_copy(update={"stage_id": "other"})
-        other = ReviewWorkflow(self.home, other_stage, LifecycleSource("other"))
+        other = ReviewWorkflow.for_home(self.home, other_stage, LifecycleSource("other"))
         other.prepare("CAT-3.1")
         original_other = other.view(self.query)
         before = self.workflow.view(self.query)
@@ -216,7 +218,7 @@ class ReviewLifecycleTests(unittest.TestCase):
                 tx.authorize_completion(self.source.snapshot, token)
             return CompletionEffect(run_id="retry-run")
 
-        restarted = ReviewWorkflow(self.home, self.stage, self.source, on_complete=retry_launch)
+        restarted = ReviewWorkflow.for_home(self.home, self.stage, self.source, on_complete=retry_launch)
         result = restarted.continue_review(request)
         self.assertEqual(result.completion, completed.completion)
         self.assertEqual(result.batch.batch_revision, completed.batch.batch_revision)

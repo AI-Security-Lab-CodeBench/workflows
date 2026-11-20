@@ -6,7 +6,6 @@ from dagster import AssetKey, Definitions, validate_run_config
 from test_declared_dataset_graph import fixture_spec
 
 from codebench_pipeline.artifact_schemas import declared_artifact_schemas
-from codebench_pipeline.dataset_branches import Branch
 from codebench_pipeline.definitions import build_definitions, dataset_run_config
 from codebench_pipeline.stage_configuration import DeclaredGlobalConfig, collection_asset_settings
 
@@ -20,26 +19,23 @@ class CollectionAssetTopologyTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             home = Path(directory)
             spec = fixture_spec(home)
-            definitions = build_definitions(home, specification=spec)
+            definitions = build_definitions(home)
             Definitions.validate_loadable(definitions)
             graph = definitions.resolve_asset_graph()
             schemas = declared_artifact_schemas(definitions)
 
-        cases: tuple[tuple[Branch, str, str, tuple[str, ...]], ...] = (
+        cases: tuple[tuple[str, str, tuple[str, ...]], ...] = (
             (
-                "dataset",
                 "build_existing_datasets",
                 "existing_datasets",
                 ("enumerate_corpus_files", "capture_corpus_files", "command_candidates"),
             ),
             (
-                "documentation",
                 "build_documentation",
                 "documentation_crawl",
                 ("documentation/capture_documentation", "documentation/command_candidates"),
             ),
             (
-                "keenable",
                 "build_keenable",
                 "keenable_use_cases",
                 (
@@ -49,10 +45,10 @@ class CollectionAssetTopologyTests(unittest.TestCase):
                 ),
             ),
         )
-        for branch, job_name, group, stages in cases:
+        for job_name, group, stages in cases:
             with self.subTest(job=job_name):
                 job = definitions.resolve_job_def(job_name)
-                validate_run_config(job, dataset_run_config(spec, home, branch).to_config_dict())
+                validate_run_config(job, dataset_run_config(spec).to_config_dict())
                 mapping = key(f"map_{group}_config")
                 self.assertEqual(graph.get(mapping).group_name, group)
                 self.assertEqual(
@@ -84,11 +80,12 @@ class CollectionAssetTopologyTests(unittest.TestCase):
                 key("documentation/command_candidates"),
                 key("keenable/command_candidates"),
                 key("map_merged_command_candidates_config"),
+                key("global_config"),
             },
         )
         self.assertEqual(
             graph.get(key("filtered_commands")).parent_keys,
-            {key("merged_command_candidates"), key("map_filtered_commands_config")},
+            {key("merged_command_candidates"), key("map_filtered_commands_config"), key("global_config")},
         )
         self.assertFalse(
             {"datasets__labeling_attempts", "datasets__human_review_queue"}

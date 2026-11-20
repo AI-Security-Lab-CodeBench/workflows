@@ -15,7 +15,8 @@ from codebench_pipeline.source_transform_contract import (
     SourceTransformConfig,
     TransformContext,
 )
-from codebench_pipeline.source_transforms import source_rows, transformation_bytes, transformed_rows
+from codebench_pipeline.source_transforms import execute_transformation, source_rows, verify_transformation
+from codebench_pipeline.stage_implementation import ImplementationSource
 from codebench_pipeline.storage import IntegrityError, digest
 
 _DEPLOYMENT_ROOT: Final = Path(__file__).resolve().parents[1]
@@ -141,8 +142,8 @@ def _parser_path(relative: str) -> str:
     return _CHEATSHEETS_FRONT_MATTER if relative == _HISTORICAL_CHEATSHEETS_PATH else relative
 
 
-def _deployment_path(relative: str) -> Path:
-    expected = _DEPLOYMENT_ROOT / _parser_path(relative)
+def _deployment_path(relative: str, root: Path | None = None) -> Path:
+    expected = (_DEPLOYMENT_ROOT if root is None else root) / _parser_path(relative)
     if expected.resolve(strict=True) != expected:
         raise IntegrityError(f"Repository ETL path is not its reviewed deployment location: {relative}")
     return expected
@@ -177,27 +178,40 @@ class RepositoryAdapter(RepositoryModel):
     transform: SourceTransformConfig
 
 
-def authorize_adapter(transform: SourceTransformConfig) -> RepositoryAdapter:
+def authorize_adapter(
+    transform: SourceTransformConfig, *, source: ImplementationSource | None = None
+) -> RepositoryAdapter:
     if not _is_approved(transform):
         raise IntegrityError(
             f"Repository ETL is absent from the deployment allowlist: {transform.module_path}"
         )
-    module = _deployment_path(transform.module_path)
-    if digest(_DEPLOYMENT_ROOT / "uv.lock") != _RUNTIME_DIGEST:
+    installed = ImplementationSource(_DEPLOYMENT_ROOT) if source is None else source
+    module = _deployment_path(transform.module_path, installed.root)
+    if installed.digest("uv.lock") != _RUNTIME_DIGEST:
         raise IntegrityError("Repository ETL dependency lock differs from the reviewed deployment")
     for path, expected in _PARSER_DEPENDENCIES.get(_parser_path(transform.module_path), ()):
-        if digest(_deployment_path(path)) != expected:
+        _deployment_path(path, installed.root)
+        if installed.digest(path) != expected:
             raise IntegrityError(f"Repository ETL dependency differs from its approved pin: {path}")
-    transformation_bytes(transform.model_copy(update={"module_path": str(module)}))
+    verify_transformation(transform, installed.read(module.relative_to(installed.root).as_posix()))
     return RepositoryAdapter(deployment_digest=_RUNTIME_DIGEST, transform=transform)
 
 
 def repository_rows(
-    text: str, adapter: RepositoryAdapter, context: TransformContext
+    text: str,
+    adapter: RepositoryAdapter,
+    context: TransformContext,
+    *,
+    source: ImplementationSource | None = None,
 ) -> Iterator[CanonicalSourceRow]:
     transform = adapter.transform
-    pinned = transform.model_copy(update={"module_path": str(_deployment_path(transform.module_path))})
-    for row in transformed_rows(pinned, source_rows(text, "text"), context):
+    if not _is_approved(transform) or adapter.deployment_digest != _RUNTIME_DIGEST:
+        raise IntegrityError("Repository ETL adapter does not match the reviewed deployment")
+    installed = ImplementationSource(_DEPLOYMENT_ROOT) if source is None else source
+    module = _deployment_path(transform.module_path, installed.root)
+    pinned = transform.model_copy(update={"module_path": str(module)})
+    body = installed.read(module.relative_to(installed.root).as_posix())
+    for row in execute_transformation(pinned, body, source_rows(text, "text"), context):
         yield row.model_copy(
             update={
                 "transformations": [

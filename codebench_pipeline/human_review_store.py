@@ -15,15 +15,21 @@ from pydantic import JsonValue
 from codebench_pipeline.human_review import HumanReviewError
 from codebench_pipeline.human_review_schema import initialize
 from codebench_pipeline.human_review_transactions import HumanReviewTransaction
+from codebench_pipeline.stage_implementation import ImplementationIdentity
 
 
 class HumanReviewStore:
-    def __init__(self, home: Path) -> None:
+    def __init__(self, home: Path, *, implementation: ImplementationIdentity | None = None) -> None:
         self.path = home.resolve() / "human-review.sqlite3"
+        self.implementation = implementation
         self.schema = "review_" + hashlib.sha256(str(home.resolve()).encode()).hexdigest()[:40]
-        self.dsn = os.environ.get("CODEBENCH_REVIEW_DATABASE_URL", "")
-        if not self.dsn:
+        self._dsn = os.environ.get("CODEBENCH_REVIEW_DATABASE_URL", "")
+
+    @property
+    def dsn(self) -> str:
+        if not self._dsn:
             raise HumanReviewError("conflict", "CODEBENCH_REVIEW_DATABASE_URL is required")
+        return self._dsn
 
     @contextmanager
     def reader(self) -> Generator[HumanReviewTransaction]:
@@ -37,7 +43,9 @@ class HumanReviewStore:
                     ).fetchone()
                     if not exists:
                         raise HumanReviewError("not_found", "No review ledger exists")
-                    connection.execute(sql.SQL("SET LOCAL search_path TO {}").format(sql.Identifier(self.schema)))
+                    connection.execute(
+                        sql.SQL("SET LOCAL search_path TO {}").format(sql.Identifier(self.schema))
+                    )
                     yield HumanReviewTransaction(connection, namespace=self.schema)
             except UndefinedTable as error:
                 raise HumanReviewError("not_found", "Review schema has not been initialized") from error
@@ -49,14 +57,28 @@ class HumanReviewStore:
         if timeout < 0:
             raise HumanReviewError("conflict", "Transaction timeout must be nonnegative")
         try:
-            with psycopg.Connection[dict[str, JsonValue]].connect(self.dsn, row_factory=dict_row) as connection:
+            with psycopg.Connection[dict[str, JsonValue]].connect(
+                self.dsn, row_factory=dict_row
+            ) as connection:
                 with connection.transaction():
                     initialize(connection, self.schema)
                 with connection.transaction():
-                    connection.execute(sql.SQL("SET LOCAL search_path TO {}").format(sql.Identifier(self.schema)))
+                    connection.execute(
+                        sql.SQL("SET LOCAL search_path TO {}").format(sql.Identifier(self.schema))
+                    )
                     transaction = HumanReviewTransaction(connection, namespace=self.schema, timeout=timeout)
                     if dataset_id is not None:
                         transaction.lock_dataset(dataset_id)
                     yield transaction
         except (LockNotAvailable, DeadlockDetected, SerializationFailure) as error:
-            raise HumanReviewError("conflict", "Another review transaction changed or locked this dataset") from error
+            raise HumanReviewError(
+                "conflict", "Another review transaction changed or locked this dataset"
+            ) from error
+
+    def publication_versions(self) -> dict[str, str]:
+        return self.bound_implementation().publication
+
+    def bound_implementation(self) -> ImplementationIdentity:
+        if self.implementation is None:
+            raise HumanReviewError("conflict", "Release implementation is not bound to the review resource")
+        return self.implementation

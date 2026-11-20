@@ -7,12 +7,12 @@ import json
 from pathlib import Path
 
 if __package__:
-    from .category_config import load_taxonomy
+    from .category_config import Taxonomy, add_policy_options, cli_taxonomy
     from .command_filter import extract_commands
     from .source_pipeline import source_eligible, write_csv, write_jsonl
     from .validate_dataset import contains_secret, load_jsonl
 else:
-    from category_config import load_taxonomy
+    from category_config import Taxonomy, add_policy_options, cli_taxonomy
     from command_filter import extract_commands
     from source_pipeline import source_eligible, write_csv, write_jsonl
     from validate_dataset import contains_secret, load_jsonl
@@ -53,11 +53,10 @@ def text_records(document: dict, manifest: Path) -> list[tuple[str, str, str]]:
     return result
 
 
-def prefilter(manifest: Path, out: Path, *, category_config: Path | None = None) -> dict[str, int]:
+def prefilter(manifest: Path, out: Path, *, taxonomy: Taxonomy) -> dict[str, int]:
     if out.exists():
         raise ValueError(f"Preserve the existing prefilter audit; choose a fresh output directory: {out}")
     records, withheld, inputs = [], [], []
-    taxonomy = load_taxonomy(category_config) if category_config else load_taxonomy()
     for document in load_jsonl(manifest):
         if not source_eligible(document):
             raise ValueError(f"Source eligibility not established: {document['source_id']}")
@@ -135,9 +134,9 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Broad, source-located extraction before CAT-3 cleanup.")
     parser.add_argument("--manifest", type=Path, required=True)
     parser.add_argument("--out", type=Path, required=True)
-    parser.add_argument("--category-config", type=Path)
+    add_policy_options(parser)
     args = parser.parse_args()
-    print(json.dumps(prefilter(args.manifest, args.out, category_config=args.category_config)))
+    print(json.dumps(prefilter(args.manifest, args.out, taxonomy=cli_taxonomy(args))))
 
 
 if __name__ == "__main__":

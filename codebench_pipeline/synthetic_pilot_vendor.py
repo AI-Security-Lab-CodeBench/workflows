@@ -3,7 +3,7 @@ import os
 import runpy
 import sys
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from importlib import import_module
 from pathlib import Path
 from typing import Final, TypedDict
@@ -32,6 +32,20 @@ class Runtime:
     capacity: CapacityConfig
     vendor_dir: Path
     output_dir: Path
+    api_key: str | None = field(default=None, repr=False)
+
+    def child_environment(self) -> dict[str, str]:
+        values = {
+            "ENDPOINT": self.endpoint,
+            "MODEL": self.model,
+            "MODEL_PATH": self.capacity.expected_model_path,
+            "LEDGER_DIR": self.capacity.state_directory,
+            "VENDOR_DIR": str(self.vendor_dir),
+            "OUTPUT_DIR": str(self.output_dir),
+        }
+        if self.api_key is not None:
+            values["API_KEY"] = self.api_key
+        return {ENV_PREFIX + name: value for name, value in values.items()}
 
     @classmethod
     def from_environment(cls) -> "Runtime":
@@ -77,6 +91,7 @@ class Runtime:
             ),
             vendor_dir=vendor_dir,
             output_dir=Path(values["OUTPUT_DIR"]).resolve(),
+            api_key=os.environ.get(ENV_PREFIX + "API_KEY") or None,
         )
 
 
@@ -114,7 +129,7 @@ class GuardedBackend:
             response = guarded_complete(
                 self.runtime.endpoint,
                 json.dumps(body, ensure_ascii=False).encode("utf-8"),
-                os.environ.get(ENV_PREFIX + "API_KEY") or None,
+                self.runtime.api_key,
                 self.config.backend.timeout,
                 self.runtime.capacity,
                 self.receipts,

@@ -1,29 +1,33 @@
 import csv
 import io
-import json
 import tempfile
 import unittest
-from contextlib import ExitStack, redirect_stdout
+from contextlib import ExitStack
 from pathlib import Path
 from unittest.mock import patch
 
-from configuration_fixture import write_fixture
-from pydantic import BaseModel, JsonValue, TypeAdapter
-from test_dataset_incremental import provider_response
+import pandas as pd
+from dagster import DagsterInstance
+from guarded_labeling_fixture import LabelingFixture
+from native_dataset_cycle import NativeDatasetCycle
+from pydantic import JsonValue, TypeAdapter
 
 from codebench_pipeline.data_view_models import DatasetQueryRequest, TableResponse
 from codebench_pipeline.data_views import DatasetDataService
-from codebench_pipeline.dataset_cli import execute_build, execute_registered_build
-from codebench_pipeline.dataset_config import load_build_config
-from codebench_pipeline.dataset_records import LabelDecision
+from codebench_pipeline.dataset_registry import DatasetRegistry
+from codebench_pipeline.dataset_run import refresh_registered_configuration
 from codebench_pipeline.dataset_table_contract import FIELDS
 from codebench_pipeline.definitions import build_definitions
-from codebench_pipeline.human_review import DecisionChange
-from codebench_pipeline.model_config import ModelConfig
+from codebench_pipeline.guarded_publication_controls import record_control
+from codebench_pipeline.guarded_publication_runtime import preview_proposal
+from codebench_pipeline.human_review import DecisionChange, HumanReviewError
+from codebench_pipeline.human_review_store import HumanReviewStore
+from codebench_pipeline.release_admission import read_publication
 from codebench_pipeline.release_runner import ReleaseContinuation, ReleaseRunner
 from codebench_pipeline.review_api_models import (
     CompletionRequest,
     DecisionRequest,
+    PublicationResponse,
     PublicationTarget,
     RetractionRequest,
 )
@@ -31,20 +35,10 @@ from codebench_pipeline.review_service import ReviewService
 from codebench_pipeline.runtime_instance import dataset_instance
 
 
-def multi_citation_response(
-    schema: type[BaseModel], system: str, prompt: str, model: ModelConfig, out: Path
-) -> BaseModel:
-    response = provider_response(schema, system, prompt, model, out)
-    if isinstance(response, LabelDecision):
-        payload = json.loads(prompt[prompt.index("{") :])
-        return response.model_copy(
-            update={
-                "documentation_urls": [doc["url"] for doc in payload["documentation"]],
-                "severity_confidence": "medium",
-                "class_confidence": "medium",
-            }
-        )
-    return response
+def attest_fixture_release(home: Path, instance: DagsterInstance, dataset_id: str) -> None:
+    proposal, _ = preview_proposal(home, instance, dataset_id)
+    with HumanReviewStore(home).transaction(dataset_id=dataset_id) as tx:
+        record_control(tx, dataset_id, "attest", actor=200, proposal=proposal)
 
 
 class ReviewReleaseTests(unittest.TestCase):
@@ -52,25 +46,28 @@ class ReviewReleaseTests(unittest.TestCase):
         self.stack = ExitStack()
         self.addCleanup(self.stack.close)
         self.home = Path(self.stack.enter_context(tempfile.TemporaryDirectory()))
-        source = write_fixture(self.home, "CAT-98")
-        config = json.loads(source.read_text())
-        config["seeds"] = config.pop("documentation_sources")
-        for seed in config["seeds"]["documents"]:
-            seed["local_path"] = str((source.parent / seed["local_path"]).resolve())
-        config["storage"] = {"local_root": str(self.home / "tables")}
-        config["publication"]["limit_per_risk"] = 1
-        self.config = self.home / "config.json"
-        self.config.write_text(json.dumps(config))
-        for module in ("dataset_annotation",):
-            self.stack.enter_context(
-                patch(f"codebench_pipeline.{module}.infer_typed", side_effect=multi_citation_response)
-            )
-        with redirect_stdout(io.StringIO()):
-            self.prepared = execute_build(self.config, self.home)
-        self.spec = load_build_config(self.config, self.home)
+        fixture = LabelingFixture(self, self.home, limit_per_risk=1, category_confidence="medium")
+        self.spec = fixture.spec
+        DatasetRegistry(self.home).register(self.spec)
+        refresh_registered_configuration(self.spec.dataset_id, self.home)
         self.instance = self.stack.enter_context(dataset_instance(self.home))
+        self.cycle = NativeDatasetCycle(self.home)
+        self.prepared = self.cycle.drain(self.instance, partition=self.spec.dataset_id)
         self.data = DatasetDataService(self.home, self.instance)
         self.service = ReviewService(self.home, self.data, ReleaseRunner(self.home, self.instance))
+
+    def complete_release(self, request: CompletionRequest) -> PublicationResponse:
+        with self.assertRaises(HumanReviewError) as pending:
+            self.service.complete(request)
+        self.assertEqual(pending.exception.code, "pending")
+        attest_fixture_release(self.home, self.instance, self.spec.dataset_id)
+        return self.service.continue_review(
+            request.model_copy(
+                update={
+                    "expected": self.service.view(DatasetQueryRequest(dataset_id=self.spec.dataset_id)).batch
+                }
+            )
+        )
 
     def test_prepare_waits_and_real_release_applies_human_exclusions_before_cap(self) -> None:
         self.assertNotIn("dataset_release", self.prepared)
@@ -105,12 +102,13 @@ class ReviewReleaseTests(unittest.TestCase):
                         reviewer="QA reviewer",
                         notes="QA exclusion" if candidate_id != identities[1] else "",
                         edits={"severity": "critical", "class": "deny"}
-                        if candidate_id == identities[1] else {},
+                        if candidate_id == identities[1]
+                        else {},
                     ),
                 )
             )
         saved = self.service.view(DatasetQueryRequest(dataset_id=self.spec.dataset_id))
-        result = self.service.complete(
+        result = self.complete_release(
             CompletionRequest(
                 dataset_id=self.spec.dataset_id,
                 snapshot_id=saved.batch.snapshot.snapshot_id,
@@ -140,9 +138,12 @@ class ReviewReleaseTests(unittest.TestCase):
         self.assertEqual(released.publication_state, "published")
         self.assertEqual(released.page.total_rows, 1)
         self.assertEqual(tuple(released.page.columns), FIELDS)
+        snapshot = read_publication(self.home, self.spec.dataset_id, self.instance)
+        assert snapshot is not None and isinstance(snapshot.value, pd.DataFrame)
+        self.assertEqual(snapshot.publication_state, "published")
+        self.assertEqual(snapshot.value["command"].tolist(), [rows[0]["command"]])
         before = len(self.instance.get_runs())
-        with redirect_stdout(io.StringIO()):
-            self.assertEqual(execute_registered_build(self.spec.dataset_id, self.home), {})
+        self.assertEqual(self.cycle.drain(self.instance, partition=self.spec.dataset_id), {})
         self.assertEqual(len(self.instance.get_runs()), before)
         completed = self.service.view(DatasetQueryRequest(dataset_id=self.spec.dataset_id))
         retried = self.service.complete(
@@ -188,7 +189,7 @@ class ReviewReleaseTests(unittest.TestCase):
                 ),
             )
         )
-        replacement = self.service.complete(
+        replacement = self.complete_release(
             CompletionRequest(
                 dataset_id=self.spec.dataset_id,
                 snapshot_id=changed.batch.snapshot.snapshot_id,
@@ -226,7 +227,10 @@ class ReviewReleaseTests(unittest.TestCase):
                         candidate_id=row.candidate_id,
                         expected_row_revision=row.row_revision,
                         decision="approve"
-                        if next(item for item in view.page.rows if item.review_record_id == row.candidate_id).blocked_reason is None
+                        if next(
+                            item for item in view.page.rows if item.review_record_id == row.candidate_id
+                        ).blocked_reason
+                        is None
                         else "reject",
                         reviewer="QA reviewer",
                     ),
@@ -246,11 +250,21 @@ class ReviewReleaseTests(unittest.TestCase):
 
         batch = service.view(query).batch
         with patch("codebench_pipeline.release_runner.launch_reviewed_run", side_effect=launch):
-            completed = service.complete(
+            pending = service.complete(
                 CompletionRequest(
                     dataset_id=self.spec.dataset_id,
                     snapshot_id=batch.snapshot.snapshot_id,
                     expected=batch,
+                    reviewer="QA reviewer",
+                )
+            )
+            self.assertIsNone(pending.run_id)
+            attest_fixture_release(self.home, self.instance, self.spec.dataset_id)
+            completed = service.continue_review(
+                CompletionRequest(
+                    dataset_id=self.spec.dataset_id,
+                    snapshot_id=pending.batch.snapshot.snapshot_id,
+                    expected=pending.batch,
                     reviewer="QA reviewer",
                 )
             )

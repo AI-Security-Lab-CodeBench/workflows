@@ -15,6 +15,7 @@ from codebench_pipeline.repository import (
     repository_documents,
 )
 from codebench_pipeline.repository_acquisition import CAPTURED_SOURCES
+from codebench_pipeline.repository_legacy import PreparedCaptureCache
 from codebench_pipeline.repository_receipts import read_receipt
 from codebench_pipeline.storage import IntegrityError
 
@@ -24,7 +25,9 @@ class LegacyRepositoryCaptureTests(TestCase):
         home = Path(self.enterContext(TemporaryDirectory()))
         self.run_context = RepositoryRun(home, "migration-fixture", "run")
         self.legacy_root = Path(self.enterContext(TemporaryDirectory()))
-        (home / "source-downloads").symlink_to(self.legacy_root, target_is_directory=True)
+        alias = home / "source-downloads"
+        alias.symlink_to(self.legacy_root, target_is_directory=True)
+        self.prepared_cache = PreparedCaptureCache(alias)
         shipped = repository_config_fixture()
         fixture = RepositoryFixture(shipped.documentation[0])
         fixture.file("pages/common/docker.md", TLDR)
@@ -47,7 +50,9 @@ class LegacyRepositoryCaptureTests(TestCase):
         prepared_cache = self.legacy_root / "sources" / key
         before = {path: path.stat().st_mtime_ns for path in prepared_cache.rglob("*")}
 
-        result = repository_documents(self.catalog, self.config, self.run_context)
+        result = repository_documents(
+            self.catalog, self.config, self.run_context, prepared_cache=self.prepared_cache
+        )
 
         receipt = read_receipt(result, "source_documents", self.run_context)
         (capture,) = CAPTURED_SOURCES.validate_python(receipt.observations["captures"])
@@ -76,7 +81,9 @@ class LegacyRepositoryCaptureTests(TestCase):
                 alias.symlink_to(destination, target_is_directory=True)
 
                 with self.assertRaisesRegex(IntegrityError, reason):
-                    repository_documents(self.catalog, self.config, self.run_context)
+                    repository_documents(
+                        self.catalog, self.config, self.run_context, prepared_cache=self.prepared_cache
+                    )
 
                 self.assertFalse((self.run_context.root / "blobs").exists())
                 self.assertEqual(len(list((self.run_context.root / "receipts").glob("*.json"))), 1)
@@ -92,6 +99,8 @@ class LegacyRepositoryCaptureTests(TestCase):
         (directory / "data").symlink_to(outside)
 
         with self.assertRaises(OSError):
-            repository_documents(self.catalog, self.config, self.run_context)
+            repository_documents(
+                self.catalog, self.config, self.run_context, prepared_cache=self.prepared_cache
+            )
 
         self.assertFalse((self.run_context.root / "blobs").exists())

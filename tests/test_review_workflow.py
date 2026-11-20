@@ -7,14 +7,14 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pandas as pd
-from configuration_fixture import example_config, write_fixture
+from configuration_fixture import example_config
 from jsonschema.exceptions import ValidationError
 from starlette.testclient import TestClient
+from test_declared_dataset_graph import fixture_spec
 
 from codebench_pipeline.data_api import make_dataset_api
 from codebench_pipeline.data_view_models import DatasetQueryRequest
 from codebench_pipeline.data_views import DatasetDataService
-from codebench_pipeline.dataset_config import load_build_config
 from codebench_pipeline.dataset_records import CandidateRecord, LabelDecision
 from codebench_pipeline.dataset_registry import DatasetRegistry
 from codebench_pipeline.human_review import (
@@ -38,6 +38,7 @@ from codebench_pipeline.review_api_models import (
 from codebench_pipeline.review_legacy_import import import_legacy
 from codebench_pipeline.review_stages import ReviewRegistration, ReviewStage, ReviewStageList
 from codebench_pipeline.review_tables import ReviewTable, TableReviewSource
+from codebench_pipeline.object_store import ObjectStore, StorageConfig
 from codebench_pipeline.review_workflow import ReviewWorkflow
 from codebench_pipeline.runtime_instance import dataset_instance
 from codebench_pipeline.table_query import TableQuery, TextFilter
@@ -50,15 +51,31 @@ class TableReviewSourceTests(unittest.TestCase):
         rules = example_config().rules
         assert rules is not None
         candidate = CandidateRecord(
-            candidate_id="one", command="git status", util="git", context="Inert fixture",
-            source_id="qa", source_url="https://example.org/qa", source_position="line 1",
-            transformations=[], risk_candidates=["CAT-99.1"],
+            candidate_id="one",
+            command="git status",
+            util="git",
+            context="Inert fixture",
+            source_id="qa",
+            source_url="https://example.org/qa",
+            source_position="line 1",
+            transformations=[],
+            risk_candidates=["CAT-99.1"],
         )
         label = LabelDecision(
-            candidate_id="one", decision="needs_review", category_id="CAT-99", risk_id="CAT-99.1",
-            severity="low", class_="allow", description="Inert fixture", util="git",
-            category_confidence="high", risk_confidence="high", severity_confidence="medium",
-            class_confidence="high", rationale="Synthetic", documentation_urls=["https://example.org/docs"],
+            candidate_id="one",
+            decision="needs_review",
+            category_id="CAT-99",
+            risk_id="CAT-99.1",
+            severity="low",
+            class_="allow",
+            description="Inert fixture",
+            util="git",
+            category_confidence="high",
+            risk_confidence="high",
+            severity_confidence="medium",
+            class_confidence="high",
+            rationale="Synthetic",
+            documentation_urls=["https://example.org/docs"],
         )
         row = {**candidate.model_dump(mode="json"), **label.model_dump(mode="json", by_alias=True)}
         schema = annotation_review_validation(rules)["row_schema"]
@@ -66,58 +83,98 @@ class TableReviewSourceTests(unittest.TestCase):
         validator = schema_validator(schema)
         validator.validate({**row, "command": "git status --short", "severity": "high", "class": "ask"})
         for edits in (
-            {"command": "git push"}, {"risk_id": "CAT-99.2"}, {"category_id": "CAT-98"},
-            {"class": "modify"}, {"severity": "unknown"}, {"documentation_urls": []}, {"decision": "reject"},
+            {"command": "git push"},
+            {"risk_id": "CAT-99.2"},
+            {"category_id": "CAT-98"},
+            {"class": "modify"},
+            {"severity": "unknown"},
+            {"documentation_urls": []},
+            {"decision": "reject"},
         ):
             with self.subTest(edits=edits), self.assertRaises(ValidationError):
                 validator.validate({**row, **edits})
 
     def test_native_partition_mapping_distinguishes_null_and_literal_strings(self) -> None:
         self.assertEqual(review_partition_id(None), "partition-" + hashlib.sha256(b"null").hexdigest())
-        self.assertEqual(len({review_partition_id(value) for value in (None, "", "null", "unpartitioned")}), 4)
+        self.assertEqual(
+            len({review_partition_id(value) for value in (None, "", "null", "unpartitioned")}), 4
+        )
         self.assertEqual(review_artifact_id(("models", "a/b")), '["models","a/b"]')
         self.assertNotEqual(review_artifact_id(("models", "a/b")), review_artifact_id(("models", "a", "b")))
 
     def test_captured_schema_marks_only_review_columns_editable_and_keeps_declared_constraints(self) -> None:
         snapshot = ReviewSnapshot(
-            dataset_id="opaque", snapshot_id="a" * 64, candidate_ids=("one",),
-            eligible_candidate_ids=("one",), review_columns=("score",),
+            dataset_id="opaque",
+            snapshot_id="a" * 64,
+            candidate_ids=("one",),
+            eligible_candidate_ids=("one",),
+            review_columns=("score",),
         )
         prepared = PreparedReview(
-            snapshot=snapshot, id_column="id", columns=("id", "score"),
+            snapshot=snapshot,
+            id_column="id",
+            columns=("id", "score"),
             rows=({"id": "one", "score": 0.5},),
             column_schema={"score": {"type": "number", "minimum": 0, "maximum": 1}},
         )
-        self.assertEqual(prepared.column_schema["score"], {
-            "type": "number", "minimum": 0, "maximum": 1, "editable": True, "readOnly": False,
-        })
-        self.assertEqual(prepared.column_schema["id"], {
-            "type": ["string"], "editable": False, "readOnly": True,
-        })
+        self.assertEqual(
+            prepared.column_schema["score"],
+            {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1,
+                "editable": True,
+                "readOnly": False,
+            },
+        )
+        self.assertEqual(
+            prepared.column_schema["id"],
+            {
+                "type": ["string"],
+                "editable": False,
+                "readOnly": True,
+            },
+        )
         with self.assertRaises(ValueError):
             PreparedReview(
-                snapshot=snapshot, id_column="id", columns=("id", "score"),
-                rows=prepared.rows, column_schema={"id": {"editable": True}},
+                snapshot=snapshot,
+                id_column="id",
+                columns=("id", "score"),
+                rows=prepared.rows,
+                column_schema={"id": {"editable": True}},
             )
 
     def test_preparation_filter_selects_occurrences_before_dedup_without_paging(self) -> None:
         with tempfile.TemporaryDirectory(prefix="review-source-") as directory:
             stage = ReviewStage(
-                stage_id="selection", title="Selection", asset_keys=(("models",),),
+                stage_id="selection",
+                title="Selection",
+                asset_keys=(("models",),),
                 review_columns=("score",),
             )
-            frame = pd.DataFrame([
-                {"id": str(index), "score": 0.5, "group": "keep" if index % 2 else "exclude"}
-                for index in range(405)
-            ])
+            frame = pd.DataFrame(
+                [
+                    {"id": str(index), "score": 0.5, "group": "keep" if index % 2 else "exclude"}
+                    for index in range(405)
+                ]
+            )
             table = ReviewTable(
-                frame, "id", "revision", {}, tuple(str(index) for index in range(405)),
-                artifact_id="models", scope_id="kept",
+                frame,
+                "id",
+                "revision",
+                {},
+                tuple(str(index) for index in range(405)),
+                artifact_id="models",
+                scope_id="kept",
                 membership=TableQuery(
-                    filters=(TextFilter(field="group", operator="equals", value="keep"),), limit=1,
+                    filters=(TextFilter(field="group", operator="equals", value="keep"),),
+                    limit=1,
                 ),
             )
-            source = TableReviewSource(Path(directory), stage, lambda _: table)
+            home = Path(directory)
+            source = TableReviewSource(
+                home, stage, lambda _: table, ObjectStore(StorageConfig(local_root=str(home / "objects")))
+            )
             captured = source.current("opaque-partition")
             self.assertEqual(captured.snapshot.candidate_ids, tuple(str(index) for index in range(1, 405, 2)))
             self.assertEqual(captured.snapshot.eligible_candidate_ids, captured.snapshot.candidate_ids)
@@ -132,7 +189,7 @@ class ReviewWorkflowTests(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.home = Path(temporary.name)
-        self.spec = load_build_config(write_fixture(self.home), self.home)
+        self.spec = fixture_spec(self.home)
         DatasetRegistry(self.home).register(self.spec)
         self.table = ReviewTable(
             pd.DataFrame([{"model_id": "small", "score": 0.8}, {"model_id": "large", "score": 0.9}]),
@@ -158,7 +215,16 @@ class ReviewWorkflowTests(unittest.TestCase):
         return self.table
 
     def make_workflow(self, stage: ReviewStage) -> ReviewWorkflow:
-        return ReviewWorkflow(self.home, stage, TableReviewSource(self.home, stage, self.resolve))
+        return ReviewWorkflow.for_home(
+            self.home,
+            stage,
+            TableReviewSource(
+                self.home,
+                stage,
+                self.resolve,
+                ObjectStore(StorageConfig(local_root=str(self.home / "objects"))),
+            ),
+        )
 
     def decide(self, candidate_id: str, decision: str, revision: int = 0) -> None:
         batch = self.workflow.view(self.query).batch
@@ -207,6 +273,19 @@ class ReviewWorkflowTests(unittest.TestCase):
         self.assertEqual(other.view(self.query).counts.pending, 2)
         with self.assertRaises(HumanReviewError):
             other.approved_records(self.spec.dataset_id, result.completion)
+
+    def test_policy_completes_only_empty_queue_and_reuses_its_completion(self) -> None:
+        workflow = self.make_workflow(self.stage.model_copy(update={"min_approvals": 0}))
+        actor = "automatic low-uncertainty policy"
+        key = self.spec.dataset_id
+        self.assertIsNone(workflow.prepare(key, empty_queue_actor=actor).completion)
+        self.table = ReviewTable(self.table.frame.iloc[:0], "model_id", "empty", {}, ())
+        self.assertIsNone(workflow.prepare(key).completion)
+        completed = workflow.prepare(key, empty_queue_actor=actor)
+        self.assertIsNotNone(completed.completion)
+        self.assertEqual(completed.reviewer, actor)
+        self.assertEqual(workflow.prepare(key, empty_queue_actor=actor), completed)
+        self.assertEqual(workflow.view(self.query).counts.pending, 0)
 
     def test_selection_bounds_are_enforced_at_completion(self) -> None:
         for choice in ("reject", "approve"):
@@ -305,7 +384,9 @@ class ReviewWorkflowTests(unittest.TestCase):
         legacy = self.home / "legacy.sqlite3"
         with sqlite3.connect(legacy) as connection:
             connection.execute("CREATE TABLE human_review_batches (data TEXT)")
-            connection.execute("CREATE TABLE human_review_decisions (batch_id TEXT, candidate_id TEXT, data TEXT)")
+            connection.execute(
+                "CREATE TABLE human_review_decisions (batch_id TEXT, candidate_id TEXT, data TEXT)"
+            )
             connection.execute("CREATE TABLE human_review_history (sequence INTEGER PRIMARY KEY, data TEXT)")
             connection.execute("CREATE TABLE human_review_publications (data TEXT)")
             connection.execute("INSERT INTO human_review_batches VALUES (?)", (json.dumps(old),))
@@ -321,7 +402,7 @@ class ReviewWorkflowTests(unittest.TestCase):
                 )
         imported_home = self.home / "imported"
         report = import_legacy(legacy, imported_home, self.home / "backup.sqlite3")
-        imported = ReviewWorkflow(imported_home, self.stage, self.workflow.source)
+        imported = ReviewWorkflow.for_home(imported_home, self.stage, self.workflow.source)
         self.assertEqual((report.batches, report.decisions), (1, 2))
         self.assertTrue(Path(report.backup_path).is_file())
         with imported.store.reader() as tx:
@@ -345,41 +426,68 @@ class ReviewWorkflowTests(unittest.TestCase):
                 self.workflow.approved_records(self.spec.dataset_id, completed.completion).to_dict("records"),
                 [{"model_id": "large", "score": 0.9}],
             )
-            evidence = self.workflow.evidence(EvidenceTarget(
-                dataset_id=self.spec.dataset_id, batch_id=original.batch.batch_id, candidate_id="small"
-            ))
+            evidence = self.workflow.evidence(
+                EvidenceTarget(
+                    dataset_id=self.spec.dataset_id, batch_id=original.batch.batch_id, candidate_id="small"
+                )
+            )
             self.assertEqual(evidence.fields["record"]["score"], 0.8)
 
     def test_selected_values_reuse_ignores_ids_evidence_neighbors_and_bounds(self) -> None:
-        stage = self.stage.model_copy(update={
-            "stage_id": "scores", "review_columns": ("score",), "min_approvals": 0, "max_approvals": None,
-        })
+        stage = self.stage.model_copy(
+            update={
+                "stage_id": "scores",
+                "review_columns": ("score",),
+                "min_approvals": 0,
+                "max_approvals": None,
+            }
+        )
         workflow = self.make_workflow(stage)
         batch = workflow.prepare(self.spec.dataset_id)
-        saved = workflow.decide(DecisionRequest(
-            dataset_id=self.spec.dataset_id,
-            snapshot_id=batch.snapshot.snapshot_id,
-            change=DecisionChange(
-                batch_id=batch.batch_id, generation=batch.generation, candidate_id="small",
-                expected_row_revision=0, decision="approve", reviewer="human", edits={"score": 0.85},
-            ),
-        ))
-        with self.assertRaises(HumanReviewError) as nonselected:
-            workflow.decide(DecisionRequest(
-                dataset_id=self.spec.dataset_id, snapshot_id=batch.snapshot.snapshot_id,
+        saved = workflow.decide(
+            DecisionRequest(
+                dataset_id=self.spec.dataset_id,
+                snapshot_id=batch.snapshot.snapshot_id,
                 change=DecisionChange(
-                    batch_id=batch.batch_id, generation=batch.generation, candidate_id="large",
-                    expected_row_revision=0, decision="approve", reviewer="human", edits={"model_id": "changed"},
+                    batch_id=batch.batch_id,
+                    generation=batch.generation,
+                    candidate_id="small",
+                    expected_row_revision=0,
+                    decision="approve",
+                    reviewer="human",
+                    edits={"score": 0.85},
                 ),
-            ))
+            )
+        )
+        with self.assertRaises(HumanReviewError) as nonselected:
+            workflow.decide(
+                DecisionRequest(
+                    dataset_id=self.spec.dataset_id,
+                    snapshot_id=batch.snapshot.snapshot_id,
+                    change=DecisionChange(
+                        batch_id=batch.batch_id,
+                        generation=batch.generation,
+                        candidate_id="large",
+                        expected_row_revision=0,
+                        decision="approve",
+                        reviewer="human",
+                        edits={"model_id": "changed"},
+                    ),
+                )
+            )
         self.assertEqual(nonselected.exception.code, "ineligible")
         self.table = ReviewTable(
-            pd.DataFrame([
-                {"model_id": "renamed", "score": 0.8},
-                {"model_id": "new-original", "score": 0.85},
-                {"model_id": "neighbor", "score": 0.7},
-            ]),
-            "model_id", "different-implementation-and-evidence", {"metric": "changed"}, ("renamed", "new-original", "neighbor"),
+            pd.DataFrame(
+                [
+                    {"model_id": "renamed", "score": 0.8},
+                    {"model_id": "new-original", "score": 0.85},
+                    {"model_id": "neighbor", "score": 0.7},
+                ]
+            ),
+            "model_id",
+            "different-implementation-and-evidence",
+            {"metric": "changed"},
+            ("renamed", "new-original", "neighbor"),
         )
         changed_stage = stage.model_copy(update={"max_approvals": 1})
         restarted = self.make_workflow(changed_stage)
@@ -398,12 +506,21 @@ class ReviewWorkflowTests(unittest.TestCase):
     def test_duplicate_occurrences_share_decision_but_selection_counts_occurrences(self) -> None:
         self.table = ReviewTable(
             pd.DataFrame([{"model_id": "first", "score": 0.8}, {"model_id": "duplicate", "score": 0.8}]),
-            "model_id", "duplicates", {}, ("first", "duplicate"),
-            artifact_id="models", scope_id="duplicate-selection",
+            "model_id",
+            "duplicates",
+            {},
+            ("first", "duplicate"),
+            artifact_id="models",
+            scope_id="duplicate-selection",
         )
-        stage = self.stage.model_copy(update={
-            "stage_id": "duplicates", "review_columns": ("score",), "min_approvals": 2, "max_approvals": 2,
-        })
+        stage = self.stage.model_copy(
+            update={
+                "stage_id": "duplicates",
+                "review_columns": ("score",),
+                "min_approvals": 2,
+                "max_approvals": 2,
+            }
+        )
         workflow = self.make_workflow(stage)
         batch = workflow.prepare(self.spec.dataset_id)
         query = ReviewQueryRequest(
@@ -413,31 +530,50 @@ class ReviewWorkflowTests(unittest.TestCase):
         self.assertEqual((view.page.total_rows, view.page.matched_rows, view.counts.pending), (1, 1, 1))
         self.assertEqual(view.page.rows[0].occurrence_count, 2)
         request = DecisionRequest(
-            dataset_id=self.spec.dataset_id, snapshot_id=batch.snapshot.snapshot_id,
-            artifact_id="models", scope_id="duplicate-selection",
+            dataset_id=self.spec.dataset_id,
+            snapshot_id=batch.snapshot.snapshot_id,
+            artifact_id="models",
+            scope_id="duplicate-selection",
             change=DecisionChange(
-                batch_id=batch.batch_id, generation=batch.generation, candidate_id="first",
-                expected_row_revision=0, decision="approve", reviewer="human", edits={"score": 0.9},
+                batch_id=batch.batch_id,
+                generation=batch.generation,
+                candidate_id="first",
+                expected_row_revision=0,
+                decision="approve",
+                reviewer="human",
+                edits={"score": 0.9},
             ),
         )
         saved = workflow.decide(request)
         self.assertEqual((saved.counts.approve, saved.counts.pending), (1, 0))
-        duplicate = workflow.item(EvidenceTarget(
-            dataset_id=self.spec.dataset_id, batch_id=batch.batch_id, candidate_id="duplicate",
-            artifact_id="models", scope_id="duplicate-selection",
-        ))
+        duplicate = workflow.item(
+            EvidenceTarget(
+                dataset_id=self.spec.dataset_id,
+                batch_id=batch.batch_id,
+                candidate_id="duplicate",
+                artifact_id="models",
+                scope_id="duplicate-selection",
+            )
+        )
         self.assertEqual(duplicate.decision.edits, {"score": 0.9})
         self.assertEqual(duplicate.decision.row_revision, 1)
         with self.assertRaises(HumanReviewError) as stale:
-            workflow.decide(request.model_copy(update={
-                "change": request.change.model_copy(update={"candidate_id": "duplicate"})
-            }))
+            workflow.decide(
+                request.model_copy(
+                    update={"change": request.change.model_copy(update={"candidate_id": "duplicate"})}
+                )
+            )
         self.assertEqual(stale.exception.code, "stale")
-        completed = workflow.complete(CompletionRequest(
-            dataset_id=self.spec.dataset_id, snapshot_id=batch.snapshot.snapshot_id,
-            artifact_id="models", scope_id="duplicate-selection",
-            expected=saved.batch, reviewer="human",
-        ))
+        completed = workflow.complete(
+            CompletionRequest(
+                dataset_id=self.spec.dataset_id,
+                snapshot_id=batch.snapshot.snapshot_id,
+                artifact_id="models",
+                scope_id="duplicate-selection",
+                expected=saved.batch,
+                reviewer="human",
+            )
+        )
         assert completed.completion is not None
         self.assertEqual(
             workflow.approved_records(self.spec.dataset_id, completed.completion).to_dict("records"),

@@ -25,7 +25,7 @@ def _inference(
 ) -> dict[str, JsonValue]:
     """Read this candidate's labels and any retained historical review artifacts."""
     result: dict[str, JsonValue] = {}
-    store = ObjectStore(manifest.storage)
+    store = ObjectStore.from_environment(manifest.storage)
     label_stage = (
         "labeling_attempts" if "labeling_attempts" in manifest.references else "proposed_annotations"
     )
@@ -73,7 +73,7 @@ def evidence_capture_stage(manifest: ReviewManifest, branch: JsonValue) -> str:
 def review_evidence(
     snapshots: ReviewSnapshots, snapshot: ReviewSnapshot, candidate_id: str
 ) -> EvidenceResponse:
-    manifest = snapshots.manifest(snapshot.snapshot_id)
+    manifest = snapshots.manifest(snapshot)
     if manifest.dataset_id != snapshot.dataset_id:
         raise HumanReviewError("conflict", "Review manifest has a different dataset binding")
     review_stage = next(
@@ -157,7 +157,7 @@ def review_evidence(
                     "inference": _inference(manifest, duplicate_origin["candidate_id"], prefix, identifier),
                 }
             )
-    taxonomy = DataFrameIOManager(storage=manifest.storage).read_version(
+    taxonomy = DataFrameIOManager.from_environment(manifest.storage).read_version(
         manifest.references["category_rules"]
     )
     match taxonomy:

@@ -54,8 +54,10 @@ next command boundary ambiguous, extraction stops for the rest of that fence.
 Synopsis placeholders and unprompted output from untyped fences remain outside
 its scope.
 
-V2 checks its verified capture cache first. On a miss, it can read the existing
-local V1 cache without changing it. The lookup is available only for sources
+## Reusing historical capture bytes
+
+The declared branch checks its verified capture cache first. On a miss, it can
+read the historical V1 cache without changing it. The lookup is available only for sources
 already selected by the current catalog and uses the pinned Git blob ID:
 
 ```text
@@ -65,7 +67,7 @@ already selected by the current catalog and uses the pinned Git blob ID:
 
 An operator can mount the cache read-only, or point `source-downloads` in a
 private QA home at the existing cache. Symlinks below that root are rejected.
-The V1 `current` pointer supplies an independent SHA-256. V2 checks it against
+The V1 `current` pointer supplies an independent SHA-256. The current collector checks it against
 the body, verifies the size and Git blob SHA-1 from the pinned catalog, and
 applies the ordinary UTF-8 and sensitive-content checks before publishing a
 capture. Catalog rights checks still run. Missing Git keys fall through to the

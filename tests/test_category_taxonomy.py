@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import csv
 import json
 import os
 import subprocess
@@ -9,14 +8,17 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import polars as pl
 from configuration_fixture import example_config
 from pandera.errors import SchemaError
 from pydantic import JsonValue, ValidationError
 
 from codebench_pipeline.category_rules import CategoryRules
-from codebench_pipeline.schemas import FIELDS, BridgeError, validate_commands, validate_export
+from codebench_pipeline.dataset_records import CandidateRecord, routing
+from codebench_pipeline.dataset_table_contract import FIELDS, table_schema
 from scripts.category_config import CategoryConfigError, load_taxonomy
 from scripts.command_filter import assess_command, extract_commands
+from scripts.dataset_schema import FIELDS as CSV_FIELDS
 from scripts.validate_dataset import validate_rows
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -81,23 +83,18 @@ class CategoryTaxonomyTests(unittest.TestCase):
         self.rules = CategoryRules.model_validate(self.configuration["rules"])
         self.taxonomy = load_taxonomy(self.path)
 
-    def eligible(self, risk: str) -> dict[str, JsonValue]:
+    def candidate(self, command: str, risks: list[str]) -> dict[str, JsonValue]:
+        risk_cells: list[JsonValue] = [*risks]
         return {
-            "raw_id": "a" * 64,
+            "candidate_id": "a" * 64,
             "source_id": "archive-docs",
-            "doc_full_url": "https://example.org/archive",
-            "doc_pos": "characters 0:24",
-            "local_path": "archive.md",
-            "format": "markdown",
-            "raw_command": "archive-tool remove old",
-            "command": "archive-tool remove old",
+            "source_url": "https://example.org/archive",
+            "source_position": "characters 0:24",
+            "util": "archive-tool",
+            "command": command,
             "context": "Remove an old archive entry.",
-            "extraction_transformations": [],
             "transformations": [],
-            "risk_candidates": [risk],
-            "filter_status": "eligible",
-            "filter_reason": "recognized_family",
-            "duplicate_of": "",
+            "risk_candidates": risk_cells,
         }
 
     def row(self, risk: str) -> dict[str, str]:
@@ -114,6 +111,7 @@ class CategoryTaxonomyTests(unittest.TestCase):
                     "real",
                     "-",
                     "ask",
+                    "false",
                 ),
                 strict=True,
             )
@@ -131,29 +129,23 @@ class CategoryTaxonomyTests(unittest.TestCase):
         self.assertEqual(assess_command("terraform destroy", self.taxonomy).risk_candidates, ())
 
     def test_eligible_boundary_accepts_each_configured_id_without_fixed_enum(self) -> None:
-        path = self.root / "eligible.jsonl"
-        for risk in ("CAT-91.7", "CAT-91.19"):
+        for operation, risk in (("remove", "CAT-91.7"), ("inspect", "CAT-91.19")):
             with self.subTest(risk=risk):
-                path.write_text(json.dumps(self.eligible(risk)) + "\n", encoding="utf-8")
-                records = validate_commands(path, eligible=True, rules=self.rules)
-                self.assertEqual(records[0].model_dump()["risk_candidates"], [risk])
+                candidate = CandidateRecord.model_validate(
+                    self.candidate(f"archive-tool {operation} old", [risk])
+                )
+                self.assertEqual(routing(candidate, self.rules), [risk])
 
     def test_eligible_boundary_rejects_foreign_unknown_and_missing_ids(self) -> None:
-        path = self.root / "eligible.jsonl"
-        for risks, error in (
-            (["CAT-3.1"], BridgeError),
-            (["CAT-91.1"], BridgeError),
-            ([], ValidationError),
-            ([""], ValidationError),
-        ):
+        for risks in (["CAT-3.1"], ["CAT-91.1"], [], [""]):
             with self.subTest(risks=risks):
-                record = {**self.eligible("CAT-91.7"), "risk_candidates": risks}
-                path.write_text(json.dumps(record) + "\n", encoding="utf-8")
-                with self.assertRaises(error):
-                    validate_commands(path, eligible=True, rules=self.rules)
+                with self.assertRaises(ValueError):
+                    candidate = CandidateRecord.model_validate(
+                        self.candidate("archive-tool remove old", risks)
+                    )
+                    routing(candidate, self.rules)
 
     def test_csv_boundaries_accept_only_supplied_canonical_taxonomy(self) -> None:
-        path = self.root / "commands.csv"
         for risk, valid in (
             ("CAT-91.7 Archive removal", True),
             ("CAT-91.19 Archive inspection", True),
@@ -164,17 +156,15 @@ class CategoryTaxonomyTests(unittest.TestCase):
         ):
             with self.subTest(risk=risk):
                 row = self.row(risk)
-                with path.open("w", encoding="utf-8", newline="") as stream:
-                    writer = csv.DictWriter[str](stream, fieldnames=FIELDS)
-                    writer.writeheader()
-                    writer.writerow(row)
+                frame = pl.DataFrame([row])
+                csv_row = {field: row[field] for field in CSV_FIELDS}
                 if valid:
-                    self.assertEqual(validate_export(path, rules=self.rules).height, 1)
-                    self.assertEqual(validate_rows([row], self.taxonomy), [])
+                    self.assertEqual(table_schema(self.rules).validate(frame).height, 1)
+                    self.assertEqual(validate_rows([csv_row], self.taxonomy), [])
                 else:
                     with self.assertRaises(SchemaError):
-                        validate_export(path, rules=self.rules)
-                    self.assertTrue(validate_rows([row], self.taxonomy))
+                        table_schema(self.rules).validate(frame)
+                    self.assertTrue(validate_rows([csv_row], self.taxonomy))
 
     def test_initial_rules_reject_foreign_and_missing_taxonomy_ids(self) -> None:
         for identifier in ("CAT-3.1", ""):

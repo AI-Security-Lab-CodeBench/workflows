@@ -103,9 +103,7 @@ def invocation_version(
                     "category_rules.py",
                     "model_config.py",
                     "inference.py",
-                    "agents.py",
                     "openai_transport.py",
-                    "mcp_transport.py",
                 )
             },
         }

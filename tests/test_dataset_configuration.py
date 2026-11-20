@@ -1,41 +1,34 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import tempfile
 import unittest
 from pathlib import Path
 
-from configuration_fixture import FixtureCategory, example_config, source_bytes, write_fixture
+from configuration_fixture import FixtureCategory, example_config, seed_prepared_snapshot, source_bytes
 from dagster import Config
 from pydantic import JsonValue, ValidationError
+from test_dataset_bundle import write_declared_bundle
+from test_declared_dataset_graph import fixture_spec
 
 from codebench_pipeline.business_config import DEFAULT_BUSINESS_CONFIG, load_business_rules
-from codebench_pipeline.dataframe_schemas import SourceCatalogTable, validated_frame
-from codebench_pipeline.dataset_catalog import catalog_row, provided_documents
+from codebench_pipeline.dataset_catalog import provided_documents
 from codebench_pipeline.dataset_config import (
     CatalogConfig,
-    DatasetFileConfig,
-    DatasetSeeds,
     DocumentationConfig,
     SnapshotConfig,
     catalog_for_branch,
     load_build_config,
     snapshots_for_branch,
 )
-from codebench_pipeline.dataset_documents import snapshot_documents
-from codebench_pipeline.dataset_seed_config import (
-    RiskSearchSeeds,
-    SearchSeeds,
-)
-from codebench_pipeline.dataset_source_models import SourceChoice
+from codebench_pipeline.dataset_registry import DatasetRegistry
+from codebench_pipeline.dataset_seed_config import RiskSearchSeeds, SearchSeeds, SourceSeed
 from codebench_pipeline.dataset_tables import documentation_table
+from codebench_pipeline.repository_branch_config import RepositoryBranchDeclaration
+from codebench_pipeline.source_manifests import resolve_source_paths
+from codebench_pipeline.stage_configuration import declared_source_config
 from codebench_pipeline.storage import IntegrityError
-
-
-def write_config(root: Path, config: DatasetFileConfig) -> Path:
-    path = root / "dataset.json"
-    path.write_text(config.model_dump_json(), encoding="utf-8")
-    return path
 
 
 class DatasetConfigurationTests(unittest.TestCase):
@@ -52,58 +45,66 @@ class DatasetConfigurationTests(unittest.TestCase):
             with self.subTest(command=command):
                 self.assertEqual("CAT-3.5" in rules.matching_risks(command), deployment)
 
-    def test_example_documentation_inventories_are_independent_of_empty_dataset_inventories(self) -> None:
+    def test_archived_documentation_inventory_remains_independent_of_empty_dataset_inventory(self) -> None:
         for category in ("CAT-99", "CAT-98"):
             with self.subTest(category=category), tempfile.TemporaryDirectory() as temporary:
-                path = write_fixture(Path(temporary), category)
-                config = example_config(category)
-                assert config.documentation_sources is not None
-                spec = load_build_config(path, Path(temporary))
-                catalog = catalog_for_branch(spec, "documentation")
-                snapshots = snapshots_for_branch(spec, "documentation")
-                self.assertEqual(catalog_for_branch(spec, "dataset").documents, [])
-                self.assertEqual(catalog_for_branch(spec, "dataset").mode, "provided_sources")
-                self.assertEqual(snapshots_for_branch(spec, "dataset").documents, [])
-                self.assertEqual(catalog.collection_revision, config.documentation_sources.revision)
-                self.assertEqual(catalog.model, config.models.selector)
-                self.assertEqual(snapshots.documents, catalog.documents)
-                for supplied, resolved in zip(
-                    config.documentation_sources.documents, catalog.documents, strict=True
-                ):
-                    assert supplied.local_path is not None
-                    self.assertEqual(resolved.local_path, str((path.parent / supplied.local_path).resolve()))
+                root = Path(temporary)
+                fixture = example_config(category)
+                supplied = fixture.documentation_sources
+                assert supplied is not None
+                (root / "source.md").write_bytes(source_bytes(category))
+                resolved = [resolve_source_paths(source, root) for source in supplied.documents]
+                catalog = CatalogConfig(
+                    documents=resolved, collection_revision=supplied.revision, model=fixture.models.selector
+                )
+                spec, _ = seed_prepared_snapshot(
+                    root,
+                    fixture_spec(root).model_copy(
+                        update={"rules": fixture.rules, "documentation_catalog": catalog}
+                    ),
+                    fixture.documentation,
+                )
+                archived = DatasetRegistry(root).get_snapshot(spec.dataset_id)
+                self.assertEqual(catalog_for_branch(archived, "dataset").documents, [])
+                self.assertEqual(catalog_for_branch(archived, "dataset").mode, "provided_sources")
+                self.assertEqual(snapshots_for_branch(archived, "dataset").documents, [])
+                stored = catalog_for_branch(archived, "documentation")
+                self.assertEqual(stored.collection_revision, supplied.revision)
+                self.assertEqual(stored.model, fixture.models.selector)
+                self.assertEqual(snapshots_for_branch(archived, "documentation").documents, stored.documents)
+                for original, actual in zip(supplied.documents, stored.documents, strict=True):
+                    self.assertEqual(actual.local_path, str(root / "source.md"))
                     self.assertEqual(
-                        resolved.model_dump(exclude={"local_path"}),
-                        supplied.model_dump(exclude={"local_path"}),
+                        actual.model_dump(exclude={"local_path"}), original.model_dump(exclude={"local_path"})
                     )
-                    resolved.to_source_document()
+                    self.assertEqual(actual.to_source_document().sha256, actual.sha256)
 
-    def test_absent_documentation_inventory_supplies_only_empty_nonselected_configuration(self) -> None:
-        original = example_config()
-        config = original.model_copy(update={"documentation_sources": None})
+    def test_missing_documentation_declaration_fails_instead_of_producing_an_empty_branch(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            spec = load_build_config(write_config(Path(temporary), config))
-        self.assertIsNone(spec.documentation_catalog)
-        self.assertEqual(
-            catalog_for_branch(spec, "documentation"),
-            CatalogConfig(mode="provided_sources", model=config.models.selector),
-        )
-        self.assertEqual(snapshots_for_branch(spec, "documentation").documents, [])
-        self.assertEqual(DatasetSeeds(mode="provided_sources").documents, [])
+            root = Path(temporary)
+            bundle = write_declared_bundle(root / "business")
+            path = bundle.parent.parent / "categories/cat3/collection/documentation-crawl.json"
+            path.unlink()
+            with self.assertRaises(FileNotFoundError):
+                load_build_config(bundle, root)
 
     def test_online_documentation_source_search_is_rejected_as_pipeline_input(self) -> None:
         search = SearchSeeds(searches=[RiskSearchSeeds(risk="CAT-99.1", queries=["Git examples"])])
         with self.assertRaises(ValidationError):
-            DatasetSeeds.model_validate({"mode": "keenable", "search_request": search.model_dump()})
+            DocumentationConfig(search_request=search)
 
     def test_documentation_inventory_rejects_corpora_and_undocumented_origins(self) -> None:
-        config = example_config()
-        assert config.documentation_sources is not None
-        original = config.documentation_sources.documents[0].model_dump()
+        with tempfile.TemporaryDirectory() as temporary:
+            spec = fixture_spec(Path(temporary))
+        collection = spec.declared_collection
+        assert collection is not None
+        declaration = collection.documentation_crawl.declaration
+        assert isinstance(declaration, RepositoryBranchDeclaration)
+        original = declaration.model_dump(mode="json")
         for source_type, provenance in (
-            ("bash_dataset", "human_authored"),
-            ("command_corpus", "human_collected"),
-            ("command_benchmark", "human_authored"),
+            ("community_command_corpus", "human_authored"),
+            ("community_command_corpus", "human_collected"),
+            ("community_command_corpus", "community_documentation"),
             ("agent_results", "community_documentation"),
             ("sft_examples", "community_documentation"),
             ("synthetic_examples", "community_documentation"),
@@ -113,38 +114,20 @@ class DatasetConfigurationTests(unittest.TestCase):
             ("maintainer_documentation", "human_authored"),
         ):
             with self.subTest(source_type=source_type, provenance=provenance):
-                values = {
-                    **original,
-                    "source_type": source_type,
-                    "provenance_type": provenance,
-                }
-                with self.assertRaises(ValidationError):
-                    DatasetFileConfig.model_validate(
-                        {
-                            **config.model_dump(),
-                            "documentation_sources": {"mode": "provided_sources", "documents": [values]},
-                        }
-                    )
-                if source_type in {"bash_dataset", "command_corpus", "command_benchmark"}:
-                    dataset = DatasetFileConfig.model_validate(
-                        {
-                            **config.model_dump(),
-                            "seeds": {"mode": "provided_sources", "documents": [values]},
-                        }
-                    )
-                    self.assertEqual(dataset.seeds.documents[0].source_type, source_type)
+                origin, *remaining = original["origins"]
+                changed = {**origin, "source_type": source_type, "provenance_type": provenance}
+                with self.assertRaises((ValidationError, IntegrityError)):
+                    RepositoryBranchDeclaration.model_validate_json(
+                        json.dumps({**original, "origins": [changed, *remaining]})
+                    ).runtime("documentation")
+        self.assertTrue(
+            all(
+                origin.source_type == "community_command_corpus"
+                for origin in collection.repository_config("dataset").origins("dataset")
+            )
+        )
 
-    def test_bounded_inspection_capture_cannot_substitute_for_a_source_manifest(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            spec = load_build_config(write_fixture(Path(temporary)), Path(temporary))
-            document = provided_documents(catalog_for_branch(spec, "documentation").documents)[0]
-            row = catalog_row(document, None, "bounded inspection")
-            row["captured_content"] = "git status"
-            catalog = validated_frame([row], SourceCatalogTable)
-            with self.assertRaises(IntegrityError):
-                snapshot_documents(catalog, SnapshotConfig())
-
-    def test_single_config_and_raw_bytes_supply_both_categories(self) -> None:
+    def test_local_pinned_source_and_taxonomy_support_multiple_categories(self) -> None:
         cases: tuple[tuple[FixtureCategory, str, str], ...] = (
             ("CAT-99", "git-status.md", "git status"),
             ("CAT-98", "terraform-destroy.md", "terraform destroy -auto-approve"),
@@ -152,122 +135,81 @@ class DatasetConfigurationTests(unittest.TestCase):
         for category, filename, command in cases:
             with self.subTest(category=category), tempfile.TemporaryDirectory() as temporary:
                 root = Path(temporary)
-                original = example_config(category)
-                assert original.documentation_sources is not None
+                fixture = example_config(category)
+                assert fixture.documentation_sources is not None
                 raw = source_bytes(category)
                 (root / filename).write_bytes(raw)
-                seed = original.documentation_sources.documents[0].model_copy(update={"local_path": filename})
-                config = original.model_copy(
-                    update={"seeds": original.seeds.model_copy(update={"documents": [seed]})}
+                source = resolve_source_paths(
+                    fixture.documentation_sources.documents[0].model_copy(update={"local_path": filename}),
+                    root,
                 )
-                path = write_config(root, config)
-
-                spec = load_build_config(path, root / "runtime")
-                document = provided_documents(spec.catalog.documents)[0]
-                catalog = validated_frame(
-                    [
-                        catalog_row(
-                            document,
-                            SourceChoice(
-                                source_id=document.source_id,
-                                decision="selected",
-                                rationale="Inspected maintainer source.",
-                                analysis="Relevant command examples occur in the inspected source.",
-                                confidence="high",
-                            ),
-                            raw.decode(),
-                        )
-                    ],
-                    SourceCatalogTable,
-                )
-                snapshots = snapshot_documents(catalog, spec.snapshots)
-                documentation = documentation_table(spec.documentation)
-
-                self.assertEqual(set(root.iterdir()), {path, root / filename})
-                self.assertEqual(document.local_path, (root / filename).resolve())
+                document = provided_documents([source])[0]
+                documentation = documentation_table(fixture.documentation)
+                self.assertEqual(set(root.iterdir()), {root / filename})
+                self.assertEqual(document.local_path, root / filename)
                 self.assertEqual(document.sha256, hashlib.sha256(raw).hexdigest())
-                self.assertEqual(snapshots.iloc[0]["content"], raw.decode())
-                self.assertIn(command, snapshots.iloc[0]["content"])
+                self.assertIn(command, document.local_path.read_text(encoding="utf-8"))
                 self.assertEqual(
-                    set(documentation["url"]),
-                    {snippet.url for snippet in config.documentation.snippets},
+                    set(documentation["url"]), {item.url for item in fixture.documentation.snippets}
                 )
-                self.assertEqual(spec.rules.matching_risks(command), [f"{category}.1"])
+                self.assertEqual(fixture.rules.matching_risks(command), [f"{category}.1"])
 
-    def test_category_patterns_and_stage_knobs_are_loaded_only_from_initial_file(self) -> None:
-        config = example_config()
-        risk = config.rules.risks[0].model_copy(
-            update={"id": "CAT-91.1", "command_patterns": [r"^git\s+diff\b"]}
-        )
-        rules = config.rules.model_copy(update={"category_id": "CAT-91", "risks": [risk]})
-        config = config.model_copy(
-            update={
-                "rules": rules,
-                "snapshot_maximum_bytes": 4321,
-                "adapters": "provided",
-                "adapter_sample_characters": 321,
-                "extraction": config.extraction.model_copy(update={"context_characters": 17}),
-                "filtering": config.filtering.model_copy(update={"maximum_command_characters": 765}),
-                "publication": config.publication.model_copy(update={"limit_per_risk": 13}),
-            }
-        )
-        with tempfile.TemporaryDirectory() as temporary:
-            spec = load_build_config(write_config(Path(temporary), config))
-
-        self.assertEqual(spec.rules.matching_risks("git diff --stat"), ["CAT-91.1"])
-        self.assertEqual(spec.rules.matching_risks("git status"), [])
-        self.assertEqual(spec.snapshots.maximum_bytes, 4321)
-        self.assertEqual(spec.documentation_snapshots.maximum_bytes, 4321)
-        self.assertEqual((spec.adapters.mode, spec.adapters.sample_characters), ("provided", 321))
-        self.assertEqual(spec.extraction.context_characters, 17)
-        self.assertEqual(spec.filtering.maximum_command_characters, 765)
-        self.assertEqual(spec.publication.limit_per_risk, 13)
-        self.assertEqual(example_config().rules.category_id, "CAT-99")
-
-    def test_registry_revision_and_reviewer_do_not_change_acquisition_configuration(self) -> None:
-        original = example_config()
-        assert original.models.reviewer is not None
-        changed = original.model_copy(
-            update={
-                "revision": "new-registry-version",
-                "rules": original.rules.model_copy(update={"version": "new-category-version"}),
-                "models": original.models.model_copy(
-                    update={
-                        "reviewer": original.models.reviewer.model_copy(update={"model": "another/reviewer"})
-                    }
-                ),
-            }
-        )
+    def test_declared_stage_knobs_and_category_rules_are_pinned_at_registration(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            first = load_build_config(write_config(root, original), root)
-            second = load_build_config(write_config(root, changed), root)
-            refreshed = changed.model_copy(
-                update={"seeds": changed.seeds.model_copy(update={"revision": "refresh-2"})}
-            )
-            third = load_build_config(write_config(root, refreshed), root)
+            file = write_declared_bundle(root / "business")
+            payload = json.loads(file.read_bytes())
+            payload["filtering"] = {"maximum_command_characters": 765}
+            payload["release"] = {"release_cap_per_risk": 13}
+            file.write_text(json.dumps(payload))
+            spec = load_build_config(file, root)
+            registry = DatasetRegistry(root)
+            registry.register(spec)
+            file.unlink()
+            restored = registry.get(spec.dataset_id)
+        self.assertIn("CAT-3.5", restored.rules.matching_risks("docker compose up"))
+        self.assertNotIn("CAT-3.5", restored.rules.matching_risks("docker compose down --volumes"))
+        self.assertEqual(restored.filtering.maximum_command_characters, 765)
+        self.assertEqual(restored.publication.limit_per_risk, 13)
 
-        self.assertEqual(first.catalog, second.catalog)
-        self.assertEqual(first.snapshots, second.snapshots)
-        self.assertEqual(first.documentation_catalog, second.documentation_catalog)
-        self.assertEqual(first.documentation_snapshots, second.documentation_snapshots)
-        self.assertIsNone(first.review)
-        self.assertIsNone(second.review)
-        self.assertEqual(third.catalog.collection_revision, "refresh-2")
-        self.assertEqual(third.catalog.documents, second.catalog.documents)
+    def test_registry_and_labeler_revisions_do_not_change_fixed_acquisition_configuration(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            bundle = write_declared_bundle(root / "business")
+            first = load_build_config(bundle, root)
+            payload = json.loads(bundle.read_bytes())
+            payload["revision_label"] = "new-registry-version"
+            payload["labeling"]["model"]["model"] = "another/labeler"
+            bundle.write_text(json.dumps(payload))
+            second = load_build_config(bundle, root)
+            dataset = bundle.parent.parent / "categories/cat3/collection/existing-datasets.json"
+            payload = json.loads(dataset.read_bytes())
+            payload["refresh_revision"] = "refresh-2"
+            dataset.write_text(json.dumps(payload))
+            third = load_build_config(bundle, root)
+        for branch in ("dataset", "documentation", "keenable"):
+            self.assertEqual(declared_source_config(first, branch), declared_source_config(second, branch))
+        revised = declared_source_config(third, "dataset")
+        self.assertNotEqual(
+            revised.declaration_digest, declared_source_config(second, "dataset").declaration_digest
+        )
+        self.assertEqual(
+            revised.repository_config.origins("dataset"),
+            declared_source_config(second, "dataset").repository_config.origins("dataset"),
+        )
+        for branch in ("documentation", "keenable"):
+            self.assertEqual(declared_source_config(second, branch), declared_source_config(third, branch))
 
     def test_online_dataset_discovery_is_rejected_even_with_valid_search_settings(self) -> None:
         search = SearchSeeds(searches=[RiskSearchSeeds(risk="CAT-99.1", queries=["Git examples"])])
         with self.assertRaises(ValidationError):
-            DatasetSeeds(mode="provided_sources", search_request=search)
+            CatalogConfig(search_request=search)
 
     def test_incompatible_modes_duplicate_ids_and_unknown_fields_are_rejected(self) -> None:
-        config = example_config()
-        assert config.documentation_sources is not None
-        seed = config.documentation_sources.documents[0]
-        search = SearchSeeds(
-            searches=[RiskSearchSeeds(risk="CAT-99.1", queries=["Git maintainer command examples"])]
-        )
+        fixture = example_config()
+        assert fixture.documentation_sources is not None
+        seed: SourceSeed = fixture.documentation_sources.documents[0]
+        search = SearchSeeds(searches=[RiskSearchSeeds(risk="CAT-99.1", queries=["Git examples"])])
         cases: list[dict[str, JsonValue]] = [
             {
                 "mode": "provided_sources",
@@ -277,41 +219,38 @@ class DatasetConfigurationTests(unittest.TestCase):
             {"mode": "keenable"},
             {"mode": "keenable", "documents": [seed.model_dump()], "search_request": search.model_dump()},
             {"mode": "provided_sources", "documents": [seed.model_dump(), seed.model_dump()]},
-            {"mode": "provided_sources", "documents": [seed.model_dump()], "manifest": "old.jsonl"},
         ]
         for values in cases:
             with self.subTest(values=values), self.assertRaises(ValidationError):
-                DatasetSeeds.model_validate(values)
+                CatalogConfig.model_validate(values)
         with self.assertRaises(ValidationError):
             SnapshotConfig(documents=[seed, seed])
-        with self.assertRaises(ValidationError):
-            DatasetFileConfig.model_validate({**config.model_dump(), "rules_file": "external.json"})
         with self.assertRaises(ValidationError):
             SearchSeeds.model_validate({**search.model_dump(), "max_chars": "4000"})
         with self.assertRaises(ValidationError):
             SearchSeeds(searches=search.searches * 2)
         with self.assertRaises(ValidationError):
             RiskSearchSeeds(risk="CAT-99.1", queries=[" "])
-        for field in ("seeds", "documentation_sources"):
-            with self.subTest(field=field), self.assertRaises(ValidationError):
-                DatasetFileConfig.model_validate(
-                    {
-                        **config.model_dump(),
-                        field: {
-                            "mode": "keenable",
-                            "search_request": {
-                                "searches": [{"risk": "CAT-3.1", "queries": ["Terraform maintainer docs"]}]
-                            },
-                        },
-                    }
-                )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            path = write_declared_bundle(root / "business")
+            original = json.loads(path.read_bytes())
+            for update in (
+                {"rules_file": "external.json"},
+                {"seeds": {"mode": "keenable", "search_request": search.model_dump()}},
+                {"documentation_sources": {"mode": "keenable", "search_request": search.model_dump()}},
+                {"seeds": {"documents": [seed.model_dump()], "manifest": "old.jsonl"}},
+            ):
+                with self.subTest(update=update), self.assertRaises(ValidationError):
+                    path.write_text(json.dumps({**original, **update}))
+                    load_build_config(path, root)
 
     def test_inline_stage_configuration_has_dagster_compatible_nested_fields(self) -> None:
-        config = example_config()
+        fixture = example_config()
         for config_type in (CatalogConfig, SnapshotConfig, DocumentationConfig):
             with self.subTest(config_type=config_type):
                 self.assertIsInstance(config_type.to_fields_dict(), dict)
-        assert config.documentation_sources is not None
-        self.assertIsInstance(config.documentation_sources.documents[0], Config)
-        self.assertIsInstance(config.documentation.snippets[0], Config)
+        assert fixture.documentation_sources is not None
+        self.assertIsInstance(fixture.documentation_sources.documents[0], Config)
+        self.assertIsInstance(fixture.documentation.snippets[0], Config)
         self.assertIsInstance(SearchSeeds.to_fields_dict(), dict)

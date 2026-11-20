@@ -12,6 +12,7 @@ from codebench_pipeline.artifact_schemas import (
     table_artifact_schema,
 )
 from codebench_pipeline.config_artifact_preview import read_config_preview
+from codebench_pipeline.data_view_models import DatasetViewError
 from codebench_pipeline.dataframe_io import AssetReference, read_frame
 from codebench_pipeline.human_review import HumanReviewError
 from codebench_pipeline.models import Digest
@@ -67,6 +68,7 @@ class ArtifactBinding:
 class RunConfigBinding:
     path: Path
     publication_state: PublicationState | None = None
+    use_declared_schema: bool = False
 
 
 class ArtifactCatalog(Protocol):
@@ -92,18 +94,28 @@ class ArtifactDataService:
             if query.search or query.filters or query.sort or query.offset:
                 raise TableQueryError("query", "JSON artifacts are not queryable tables")
             preview = read_config_preview(binding.path, request.snapshot_id)
+            schema = ArtifactSchema(source="storage", schema=preview.schema)
+            if binding.use_declared_schema and "x-codebench-truncated" not in preview.schema:
+                declared = rules_artifact_schema(preview.value, self.schemas.get(request.asset_key))
+                if declared.source == "declared":
+                    schema = declared
             return ArtifactJSON(
                 asset_key=request.asset_key,
                 partition_key=request.partition_key,
                 snapshot_id=preview.digest,
                 value=preview.value,
-                data_schema=ArtifactSchema(source="storage", schema=preview.schema),
+                data_schema=schema,
                 publication_state=binding.publication_state,
             )
         if request.snapshot_id is not None and request.snapshot_id != binding.reference.digest:
             raise HumanReviewError("stale", "The artifact changed; refresh before continuing")
         suffix = "parquet" if binding.reference.format == "parquet" else "json"
-        payload = ObjectStore(binding.storage).read(f"objects/{binding.reference.digest}.{suffix}")
+        try:
+            payload = ObjectStore.from_environment(binding.storage).read(
+                f"objects/{binding.reference.digest}.{suffix}"
+            )
+        except FileNotFoundError as error:
+            raise DatasetViewError("not_materialized", "The bound artifact bytes are missing") from error
         if sha256(payload) != binding.reference.digest:
             raise IntegrityError("Artifact reference content mismatch")
         match binding.reference.format:
@@ -130,6 +142,7 @@ class ArtifactDataService:
                     snapshot_id=binding.reference.digest,
                     value=value,
                     data_schema=rules_artifact_schema(value, self.schemas.get(request.asset_key)),
+                    publication_state=binding.publication_state,
                 )
             case _:
                 assert_never(binding.reference.format)

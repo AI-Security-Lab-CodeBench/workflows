@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections.abc import Iterable
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from hashlib import sha256
 from pathlib import Path
@@ -8,7 +9,7 @@ from urllib.parse import urlsplit
 
 from pydantic import JsonValue
 
-from codebench_pipeline.batch_labeling import RowEvidence
+from codebench_pipeline.batch_labeling_rows import RowEvidence
 from codebench_pipeline.dataset_records import CandidateRecord
 from codebench_pipeline.grounding_inventory import SharedOperations, shared_passages
 from codebench_pipeline.grounding_passages import Applicability
@@ -21,7 +22,7 @@ from codebench_pipeline.grounding_tools import (
 )
 from codebench_pipeline.keenable_policy import RESPONSE_BYTES, canonical_url
 from codebench_pipeline.models import Digest, SemanticSnippet
-from codebench_pipeline.repository_receipts import canonical, publish_bytes
+from codebench_pipeline.repository_receipts import canonical, read_evidence_bytes
 from codebench_pipeline.storage import IntegrityError, digest, fingerprint
 from scripts.dataset_schema import SECRET_PATTERNS
 
@@ -61,11 +62,21 @@ def admitted_excerpt(
 
 
 @dataclass(frozen=True, slots=True)
+class OperationReceiptBuffer:
+    receipts: dict[str, bytes] = field(default_factory=dict)
+
+    def referenced(self, evidence: Iterable[RowEvidence]) -> dict[str, bytes]:
+        keys = {f"shared-operations/{item.provider_metadata}.json" for item in evidence}
+        return {key: self.receipts[key] for key in keys if key in self.receipts}
+
+
+@dataclass(frozen=True, slots=True)
 class GuardedEvidence:
     sources: CandidateEvidence
     config: GroundingConfig
     root: Path
     shared_operations: SharedOperations | None = None
+    operation_receipts: OperationReceiptBuffer | None = None
 
     @property
     def source_limited(self) -> bool:
@@ -145,9 +156,9 @@ class GuardedEvidence:
             raise ValueError("Citation lacks a current source-level operation passage")
         authorized = self._authorizations(candidate, capture)
         if authorized:
-            path = self.root / "verified-operations" / f"{evidence.evidence_id}.json"
-            if path.stem == evidence.evidence_id and len(evidence.evidence_id) == 64:
-                payload = path.read_bytes()
+            key = f"verified-operations/{evidence.evidence_id}.json"
+            if Path(key).stem == evidence.evidence_id and len(evidence.evidence_id) == 64:
+                payload = read_evidence_bytes(self.root, key)
                 if sha256(payload).hexdigest() != evidence.provider_metadata:
                     raise IntegrityError("Operation admission receipt differs from its verified digest")
                 receipt = OperationReceipt.model_validate_json(payload)
@@ -215,13 +226,14 @@ class GuardedEvidence:
             "matcher": "verified-container-applicability-v5",
         }
         receipt_digest = fingerprint(receipt)
-        path = self.root / "shared-operations" / f"{receipt_digest}.json"
+        key = f"shared-operations/{receipt_digest}.json"
         payload = canonical(receipt)
-        if verify:
-            if path.read_bytes() != payload:
+        if self.operation_receipts is not None:
+            records = self.operation_receipts.receipts
+            if (records.get(key) if verify else records.setdefault(key, payload)) != payload:
                 raise IntegrityError("Shared operation admission receipt differs from its verified bytes")
-        else:
-            publish_bytes(path, payload)
+        elif verify and read_evidence_bytes(self.root, key) != payload:
+            raise IntegrityError("Shared operation admission receipt differs from its verified bytes")
         return [
             admitted_excerpt(
                 candidate,

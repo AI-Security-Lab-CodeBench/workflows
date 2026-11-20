@@ -3,12 +3,14 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+from collections.abc import Callable
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from email.message import Message
 from http.client import HTTPException
 from pathlib import Path
 from threading import RLock
-from typing import IO, Final, Literal, assert_never
+from typing import IO, Final, Literal, Protocol, assert_never
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, urlsplit, urlunsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
@@ -18,6 +20,9 @@ from pydantic import BaseModel, ConfigDict, Field, JsonValue, TypeAdapter, Valid
 from scripts.dataset_schema import SECRET_PATTERNS
 
 from .grounding_policy import OperationGrant
+from .object_store import safe_key
+from .repository_receipts import publish_bytes
+from .storage import IntegrityError
 from .typed_config import TypedConfig
 
 MAXIMUM_BATCH_PROVIDER_CALLS: Final = 10
@@ -86,6 +91,23 @@ class GroundingConfig(TypedConfig):
 
 Action = Literal["context7_search", "context7_context", "keenable_search", "keenable_fetch"]
 Provider = Literal["context7", "keenable"]
+
+
+@dataclass(frozen=True, slots=True)
+class GroundingCredentials:
+    keenable: str | None = field(default=None, repr=False)
+    context7: str | None = field(default=None, repr=False)
+
+    @classmethod
+    def bind(cls, config: GroundingConfig, lookup: Callable[[str], str | None]) -> GroundingCredentials:
+        return cls(lookup(config.keenable_api_key_env), lookup(config.context7_api_key_env))
+
+    @classmethod
+    def from_environment(cls, config: GroundingConfig) -> GroundingCredentials:
+        return cls.bind(config, os.environ.get)
+
+    def contains(self, text: str) -> bool:
+        return any(key is not None and bool(key) and key in text for key in (self.keenable, self.context7))
 
 
 class DocumentationQuery(_Frozen):
@@ -252,25 +274,53 @@ def _json(value: JsonValue) -> str:
     return json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
 
 
-def _persist(path: Path, body: bytes) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        with path.open("xb") as stream:
-            stream.write(body)
-    except FileExistsError:
-        if path.read_bytes() != body:
-            raise ValueError("Immutable grounding artifact conflict") from None
+class ResponseCache(Protocol):
+    @property
+    def root(self) -> Path: ...
+
+    def read(self, key: str, maximum: int) -> bytes | None: ...
+
+    def write(self, key: str, body: bytes) -> None: ...
+
+
+@dataclass(frozen=True, slots=True)
+class GroundingFiles:
+    root: Path
+
+    def _address(self, key: str) -> Path:
+        root = self.root.resolve()
+        path = root / safe_key(key)
+        if not path.is_relative_to(root) or path.resolve() != path:
+            raise IntegrityError("Grounding artifact is outside its bound directory or traverses a link")
+        return path
+
+    def read(self, key: str, maximum: int) -> bytes | None:
+        try:
+            with self._address(key).open("rb") as stream:
+                return stream.read(maximum + 1)
+        except FileNotFoundError:
+            return None
+
+    def write(self, key: str, body: bytes) -> None:
+        publish_bytes(self._address(key), body)
 
 
 class GroundingBroker:
     """One batch's serialized call budget, discovery permissions and bounded evidence."""
 
     def __init__(
-        self, config: GroundingConfig, out: Path, cache: Path | None = None, *, retain_responses: bool = True
+        self,
+        config: GroundingConfig,
+        credentials: GroundingCredentials,
+        artifacts: GroundingFiles,
+        *,
+        response_cache: ResponseCache | None = None,
+        retain_responses: bool = True,
     ) -> None:
         self.config = config.model_copy(deep=True)
-        self.out = out
-        self.cache = cache
+        self.credentials = credentials
+        self.artifacts = artifacts
+        self.response_cache = response_cache
         self.retain_responses = retain_responses
         self._provider_calls = 0
         self._response_bytes = 0
@@ -282,6 +332,25 @@ class GroundingBroker:
         self._evidence_ids: set[str] = set()
         self._response_hashes: dict[str, str] = {}
         self._history: list[GroundingReceipt] = []
+
+    @classmethod
+    def from_environment(
+        cls, config: GroundingConfig, out: Path, cache: Path | None = None
+    ) -> GroundingBroker:
+        return cls(
+            config,
+            GroundingCredentials.from_environment(config),
+            GroundingFiles(out),
+            response_cache=GroundingFiles(cache) if cache is not None else None,
+        )
+
+    @property
+    def out(self) -> Path:
+        return self.artifacts.root
+
+    @property
+    def cache(self) -> Path | None:
+        return self.response_cache.root if self.response_cache is not None else None
 
     @property
     def provider_calls(self) -> int:
@@ -334,13 +403,7 @@ class GroundingBroker:
         return False
 
     def _sensitive(self, text: str) -> bool:
-        keys = (
-            os.environ.get(self.config.keenable_api_key_env),
-            os.environ.get(self.config.context7_api_key_env),
-        )
-        return any(pattern.search(text) for pattern in SECRET_PATTERNS) or any(
-            key and key in text for key in keys
-        )
+        return self.credentials.contains(text) or any(pattern.search(text) for pattern in SECRET_PATTERNS)
 
     def execute(self, query: DocumentationQuery) -> GroundingResult:
         """Return bounded evidence or a structured error; calls are per execution."""
@@ -396,11 +459,9 @@ class GroundingBroker:
                 if cached is not None:
                     self._response_hashes[request_hash] = cached.response_sha256
                     if self.retain_responses:
-                        _persist(
-                            self.out / "responses" / (cached.response_sha256 + ".json"), cached.body.encode()
-                        )
-                    if self.retain_responses and self.cache is not None:
-                        _persist(self.cache / (request_hash + ".json"), cached.model_dump_json().encode())
+                        self.artifacts.write(f"responses/{cached.response_sha256}.json", cached.body.encode())
+                    if self.retain_responses and self.response_cache is not None:
+                        self.response_cache.write(f"{request_hash}.json", cached.model_dump_json().encode())
             self._results[request_hash] = result.model_copy(deep=True)
             return self._receipt(query, request_hash, result)
 
@@ -412,16 +473,17 @@ class GroundingBroker:
                 self._seen_urls.add(_url(hit.url))
 
     def _load_cache(self, key: str) -> _Cached | GroundingError | None:
-        if self.cache is None:
-            return None
-        path = self.cache / (key + ".json")
-        if not path.exists():
+        if self.response_cache is None:
             return None
         maximum = self.config.maximum_response_bytes
-        if path.stat().st_size > maximum * 6 + 2048:
+        cache_limit = maximum * 6 + 2048
+        payload = self.response_cache.read(f"{key}.json", cache_limit)
+        if payload is None:
+            return None
+        if len(payload) > cache_limit:
             return GroundingError(code="invalid_cache")
         try:
-            cached = _Cached.model_validate_json(path.read_bytes())
+            cached = _Cached.model_validate_json(payload)
             decoded = TypeAdapter(JsonValue).validate_json(cached.body, strict=True)
         except ValidationError:
             return GroundingError(code="invalid_cache")
@@ -438,10 +500,7 @@ class GroundingBroker:
 
     def _retrieve(self, query: DocumentationQuery, key: str) -> tuple[GroundingResult, _Cached | None]:
         provider: Provider = "context7" if query.action.startswith("context7_") else "keenable"
-        environment = (
-            self.config.context7_api_key_env if provider == "context7" else self.config.keenable_api_key_env
-        )
-        api_key = os.environ.get(environment)
+        api_key = self.credentials.context7 if provider == "context7" else self.credentials.keenable
         if not api_key:
             return GroundingResult(error=GroundingError(code="missing_api_key")), None
         if self.provider_calls >= self.config.provider_call_limit:
@@ -509,8 +568,6 @@ class GroundingBroker:
             cached = _Cached(
                 request_sha256=key, response_sha256=_digest(raw), retrieved_at=retrieved_at, body=text
             )
-            if self.retain_responses:
-                _persist(self.out / "responses" / (cached.response_sha256 + ".json"), raw)
             return result, cached
         except HTTPError as error:
             retry = error.headers.get("Retry-After")
@@ -616,7 +673,7 @@ class GroundingBroker:
         if self.retain_responses:
             for doc in documents:
                 artifact = doc.model_dump_json().encode()
-                _persist(self.out / "documents" / (_digest(artifact) + ".json"), artifact)
+                self.artifacts.write(f"documents/{_digest(artifact)}.json", artifact)
         return GroundingResult(documents=documents, discovery_results=hits)
 
     def _document(
@@ -677,6 +734,6 @@ class GroundingBroker:
             evidence_bytes=self.evidence_bytes,
         )
         body = receipt.model_dump_json().encode()
-        _persist(self.out / "receipts" / (_digest(body) + ".json"), body)
+        self.artifacts.write(f"receipts/{_digest(body)}.json", body)
         self._history.append(receipt)
         return result

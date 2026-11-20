@@ -51,13 +51,22 @@ def load_legacy_manifest(home: Path, directory: Path | None, batch: ReviewBatch)
         try:
             annotation = ReviewManifest.model_validate_json(payload)
             stage = next(
-                (name for name in ("category_eligible_annotations", "deduplicated_annotations", "reviewed_annotations")
-                 if name in annotation.references),
+                (
+                    name
+                    for name in (
+                        "category_eligible_annotations",
+                        "deduplicated_annotations",
+                        "reviewed_annotations",
+                    )
+                    if name in annotation.references
+                ),
                 None,
             )
             if stage is None:
                 return None
-            value = DataFrameIOManager(storage=annotation.storage).read_version(annotation.references[stage])
+            value = DataFrameIOManager.from_environment(annotation.storage).read_version(
+                annotation.references[stage]
+            )
             if not isinstance(value, pd.DataFrame):
                 return None
             records = {str(row["candidate_id"]): row for row in frame_records(value)}
@@ -80,7 +89,10 @@ def load_legacy_manifest(home: Path, directory: Path | None, batch: ReviewBatch)
         manifest = LegacyManifest.model_validate_json(payload)
     except ValidationError:
         return None
-    if manifest.dataset_id != batch.snapshot.dataset_id or manifest.review_stage != batch.snapshot.review_stage:
+    if (
+        manifest.dataset_id != batch.snapshot.dataset_id
+        or manifest.review_stage != batch.snapshot.review_stage
+    ):
         return None
     identifiers = tuple(row.get(manifest.id_column) for row in manifest.rows)
     if identifiers != batch.snapshot.candidate_ids or not manifest.review_columns:

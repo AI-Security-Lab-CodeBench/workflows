@@ -4,13 +4,12 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from configuration_fixture import write_fixture
 from dagster import AssetKey, DagsterInstance, build_output_context
+from test_declared_dataset_graph import fixture_spec
 
 from codebench_pipeline.dataframe_io import DataFrameIOManager
 from codebench_pipeline.dataframe_schemas import CommandCandidatesTable, validated_frame
 from codebench_pipeline.dataset_asset_types import DATASET_PARTITIONS
-from codebench_pipeline.dataset_config import load_build_config
 from codebench_pipeline.dataset_registry import DatasetRegistry
 from codebench_pipeline.definitions import build_definitions
 from codebench_pipeline.runtime_instance import dataset_instance
@@ -22,7 +21,7 @@ class DatasetViewerTests(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.home = Path(temporary.name)
-        self.spec = load_build_config(write_fixture(self.home), self.home)
+        self.spec = fixture_spec(self.home)
         DatasetRegistry(self.home).register(self.spec)
         self.long_context = "Full context " * 100
         self.frame = validated_frame(

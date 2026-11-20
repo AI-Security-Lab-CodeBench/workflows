@@ -4,19 +4,17 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict
 
-from codebench_pipeline.dataset_branches import FINALIZATION_STAGES, Branch, collection_branches, stage_branch
-from codebench_pipeline.dataset_plan import plan_dataset
+from codebench_pipeline.dataset_branches import COLLECTION_BRANCHES, FINALIZATION_STAGES, Branch, stage_branch
+from codebench_pipeline.dataset_dependencies import DECLARED_INPUT_STAGES
 from codebench_pipeline.dataset_registry import DatasetRegistry
 from codebench_pipeline.definitions import build_definitions, dataset_run_config
 from codebench_pipeline.human_review import HumanReviewError
 from codebench_pipeline.human_review_store import HumanReviewStore
 from codebench_pipeline.release_runner import ReleaseRunner
 from codebench_pipeline.runtime_instance import dataset_instance
-from codebench_pipeline.stage_configuration import stage_configs
-from codebench_pipeline.storage import IntegrityError, exclusive
+from codebench_pipeline.storage import exclusive
 
 BuildStatus = Literal[
-    "unconfigured",
     "prepared",
     "waiting_for_sources",
     "awaiting_human_review",
@@ -60,85 +58,58 @@ class BuildOutcome(BaseModel):
     branches: dict[Branch, BranchOutcome]
 
 
+def refresh_registered_configuration(dataset_id: str, home: Path) -> str:
+    DatasetRegistry(home).get(dataset_id)
+    with dataset_instance(home) as instance:
+        instance.add_dynamic_partitions("dataset_builds", [dataset_id])
+        result = (
+            build_definitions(home)
+            .resolve_job_def("refresh_dataset_configuration")
+            .execute_in_process(
+                instance=instance,
+                partition_key=dataset_id,
+            )
+        )
+        return result.run_id
+
+
 def run_registered(dataset_id: str, home: Path, *, prepare_only: bool = False) -> BuildOutcome:
+    """Force the named native job for one registered partition."""
     spec = DatasetRegistry(home).get(dataset_id)
-    if prepare_only and not spec.has_declared_collection:
-        raise IntegrityError("Preparation-only builds require a declared collection")
-    through = "filtered_commands" if prepare_only else None
     job_name = "prepare_dataset" if prepare_only else "build_dataset"
     with exclusive(home / "build-locks" / f"{spec.dataset_id}.lock"), dataset_instance(home) as instance:
         instance.add_dynamic_partitions("dataset_builds", [spec.dataset_id])
-        configs = stage_configs(spec)
-        plan = plan_dataset(spec, configs, instance, home=home, through=through)
-        caches: dict[str, bool] = {}
-        run_id: str | None = None
-        if plan.selected:
-            job = build_definitions(home, specification=spec).resolve_job_def(job_name)
-            result = job.execute_in_process(
+        result = (
+            build_definitions(home)
+            .resolve_job_def(job_name)
+            .execute_in_process(
                 instance=instance,
                 partition_key=spec.dataset_id,
-                asset_selection=plan.asset_selection,
-                run_config=dataset_run_config(spec, home, prepare_only=prepare_only),
+                run_config=dataset_run_config(spec),
             )
-            if not result.success:
-                raise RuntimeError(f"Dataset job failed: {result.run_id}")
-            run_id = result.run_id
-            for stage in plan.selected:
-                materializations = result.asset_materializations_for_node(
-                    f"datasets__{stage.replace('/', '__')}"
-                )
-                if len(materializations) != 1:
-                    raise RuntimeError(f"Missing planned materialization: {stage}")
-                caches[stage] = materializations[0].metadata["cache_hit"].value is True
-        current = plan_dataset(spec, configs, instance, home=home, through=through)
+        )
+        caches: dict[str, bool] = {}
+        for event in result.get_asset_materialization_events():
+            materialization = event.step_materialization_data.materialization
+            stage = "/".join(materialization.asset_key.path[1:])
+            if stage in DECLARED_INPUT_STAGES:
+                caches[stage] = materialization.metadata["cache_hit"].value is True
         branches: dict[Branch, BranchOutcome] = {}
         review = nullcontext() if prepare_only else HumanReviewStore(home).transaction(dataset_id=dataset_id)
         with review as transaction:
             shared_batch = (
-                transaction.get_current_batch(dataset_id, "annotations")
-                if transaction is not None and not current.selected and not current.blocked
-                else None
+                transaction.get_current_batch(dataset_id, "annotations") if transaction is not None else None
             )
-            if (
-                shared_batch is not None
-                and transaction is not None
-                and not shared_batch.snapshot.candidate_ids
-                and shared_batch.completion is None
-            ):
-                transaction.complete(
-                    shared_batch.snapshot, shared_batch, reviewer="automatic low-uncertainty policy"
-                )
-                shared_batch = transaction.get_batch(shared_batch.batch_id)
-            for descriptor in collection_branches(declared=spec.has_declared_collection):
+            for descriptor in COLLECTION_BRANCHES:
                 branch = descriptor.namespace
                 materialized = tuple(
                     stage
                     for stage in caches
                     if stage not in FINALIZATION_STAGES and stage_branch(stage) == branch
                 )
-                skipped = tuple(
-                    stage
-                    for stage in plan.unchanged
-                    if stage not in FINALIZATION_STAGES and stage_branch(stage) == branch
-                )
-                blocked = tuple(
-                    stage
-                    for stage in current.blocked
-                    if stage not in FINALIZATION_STAGES and stage_branch(stage) == branch
-                )
-                if branch in current.unconfigured:
-                    branches[branch] = BranchOutcome(
-                        materialized_stages=materialized,
-                        skipped_stages=skipped,
-                        blocked_stages=blocked,
-                        status="unconfigured",
-                    )
-                    continue
                 batch = shared_batch
                 status: BuildStatus = (
-                    "waiting_for_sources"
-                    if blocked
-                    else "unchanged"
+                    "unchanged"
                     if not materialized
                     else "prepared"
                     if prepare_only
@@ -150,18 +121,16 @@ def run_registered(dataset_id: str, home: Path, *, prepare_only: bool = False) -
                 )
                 branches[branch] = BranchOutcome(
                     materialized_stages=materialized,
-                    skipped_stages=skipped,
-                    blocked_stages=blocked,
+                    skipped_stages=(),
+                    blocked_stages=(),
                     status=status,
                     review_stage="annotations" if batch is not None else None,
                     review_batch_id=batch.batch_id if batch is not None else None,
                     review_snapshot_id=batch.snapshot.snapshot_id if batch is not None else None,
                 )
-        primary = branches["documentation"] if "dataset" in current.unconfigured else branches["dataset"]
+        primary = branches["dataset"]
         status = primary.status
-        if current.waiting_for == "sources":
-            status = "waiting_for_sources"
-        elif prepare_only and caches:
+        if prepare_only and caches:
             status = "prepared"
         if shared_batch is not None:
             if shared_batch.state == "open":
@@ -176,7 +145,7 @@ def run_registered(dataset_id: str, home: Path, *, prepare_only: bool = False) -
             try:
                 published = ReleaseRunner(home, instance)(shared_batch.completion)
             except HumanReviewError as error:
-                if not spec.has_declared_collection or error.code != "pending":
+                if error.code != "pending":
                     raise
                 status = "prepared"
                 publication_waiting_reason = error.detail
@@ -186,7 +155,7 @@ def run_registered(dataset_id: str, home: Path, *, prepare_only: bool = False) -
                     caches.update({"human_review_decisions": False, "dataset_release": False})
                     status = "published"
         outcome = BuildOutcome(
-            run_id=run_id,
+            run_id=result.run_id,
             release_run_id=release_run_id,
             publication_waiting_reason=publication_waiting_reason,
             job=job_name,
@@ -194,9 +163,9 @@ def run_registered(dataset_id: str, home: Path, *, prepare_only: bool = False) -
             category=spec.rules.category_id,
             storage=spec.storage.backend,
             materialized_stages=tuple(caches),
-            skipped_stages=plan.unchanged,
-            blocked_stages=current.blocked,
-            selection_reasons=plan.reasons,
+            skipped_stages=(),
+            blocked_stages=(),
+            selection_reasons={},
             cache_hits=caches,
             status=status,
             review_stage="annotations" if shared_batch is not None else primary.review_stage,
@@ -206,6 +175,5 @@ def run_registered(dataset_id: str, home: Path, *, prepare_only: bool = False) -
             else primary.review_snapshot_id,
             branches=branches,
         )
-        if run_id is not None:
-            (home / f"build-{run_id}.json").write_text(outcome.model_dump_json(indent=2), encoding="utf-8")
+        (home / f"build-{result.run_id}.json").write_text(outcome.model_dump_json(indent=2), encoding="utf-8")
         return outcome

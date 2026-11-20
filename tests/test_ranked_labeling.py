@@ -8,7 +8,9 @@ from unittest import TestCase
 from unittest.mock import Mock, patch
 
 import numpy as np
+from guarded_labeling_fixture import guarded_labeling
 from numpy.typing import NDArray
+from pandera.typing import DataFrame
 from pydantic import BaseModel, JsonValue, ValidationError
 from test_batch_labeling import batch_config, remote_model, submitted, tool_reply
 from test_dataset_annotation import documentation
@@ -16,21 +18,32 @@ from test_dataset_rules import make_candidate, make_label, make_rules
 from test_declared_dataset_graph import fixture_spec
 from test_repository import repository_config_fixture
 
-from codebench_pipeline.batch_labeling import EvidenceAdmission, RowEvidence, annotate_batches
+from codebench_pipeline.batch_labeling import (
+    BatchExecution,
+    EvidenceAdmission,
+    annotate_batches,
+)
 from codebench_pipeline.batch_labeling_config import BatchLabelingConfig
 from codebench_pipeline.batch_labeling_ranked import QUOTA_DEFERRED, QUOTA_RECEIPT, RankedLabeling
+from codebench_pipeline.batch_labeling_rows import RowEvidence
 from codebench_pipeline.category_rules import CategoryRules
-from codebench_pipeline.dataframe_schemas import FilteredCommandsTable, validated_frame
+from codebench_pipeline.dataframe_schemas import FilteredCommandsTable, SourceDocumentsTable, validated_frame
+from codebench_pipeline.dataset_engine import stage_signature
 from codebench_pipeline.dataset_records import CandidateRecord
 from codebench_pipeline.grounding import GuardedEvidence
 from codebench_pipeline.grounding_sources import CandidateCapture
-from codebench_pipeline.grounding_tables import GuardedLabeling
+from codebench_pipeline.grounding_tables import LabelingEvidenceInputs
+from codebench_pipeline.inference_capacity import CapacityUnavailable
+from codebench_pipeline.labeling_checkpoint_io import labeling_generation_identity
+from codebench_pipeline.labeling_checkpoint_store import LabelingCheckpointCache
 from codebench_pipeline.labeling_outcomes import LabelingAttempt, failed_attempt, label_attempt
 from codebench_pipeline.labeling_tables import proposed_from_attempts
 from codebench_pipeline.model_config import ModelConfig
 from codebench_pipeline.models import SemanticSnippet
 from codebench_pipeline.openai_transport import HTTPResponse
 from codebench_pipeline.repository_config import RepositoryConfig
+from codebench_pipeline.repository_receipts import RepositoryRun
+from codebench_pipeline.stage_configuration import GuardedLabelingCacheConfig
 from codebench_pipeline.storage import fingerprint
 
 
@@ -43,7 +56,11 @@ class RankedLabelingTests(TestCase):
         annotation = spec.annotation.model_copy(
             update={"workers": 2, "batch": batch_config(home).model_copy(update={"batch_size": 1})}
         )
-        labeling = GuardedLabeling(home, spec.model_copy(update={"rules": rules, "annotation": annotation}))
+        labeling = guarded_labeling(
+            RepositoryRun(home, spec.dataset_id, "ranked-packets"),
+            spec.model_copy(update={"rules": rules, "annotation": annotation}),
+            validated_frame([], SourceDocumentsTable),
+        )
         rows = [
             (
                 identity,
@@ -113,6 +130,7 @@ class RankedLabelingTests(TestCase):
             cache: Path,
             maximum_context_characters: int,
             admission: EvidenceAdmission,
+            execution: BatchExecution,
         ) -> list[LabelingAttempt]:
             attempts = annotate_batches(
                 packet,
@@ -124,15 +142,18 @@ class RankedLabelingTests(TestCase):
                 cache=cache,
                 maximum_context_characters=maximum_context_characters,
                 admission=admission,
+                execution=execution,
             )
             (candidate,) = packet
             finished[candidate.candidate_id].set()
             return attempts
 
         with (
-            patch.object(GuardedLabeling, "admission", return_value=guard),
+            patch.object(LabelingEvidenceInputs, "admission", return_value=guard),
             patch("codebench_pipeline.batch_labeling.guarded_complete", side_effect=provider),
-            patch("codebench_pipeline.batch_labeling_ranked.annotate_batches", side_effect=observe_packet),
+            patch(
+                "codebench_pipeline.batch_labeling_ranked.annotate_batches_bound", side_effect=observe_packet
+            ),
             patch("codebench_pipeline.batch_labeling_ranked.SUBRISK_QUOTA", 2),
         ):
             attempts = labeling.attempts(filtered, home / "stage")
@@ -149,12 +170,21 @@ class RankedLabelingTests(TestCase):
         self.assertEqual(quotas[first_risk]["credited_candidates"], ["a-first", "c-refill"])
         self.assertEqual(quotas[second_risk]["credited_candidates"], ["lower"])
 
-    def test_guarded_rank_change_reuses_judgment_and_keeps_inspectable_trust_and_evidence(self) -> None:
+    def test_checkpoints_resume_same_generation_but_reinfer_after_input_or_io_change(self) -> None:
         home = Path(self.enterContext(TemporaryDirectory()))
         rules = make_rules()
-        labeling = GuardedLabeling(home, fixture_spec(home).model_copy(update={"rules": rules}))
-        candidate = make_candidate()
-        identity = candidate.candidate_id
+        spec = fixture_spec(home)
+        annotation = spec.annotation.model_copy(
+            update={"workers": 1, "batch": batch_config(home).model_copy(update={"batch_size": 1})}
+        )
+        spec = spec.model_copy(update={"rules": rules, "annotation": annotation})
+        docs = validated_frame([], SourceDocumentsTable)
+        labeling = guarded_labeling(
+            RepositoryRun(home, spec.dataset_id, "rank-change"),
+            spec,
+            docs,
+        )
+        candidates = [make_candidate("first"), make_candidate("later")]
         filtered = validated_frame(
             [
                 {
@@ -163,51 +193,85 @@ class RankedLabelingTests(TestCase):
                     "filter_reason": "",
                     "source_weight": 0.8,
                 }
+                for candidate in candidates
             ],
             FilteredCommandsTable,
         )
         doc = documentation()[0]
         guard = Mock(spec=GuardedEvidence)
         guard.sources.resolve.return_value = CandidateCapture(
-            "fixture", "fixed-binding", candidate.source_url, b"", "0" * 64, "fixture", None
+            "fixture", "fixed-binding", candidates[0].source_url, b"", "0" * 64, "fixture", None
         )
         guard.source.return_value = (
             "fixed-binding",
             [RowEvidence(evidence_id=fingerprint(doc.url), snippet=doc)],
         )
         guard.preflight.return_value = []
+        calls: list[str] = []
 
         def provider(_base: str, body: bytes, *_args: str | int | Path | BaseModel) -> HTTPResponse:
             (row,) = json.loads(json.loads(body)["messages"][1]["content"])["records"]
+            calls.append(str(row["candidate"]["candidate_id"]))
+            if len(calls) == 2:
+                raise CapacityUnavailable("fixture side load")
             return tool_reply("submit_labels", {"outcomes": [submitted(row, row["evidence_ids"])]})
 
-        self.enterContext(patch.object(GuardedLabeling, "admission", return_value=guard))
-        inference = self.enterContext(
-            patch("codebench_pipeline.batch_labeling.guarded_complete", side_effect=provider)
-        )
-        first = labeling.attempts(filtered, home / "first")
-        revised = filtered.copy()
-        revised.loc[revised["candidate_id"] == identity, "source_weight"] = 0.79
-        replay = labeling.attempts(revised, home / "replay")
-        labeling.verify(replay)
+        self.enterContext(patch.object(LabelingEvidenceInputs, "admission", return_value=guard))
+        self.enterContext(patch("codebench_pipeline.batch_labeling.guarded_complete", side_effect=provider))
+        checkpoint = LabelingCheckpointCache(home / "cache", home / "operations")
+        settings = GuardedLabelingCacheConfig.from_settings(labeling.mapped)
 
-        inference.assert_called_once()
-        observed = first.set_index("candidate_id")
-        self.assertEqual(observed.loc[identity, "source_weight"], 0.8)
-        self.assertEqual(observed.loc[identity, "status"], "success")
-        replayed = replay.set_index("candidate_id")
-        self.assertEqual(
-            replayed.loc[identity, "row_input_fingerprint"], observed.loc[identity, "row_input_fingerprint"]
+        def generation(
+            commands: DataFrame[FilteredCommandsTable],
+            storage: str,
+            capture: DataFrame[SourceDocumentsTable] = docs,
+        ) -> str:
+            signature = stage_signature(
+                "labeling_attempts",
+                settings,
+                {"commands": commands, "category_rules": rules, "documentation_capture": capture},
+                storage_identity=storage,
+            )
+            return labeling_generation_identity(spec.dataset_id, signature, "/fixture/model")
+
+        io = spec.storage.model_dump_json()
+        identity = generation(filtered, io)
+        with self.assertRaises(CapacityUnavailable):
+            labeling.attempts_for_generation(filtered, home / "failed", checkpoint, identity)
+        retry = guarded_labeling(RepositoryRun(home, spec.dataset_id, "retry"), spec, docs)
+        resumed = retry.attempts_for_generation(filtered, home / "resumed", checkpoint, identity)
+        self.assertEqual(calls, ["first", "later", "later"])
+        row_dir = Path("label") / sha256(b"first").hexdigest()
+        original = home / "failed" / row_dir / "receipt.json"
+        restored = home / "resumed" / row_dir
+        self.assertEqual((restored / "receipt.json").read_bytes(), original.read_bytes())
+        self.assertTrue((restored / "reuse.json").is_file())
+        retry.evidence_inputs.verify(resumed)
+
+        revised = filtered.copy()
+        revised.loc[revised["candidate_id"] == "first", "source_weight"] = 0.79
+        replay = retry.attempts_for_generation(
+            revised, home / "new-input", checkpoint, generation(revised, io)
         )
+        self.assertEqual(calls[-2:], ["later", "first"])
+        self.assertEqual(len(calls), 5)
         proposal = proposed_from_attempts(replay, rules).set_index("candidate_id")
-        self.assertEqual(proposal.loc[identity, "source_weight"], 0.79)
-        row_dir = home / "replay" / "label" / sha256(identity.encode()).hexdigest()
-        self.assertTrue((row_dir / "reuse.json").is_file())
-        self.assertTrue((row_dir / "verified.json").is_file())
-        self.assertNotEqual(
-            first.attrs["labeling_quota"]["eligible_scope_fingerprint"],
-            replay.attrs["labeling_quota"]["eligible_scope_fingerprint"],
+        self.assertEqual(proposal.loc["first", "source_weight"], 0.79)
+
+        changed_io = spec.storage.model_copy(update={"sample_rows": spec.storage.sample_rows + 1})
+        retry.attempts_for_generation(
+            revised, home / "new-io", checkpoint, generation(revised, changed_io.model_dump_json())
         )
+        self.assertEqual(calls[-2:], ["later", "first"])
+        self.assertEqual(len(calls), 7)
+
+        changed_docs = docs.copy()
+        changed_docs.attrs["documentation_receipt"] = "changed upstream capture"
+        retry.attempts_for_generation(
+            revised, home / "new-documentation", checkpoint, generation(revised, io, changed_docs)
+        )
+        self.assertEqual(calls[-2:], ["later", "first"])
+        self.assertEqual(len(calls), 9)
 
     def test_only_distinct_all_high_verified_risk_judgments_can_fill_a_quota(self) -> None:
         home = Path(self.enterContext(TemporaryDirectory()))
@@ -288,7 +352,7 @@ class RankedLabelingTests(TestCase):
         )
         with (
             patch("codebench_pipeline.command_batches.encode_commands", side_effect=vectors),
-            patch("codebench_pipeline.batch_labeling_ranked.annotate_batches", side_effect=judge),
+            patch("codebench_pipeline.batch_labeling_ranked.annotate_batches_bound", side_effect=judge),
         ):
             attempts, _ = scheduler.run(list(reversed(candidates)), weights, [source_failure])
 
@@ -334,7 +398,7 @@ class RankedLabelingTests(TestCase):
             Mock(spec=GuardedEvidence),
         )
 
-        with patch("codebench_pipeline.batch_labeling_ranked.annotate_batches") as infer:
+        with patch("codebench_pipeline.batch_labeling_ranked.annotate_batches_bound") as infer:
             attempts, _ = scheduler.run([], {candidate.candidate_id: 0.9}, [failure])
 
         infer.assert_not_called()
@@ -384,7 +448,7 @@ class RankedLabelingTests(TestCase):
         )
         weights = {candidate.candidate_id: 0.8 for candidate in [*candidates, unknown]}
         with patch(
-            "codebench_pipeline.batch_labeling_ranked.annotate_batches",
+            "codebench_pipeline.batch_labeling_ranked.annotate_batches_bound",
             side_effect=[[attempt] for attempt in sorted(failures, key=lambda row: row.candidate_id)],
         ):
             attempts, _ = scheduler.run([*candidates, unknown], weights, [])

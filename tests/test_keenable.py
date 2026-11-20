@@ -13,6 +13,7 @@ from unittest.mock import MagicMock, patch
 
 from pydantic import ValidationError
 
+from codebench_pipeline.declared_source_assets import KeenableDiscovery
 from codebench_pipeline.keenable import KeenableCollection, KeenableError, load_declaration
 from codebench_pipeline.keenable_policy import (
     CASES,
@@ -27,6 +28,7 @@ from codebench_pipeline.keenable_policy import (
     parse_declaration,
 )
 from codebench_pipeline.keenable_receipts import CallReceipt
+from codebench_pipeline.keenable_tables import provider_catalog, provider_documents
 from codebench_pipeline.keenable_transport import DirectResponse, Request
 
 DECLARATION = Path("business-configs/categories/cat3/keenable/declaration.json")
@@ -194,6 +196,24 @@ class KeenableCollectionTests(unittest.TestCase):
         lock = collection.capture(collection.discover())
         self.assertEqual(collection.read_body(lock, PLAN), SOURCE_BODY)
         self.assertEqual(collection.candidates(lock, collection.adapters(lock)), ())
+
+    def test_bound_provider_key_authenticates_search_and_keeps_it_out_of_retained_pages(self) -> None:
+        resource = KeenableDiscovery.from_environment()
+        collection = KeenableCollection(self.root, source_declaration())
+        body = SOURCE_BODY + b"<p>fixture-key</p>"
+        wire = self.wire(result(PLAN), DirectResponse(body, PEER))
+
+        with patch.dict(os.environ, {"KEENABLE_API_KEY": "different-fixture-key"}):
+            catalog = provider_catalog(collection, resource.api_key)
+            documents = provider_documents(collection, catalog, resource.api_key)
+
+        search, origin = (call.args[0] for call in wire.call_args_list)
+        self.assertEqual(search.credential, "fixture-key")
+        self.assertEqual(origin, Request(PLAN, "text/html"))
+        self.assertTrue(documents.empty)
+        receipts, payloads, _ = self.persisted()
+        self.assertEqual(receipts[-1].reason, "content_policy")
+        self.assertNotIn(body, payloads)
 
     def test_historical_declarations_preserve_normalized_bytes_and_hashes(self) -> None:
         for declaration, historical_hash in (

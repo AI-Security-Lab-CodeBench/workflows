@@ -278,9 +278,9 @@ by `human_reviewed` (`true` or `false`); historical nine-column CSVs remain unch
 The native run link is `/runs/{run_id}`.
 
 For a nonempty queue, the annotation Review view exposes a current publication
-only after completion of its exact unified snapshot. If the queue is empty, the
-build releases automatically through the same `dataset_release`, without a human
-decision or human reviewer. The empty ledger batch receives a completion token
+only after completion of its exact unified snapshot and guarded release checks.
+If the queue is empty, no human decision or reviewer is needed. The empty
+ledger batch receives a completion token
 under the explicit `automatic low-uncertainty policy` actor; it contains no row
 decisions. Automatically admitted machine-eligible
 all-high rows have `human_reviewed=false`; actually approved uncertain rows have
@@ -289,11 +289,13 @@ all-high rows have `human_reviewed=false`; actually approved uncertain rows have
 ## Mandatory publication boundary
 
 Resolving the current snapshot, changing decisions and registering publication
-use the same SQLite transaction protocol. Upstream current-reference/config
+use the same PostgreSQL transaction protocol. Upstream current-reference/config
 writers must participate so review authorization cannot race a snapshot change.
 The publisher checks snapshot binding again when committing output. A nonempty
 queue requires current completion authorization; an empty queue requires
 revalidated emptiness and machine eligibility, not a fabricated human token.
+Both paths require a resolved sampling check, no operator hold and steward
+attestation of the exact proposal.
 A manual release-only materialization cannot bypass this boundary.
 
 The service preserves immutable evidence manifests and prior decisions.

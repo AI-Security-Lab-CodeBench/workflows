@@ -7,8 +7,8 @@ from guarded_labeling_fixture import CORPUS, DOCS, REVIEWED_SCOPE, UNRELATED_SCO
 
 from codebench_pipeline.dataframe_schemas import model_records
 from codebench_pipeline.dataset_records import CandidateRecord
+from codebench_pipeline.grounding import OperationReceiptBuffer
 from codebench_pipeline.grounding_inventory import DocumentationCapture
-from codebench_pipeline.grounding_tables import GuardedLabeling
 from codebench_pipeline.inference_capacity import CapacityUnavailable, guarded_complete
 from codebench_pipeline.labeling_outcomes import LabelingAttempt
 from codebench_pipeline.storage import IntegrityError
@@ -36,9 +36,9 @@ class EvidenceAdmissionTests(TestCase):
             corpus=b"\n\n".join(b"```bash\n" + cmd.encode() + b"\n```" for cmd in (*permitted, *denied)),
             documentation_corpus=DOCS + b"\n" + template + b"\n",
         )
-        filtered = fixture.filtered()
+        filtered, labeling = fixture.labeling()
         rows = {row.command: row for row in model_records(filtered, CandidateRecord)}
-        guard = GuardedLabeling(home, fixture.spec).admission(filtered)
+        guard = labeling.evidence_inputs.admission(filtered, operation_receipts=OperationReceiptBuffer())
         read = DocumentationCapture.read
         with patch.object(DocumentationCapture, "read", autospec=True, side_effect=read) as reads:
             for command in permitted:
@@ -55,11 +55,11 @@ class EvidenceAdmissionTests(TestCase):
     def test_eligible_same_source_passage_precedes_external_inventory_reads(self) -> None:
         home = Path(self.enterContext(TemporaryDirectory()))
         fixture = LabelingFixture(self, home, corpus=CORPUS)
-        filtered = fixture.filtered()
+        filtered, labeling = fixture.labeling()
         candidate = next(
             row for row in model_records(filtered, CandidateRecord) if row.command == "kubectl get pods"
         )
-        guard = GuardedLabeling(home, fixture.spec).admission(filtered)
+        guard = labeling.evidence_inputs.admission(filtered, operation_receipts=OperationReceiptBuffer())
         with patch.object(
             DocumentationCapture, "read", side_effect=AssertionError("external inventory read")
         ):
@@ -77,8 +77,7 @@ class EvidenceAdmissionTests(TestCase):
             corpus=b"```bash\nkubectl get pods\n```\n\n```bash\nkubectl get pods --all-namespaces\n```\n",
             documentation_corpus=documentation,
         )
-        filtered = fixture.filtered()
-        labeling = GuardedLabeling(home, fixture.spec)
+        filtered, labeling = fixture.labeling()
         with (
             patch("codebench_pipeline.keenable.request_direct", side_effect=AssertionError("recrawl")),
             patch(
@@ -87,10 +86,10 @@ class EvidenceAdmissionTests(TestCase):
             ),
         ):
             first = labeling.attempts(filtered, home / "first")
-            labeling.verify(first)
+            labeling.evidence_inputs.verify(first)
             fixture.inference.reset_mock()
             replay = labeling.attempts(filtered, home / "replay")
-            labeling.verify(replay)
+            labeling.evidence_inputs.verify(replay)
             fixture.inference.assert_not_called()
         rows = {row.command: row for row in model_records(first, LabelingAttempt)}
         self.assertEqual(rows["terraform plan"].status, "success")
@@ -110,17 +109,15 @@ class EvidenceAdmissionTests(TestCase):
         ]
         orig.write_bytes(b"changed")
         with self.assertRaisesRegex(IntegrityError, "capture digest mismatch"):
-            labeling.verify(first)
+            labeling.evidence_inputs.verify(first)
 
     def test_unrelated_adjacent_prose_does_not_admit_scope_changing_flag(self) -> None:
         home = Path(self.enterContext(TemporaryDirectory()))
         fixture = LabelingFixture(self, home, corpus=UNRELATED_SCOPE)
-        labeling = GuardedLabeling(home, fixture.spec)
+        filtered, labeling = fixture.labeling()
         rows = {
             row.command: row
-            for row in model_records(
-                labeling.attempts(fixture.filtered(), home / "attempts"), LabelingAttempt
-            )
+            for row in model_records(labeling.attempts(filtered, home / "attempts"), LabelingAttempt)
         }
         row = rows[SCOPE_COMMAND]
         self.assertIn("This section uses a demo cluster.", row.context)
@@ -131,23 +128,22 @@ class EvidenceAdmissionTests(TestCase):
     def test_exact_scope_passage_must_still_have_its_persisted_admission_receipt(self) -> None:
         home = Path(self.enterContext(TemporaryDirectory()))
         fixture = LabelingFixture(self, home, corpus=REVIEWED_SCOPE)
-        labeling = GuardedLabeling(home, fixture.spec)
-        result = labeling.attempts(fixture.filtered(), home / "first")
+        filtered, labeling = fixture.labeling()
+        result = labeling.attempts(filtered, home / "first")
         row = next(row for row in model_records(result, LabelingAttempt) if row.command == SCOPE_COMMAND)
         self.assertEqual(row.status, "success")
         self.assertTrue(any("lists pods across all namespaces" in doc.snippet for doc in row.documentation))
-        labeling.verify(result)
+        labeling.evidence_inputs.verify(result)
 
         for receipt in home.glob("label-grounding-v2/*/shared-operations/*.json"):
             receipt.unlink()
         with self.assertRaises(FileNotFoundError):
-            labeling.verify(result)
+            labeling.evidence_inputs.verify(result)
 
     def test_page_permission_declaration_requires_migration_without_relabeling(self) -> None:
         home = Path(self.enterContext(TemporaryDirectory()))
         fixture = LabelingFixture(self, home, source_limited=False)
-        labeling = GuardedLabeling(home, fixture.spec)
-        filtered = fixture.filtered()
+        filtered, labeling = fixture.labeling()
         with patch(
             "codebench_pipeline.grounding_tools.GroundingBroker.execute",
             side_effect=AssertionError("legacy provider call"),
@@ -161,8 +157,7 @@ class EvidenceAdmissionTests(TestCase):
     def test_actual_capacity_guard_never_posts_without_telemetry(self) -> None:
         home = Path(self.enterContext(TemporaryDirectory()))
         fixture = LabelingFixture(self, home, corpus=REVIEWED_SCOPE)
-        labeling = GuardedLabeling(home, fixture.spec)
-        filtered = fixture.filtered()
+        filtered, labeling = fixture.labeling()
         fixture.inference.side_effect = guarded_complete
         with (
             patch("codebench_pipeline.inference_capacity._get", return_value=b"{}") as telemetry,

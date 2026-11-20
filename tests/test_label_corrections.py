@@ -1,12 +1,12 @@
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
 
 import pandas as pd
-from configuration_fixture import write_fixture
+from configuration_fixture import example_config, seed_prepared_snapshot
 from psycopg.types.json import Jsonb
 from pydantic import JsonValue, ValidationError
+from test_declared_dataset_graph import fixture_spec
 
 from codebench_pipeline.category_rules import (
     CategoryRules,
@@ -17,9 +17,7 @@ from codebench_pipeline.category_rules import (
 from codebench_pipeline.data_view_models import DatasetQueryRequest
 from codebench_pipeline.data_views import DatasetDataService
 from codebench_pipeline.dataframe_schemas import ProposedAnnotationsTable, validated_frame
-from codebench_pipeline.dataset_config import load_build_config
 from codebench_pipeline.dataset_records import CandidateRecord, LabelDecision
-from codebench_pipeline.dataset_registry import DatasetRegistry
 from codebench_pipeline.human_review import (
     CompletionEffect,
     DecisionChange,
@@ -40,7 +38,6 @@ from codebench_pipeline.review_frames import (
 )
 from codebench_pipeline.review_identity import review_identity
 from codebench_pipeline.review_service import ReviewService
-from codebench_pipeline.review_snapshots import ResolvedReview, ReviewManifest, ReviewSnapshots
 from codebench_pipeline.runtime_instance import dataset_instance
 from codebench_pipeline.storage import fingerprint
 
@@ -410,9 +407,11 @@ class LabelCorrectionTests(unittest.TestCase):
 
     def test_service_saves_and_returns_corrected_approved_records_with_original_evidence(self) -> None:
         home = self.home
-        spec = load_build_config(write_fixture(home), home)
-        DatasetRegistry(home).register(spec)
+        prepared = example_config()
+        declared = fixture_spec(home).model_copy(update={"rules": prepared.rules})
+        seed_prepared_snapshot(home, declared, prepared.documentation)
         data = DatasetDataService(home, self.enterContext(dataset_instance(home)))
+        spec = data.specification(declared.dataset_id)
         candidate = self.candidate.model_copy(
             update={"command": "git status", "util": "git", "risk_candidates": ["CAT-99.1"]}
         )
@@ -427,18 +426,18 @@ class LabelCorrectionTests(unittest.TestCase):
                 "record_fingerprints": {"first": review_identity(original, self.snapshot.review_columns)},
             }
         )
-        manifest = ReviewManifest(
-            dataset_id=spec.dataset_id,
-            storage=spec.storage,
-            publication=spec.publication,
-            references={},
-            evidence={},
-            implementation={},
-        )
-        resolved = ResolvedReview(manifest, snapshot, annotations, spec.rules)
-        self.enterContext(patch.object(ReviewSnapshots, "capture", return_value=resolved))
         service = ReviewService(home, data, lambda token: CompletionEffect())
-        service.prepare(spec.dataset_id)
+        with service.store.transaction(dataset_id=spec.dataset_id) as tx:
+            tx.prepare(
+                PreparedReview(
+                    snapshot=snapshot,
+                    id_column="candidate_id",
+                    columns=tuple(original),
+                    rows=(original,),
+                    validation=annotation_review_validation(spec.rules),
+                    column_schema={"command": {"editable": True}},
+                )
+            )
         batch = service.view(DatasetQueryRequest(dataset_id=spec.dataset_id)).batch
         with self.assertRaises(HumanReviewError) as unrouted:
             service.decide(
@@ -477,6 +476,11 @@ class LabelCorrectionTests(unittest.TestCase):
         self.assertEqual(
             view.page.rows[0].values["human_edits"],
             {"command": "git status --short", "severity": "high", "class": "deny"},
+        )
+        with self.store.reader() as tx:
+            (stored,) = tx.prepared(batch.batch_id).rows
+        self.assertEqual(
+            (stored["command"], stored["severity"], stored["class"]), ("git status", "low", "allow")
         )
         self.assertEqual(annotations.loc[0, ["severity", "class"]].tolist(), ["low", "allow"])
         self.assertEqual(annotations.loc[0, "command"], "git status")

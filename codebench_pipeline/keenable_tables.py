@@ -36,8 +36,8 @@ def provider_source_id(url: str) -> str:
     return "keenable-" + sha256(url.encode()).hexdigest()
 
 
-def provider_catalog(collection: KeenableCollection) -> DataFrame[SourceCatalogTable]:
-    catalog = collection.discover()
+def provider_catalog(collection: KeenableCollection, api_key: str) -> DataFrame[SourceCatalogTable]:
+    catalog = collection.discover_with_credential(api_key)
     permissions = {page.lead.url: page.permission for page in catalog.selected}
     frame = validated_frame(
         [
@@ -80,9 +80,11 @@ def provider_catalog(collection: KeenableCollection) -> DataFrame[SourceCatalogT
 
 
 def provider_documents(
-    collection: KeenableCollection, catalog: DataFrame[SourceCatalogTable]
+    collection: KeenableCollection, catalog: DataFrame[SourceCatalogTable], api_key: str
 ) -> DataFrame[SourceDocumentsTable]:
-    lock = collection.capture(CatalogReceipt.model_validate_json(catalog.attrs[PROVIDER_RECEIPT]))
+    lock = collection.capture_with_credential(
+        CatalogReceipt.model_validate_json(catalog.attrs[PROVIDER_RECEIPT]), api_key
+    )
     bodies = collection.read_bodies(lock)
     permissions: dict[str, Permission] = {}
     for page in lock.pages:

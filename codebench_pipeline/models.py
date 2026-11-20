@@ -7,34 +7,10 @@ from pydantic import BaseModel, ConfigDict, Field, JsonValue, model_validator
 
 Identifier = Annotated[str, Field(pattern=r"^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,119}$")]
 Digest = Annotated[str, Field(pattern=r"^[a-f0-9]{64}$")]
-Stage = Literal[
-    "source_snapshot",
-    "semantic_evidence",
-    "adapter",
-    "extraction",
-    "filtering",
-    "candidates",
-    "label_packets",
-    "labels",
-    "review_packets",
-    "reviews",
-    "export",
-]
 
 
 class FrozenModel(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
-
-
-class AdapterSpec(FrozenModel):
-    format: Literal["text", "markdown", "json", "jsonl", "csv"]
-    text_field: str = "$"
-    context_field: str = ""
-    rationale: str = Field(min_length=1)
-
-
-class AdapterPlan(FrozenModel):
-    documents: dict[str, AdapterSpec]
 
 
 class SemanticSnippet(FrozenModel):
@@ -46,41 +22,6 @@ class SemanticSnippet(FrozenModel):
     retrieved_at: str = Field(min_length=1)
     snippet: str = Field(min_length=1)
     version_limits: str = Field(min_length=1)
-
-
-class ReplaySpec(FrozenModel):
-    candidates: Path
-    sources: Path
-    semantics: Path
-    packets: Path
-    responses: Path
-    review_packets: Path
-    reviews: Path
-
-
-class DatasetSpec(FrozenModel):
-    dataset_id: Identifier
-    revision: str = Field(min_length=1)
-    documents: Path
-    semantics: Path
-    adapter: AdapterSpec | None = None
-    use_document_adapters: bool = False
-    replay: ReplaySpec | None = None
-    label_model: str = "chatgpt-subscription/gpt-6-luna"
-    review_model: str = "chatgpt-subscription/gpt-6-luna"
-    batch_size: int = Field(default=8, ge=1, le=32)
-    limit_per_risk: int = Field(default=250, ge=1, le=250)
-
-
-class Artifact(FrozenModel):
-    dataset_id: Identifier
-    stage: Stage
-    fingerprint: Digest
-    path: Path
-    files: dict[str, Digest]
-    inputs: dict[str, Digest]
-    created_at: str
-    metadata: dict[str, JsonValue] = Field(default_factory=dict)
 
 
 class SourceDocument(FrozenModel):

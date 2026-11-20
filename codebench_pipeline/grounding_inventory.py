@@ -2,13 +2,15 @@ from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from functools import cached_property
 from hashlib import sha256
-from pathlib import Path
 
+from pandera.typing import DataFrame
+
+from codebench_pipeline.dataframe_schemas import SourceDocumentsTable
 from codebench_pipeline.grounding_passages import OperationPassage, operation_passages
 from codebench_pipeline.grounding_sources import CandidateEvidence, RepositoryBranchEvidence
 from codebench_pipeline.keenable_policy import RESPONSE_BYTES, canonical_url, record_digest
 from codebench_pipeline.repository_acquisition import CAPTURED_SOURCES, CATALOG_SOURCES
-from codebench_pipeline.repository_receipts import RepositoryReceipt
+from codebench_pipeline.repository_receipts import RepositoryReceipt, RepositoryRun, read_receipt
 from codebench_pipeline.repository_tree import git_blob_sha1, raw_url
 from codebench_pipeline.storage import IntegrityError, fingerprint
 from scripts.dataset_schema import SECRET_PATTERNS
@@ -21,14 +23,10 @@ class DocumentationCapture:
     sha256: str
     git_blob: str
     size: int
-    root: Path
+    run: RepositoryRun
 
     def read(self) -> bytes:
-        path = (self.root / "blobs" / self.git_blob).resolve()
-        if not path.is_relative_to(self.root.resolve()):
-            raise IntegrityError("Documentation capture escapes the verified inventory")
-        with path.open("rb") as stream:
-            body = stream.read(self.size + 1)
+        body = self.run.read_capture(f"blobs/{self.git_blob}", self.size)
         if (
             len(body) != self.size
             or sha256(body).hexdigest() != self.sha256
@@ -84,19 +82,24 @@ class SharedOperations:
             yield from self.index.get(key, ())
 
 
-def documentation_captures(branch: RepositoryBranchEvidence) -> tuple[DocumentationCapture, ...]:
-    """Resolve the authorized catalog and documents bound by the terminal documentation receipt."""
+def documentation_captures(
+    branch: RepositoryBranchEvidence,
+    documentation_capture: DataFrame[SourceDocumentsTable],
+    run: RepositoryRun,
+) -> tuple[DocumentationCapture, ...]:
+    """Verify the explicit capture and scope receipts against the terminal candidate receipt."""
     terminal = branch.receipt
     if terminal.branch != "documentation" or len(terminal.upstream) != 2:
         raise IntegrityError("Documentation candidate receipt lacks its source inventory")
-    documents = RepositoryReceipt.model_validate_json(
-        (branch.root / "receipts" / f"{terminal.upstream[0]}.json").read_bytes()
-    )
+    documents = read_receipt(documentation_capture, "source_documents", run)
     if len(documents.upstream) != 1:
         raise IntegrityError("Documentation source receipt lacks its catalog")
-    catalog = RepositoryReceipt.model_validate_json(
-        (branch.root / "receipts" / f"{documents.upstream[0]}.json").read_bytes()
-    )
+    scope = documentation_capture.attrs.get("documentation_scope_receipt_json")
+    if not isinstance(scope, str):
+        raise IntegrityError("Documentation capture lacks its scope receipt")
+    catalog = RepositoryReceipt.model_validate_json(scope)
+    if run.read_evidence(f"receipts/{catalog.digest}.json") != catalog.body:
+        raise IntegrityError("Documentation scope differs from its verified receipt")
     for stage, digest, receipt in (
         ("source_documents", terminal.upstream[0], documents),
         ("source_catalog", documents.upstream[0], catalog),
@@ -145,7 +148,7 @@ def documentation_captures(branch: RepositoryBranchEvidence) -> tuple[Documentat
                     sha256=capture.sha256,
                     git_blob=source.git_blob_sha1,
                     size=capture.size,
-                    root=branch.root,
+                    run=run,
                 )
             )
     return tuple(captures)
