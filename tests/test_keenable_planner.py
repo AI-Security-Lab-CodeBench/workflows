@@ -101,6 +101,35 @@ class AdministrativeSearchTests(unittest.TestCase):
         self.assertEqual(len([lead for lead in catalog.leads if lead.excluded == "outside_case"]), 1)
         model.assert_not_called()
 
+    def test_shipped_discovery_ignores_reference_hits_and_switches_symptom(self) -> None:
+        community = "https://operator.example/stale-workload-status"
+        with (
+            patch(
+                "codebench_pipeline.keenable_planner.guarded_complete",
+                side_effect=[
+                    completion({"option": "workloads-unexpected-output"}),
+                    completion({"option": "workloads-quoting"}),
+                    completion({"option": None}),
+                ],
+            ),
+            patch(
+                "codebench_pipeline.keenable.request_direct",
+                side_effect=[
+                    result("https://kubernetes.io/docs/reference/kubectl/"),
+                    result(community),
+                ],
+            ),
+        ):
+            catalog = KeenableCollection(
+                self.root, load_declaration(DECLARATION), planner=self.planner
+            ).discover()
+        assert catalog.plan is not None
+        self.assertEqual([page.lead.url for page in catalog.selected], [community])
+        self.assertEqual([turn.new_urls for turn in catalog.plan.feedback], [0, 1])
+        self.assertEqual(
+            [lead.excluded for lead in catalog.leads if lead.url is None], ["official_documentation"]
+        )
+
     def test_adaptive_uses_counts_only_and_reuses_completed_generation(self) -> None:
         workload, docker = self.urls
         prompts: list[str] = []

@@ -394,6 +394,7 @@ class CurrentAdministrativeSearch(Record):
 
 class UnrestrictedSearch(Record):
     mode: Literal["fixed", "adaptive"]
+    community_use_cases: bool = Field(default=False, exclude_if=lambda enabled: not enabled)
     max_queries: int = Field(ge=1, le=MAX_SEARCH)
     unrestricted_cases: tuple[Case, ...] = Field(min_length=1, max_length=len(CASES))
 

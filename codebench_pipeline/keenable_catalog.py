@@ -1,3 +1,5 @@
+from urllib.parse import urlsplit
+
 from pydantic import TypeAdapter
 
 from .keenable_policy import (
@@ -8,6 +10,7 @@ from .keenable_policy import (
     CurrentKeenableDeclaration,
     Declaration,
     KeenableDeclaration,
+    UnrestrictedSearch,
     canonical_url,
     digest,
 )
@@ -41,6 +44,39 @@ def search_leads(
                     url_sha256=digest(hit.url.encode()),
                     url=None,
                     excluded="invalid_url",
+                )
+            )
+        elif (
+            isinstance(declaration.search_plan, UnrestrictedSearch)
+            and declaration.search_plan.community_use_cases
+            and (
+                declaration.authority(canonical, case) is not None
+                or urlsplit(canonical).hostname
+                in {
+                    "docs.docker.com",
+                    "docs.cloud.google.com",
+                    "docs.aws.amazon.com",
+                    "developer.hashicorp.com",
+                    "kubernetes.io",
+                    "www.postgresql.org",
+                }
+                or canonical.startswith(
+                    (
+                        "https://github.com/kubernetes/website/",
+                        "https://github.com/docker/docs/",
+                        "https://raw.githubusercontent.com/kubernetes/website/",
+                        "https://raw.githubusercontent.com/docker/docs/",
+                    )
+                )
+            )
+        ):
+            leads.append(
+                Lead(
+                    case=case,
+                    rank=rank,
+                    url_sha256=digest(hit.url.encode()),
+                    url=None,
+                    excluded="official_documentation",
                 )
             )
         elif (reviewed is not None and canonical not in reviewed) or (
@@ -122,6 +158,11 @@ def freeze_catalog(
 
 def declared_leads(declaration: Declaration) -> list[Lead]:
     """Resolve preverified reference targets without asking search to find them again."""
+    if (
+        isinstance(declaration.search_plan, UnrestrictedSearch)
+        and declaration.search_plan.community_use_cases
+    ):
+        return []
     return [
         Lead(case=source.cases[0], rank=rank, url_sha256=digest(url.encode()), url=url, origin="declared")
         for source in sorted(declaration.sources, key=lambda source: source.origin_id)

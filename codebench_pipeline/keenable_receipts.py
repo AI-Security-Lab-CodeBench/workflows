@@ -20,7 +20,10 @@ class Lead(Record):
     rank: int
     url_sha256: Digest
     url: str | None
-    excluded: Literal["invalid_url", "outside_case", "duplicate", "selection_budget"] | None = None
+    excluded: (
+        Literal["invalid_url", "outside_case", "official_documentation", "duplicate", "selection_budget"]
+        | None
+    ) = None
     origin: Literal["search", "declared"] = Field(
         default="search", exclude_if=lambda value: value == "search"
     )

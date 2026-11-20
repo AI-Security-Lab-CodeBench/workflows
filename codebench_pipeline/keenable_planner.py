@@ -28,9 +28,28 @@ from .keenable_transport import search_payload
 from .openai_transport import parse_completion
 
 _PROMPT: Final = (
-    "Choose one available option ID to find additional ordinary administrative reference pages, "
+    "Choose one available option ID to find additional distinct pages matching the available topics, "
     'using the previous search counts. Return only {"option":"ID"} or {"option":null} to stop. '
-    "Prefer uncovered reference topics or a different focus after low yield."
+    "Prefer uncovered topics. After repeated or ineligible results, switch symptom or case."
+)
+_CASE_TOPICS: Final[dict[Case, str]] = {
+    "plan": "Terraform plan drift or unexpected validation output",
+    "workloads": "kubectl workload inventory with missing, stale or misleading status",
+    "containers": "Docker container inventory and discrepancies in reported disk usage",
+    "storage_sql": "S3 or PostgreSQL inventory with unexpectedly empty metadata",
+    "rollout": "Kubernetes deployment whose rollout status disagreed with observed readiness",
+}
+_CASE_FOCUSES: Final = (
+    (
+        "unexpected-output",
+        "An operator explains a surprising result and the diagnostic command that clarified it.",
+    ),
+    ("quoting", "A practitioner works around shell quoting, unusual names or JSONPath escaping."),
+    ("version-difference", "A field report traces inconsistent output across versions or environments."),
+    (
+        "partial-results",
+        "A troubleshooting report explains an empty or incomplete result and shows how it was checked.",
+    ),
 )
 _FOCUSES: Final = (
     ("reference", ""),
@@ -185,14 +204,23 @@ class SearchSession:
             case_urls = tuple((case, None) for case in plan.unrestricted_cases)
         else:
             case_urls = tuple((scope.case, frozenset(scope.reviewed_urls)) for scope in plan.scopes)
-        for focus, suffix in _FOCUSES:
+        community = isinstance(plan, UnrestrictedSearch) and plan.community_use_cases
+        for focus, suffix in _CASE_FOCUSES if community else _FOCUSES:
             for case, urls in case_urls:
+                query = (
+                    f"Firsthand operator use case: {_CASE_TOPICS[case]}. {suffix} "
+                    "Find community troubleshooting writeups with the observed symptom, literal read-only "
+                    "command and explanation. Prefer explicitly CC BY 4.0 licensed posts. "
+                    "Exclude official documentation, CLI references, cheatsheets and exploit walkthroughs."
+                    if community
+                    else QUERIES[case] + suffix
+                )
                 options.append(
                     SearchOption(
                         f"{case}-{focus}",
                         case,
                         focus,
-                        search_payload(QUERIES[case] + suffix, tuple(sorted(urls)) if urls else ()),
+                        search_payload(query, tuple(sorted(urls)) if urls else ()),
                         urls,
                     )
                 )

@@ -76,8 +76,14 @@ class CurrentKeenableAuthoringTests(unittest.TestCase):
         with self.assertRaisesRegex(ValidationError, "evidence_sha256"):
             CurrentSourcePermission.model_validate_json(json.dumps(values))
 
-    def test_shipped_plan_retries_both_queries_without_spending_headroom_on_new_queries(self) -> None:
-        declaration = load_declaration(DECLARATION)
+    def test_fixed_plan_retries_both_queries_without_spending_headroom_on_new_queries(self) -> None:
+        config = load_declaration(DECLARATION).model_dump(mode="json")
+        config["search_plan"] = {
+            "mode": "fixed",
+            "max_queries": 2,
+            "unrestricted_cases": ["workloads", "containers"],
+        }
+        declaration = parse_declaration(json.dumps(config))
         with (
             tempfile.TemporaryDirectory() as root,
             patch("codebench_pipeline.keenable_client.sleep"),
