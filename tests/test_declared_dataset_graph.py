@@ -1,7 +1,8 @@
 import json
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from collections.abc import Iterator
+from contextlib import contextmanager, redirect_stdout
 from hashlib import sha256
 from io import StringIO
 from pathlib import Path
@@ -205,7 +206,9 @@ class DeclaredDatasetGraphTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary, dataset_instance(Path(temporary)) as instance:
             home = Path(temporary)
             inputs = copytree(BUNDLE.parent.parent, home / "business-configs")
-            spec = self.collection_fixture(fixture_spec(home, inputs / "datasets" / BUNDLE.name))
+            spec = self.enterContext(
+                collection_fixture(fixture_spec(home, inputs / "datasets" / BUNDLE.name))
+            )
             registry = DatasetRegistry(home)
             registry.register(spec)
             rmtree(inputs)
@@ -595,50 +598,45 @@ class DeclaredDatasetGraphTests(unittest.TestCase):
             )
             self.assertEqual(instance.get_runs(), runs)
 
-    def collection_fixture(self, spec: DatasetBuildSpec) -> DatasetBuildSpec:
-        collection = spec.declared_collection
-        assert collection is not None
-        repositories = repository_config_fixture()
-        docker = RepositoryFixture(repositories.dataset[2])
-        docker.file("sample/README.md", DOCKER)
-        docker.file("sample/compose.yaml", b"services: {}")
-        tldr = RepositoryFixture(repositories.documentation[0])
-        tldr.file("pages/common/docker.md", TLDR)
-        wire: dict[str, bytes] = {}
-        for fixture in (docker, tldr):
-            origin = fixture.origin
-            wire[
-                f"https://api.github.com/repos/{origin.repository}/git/trees/{origin.commit}?recursive=1"
-            ] = fixture.response()
-            for path, payload in fixture.bodies.items():
-                wire[f"https://raw.githubusercontent.com/{origin.repository}/{origin.commit}/{path}"] = (
-                    payload
-                )
 
-        def fetch(url: str, limit: int) -> bytes:
-            payload = wire[url]
-            self.assertLessEqual(len(payload), limit)
-            return payload
+@contextmanager
+def collection_fixture(spec: DatasetBuildSpec) -> Iterator[DatasetBuildSpec]:
+    collection = spec.declared_collection
+    assert collection is not None
+    repositories = repository_config_fixture()
+    docker = RepositoryFixture(repositories.dataset[2])
+    docker.file("sample/README.md", DOCKER)
+    docker.file("sample/compose.yaml", b"services: {}")
+    tldr = RepositoryFixture(repositories.documentation[0])
+    tldr.file("pages/common/docker.md", TLDR)
+    wire: dict[str, bytes] = {}
+    for fixture in (docker, tldr):
+        origin = fixture.origin
+        wire[f"https://api.github.com/repos/{origin.repository}/git/trees/{origin.commit}?recursive=1"] = (
+            fixture.response()
+        )
+        for path, payload in fixture.bodies.items():
+            wire[f"https://raw.githubusercontent.com/{origin.repository}/{origin.commit}/{path}"] = payload
 
-        self.enterContext(
-            patch(
-                "codebench_pipeline.repository_acquisition.fetch_repository_bytes",
-                side_effect=fetch,
+    def fetch(url: str, limit: int) -> bytes:
+        payload = wire[url]
+        assert len(payload) <= limit
+        return payload
+
+    spec = spec.model_copy(
+        update={
+            "declared_collection": collection.model_copy(
+                update={
+                    "existing_datasets": SourceDeclaration.from_declaration(
+                        repository_branch_fixture("dataset", (docker,))
+                    ),
+                    "documentation_crawl": SourceDeclaration.from_declaration(
+                        repository_branch_fixture("documentation", (tldr,))
+                    ),
+                    "merge_keenable_weight": 0.24,
+                }
             )
-        )
-        spec = spec.model_copy(
-            update={
-                "declared_collection": collection.model_copy(
-                    update={
-                        "existing_datasets": SourceDeclaration.from_declaration(
-                            repository_branch_fixture("dataset", (docker,))
-                        ),
-                        "documentation_crawl": SourceDeclaration.from_declaration(
-                            repository_branch_fixture("documentation", (tldr,))
-                        ),
-                        "merge_keenable_weight": 0.24,
-                    }
-                )
-            }
-        )
-        return with_keenable_declaration(spec, source_scope_declaration())
+        }
+    )
+    with patch("codebench_pipeline.repository_acquisition.fetch_repository_bytes", side_effect=fetch):
+        yield with_keenable_declaration(spec, source_scope_declaration())

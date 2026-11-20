@@ -328,6 +328,22 @@ local skill does not install or authorize the Dagster Plus MCP server.
   conventions; keep stages parameterized, not tied to machine paths or accounts.
 - Assign parallel workers disjoint files. One owner integrates graph contracts,
   shared ledgers and final artifacts. Preserve unrelated working-tree changes.
+- Run `make e2e` from the operator checkout with `uv`, Docker Compose and the
+  shared deployment's `.env`. The host pytest session calls `make remote-up`
+  and runs `tests/e2e/` inside the existing `webserver` service. Mount the QA
+  checkout read-only at `/opt/codebench-qa-src`, or set `CODEBENCH_QA_WORKDIR`
+  to its mount point inside the service. Leave the shared stack running.
+- Keep E2E focused on observable contracts between Dagster groups. Use native
+  pytest scenarios, deterministic provider responses and actual materializations.
+  For example, check that the three collection groups contribute their original
+  evidence to the merge, that a successful empty Keenable search can merge, and
+  that a failed replacement cannot reuse a previous merge. Stop execution at
+  the boundary under test. Keep exhaustive parser, transport and publication
+  cases in the full suite; do not run discovery or inference from `make e2e`.
+- Let pytest own test state: each E2E invocation gets a temporary workspace,
+  and each scenario gets its own Dagster home and uniquely named review database
+  on the existing `review-db` service. Fixtures remove those resources on exit.
+  Never point a scenario at the shared review dataset.
 - Inside the Compose test environment, run `make test-suite` for full isolated
   unittest discovery and the relevant frontend tests/type/lint/build checks.
   The entire suite, including setup, must finish within 600 seconds. A timeout,

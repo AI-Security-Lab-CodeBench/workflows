@@ -4,7 +4,7 @@ remote-up:
 
 .PHONY: e2e
 e2e:
-	timeout --verbose --kill-after=10s 290s bash scripts/e2e.sh
+	$(UV) run --no-project --with-requirements tests/e2e/requirements.txt python -m pytest -q -s --tb=line -p no:cacheprovider tests/compose_e2e.py
 
 PYTHON ?= python3
 UV ?= uv
