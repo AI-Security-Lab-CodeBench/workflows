@@ -74,7 +74,7 @@ running the target. Keep that file on the server and outside version control.
 
 ## Publication scope
 
-Publish pipelines, workflows, tests, operational documentation and CAT-3
+Publish pipelines, workflows, tests, the architecture guides and CAT-3
 configuration only. CAT-2 is a local example demonstrating multicategory support;
 exclude its configuration and collected records from the workflows repository.
 Keep multicategory regression coverage with synthetic test fixtures, not CAT-2
@@ -102,7 +102,7 @@ assets run or replace the checks for current eligibility and release approval.
 Follow the current user request first. `business-configs/labeling/instructions.md` carries
 generic labeling instructions; `business-configs/categories/<category>/` carries
 category taxonomy, policy and illustrative examples. These are the editable
-policy sources; `docs/labeling-policy.md` is an editing guide, not another prompt.
+policy sources.
 If local `strategy/` files
 are present, read them as human-owned guidance; never edit, regenerate, format or
 stage them. Historical collection notes are local and are not publication inputs.
@@ -277,7 +277,7 @@ local skill does not install or authorize the Dagster Plus MCP server.
 - Keep registry, tables and Dagster history explicit. The launcher must align
   `CODEBENCH_HOME` and `DAGSTER_HOME`; build and UI must use the same dataset home.
 - Every visible stage needs a description stating its input, purpose, typed
-  output, acceptance and failure/waiting rules. Maintain `docs/pipeline-stages.md`.
+  output, acceptance and failure/waiting rules.
 - Start every artifact's native UI description with a brief **How it works**
   paragraph explaining its core algorithm or architecture in plain language:
   what it consumes, how the main transformation or decision works, and what it
@@ -316,6 +316,13 @@ local skill does not install or authorize the Dagster Plus MCP server.
   acceptance is not a new labeling or review pass.
 
 ## Implementation and verification
+
+- Keep project architecture in `docs/architecture/`. The root README points
+  readers there. Edit an architecture guide only when a change makes its account
+  of stage boundaries, orchestration or a core algorithm inaccurate. For routine
+  implementation changes, edit only code and its tests. Do not add parallel
+  guides or stage catalogs. Express implementation detail in descriptive names,
+  types and control flow instead of explanatory comments.
 
 - Read code and its tests before editing. Reuse existing typed Python/CLI/test
   conventions; keep stages parameterized, not tied to machine paths or accounts.
