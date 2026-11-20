@@ -136,8 +136,8 @@ class Supervisor:
 
 
 def prepare(supervisor: Supervisor) -> None:
-    supervisor.launch("lint", ["make", "lint"])
-    supervisor.require("lint")
+    supervisor.launch("static-checks", ["make", "static-checks"])
+    supervisor.require("static-checks")
     root = supervisor.root
     configured = os.environ.get("CODEBENCH_BASHGUARD_AUDIT_BINARY")
     audit = Path(configured).resolve() if configured else root / "bashguard-audit"

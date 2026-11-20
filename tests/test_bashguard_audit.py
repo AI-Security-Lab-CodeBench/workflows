@@ -16,7 +16,6 @@ from codebench_pipeline.dataframe_schemas import CommandCandidatesTable, frame_r
 from codebench_pipeline.dataset_finalization import merge_candidates
 from codebench_pipeline.definitions import build_definitions
 
-MERGED = AssetKey(["datasets", "merged_command_candidates"])
 AUDIT = AssetKey(["datasets", "bashguard_syntax_audit"])
 
 
@@ -114,33 +113,16 @@ class BashGuardAuditTests(TestCase):
         self.assertTrue(frame.empty)
         self.assertEqual(metrics.model_dump(), {"candidates": 0, "status_counts": {}, "flag_counts": {}})
 
-    def test_declared_graph_selects_the_audit_without_adding_labeling_dependencies(self) -> None:
+    def test_audit_job_rejects_analyzer_binary_override(self) -> None:
         with TemporaryDirectory() as temporary:
             home = Path(temporary)
             definitions = build_definitions(home)
-            graph = definitions.resolve_asset_graph()
-            self.assertEqual(graph.get(AUDIT).parent_keys, {MERGED})
-            self.assertEqual(graph.get(AUDIT).child_keys, set())
             job = definitions.resolve_job_def("audit_bashguard_syntax")
-            self.assertEqual({node.name for node in job.nodes}, {AUDIT.to_python_identifier()})
             validate_run_config(job, {})
             with self.assertRaisesRegex(DagsterInvalidConfigError, "binary"):
                 validate_run_config(
                     job, {"resources": {"bashguard_analyzer": {"config": {"binary": "/tmp/parser"}}}}
                 )
-            for name in ("build_dataset", "release_dataset"):
-                self.assertNotIn(
-                    AUDIT.to_python_identifier(),
-                    {node.name for node in definitions.resolve_job_def(name).nodes},
-                )
-            self.assertEqual(
-                graph.get(AssetKey(["datasets", "labeling_attempts"])).parent_keys,
-                {
-                    AssetKey(["datasets", "filtered_commands"]),
-                    AssetKey(["datasets", "map_labeling_attempts_config"]),
-                    AssetKey(["datasets", "documentation", "capture_documentation"]),
-                },
-            )
 
     def test_native_schema_distinguishes_flag_arrays_from_scalar_text(self) -> None:
         with TemporaryDirectory() as temporary:

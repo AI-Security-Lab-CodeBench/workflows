@@ -6,12 +6,17 @@ from dagster import AssetKey
 from test_declared_dataset_graph import fixture_spec
 
 from codebench_pipeline.collection_stage_settings import COLLECTION_OPERATIONS
-from codebench_pipeline.config_assets import CONFIG_DIRECTORY, collection_mapping_key, mapping_key
+from codebench_pipeline.config_assets import (
+    CONFIG_DIRECTORY,
+    GLOBAL_CONFIG,
+    collection_mapping_key,
+    mapping_key,
+)
 from codebench_pipeline.dataset_config import FilteringConfig
 from codebench_pipeline.dataset_registry import DatasetRegistry
 from codebench_pipeline.definitions import build_definitions
 from codebench_pipeline.runtime_instance import dataset_instance
-from codebench_pipeline.stage_configuration import FilterConfig
+from codebench_pipeline.stage_configuration import DeclaredGlobalConfig, FilterConfig
 
 
 class ConfigurationRefreshTests(TestCase):
@@ -35,17 +40,21 @@ class ConfigurationRefreshTests(TestCase):
                 dataset_id = registry.register(spec)
                 refreshed = refresh.execute_in_process(instance=instance, partition_key=dataset_id)
                 self.assertTrue(refreshed.success)
-                self.assertNotIn(
-                    CONFIG_DIRECTORY,
-                    {event.asset_key for event in refreshed.get_asset_materialization_events()},
-                )
+                for event in refreshed.get_asset_materialization_events():
+                    assert event.asset_key is not None
+                    self.assertNotEqual(event.asset_key, CONFIG_DIRECTORY)
+                    self.assertEqual(
+                        definitions.resolve_asset_graph().get(event.asset_key).group_name, "configuration"
+                    )
+                payload = home.joinpath(
+                    "configuration-runs", refreshed.run_id, *GLOBAL_CONFIG.path
+                ).read_bytes()
+                registered = DeclaredGlobalConfig.model_validate_json(payload, strict=True)
+                self.assertEqual(registered.scopes.filtered_commands.filtered_commands, spec.filtering)
                 result = job.execute_in_process(
                     instance=instance, partition_key=dataset_id, asset_selection=keys
                 )
                 self.assertTrue(result.success)
-                self.assertCountEqual(
-                    [event.asset_key for event in result.get_asset_materialization_events()], keys
-                )
                 snapshot: dict[AssetKey, tuple[str, bytes]] = {}
                 for key in keys:
                     (materialization,) = result.asset_materializations_for_node(key.to_python_identifier())

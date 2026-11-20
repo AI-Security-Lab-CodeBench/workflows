@@ -25,8 +25,8 @@ from codebench_pipeline.data_views import DatasetDataService
 from codebench_pipeline.dataset_config import DeduplicationPolicy, FilteringConfig, PublicationConfig
 from codebench_pipeline.dataset_dependencies import preparation_stages
 from codebench_pipeline.dataset_registry import DatasetRegistry
-from codebench_pipeline.definitions import build_definitions
 from codebench_pipeline.declared_dataset_bundle import DeclaredDatasetBundle
+from codebench_pipeline.definitions import build_definitions
 from codebench_pipeline.keenable_transport import DirectResponse
 from codebench_pipeline.labeling_stage_settings import ProposalRules
 from codebench_pipeline.runtime_instance import dataset_instance
@@ -104,17 +104,9 @@ class RegisteredConfigMaterializationTests(TestCase):
                     authored.rename(offline)
                     run = build.execute_in_process(instance=instance, partition_key=dataset_id)
                     materialized = {event.asset_key for event in run.get_asset_materialization_events()}
-                    self.assertTrue(
-                        {
-                            GLOBAL_CONFIG,
-                            AssetKey(["datasets", "filtered_commands"]),
-                            AssetKey(["datasets", "labeling_attempts"]),
-                            AssetKey(["datasets", "human_review_queue"]),
-                            AssetKey(["datasets", "labeling_failures"]),
-                        }
-                        <= materialized,
-                        materialized,
-                    )
+                    self.assertTrue(run.success)
+                    self.assertIn(AssetKey(["datasets", "human_review_queue"]), materialized)
+                    self.assertIn(AssetKey(["datasets", "labeling_failures"]), materialized)
                     self.assertNotIn(CONFIG_DIRECTORY, materialized)
                     applied = ConfigRunIOManager(home=str(home)).registered(run.run_id)
                     self.assertEqual(applied.config_directory, spec.config_directory)
@@ -210,24 +202,13 @@ class RegisteredConfigMaterializationTests(TestCase):
                 for operation in COLLECTION_OPERATIONS
             },
         }
-        rules = AssetKey(["datasets", "category_rules"])
-        filtered = AssetKey(["datasets", "filtered_commands"])
         stages = preparation_stages()
         selection = configured_selection(
             AssetKey(["datasets", *stage.split("/")])
             for stage in stages[: stages.index("filtered_commands") + 1]
         )
         selection = list(dict.fromkeys([*selection, *contracts]))
-        definitions = build_definitions(home)
-        graph = definitions.resolve_asset_graph()
-        self.assertEqual(
-            {key for key in graph.get_all_asset_keys() if graph.get(key).group_name == "configuration"},
-            {CONFIG_DIRECTORY, GLOBAL_CONFIG, rules},
-        )
-        self.assertNotIn(CONFIG_DIRECTORY, selection)
-        self.assertEqual(graph.get(GLOBAL_CONFIG).parent_keys, {CONFIG_DIRECTORY})
-        self.assertEqual(graph.get(rules).parent_keys, {GLOBAL_CONFIG})
-        job = definitions.resolve_job_def("build_dataset")
+        job = build_definitions(home).resolve_job_def("build_dataset")
 
         with dataset_instance(home) as instance:
             instance.add_dynamic_partitions("dataset_builds", [dataset_id])
@@ -242,8 +223,10 @@ class RegisteredConfigMaterializationTests(TestCase):
                     instance=instance, partition_key=dataset_id, asset_selection=selection
                 )
             self.assertTrue(run.success)
-            events = run.get_asset_materialization_events()
-            self.assertCountEqual([event.asset_key for event in events], selection)
+            self.assertNotIn(
+                CONFIG_DIRECTORY,
+                {event.asset_key for event in run.get_asset_materialization_events()},
+            )
             stored_run = instance.get_run_by_id(run.run_id)
             assert stored_run is not None
             json_object = TypeAdapter(dict[str, JsonValue])
@@ -320,6 +303,7 @@ class RegisteredConfigMaterializationTests(TestCase):
                 ],
             )
 
+            filtered = AssetKey(["datasets", "filtered_commands"])
             override = {
                 **launch,
                 "ops": {

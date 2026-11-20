@@ -163,30 +163,12 @@ class IndependentBranchDatasetTests(unittest.TestCase):
         cycle = NativeDatasetCycle(self.home)
         with dataset_instance(self.home) as instance:
             self.refresh(cycle, instance, spec.dataset_id)
-            materialized = cycle.drain(instance, partition=spec.dataset_id)
+            cycle.drain(instance, partition=spec.dataset_id)
             sensor = cycle.definitions.resolve_sensor_def("dataset_release_requests")
             with build_sensor_context(
                 instance=instance, repository_def=cycle.definitions.get_repository_def()
             ) as context:
                 self.assertFalse(sensor.evaluate_tick(context).run_requests)
-        self.assertLessEqual(
-            {
-                "capture_corpus_files",
-                "documentation/capture_documentation",
-                "keenable/capture_origin_pages",
-                "documentation/command_candidates",
-                "merged_command_candidates",
-                "proposed_annotations",
-                "deduplicated_annotations",
-                "human_review_queue",
-            },
-            set(materialized),
-        )
-        self.assertTrue(
-            {"documentation/proposed_annotations", "human_source_decisions", "dataset_release"}.isdisjoint(
-                materialized
-            )
-        )
         with dataset_instance(self.home) as instance:
             data = DatasetDataService(self.home, instance)
             filtered = data.read_current(spec.dataset_id, "filtered_commands").value
@@ -209,7 +191,17 @@ class IndependentBranchDatasetTests(unittest.TestCase):
             with self.assertRaises(HumanReviewError) as missing:
                 transaction.get_current_batch(spec.dataset_id, "sources")
             self.assertEqual(missing.exception.code, "not_found")
-            self.assertEqual(transaction.get_current_batch(spec.dataset_id, "annotations").state, "open")
+            batch = transaction.get_current_batch(spec.dataset_id, "annotations")
+            self.assertEqual(batch.state, "open")
+        fixture.inference.reset_mock()
+        with dataset_instance(self.home) as instance:
+            self.assertEqual(cycle.tick(instance), ())
+        with HumanReviewStore(self.home).reader() as transaction:
+            repeated = transaction.get_current_batch(spec.dataset_id, "annotations")
+            self.assertEqual(
+                (repeated.snapshot.snapshot_id, repeated.state), (batch.snapshot.snapshot_id, "open")
+            )
+        fixture.inference.assert_not_called()
 
     def test_configured_empty_branch_retains_its_digest(self) -> None:
         fixture = LabelingFixture(
@@ -286,28 +278,6 @@ class IndependentBranchDatasetTests(unittest.TestCase):
             self.assertEqual(waiting.exception.code, "pending")
             fixture.inference.assert_not_called()
 
-    def test_declared_build_reuses_outputs_with_unchanged_inputs(self) -> None:
-        fixture = LabelingFixture(self, self.home, category_confidence="medium")
-        spec = fixture.spec
-        self.registry.register(spec)
-        cycle = NativeDatasetCycle(self.home)
-        with dataset_instance(self.home) as instance:
-            self.refresh(cycle, instance, spec.dataset_id)
-            initial = cycle.drain(instance, partition=spec.dataset_id)
-            self.assertIn("documentation/command_candidates", initial)
-            self.assertNotIn("source_catalog", initial)
-            store = HumanReviewStore(self.home)
-            with store.reader() as transaction:
-                batch = transaction.get_current_batch(spec.dataset_id, "annotations")
-                self.assertEqual(batch.state, "open")
-            fixture.inference.reset_mock()
-            self.assertEqual(cycle.tick(instance), ())
-            with store.reader() as transaction:
-                repeated = transaction.get_current_batch(spec.dataset_id, "annotations")
-                self.assertEqual(repeated.snapshot.snapshot_id, batch.snapshot.snapshot_id)
-                self.assertEqual(repeated.state, "open")
-        fixture.inference.assert_not_called()
-
     def test_empty_prepared_branches_remain_readable_but_cannot_build(self) -> None:
         fixture = LabelingFixture(self, self.home)
         archived, revision = seed_prepared_snapshot(
@@ -332,19 +302,7 @@ class IndependentBranchDatasetTests(unittest.TestCase):
         cycle = NativeDatasetCycle(self.home)
         with dataset_instance(self.home) as instance:
             self.refresh(cycle, instance, spec.dataset_id)
-            materialized = cycle.drain(instance, partition=spec.dataset_id)
-        self.assertLessEqual(
-            {
-                "merged_command_candidates",
-                "filtered_commands",
-                "labeling_attempts",
-                "proposed_annotations",
-                "deduplicated_annotations",
-                "human_review_queue",
-            },
-            set(materialized),
-        )
-        self.assertNotIn("dataset_release", materialized)
+            cycle.drain(instance, partition=spec.dataset_id)
         fixture.inference.assert_not_called()
         with dataset_instance(self.home) as instance:
             data = DatasetDataService(self.home, instance)

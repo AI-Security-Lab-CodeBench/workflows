@@ -56,22 +56,11 @@ def test_merge_consumes_all_three_collection_group_outputs(tmp_path: Path) -> No
         merged_rows = frame_records(merged.value)
         assert len(merged_rows) == 3
         rows_by_id = {str(row["candidate_id"]): row for row in merged_rows}
-        graph = definitions.resolve_asset_graph()
-        for branch, group, stage, command, weight in (
-            ("dataset", "existing_datasets", "command_candidates", "docker compose ps --all", 0.62),
-            (
-                "documentation",
-                "documentation_crawl",
-                "documentation/command_candidates",
-                "docker ps --all",
-                0.9,
-            ),
-            ("keenable", "keenable_use_cases", "keenable/command_candidates", "terraform plan", 0.24),
+        for branch, stage, command, weight in (
+            ("dataset", "command_candidates", "docker compose ps --all", 0.62),
+            ("documentation", "documentation/command_candidates", "docker ps --all", 0.9),
+            ("keenable", "keenable/command_candidates", "terraform plan", 0.24),
         ):
-            key = AssetKey(["datasets", *stage.split("/")])
-            assert graph.get(key).group_name == group
-            (event,) = run.asset_materializations_for_node(key.to_python_identifier())
-            assert event.asset_key == key
             output = data.read_current(spec.dataset_id, stage)
             assert isinstance(output.value, pd.DataFrame)
             (original,) = frame_records(output.value)

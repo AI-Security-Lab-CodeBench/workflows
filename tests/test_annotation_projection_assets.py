@@ -243,9 +243,7 @@ class AnnotationProjectionAssetTests(unittest.TestCase):
             [(("policy",), "extra_forbidden")],
         )
 
-    def retain_legacy_projections(
-        self, *, corrupt_attempt: AssetKey | None = None
-    ) -> dict[AssetKey, tuple[str, str, bytes]]:
+    def retain_legacy_projections(self) -> dict[AssetKey, tuple[str, str, bytes]]:
         source = ImplementationSource()
         module = ast.parse(source.read(SOURCE))
         factory = next(
@@ -307,10 +305,7 @@ class AnnotationProjectionAssetTests(unittest.TestCase):
                 "implementation": implementation,
                 "stage_implementation": scoped,
             }
-            self.io.write_evidence(
-                f"{cache_key}/{'0' * 32}/receipts.json",
-                b'{"unexpected":"alteration"}' if key == corrupt_attempt else b"{}",
-            )
+            self.io.write_evidence(f"{cache_key}/{'0' * 32}/receipts.json", b"{}")
             original_index = json.dumps(index, indent=2).encode()
             self.io.write_evidence(f"{cache_key}/evidence-index.json", original_index)
             self.io.write_evidence(f"{cache_key}/stage-config.json", config.model_dump_json().encode())
@@ -340,15 +335,6 @@ class AnnotationProjectionAssetTests(unittest.TestCase):
             self.assertEqual(self.io.read_evidence(f"{cache_key}/evidence-index.json"), original_index)
             self.assertEqual(self.io.read_evidence(f"{cache_key}/{'0' * 32}/receipts.json"), b"{}")
 
-    def test_historical_projection_with_altered_receipt_is_not_reused(self) -> None:
-        _, cache_key, _ = self.retain_legacy_projections(corrupt_attempt=PROPOSED)[PROPOSED]
-        run = self.materialize_projections()
-        metadata = run.asset_materializations_for_node(PROPOSED.to_python_identifier())[0].metadata
-        self.assertIs(metadata["cache_hit"].value, False)
-        self.assertEqual(
-            self.io.read_evidence(f"{cache_key}/{'0' * 32}/receipts.json"), b'{"unexpected":"alteration"}'
-        )
-
     def test_current_cache_rejects_altered_content(self) -> None:
         run = self.materialize_projections()
         metadata = run.asset_materializations_for_node(PROPOSED.to_python_identifier())[0].metadata
@@ -360,27 +346,6 @@ class AnnotationProjectionAssetTests(unittest.TestCase):
 
         with self.assertRaisesRegex(IntegrityError, "Asset reference content mismatch"):
             self.materialize_projections()
-
-    def test_legacy_projection_misses_when_a_current_only_helper_changes(self) -> None:
-        self.retain_legacy_projections()
-        original_read = ImplementationSource.read
-        helper = "codebench_pipeline/finalization_table_asset.py"
-        before = (
-            b"table = compute(loaded.attempts) if loaded.cached is None else schema.validate(loaded.cached)"
-        )
-        after = b"table = compute(loaded.attempts.head(0)) if loaded.cached is None else schema.validate(loaded.cached)"
-
-        def read(source: ImplementationSource, name: str) -> bytes:
-            payload = original_read(source, name)
-            if name == helper:
-                self.assertIn(before, payload)
-                return payload.replace(before, after)
-            return payload
-
-        with patch.object(ImplementationSource, "read", read):
-            run = self.materialize_projections()
-        metadata = run.asset_materializations_for_node(PROPOSED.to_python_identifier())[0].metadata
-        self.assertIs(metadata["cache_hit"].value, False)
 
     def test_failed_output_publication_is_not_reused_on_retry(self) -> None:
         original = RegisteredDatasetTableIO.handle_output

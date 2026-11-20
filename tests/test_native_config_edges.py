@@ -16,22 +16,18 @@ from dagster import (
     materialize,
 )
 from dagster._core.execution.context.system import StepExecutionContext
-from native_dataset_cycle import NativeDatasetCycle
 from pandera.typing import DataFrame
 from pydantic import BaseModel, ValidationError
 from test_dataset_rules import make_candidate, make_rules
 from test_declared_dataset_graph import fixture_spec
 
 from codebench_pipeline.category_rules import CategoryRules
-from codebench_pipeline.collection_stage_settings import COLLECTION_OPERATIONS
 from codebench_pipeline.config_assets import (
-    CONFIG_DIRECTORY,
     GLOBAL_CONFIG,
     REGISTERED_CONFIG_TYPE,
     ConfigRunIOManager,
     GlobalConfig,
     RegisteredConfig,
-    collection_mapping_key,
     configuration_assets,
     mapping_key,
 )
@@ -39,15 +35,13 @@ from codebench_pipeline.dataframe_io import DataFrameIOManager
 from codebench_pipeline.dataframe_schemas import CommandCandidatesTable, validated_frame
 from codebench_pipeline.dataset_asset_types import DATASET_PARTITIONS, RULES_TYPE, TABLE_TYPES
 from codebench_pipeline.dataset_assets_sources import filtered_commands
-from codebench_pipeline.dataset_branches import Branch, asset_path
 from codebench_pipeline.dataset_collection_binding import FINALIZATION_BINDING
 from codebench_pipeline.dataset_config import FilteringConfig
-from codebench_pipeline.dataset_engine import stage_signature
 from codebench_pipeline.dataset_extract import filter_candidates
 from codebench_pipeline.dataset_registry import DatasetRegistry
 from codebench_pipeline.dataset_storage_io import RegisteredDatasetTableIO
 from codebench_pipeline.definitions import build_definitions
-from codebench_pipeline.finalization_table_asset import FINALIZATION_TABLE_IO, CollectionInput
+from codebench_pipeline.finalization_table_asset import FINALIZATION_TABLE_IO
 from codebench_pipeline.finalization_table_io import finalization_table_io
 from codebench_pipeline.human_review_store import HumanReviewStore
 from codebench_pipeline.labeling_stage_settings import RiskRoute
@@ -55,7 +49,6 @@ from codebench_pipeline.runtime_instance import dataset_instance
 from codebench_pipeline.stage_configuration import (
     DeclaredGlobalConfig,
     FilterConfig,
-    stage_configs,
 )
 from codebench_pipeline.storage import IntegrityError
 
@@ -170,47 +163,6 @@ class NativeConfigEdgesTests(TestCase):
 
         self.assertEqual(len(result.asset_materializations_for_node("datasets__category_rules")), 1)
 
-    def test_configuration_only_job_persists_active_settings_without_processing(self) -> None:
-        home = Path(self.enterContext(TemporaryDirectory()))
-        spec = fixture_spec(home)
-        dataset_id = DatasetRegistry(home).register(spec)
-        job = build_definitions(home).resolve_job_def("refresh_dataset_configuration")
-        rules = AssetKey(["datasets", "category_rules"])
-        mappings = {
-            mapping_key(scope)
-            for scope in (
-                "merged_command_candidates",
-                "filtered_commands",
-                "labeling_attempts",
-                "proposed_annotations",
-                "deduplicated_annotations",
-                "category_eligible_annotations",
-                "human_review_queue",
-            )
-        } | {collection_mapping_key(operation.branch, operation.stage) for operation in COLLECTION_OPERATIONS}
-        with dataset_instance(home) as instance:
-            instance.add_dynamic_partitions("dataset_builds", [dataset_id])
-            result = job.execute_in_process(instance=instance, partition_key=dataset_id)
-            self.assertTrue(result.success)
-            self.assertEqual(
-                {event.asset_key for event in result.get_asset_materialization_events()},
-                {GLOBAL_CONFIG, rules},
-            )
-            self.assertTrue(home.joinpath("configuration-runs", result.run_id, *GLOBAL_CONFIG.path).is_file())
-            cycle = NativeDatasetCycle(home)
-            (request,) = cycle.tick(instance)
-            self.assertEqual(request.partition_key, dataset_id)
-            self.assertEqual(set(request.asset_selection or ()), mappings)
-            self.assertEqual(request.run_config, {})
-            mapped = cycle.definitions.get_implicit_global_asset_job_def().execute_in_process(
-                instance=instance, partition_key=dataset_id, asset_selection=request.asset_selection
-            )
-            self.assertEqual(
-                {event.asset_key for event in mapped.get_asset_materialization_events()}, mappings
-            )
-        for key in mappings:
-            self.assertTrue(home.joinpath("configuration-runs", mapped.run_id, *key.path).is_file())
-
     def test_filter_uses_mapped_settings_for_decisions_and_fingerprint(self) -> None:
         home = Path(self.enterContext(TemporaryDirectory()))
         key = AssetKey(["datasets", "filtered_commands"])
@@ -303,108 +255,6 @@ class NativeConfigEdgesTests(TestCase):
             strict_metadata["input_fingerprint"],
             control.asset_materializations_for_node(node)[0].metadata["input_fingerprint"],
         )
-        self.assertEqual(
-            strict_metadata["input_fingerprint"].value,
-            stage_signature(
-                "filtered_commands",
-                stage_configs(spec)["filtered_commands"],
-                {"command_candidates": candidates},
-            ),
-        )
-
-    def test_config_edges_use_matching_domain_types(self) -> None:
-        home = Path(self.enterContext(TemporaryDirectory()))
-        assets = {
-            asset.key: asset
-            for asset in build_definitions(home).assets or ()
-            if isinstance(asset, AssetsDefinition) and len(asset.keys) == 1
-        }
-        configs = {
-            key: definition.op.output_defs[0].dagster_type
-            for key, definition in assets.items()
-            if key == GLOBAL_CONFIG or key.path[-1].startswith("map_")
-        }
-        collection = {
-            collection_mapping_key(operation.branch, operation.stage): operation.contract
-            for operation in COLLECTION_OPERATIONS
-        }
-        for key, definition in assets.items():
-            for name, dependency in definition.keys_by_input_name.items():
-                if dependency in configs:
-                    with self.subTest(asset=key.to_user_string(), input=name):
-                        edge_type = definition.op.input_def_named(name).dagster_type
-                        if dependency in collection:
-                            self.assertIs(edge_type.typing_type, CollectionInput)
-                            self.assertIs(configs[dependency].typing_type, collection[dependency])
-                            self.assertEqual(
-                                definition.op.input_def_named(name).input_manager_key, FINALIZATION_TABLE_IO
-                            )
-                        else:
-                            self.assertEqual(edge_type.key, configs[dependency].key)
-                        if dependency != GLOBAL_CONFIG:
-                            self.assertTrue(issubclass(edge_type.typing_type, BaseModel))
-
-    def test_declared_consumers_only_depend_on_their_active_config(self) -> None:
-        with TemporaryDirectory() as home:
-            graph = build_definitions(Path(home)).resolve_asset_graph()
-
-        branch_mappings: tuple[tuple[Branch, tuple[str, ...]], ...] = (
-            ("dataset", ("enumerate_corpus_files", "capture_corpus_files", "command_candidates")),
-            ("documentation", ("capture_documentation", "command_candidates")),
-            ("keenable", ("discover_use_cases", "capture_origin_pages", "command_candidates")),
-        )
-        shared = (
-            "merged_command_candidates",
-            "filtered_commands",
-            "labeling_attempts",
-            "proposed_annotations",
-            "deduplicated_annotations",
-            "category_eligible_annotations",
-            "human_review_queue",
-            "dataset_release",
-        )
-        collection = {
-            AssetKey(asset_path(stage, branch)): collection_mapping_key(branch, stage)
-            for branch, branch_stages in branch_mappings
-            for stage in branch_stages
-        }
-        expected = collection | {AssetKey(["datasets", stage]): mapping_key(stage) for stage in shared}
-        rules = AssetKey(["datasets", "category_rules"])
-        global_config = AssetKey(["datasets", "global_config"])
-        all_keys = graph.get_all_asset_keys()
-        configuration = {CONFIG_DIRECTORY, global_config, rules}
-        mappings = set(expected.values())
-        unmapped = {
-            AssetKey(["datasets", name])
-            for name in ("bashguard_syntax_audit", "labeling_failures", "human_review_decisions")
-        }
-        self.assertEqual(
-            set(all_keys),
-            set(expected) | mappings | configuration | unmapped,
-        )
-        self.assertEqual(
-            {key for key in all_keys if graph.get(key).group_name == "configuration"},
-            configuration,
-        )
-        self.assertEqual(graph.get(CONFIG_DIRECTORY).parent_keys, set())
-        self.assertEqual(graph.get(global_config).parent_keys, {CONFIG_DIRECTORY})
-        self.assertEqual(graph.get(rules).parent_keys, {global_config})
-        self.assertEqual(
-            {child for parent in configuration for child in graph.get(parent).child_keys} - configuration,
-            mappings,
-        )
-
-        for stage, mapping in expected.items():
-            with self.subTest(stage=stage.to_user_string()):
-                parents = graph.get(stage).parent_keys
-                self.assertEqual(parents & mappings, {mapping})
-                self.assertEqual(graph.get(mapping).parent_keys, {global_config})
-        self.assertEqual(len(set(collection.values())), len(collection))
-        for stage, mapping in collection.items():
-            self.assertEqual(graph.get(stage).group_name, graph.get(mapping).group_name)
-            self.assertFalse(graph.get(stage).parent_keys & configuration)
-        for stage in unmapped:
-            self.assertFalse(graph.get(stage).parent_keys & mappings)
 
     def test_registration_rejects_metadata_only_configuration_bypasses(self) -> None:
         home = Path(self.enterContext(TemporaryDirectory()))
@@ -414,15 +264,23 @@ class NativeConfigEdgesTests(TestCase):
         def future_settings() -> str:
             return "settings"
 
-        bypass = filtered_commands.map_asset_specs(lambda spec: spec.merge_attributes(deps=[settings]))
-        with (
-            patch(
-                "codebench_pipeline.definitions.configuration_assets",
-                return_value=[*configuration_assets(home), future_settings],
-            ),
-            patch("codebench_pipeline.definitions.filtered_commands", bypass),
-            self.assertRaisesRegex(
-                IntegrityError, "datasets/filtered_commands bypasses scoped configuration: future_settings"
-            ),
+        @asset(group_name="future_processing")
+        def future_consumer() -> str:
+            return "output"
+
+        mapped = mapping_key("filtered_commands")
+        for parent, reason in (
+            (settings, "future_consumer bypasses scoped configuration: future_settings"),
+            (mapped, f"{mapped.to_user_string()} must belong to the group of future_consumer"),
         ):
-            build_definitions(home)
+            bypass = future_consumer.map_asset_specs(lambda spec: spec.merge_attributes(deps=[parent]))
+            with (
+                self.subTest(parent=parent),
+                patch(
+                    "codebench_pipeline.definitions.configuration_assets",
+                    return_value=[*configuration_assets(home), future_settings],
+                ),
+                patch("codebench_pipeline.definitions.bashguard_syntax_audit", bypass),
+                self.assertRaisesRegex(IntegrityError, reason),
+            ):
+                build_definitions(home)

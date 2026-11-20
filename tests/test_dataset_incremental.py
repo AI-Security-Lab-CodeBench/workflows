@@ -3,6 +3,7 @@ import io
 import json
 import tempfile
 import unittest
+from collections.abc import Iterable
 from contextlib import redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
@@ -98,7 +99,7 @@ class IncrementalDatasetTests(unittest.TestCase):
             update={"annotation": annotation.model_copy(update={"model": model})}
         )
 
-    def materializations(self, dataset: str) -> dict[str, int]:
+    def materializations(self, dataset: str, stages: Iterable[str] | None = None) -> dict[str, int]:
         with dataset_instance(self.home) as instance:
             return {
                 stage: instance.fetch_materializations(
@@ -109,85 +110,133 @@ class IncrementalDatasetTests(unittest.TestCase):
                 )
                 .records[0]
                 .storage_id
-                for stage in self.first
+                for stage in (self.first if stages is None else stages)
             }
 
-    def test_unchanged_refresh_creates_no_processing_run_or_materialization(self) -> None:
-        before = self.materializations(self.spec.dataset_id)
-        with dataset_instance(self.home) as instance:
-            runs_before = len(instance.get_runs())
-        self.assertEqual(self.build(), {})
-        self.assertEqual(self.materializations(self.spec.dataset_id), before)
-        with dataset_instance(self.home) as instance:
-            self.assertEqual(len(instance.get_runs()), runs_before + 1)
-            self.assertEqual(instance.get_runs(limit=1)[0].job_name, "refresh_dataset_configuration")
+    def assert_boundary_changes(self, before: dict[str, int], changed: set[str]) -> None:
+        after = self.materializations(self.spec.dataset_id, before)
+        for stage in before:
+            with self.subTest(stage=stage):
+                if stage in changed:
+                    self.assertNotEqual(after[stage], before[stage])
+                else:
+                    self.assertEqual(after[stage], before[stage])
 
-    def test_revised_documentation_branch_preserves_current_dataset_outputs(self) -> None:
-        before = self.materializations(self.spec.dataset_id)
+    def test_documentation_refresh_rebuilds_consumers_and_reuses_sibling_evidence(self) -> None:
+        before = self.materializations(
+            self.spec.dataset_id,
+            (
+                "command_candidates",
+                "documentation/capture_documentation",
+                "documentation/command_candidates",
+                "keenable/command_candidates",
+                "merged_command_candidates",
+                "filtered_commands",
+                "labeling_attempts",
+                "human_review_queue",
+            ),
+        )
         collection = self.spec.declared_collection
         assert collection is not None
         declaration = collection.documentation_crawl.declaration
         assert isinstance(declaration, RepositoryBranchDeclaration)
-        changed_doc = SourceDeclaration.from_declaration(
+        revised = SourceDeclaration.from_declaration(
             declaration.model_copy(update={"refresh_revision": "new-documentation-scope"})
         )
         self.spec = self.spec.model_copy(
-            update={"declared_collection": collection.model_copy(update={"documentation_crawl": changed_doc})}
+            update={"declared_collection": collection.model_copy(update={"documentation_crawl": revised})}
         )
-        expected = {
-            "documentation/capture_documentation",
+        self.build()
+        self.assert_boundary_changes(
+            before,
+            {
+                "documentation/capture_documentation",
+                "documentation/command_candidates",
+                "merged_command_candidates",
+                "filtered_commands",
+                "labeling_attempts",
+                "human_review_queue",
+            },
+        )
+        self.assertEqual(self.build(), {})
+
+    def test_source_revision_preserves_rules_and_refreshes_source_bound_labeling(self) -> None:
+        dataset_id = self.spec.dataset_id
+        before = self.materializations(
+            dataset_id,
+            (
+                "command_candidates",
+                "documentation/command_candidates",
+                "keenable/command_candidates",
+                "merged_command_candidates",
+                "filtered_commands",
+                "labeling_attempts",
+                "human_review_queue",
+            ),
+        )
+        with dataset_instance(self.home) as instance:
+            rules = (
+                DatasetDataService(self.home, instance).read_current(dataset_id, "category_rules").reference
+            )
+        collection = self.spec.declared_collection
+        assert collection is not None
+        declaration = collection.existing_datasets.declaration
+        assert isinstance(declaration, RepositoryBranchDeclaration)
+        revised = SourceDeclaration.from_declaration(
+            declaration.model_copy(update={"refresh_revision": "dataset-source-refresh"})
+        )
+        self.spec = self.spec.model_copy(
+            update={"declared_collection": collection.model_copy(update={"existing_datasets": revised})}
+        )
+        self.build()
+        self.assert_boundary_changes(
+            before,
+            {
+                "command_candidates",
+                "merged_command_candidates",
+                "filtered_commands",
+                "labeling_attempts",
+                "human_review_queue",
+            },
+        )
+        with dataset_instance(self.home) as instance:
+            refreshed = DatasetDataService(self.home, instance).read_current(dataset_id, "category_rules")
+        self.assertEqual(refreshed.reference.digest, rules.digest)
+
+    def test_labeler_and_policy_changes_reuse_filtered_command_evidence(self) -> None:
+        stages = (
+            "command_candidates",
             "documentation/command_candidates",
-            "merged_command_candidates",
+            "keenable/command_candidates",
             "filtered_commands",
             "labeling_attempts",
-            "proposed_annotations",
-            "labeling_failures",
-            "deduplicated_annotations",
-            "category_eligible_annotations",
             "human_review_queue",
-        }
-        self.assertEqual(set(self.build()), expected)
-        after = self.materializations(self.spec.dataset_id)
-        self.assertEqual({stage for stage in before if before[stage] != after[stage]}, expected)
-        self.assertEqual(self.build(), {})
+        )
+        with dataset_instance(self.home) as instance:
+            self.assertEqual(self.cycle.tick(instance), ())
+            self.update_labeler()
+            DatasetRegistry(self.home).register(self.spec)
+            self.assertEqual(self.cycle.tick(instance), ())
 
-    def test_labeler_change_materializes_only_labels_and_finalization(self) -> None:
-        before = self.materializations(self.spec.dataset_id)
-        self.update_labeler()
         self.spec = self.spec.model_copy(update={"revision": "label-settings-update"})
-        changed = self.build()
-        expected = {
-            "labeling_attempts",
-            "proposed_annotations",
-            "labeling_failures",
-            "deduplicated_annotations",
-            "category_eligible_annotations",
-            "human_review_queue",
-        }
-        self.assertEqual(set(changed), expected)
-        after = self.materializations(self.spec.dataset_id)
-        self.assertEqual({stage for stage in before if before[stage] != after[stage]}, expected)
-        self.assertEqual(self.build(), {})
-
-    def test_policy_change_does_not_rematerialize_source_or_filter_tables(self) -> None:
         rules = self.spec.rules.model_copy(
             update={
                 "policy": self.spec.rules.policy + " Check evidence carefully.",
                 "version": "policy-update",
             }
         )
-        self.spec = self.spec.model_copy(update={"rules": rules})
-        self.assertEqual(
-            set(self.build()),
-            {
-                "labeling_attempts",
-                "proposed_annotations",
-                "labeling_failures",
-                "human_review_queue",
-                "deduplicated_annotations",
-                "category_eligible_annotations",
-            },
-        )
+        for change, spec in (
+            ("labeler", self.spec),
+            ("policy", self.spec.model_copy(update={"rules": rules})),
+        ):
+            with self.subTest(change=change):
+                before = self.materializations(self.spec.dataset_id, stages)
+                inference_before = len(self.fixture.remote_rows)
+                self.spec = spec
+                self.build()
+                self.assert_boundary_changes(before, {"labeling_attempts", "human_review_queue"})
+                self.assertGreater(len(self.fixture.remote_rows), inference_before)
+        self.assertEqual(self.build(), {})
 
     def test_publication_cap_replaces_completion_without_changing_review_rows(self) -> None:
         dataset_id = self.spec.dataset_id
@@ -282,7 +331,12 @@ class IncrementalDatasetTests(unittest.TestCase):
                 queue.attrs[REVIEW_PREPARATION],
                 {"batch_id": batch.batch_id, "snapshot_id": batch.snapshot.snapshot_id},
             )
+            runs_before = len(instance.get_runs())
         self.assertEqual(self.build(), {})
+        self.assertEqual(self.materializations(self.spec.dataset_id), before)
+        with dataset_instance(self.home) as instance:
+            self.assertEqual(len(instance.get_runs()), runs_before + 1)
+            self.assertEqual(instance.get_runs(limit=1)[0].job_name, "refresh_dataset_configuration")
 
     def test_unchanged_refresh_does_not_retry_failed_native_labeling_run(self) -> None:
         before = self.materializations(self.spec.dataset_id)
@@ -300,33 +354,6 @@ class IncrementalDatasetTests(unittest.TestCase):
         ):
             self.assertEqual(self.build(), {})
         self.assertEqual(self.materializations(self.spec.dataset_id), before)
-
-    def test_native_sensor_reads_persisted_config_updates_after_refresh(self) -> None:
-        with dataset_instance(self.home) as instance:
-            self.assertEqual(self.cycle.tick(instance), ())
-        self.update_labeler()
-        DatasetRegistry(self.home).register(self.spec)
-        with dataset_instance(self.home) as instance:
-            self.assertEqual(self.cycle.tick(instance), ())
-        self.assertIn("labeling_attempts", self.build())
-
-    def test_source_revision_preserves_rules_and_refreshes_source_bound_labeling(self) -> None:
-        before = self.materializations(self.spec.dataset_id)
-        collection = self.spec.declared_collection
-        assert collection is not None
-        declaration = collection.existing_datasets.declaration
-        assert isinstance(declaration, RepositoryBranchDeclaration)
-        source = SourceDeclaration.from_declaration(
-            declaration.model_copy(update={"refresh_revision": "dataset-source-refresh"})
-        )
-        self.spec = self.spec.model_copy(
-            update={"declared_collection": collection.model_copy(update={"existing_datasets": source})}
-        )
-        changed = self.build()
-        unaffected = {"category_rules", *(stage for stage in before if "/" in stage)}
-        self.assertEqual(set(changed), set(self.first) - unaffected)
-        after = self.materializations(self.spec.dataset_id)
-        self.assertNotEqual(after["labeling_attempts"], before["labeling_attempts"])
 
     def test_adding_and_changing_category_leaves_existing_category_events_untouched(self) -> None:
         original = self.spec
@@ -355,19 +382,20 @@ class IncrementalDatasetTests(unittest.TestCase):
                 "declared_collection": collection.model_copy(update={"keenable_use_cases": revised}),
             }
         )
-        self.assertEqual(set(self.build()), set(self.first))
-        self.update_labeler()
-        self.assertEqual(
-            set(self.build()),
-            {
-                "labeling_attempts",
-                "proposed_annotations",
-                "labeling_failures",
-                "deduplicated_annotations",
-                "category_eligible_annotations",
-                "human_review_queue",
-            },
+        self.build()
+        boundaries = (
+            "merged_command_candidates",
+            "filtered_commands",
+            "labeling_attempts",
+            "human_review_queue",
         )
+        new_category = self.materializations(dataset_id, boundaries)
+        with dataset_instance(self.home) as instance:
+            rules_output = DatasetDataService(self.home, instance).read_current(dataset_id, "category_rules")
+        self.assertEqual(rules_output.value, rules)
+        self.update_labeler()
+        self.build()
+        self.assert_boundary_changes(new_category, {"labeling_attempts", "human_review_queue"})
         self.assertEqual(self.materializations(identity), before)
         self.spec = original
         self.assertEqual(self.build(), {})

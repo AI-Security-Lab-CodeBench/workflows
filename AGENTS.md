@@ -340,6 +340,12 @@ local skill does not install or authorize the Dagster Plus MCP server.
   that a failed replacement cannot reuse a previous merge. Stop execution at
   the boundary under test. Keep exhaustive parser, transport and publication
   cases in the full suite; do not run discovery or inference from `make e2e`.
+- Test a behavior at the cheapest boundary that can expose its failure. Do not
+  copy inventories of graph nodes, edges or group names into expected values.
+  For selective execution, inspect the resulting data, reuse, or absence of
+  side effects. Enforce general configuration-boundary rules without a second
+  hand-maintained graph. Reuse an existing materialization when two checks
+  start from the same dataset state.
 - Let pytest own test state: each E2E invocation gets a temporary workspace,
   and each scenario gets its own Dagster home and uniquely named review database
   on the existing `review-db` service. Fixtures remove those resources on exit.

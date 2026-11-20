@@ -13,9 +13,11 @@ ifeq ($(shell test -w . || echo readonly),readonly)
 export UV_PROJECT_ENVIRONMENT ?= $(HOME)/.cache/codebench/lint-venv
 endif
 
-.PHONY: lint
-lint:
+.PHONY: lint static-checks
+lint: static-checks
 	$(PYTHON) -B -m unittest discover -s tests -p test_asset_boundary.py
+
+static-checks:
 	$(PYTHON) -B -m scripts.asset_boundary
 	$(UV) run --locked ruff check --no-cache codebench_pipeline
 	$(UV) run --locked basedpyright

@@ -6,7 +6,7 @@ from unittest.mock import patch
 from dagster import AssetKey, DagsterInvalidConfigError, InputContext, OutputContext
 from guarded_labeling_fixture import LabelingFixture
 from native_dataset_cycle import NativeDatasetCycle
-from pydantic import BaseModel, JsonValue, RootModel
+from pydantic import BaseModel, JsonValue, RootModel, ValidationError
 
 from codebench_pipeline.config_assets import (
     ConfigRunIOManager,
@@ -34,20 +34,22 @@ class NativeConfigConsumptionTests(TestCase):
         mapping = mapping_key("filtered_commands")
         selection = configured_selection([key])
         expected = FilterConfig.project(RegisteredConfig.from_spec(spec), spec.rules).model_dump(mode="json")
-        payloads: tuple[tuple[dict[str, JsonValue], str], ...] = (
-            ({"another_scope": {}}, "another_scope"),
-            ({**expected, "category_rules": spec.rules.model_dump(mode="json")}, "category_rules"),
-            (
-                {
-                    **expected,
-                    "filtered_commands": {
-                        **spec.filtering.model_dump(mode="json"),
-                        "unregistered_setting": True,
-                    },
-                },
-                "unregistered_setting",
-            ),
-        )
+        for field, value in (("another_scope", {}), ("category_rules", spec.rules.model_dump(mode="json"))):
+            with self.subTest(field=field), self.assertRaisesRegex(ValidationError, field):
+                FilterConfig.model_validate({**expected, field: value})
+
+        def write_wrong_config(manager: ConfigRunIOManager, context: OutputContext, obj: BaseModel) -> None:
+            if context.asset_key == mapping:
+                obj = RootModel[dict[str, JsonValue]](
+                    {
+                        **expected,
+                        "filtered_commands": {
+                            **spec.filtering.model_dump(mode="json"),
+                            "unregistered_setting": True,
+                        },
+                    }
+                )
+            write_config(manager, context, obj)
 
         with dataset_instance(home) as instance:
             instance.add_dynamic_partitions("dataset_builds", [dataset_id])
@@ -58,14 +60,9 @@ class NativeConfigConsumptionTests(TestCase):
             prepared = cycle.drain(instance, prepare_only=True, partition=dataset_id)
             self.assertIn("filtered_commands", prepared)
 
-            current = job.execute_in_process(
-                instance=instance,
-                partition_key=dataset_id,
-                asset_selection=[key],
-            )
-            self.assertTrue(current.success)
-            self.assertEqual({event.asset_key for event in current.get_asset_materialization_events()}, {key})
-            (materialization,) = current.asset_materializations_for_node(key.to_python_identifier())
+            event = instance.get_latest_materialization_event(key)
+            assert event is not None and event.asset_materialization is not None
+            materialization = event.asset_materialization
             producer = current_configuration_record(instance, mapping, dataset_id)
             path = Path(home, "configuration-runs", producer.run_id, *mapping.path)
             original = path.read_bytes()
@@ -84,33 +81,19 @@ class NativeConfigConsumptionTests(TestCase):
             self.assertIn('loading input "mapped_config"', error.to_string())
             self.assertIn("Missing configuration", error.to_string())
 
-            for payload, diagnostic in payloads:
-
-                def write_wrong_config(
-                    manager: ConfigRunIOManager, context: OutputContext, obj: BaseModel
-                ) -> None:
-                    write_config(
-                        manager,
-                        context,
-                        RootModel[dict[str, JsonValue]](payload) if context.asset_key == mapping else obj,
-                    )
-
-                with (
-                    self.subTest(mapping=payload),
-                    patch.object(ConfigRunIOManager, "handle_output", write_wrong_config),
-                ):
-                    wrong = job.execute_in_process(
-                        instance=instance,
-                        partition_key=dataset_id,
-                        asset_selection=selection,
-                        raise_on_error=False,
-                    )
-                    self.assertFalse(wrong.success)
-                    (failure,) = wrong.get_step_failure_events()
-                    self.assertEqual(failure.step_key, key.to_python_identifier())
-                    error = failure.step_failure_data.error
-                    assert error is not None
-                    self.assertIn(diagnostic, error.to_string())
+            with patch.object(ConfigRunIOManager, "handle_output", write_wrong_config):
+                wrong = job.execute_in_process(
+                    instance=instance,
+                    partition_key=dataset_id,
+                    asset_selection=selection,
+                    raise_on_error=False,
+                )
+            self.assertFalse(wrong.success)
+            (failure,) = wrong.get_step_failure_events()
+            self.assertEqual(failure.step_key, key.to_python_identifier())
+            error = failure.step_failure_data.error
+            assert error is not None
+            self.assertIn("unregistered_setting", error.to_string())
 
             override = {"ops": {key.to_python_identifier(): {"config": {"maximum_command_characters": 1}}}}
             with self.assertRaisesRegex(DagsterInvalidConfigError, "maximum_command_characters"):
@@ -126,9 +109,6 @@ class NativeConfigConsumptionTests(TestCase):
                 asset_selection=selection,
             )
             self.assertTrue(repeated_run.success)
-            self.assertEqual(
-                {event.asset_key for event in repeated_run.get_asset_materialization_events()}, set(selection)
-            )
             (repeated,) = repeated_run.asset_materializations_for_node(key.to_python_identifier())
             self.assertTrue(repeated.metadata["cache_hit"].value)
             self.assertEqual(

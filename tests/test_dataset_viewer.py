@@ -11,7 +11,6 @@ from codebench_pipeline.dataframe_io import DataFrameIOManager
 from codebench_pipeline.dataframe_schemas import CommandCandidatesTable, validated_frame
 from codebench_pipeline.dataset_asset_types import DATASET_PARTITIONS
 from codebench_pipeline.dataset_registry import DatasetRegistry
-from codebench_pipeline.definitions import build_definitions
 from codebench_pipeline.runtime_instance import dataset_instance
 from codebench_pipeline.viewer import launch_ui, preview_asset, viewer_environment
 
@@ -120,9 +119,3 @@ class DatasetViewerTests(unittest.TestCase):
                 preview_asset(self.home, self.spec.dataset_id, "command_candidates", limit)
         with self.assertRaises(ValueError):
             launch_ui(self.home, 0)
-
-    def test_each_dagster_asset_exposes_description_metadata(self) -> None:
-        graph = build_definitions(self.home).resolve_asset_graph()
-        for key in graph.get_all_asset_keys():
-            with self.subTest(asset=key.to_user_string()):
-                self.assertTrue(graph.get(key).description)

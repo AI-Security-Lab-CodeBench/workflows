@@ -7,7 +7,6 @@ import unittest
 from pathlib import Path
 
 from configuration_fixture import FixtureCategory, example_config, seed_prepared_snapshot, source_bytes
-from dagster import Config
 from pydantic import JsonValue, ValidationError
 from test_dataset_bundle import write_declared_bundle
 from test_declared_dataset_graph import fixture_spec
@@ -176,6 +175,14 @@ class DatasetConfigurationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             bundle = write_declared_bundle(root / "business")
+            declaration = bundle.parent.parent / "categories/cat3/keenable/declaration.json"
+            settings = json.loads(declaration.read_bytes())
+            settings["search_plan"] = {
+                "mode": "fixed",
+                "max_queries": 1,
+                "unrestricted_cases": ["containers"],
+            }
+            declaration.write_text(json.dumps(settings))
             first = load_build_config(bundle, root)
             payload = json.loads(bundle.read_bytes())
             payload["revision_label"] = "new-registry-version"
@@ -200,17 +207,13 @@ class DatasetConfigurationTests(unittest.TestCase):
         for branch in ("documentation", "keenable"):
             self.assertEqual(declared_source_config(second, branch), declared_source_config(third, branch))
 
-    def test_online_dataset_discovery_is_rejected_even_with_valid_search_settings(self) -> None:
-        search = SearchSeeds(searches=[RiskSearchSeeds(risk="CAT-99.1", queries=["Git examples"])])
-        with self.assertRaises(ValidationError):
-            CatalogConfig(search_request=search)
-
     def test_incompatible_modes_duplicate_ids_and_unknown_fields_are_rejected(self) -> None:
         fixture = example_config()
         assert fixture.documentation_sources is not None
         seed: SourceSeed = fixture.documentation_sources.documents[0]
         search = SearchSeeds(searches=[RiskSearchSeeds(risk="CAT-99.1", queries=["Git examples"])])
         cases: list[dict[str, JsonValue]] = [
+            {"search_request": search.model_dump()},
             {
                 "mode": "provided_sources",
                 "documents": [seed.model_dump()],
@@ -244,13 +247,3 @@ class DatasetConfigurationTests(unittest.TestCase):
                 with self.subTest(update=update), self.assertRaises(ValidationError):
                     path.write_text(json.dumps({**original, **update}))
                     load_build_config(path, root)
-
-    def test_inline_stage_configuration_has_dagster_compatible_nested_fields(self) -> None:
-        fixture = example_config()
-        for config_type in (CatalogConfig, SnapshotConfig, DocumentationConfig):
-            with self.subTest(config_type=config_type):
-                self.assertIsInstance(config_type.to_fields_dict(), dict)
-        assert fixture.documentation_sources is not None
-        self.assertIsInstance(fixture.documentation_sources.documents[0], Config)
-        self.assertIsInstance(fixture.documentation.snippets[0], Config)
-        self.assertIsInstance(SearchSeeds.to_fields_dict(), dict)

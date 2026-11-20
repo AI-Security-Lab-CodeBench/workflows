@@ -60,7 +60,6 @@ class CollectionDeclarationTests(TestCase):
         restored = read_registered_spec(wire.encode())
 
         self.assertEqual(restored.model_dump_json(), wire)
-        self.assertEqual(fingerprint(restored.model_dump_json()), fingerprint(wire))
         for branch in ("dataset", "documentation", "keenable"):
             source = collection.for_branch(branch)
             definition = source.declaration

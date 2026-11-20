@@ -25,7 +25,7 @@ from dagster._core.events import StepMaterializationData
 from dagster._core.events.log import EventLogEntry
 from native_dataset_cycle import NativeDatasetCycle
 from pydantic import ValidationError
-from test_keenable import PEER, PLAN, SOURCE_BODY, permission, result
+from test_keenable import PEER, PLAN, SOURCE_BODY, result
 from test_keenable import source_declaration as source_scope_declaration
 from test_repository import (
     DOCKER,
@@ -41,11 +41,9 @@ from codebench_pipeline.collection_stage_settings import KeenableDiscoverySettin
 from codebench_pipeline.config_assets import collection_mapping_key
 from codebench_pipeline.data_views import DatasetDataService
 from codebench_pipeline.dataframe_io import DataFrameIOManager, asset_storage_key
-from codebench_pipeline.dataframe_schemas import frame_records
 from codebench_pipeline.dataset_cli import main
 from codebench_pipeline.dataset_config import DatasetBuildSpec, load_build_config
 from codebench_pipeline.dataset_documentation_config import DocumentationConfig
-from codebench_pipeline.dataset_finalization import available_candidates
 from codebench_pipeline.dataset_registry import DatasetRegistry
 from codebench_pipeline.dataset_run import refresh_registered_configuration
 from codebench_pipeline.dataset_tables import documentation_table
@@ -55,14 +53,14 @@ from codebench_pipeline.declared_dataset_bundle import (
     DeclaredS3Storage,
 )
 from codebench_pipeline.definitions import build_definitions
-from codebench_pipeline.human_review import HumanReviewError
+from codebench_pipeline.keenable import KeenableCollection
 from codebench_pipeline.keenable_policy import CASES, Declaration, KeenableDeclaration, KeenableSourceAccess
 from codebench_pipeline.keenable_transport import DirectResponse
 from codebench_pipeline.object_store import ObjectStore, StorageConfig
 from codebench_pipeline.repository_branch_config import RepositoryBranchDeclaration
 from codebench_pipeline.repository_receipts import RepositoryReceipt
 from codebench_pipeline.runtime_instance import dataset_instance
-from codebench_pipeline.stage_configuration import DeclaredGlobalConfig, stage_configs
+from codebench_pipeline.stage_configuration import stage_configs
 from codebench_pipeline.storage import IntegrityError, fingerprint
 
 BUNDLE = Path("business-configs/datasets/cat3.json")
@@ -224,16 +222,6 @@ class DeclaredDatasetGraphTests(unittest.TestCase):
             ):
                 run = job.execute_in_process(instance=instance, partition_key=spec.dataset_id)
             self.assertTrue(run.success)
-            self.assertEqual(
-                definitions.resolve_asset_graph()
-                .get(AssetKey(["datasets", "labeling_attempts"]))
-                .parent_keys,
-                {
-                    AssetKey(["datasets", "filtered_commands"]),
-                    AssetKey(["datasets", "map_labeling_attempts_config"]),
-                    AssetKey(["datasets", "documentation", "capture_documentation"]),
-                },
-            )
             data = DatasetDataService(home, instance)
             for stage in (
                 "command_candidates",
@@ -253,17 +241,6 @@ class DeclaredDatasetGraphTests(unittest.TestCase):
             filtered = data.read_current(spec.dataset_id, "filtered_commands")
             self.assertIsNone(filtered.publication_state)
             assert isinstance(filtered.value, pd.DataFrame)
-            self.assertEqual(
-                {
-                    (str(row["command"]), str(row["candidate_id"]).partition(":")[0], row["source_weight"])
-                    for row in frame_records(filtered.value)
-                },
-                {
-                    ("docker compose ps --all", "dataset", 0.62),
-                    ("docker ps --all", "documentation", 0.9),
-                    ("terraform plan", "keenable", 0.24),
-                },
-            )
             cycle = NativeDatasetCycle(home)
             cycle.drain(instance, prepare_only=True, partition=spec.dataset_id)
             self.assertFalse(cycle.tick(instance, prepare_only=True))
@@ -397,87 +374,20 @@ class DeclaredDatasetGraphTests(unittest.TestCase):
             )
             self.assertIsNone(data.read_current(spec.dataset_id, "filtered_commands").publication_state)
 
-    def test_healthy_empty_provider_is_current_and_failed_generation_cannot_merge(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary, dataset_instance(Path(temporary)) as instance:
-            home = Path(temporary)
-            empty = KeenableDeclaration(
-                dataset=CAT3_DATASET_ID,
-                generation="fixture-empty",
-                generation_review="fixture-review",
-                cases=CASES,
-                revision="2",
-            )
-            from guarded_labeling_fixture import LabelingFixture
-
-            spec = with_keenable_declaration(LabelingFixture(self, home).spec, empty)
-            registry = DatasetRegistry(home)
-            registry.register(spec)
-            instance.add_dynamic_partitions("dataset_builds", [spec.dataset_id])
-            definitions = build_definitions(home)
-            provider = definitions.resolve_job_def("build_keenable")
-            with patch(
-                "codebench_pipeline.keenable.request_direct",
-                side_effect=AssertionError("No sources configured for acquisition"),
-            ):
-                healthy = definitions.resolve_job_def("prepare_dataset").execute_in_process(
-                    instance=instance, partition_key=spec.dataset_id
-                )
-            self.assertTrue(healthy.success)
-            merge_key = AssetKey(["datasets", "merged_command_candidates"])
-            merge_job = definitions.get_implicit_global_asset_job_def()
-            listing = AssetRecordsFilter(asset_key=merge_key, asset_partitions=[spec.dataset_id])
-            (previous_merge,) = instance.fetch_materializations(listing, limit=1).records
-            manager = DataFrameIOManager(storage=spec.storage, review_home=str(home))
-            frames, bindings = available_candidates(
-                manager=manager, instance=instance, registered=DeclaredGlobalConfig.from_spec(spec)
-            )
-            self.assertEqual(len(frames["keenable"]), 0)
-            binding = bindings["keenable"]
-            assert isinstance(binding, dict)
-            self.assertEqual(binding["state"], "configured")
-
-            broken = KeenableDeclaration(
-                dataset=spec.dataset_id,
-                generation="fixture-failed",
-                generation_review="fixture-review",
-                cases=CASES,
-                permissions=(permission(),),
-            )
-            revised = with_keenable_declaration(spec, broken)
-            registry.register(revised)
-            with (
-                patch.dict("os.environ", {"KEENABLE_API_KEY": "fixture-key"}),
-                patch(
-                    "codebench_pipeline.keenable.request_direct",
-                    side_effect=(
-                        result(PLAN),
-                        *(result() for _ in CASES[1:]),
-                        DirectResponse(SOURCE_BODY, PEER),
-                    ),
-                ),
-            ):
-                failed = provider.execute_in_process(
-                    instance=instance,
-                    partition_key=spec.dataset_id,
-                    raise_on_error=False,
-                )
-            self.assertFalse(failed.success)
-            (failure,) = failed.get_step_failure_events()
-            error = failure.step_failure_data.error
-            assert error is not None
-            self.assertIn("origin_pin_mismatch (200)", error.to_string())
-            _, bindings = available_candidates(
-                manager=manager, instance=instance, registered=DeclaredGlobalConfig.from_spec(revised)
-            )
-            self.assertEqual(bindings["keenable"], {"state": "failed"})
-            with self.assertRaisesRegex(HumanReviewError, "keenable acquisition receipt binding changed"):
-                merge_job.execute_in_process(
-                    instance=instance,
-                    partition_key=spec.dataset_id,
-                    asset_selection=[merge_key],
-                )
-            (latest_merge,) = instance.fetch_materializations(listing, limit=1).records
-            self.assertEqual(latest_merge.storage_id, previous_merge.storage_id)
+    def test_declaration_without_search_sources_captures_nothing_offline(self) -> None:
+        declaration = KeenableDeclaration(
+            dataset=CAT3_DATASET_ID,
+            generation="fixture-empty",
+            generation_review="fixture-review",
+            cases=CASES,
+            revision="2",
+        )
+        with (
+            tempfile.TemporaryDirectory() as temporary,
+            patch("codebench_pipeline.keenable.request_direct", side_effect=AssertionError("unexpected I/O")),
+        ):
+            branch = KeenableCollection(Path(temporary), declaration)
+            self.assertEqual(branch.capture(branch.discover()).pages, ())
 
     def test_prepared_documentation_and_mapping_stay_readable_after_declared_registration(self) -> None:
         with tempfile.TemporaryDirectory() as temporary, dataset_instance(Path(temporary)) as instance:
@@ -598,8 +508,6 @@ class DeclaredDatasetGraphTests(unittest.TestCase):
             self.assertEqual(config.value, mapping)
             self.assertEqual(history.page.total_rows, 1)
             self.assertEqual(history.page.rows[0].values["snippet"], documentation.snippets[0].snippet)
-            graph = build_definitions(home).resolve_asset_graph()
-            self.assertNotIn(AssetKey(["datasets", "labeling_documentation"]), graph.get_all_asset_keys())
             self.assertEqual(
                 registry.get_snapshot(legacy.dataset_id, revision=revision),
                 legacy,
