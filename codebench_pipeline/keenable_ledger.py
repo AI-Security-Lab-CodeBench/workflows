@@ -24,7 +24,7 @@ from .keenable_policy import (
     digest,
 )
 from .keenable_receipts import CallReceipt, CaptureLock, CatalogReceipt, VerifiedPage
-from .keenable_transport import transient_search_failure
+from .keenable_transport import transient_request_failure
 
 PLAN_RESPONSE_BYTES = 16 * 1024
 
@@ -97,12 +97,12 @@ class Ledger:
             self.finish(receipt, state="failed", reason="ambiguous_dispatch")
         for (raw,) in self.db.execute("SELECT receipt FROM call WHERE state = 'failed' ORDER BY slot"):
             receipt = CallReceipt.model_validate_json(raw)
-            if receipt.kind != "search" or not transient_search_failure(receipt.reason, receipt.status):
+            if receipt.kind == "plan" or not transient_request_failure(receipt.reason, receipt.status):
                 raise KeenableError(receipt.reason or "generation_failed", receipt.status)
 
-    def search_attempts(self, slot: str) -> int:
+    def attempts(self, slot: str) -> int:
         (count,) = self.db.execute(
-            "SELECT COUNT(*) FROM call WHERE slot = ? OR slot GLOB ?", (slot, f"{slot}#*")
+            "SELECT COUNT(*) FROM call WHERE slot = ?1 OR slot GLOB (?1 || '#*')", (slot,)
         ).fetchone()
         return count
 
@@ -142,15 +142,14 @@ class Ledger:
             reserved_bytes=size,
             state="dispatched",
         )
+        attempts = self.attempts(identity.slot)
+        storage_slot = (
+            f"{identity.slot}#retry-{attempts + 1}" if attempts and kind != "plan" else identity.slot
+        )
         with self.db:
-            if kind == "search":
-                self.db.execute(
-                    "UPDATE call SET slot = slot || '#' || rowid WHERE slot = ? AND kind = 'search' AND state = 'failed'",
-                    (identity.slot,),
-                )
             self.db.execute(
                 "INSERT INTO call VALUES (?, ?, ?, ?, ?, NULL)",
-                (receipt.slot, kind, size, receipt.state, receipt.model_dump_json()),
+                (storage_slot, kind, size, receipt.state, receipt.model_dump_json()),
             )
         return receipt
 
@@ -179,17 +178,22 @@ class Ledger:
                 "retry_after": retry_after,
             }
         )
+        saved, pending = outcome.model_dump_json(), receipt.model_dump_json()
         with self.db:
             update = self.db.execute(
-                "UPDATE call SET state = ?, receipt = ?, payload = ? WHERE slot = ? AND state = 'dispatched'",
-                (state, outcome.model_dump_json(), payload, receipt.slot),
+                "UPDATE call SET state = ?, receipt = ?, payload = ? "
+                "WHERE state = 'dispatched' AND (slot = ?4 OR slot GLOB (?4 || '#*')) AND receipt = ?",
+                (state, saved, payload, receipt.slot, pending),
             )
             if update.rowcount != 1:
                 raise KeenableError("call_transition_conflict")
         return outcome
 
     def call(self, slot: str) -> tuple[CallReceipt, bytes | None] | None:
-        row = self.db.execute("SELECT receipt, payload FROM call WHERE slot = ?", (slot,)).fetchone()
+        row = self.db.execute(
+            "SELECT receipt, payload FROM call WHERE slot = ?1 OR slot GLOB (?1 || '#*') ORDER BY rowid DESC LIMIT 1",
+            (slot,),
+        ).fetchone()
         if row is None:
             return None
         receipt = CallReceipt.model_validate_json(row[0])

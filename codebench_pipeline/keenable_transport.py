@@ -27,7 +27,7 @@ class HttpStatusError(KeenableError):
         self.peer = peer
 
 
-def transient_search_failure(code: str | None, status: int | None) -> bool:
+def transient_request_failure(code: str | None, status: int | None) -> bool:
     return code in {"request_timeout", "dns_temporary", "connection_unavailable"} or (
         code == "http_status" and status is not None and (status == 429 or 500 <= status < 600)
     )

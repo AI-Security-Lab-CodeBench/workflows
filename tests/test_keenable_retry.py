@@ -81,7 +81,7 @@ class KeenableRetryTests(unittest.TestCase):
 
         with (
             patch("codebench_pipeline.keenable.request_direct", return_value=_EMPTY) as wire,
-            patch("codebench_pipeline.keenable_search.sleep"),
+            patch("codebench_pipeline.keenable_client.sleep"),
         ):
             catalog = self.collection.discover_with_credential("fixture-key")
             self.assertEqual(self.collection.discover_with_credential(""), catalog)
@@ -101,7 +101,7 @@ class KeenableRetryTests(unittest.TestCase):
                 "codebench_pipeline.keenable.request_direct",
                 side_effect=[KeenableError("request_timeout"), _EMPTY, _EMPTY],
             ) as wire,
-            patch("codebench_pipeline.keenable_search.sleep"),
+            patch("codebench_pipeline.keenable_client.sleep"),
         ):
             with self.assertRaisesRegex(KeenableError, "generation_budget_exhausted"):
                 collection.discover_with_credential("fixture-key")
@@ -121,8 +121,8 @@ class KeenableRetryTests(unittest.TestCase):
                 "codebench_pipeline.keenable.request_direct",
                 side_effect=KeenableError("http_status", 503),
             ) as wire,
-            patch("codebench_pipeline.keenable_search.uniform", side_effect=midpoint),
-            patch("codebench_pipeline.keenable_search.sleep") as sleep,
+            patch("codebench_pipeline.keenable_client.uniform", side_effect=midpoint),
+            patch("codebench_pipeline.keenable_client.sleep") as sleep,
         ):
             for _ in range(2):
                 with self.assertRaisesRegex(KeenableError, r"http_status \(503\)"):
@@ -138,8 +138,8 @@ class KeenableRetryTests(unittest.TestCase):
                 "codebench_pipeline.keenable.request_direct",
                 side_effect=[HttpStatusError(429, 120, "1.1.1.1"), _EMPTY, _EMPTY],
             ) as wire,
-            patch("codebench_pipeline.keenable_search.sleep") as sleep,
-            patch("codebench_pipeline.keenable_search.datetime", wraps=datetime) as clock,
+            patch("codebench_pipeline.keenable_client.sleep") as sleep,
+            patch("codebench_pipeline.keenable_client.datetime", wraps=datetime) as clock,
         ):
             for _ in range(2):
                 with self.assertRaisesRegex(KeenableError, r"http_status \(429\)"):

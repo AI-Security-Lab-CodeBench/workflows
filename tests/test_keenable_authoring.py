@@ -80,7 +80,7 @@ class CurrentKeenableAuthoringTests(unittest.TestCase):
         declaration = load_declaration(DECLARATION)
         with (
             tempfile.TemporaryDirectory() as root,
-            patch("codebench_pipeline.keenable_search.sleep"),
+            patch("codebench_pipeline.keenable_client.sleep"),
             patch(
                 "codebench_pipeline.keenable.request_direct",
                 side_effect=(

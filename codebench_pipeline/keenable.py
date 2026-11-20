@@ -3,10 +3,10 @@ from datetime import UTC, datetime
 from pathlib import Path
 from re import DOTALL, compile
 
-from scripts.dataset_schema import SECRET_PATTERNS
-
+from .keenable_capture import CaptureTarget, capture_bytes
 from .keenable_catalog import declared_leads, freeze_catalog
-from .keenable_ledger import Ledger, SlotIdentity, open_ledger, verify_lock
+from .keenable_client import KeenableClient
+from .keenable_ledger import open_ledger, verify_lock
 from .keenable_planner import GuardedSearchPlanner, SearchSession
 from .keenable_policy import (
     COMMANDS,
@@ -17,9 +17,7 @@ from .keenable_policy import (
     KeenableError,
     KeenableSourceAccess,
     PagePermission,
-    Permission,
     ReviewedSpan,
-    canonical_url,
     digest,
     load_declaration,
     record_digest,
@@ -33,7 +31,7 @@ from .keenable_receipts import (
     VerifiedPage,
 )
 from .keenable_search import DiscoverySearch
-from .keenable_transport import DirectResponse, Request, request_direct
+from .keenable_transport import request_direct
 
 __all__ = ["KeenableCollection", "KeenableDeclaration", "KeenableError", "load_declaration"]
 
@@ -74,7 +72,9 @@ class KeenableCollection:
                 return catalog
             leads = declared_leads(declaration)
             searches: list[CallReceipt] = []
-            search = DiscoverySearch(ledger, declaration, api_key, request_direct)
+            search = DiscoverySearch(
+                KeenableClient(ledger, declaration, request_direct), declaration, api_key
+            )
             plan = None
             if declaration.search_plan is not None:
                 hits, receipts, plan = SearchSession(ledger, declaration, self.planner).run(
@@ -109,8 +109,9 @@ class KeenableCollection:
             withheld: list[str] = []
             calls: list[CallReceipt] = []
             rights_calls: list[CallReceipt] = []
+            client = KeenableClient(ledger, self.declaration, request_direct)
             for url, expected in self.declaration.raw_licenses:
-                receipt, body = _capture(ledger, url, None, api_key=api_key, rights_sha256=expected)
+                receipt, body = capture_bytes(client, CaptureTarget(url, rights_sha256=expected), api_key)
                 if body is None:
                     raise KeenableError("rights_bytes_unavailable")
                 rights_calls.append(receipt)
@@ -125,7 +126,7 @@ class KeenableCollection:
                 case = selection.lead.case
                 if url is None or self.declaration.authority(url, case) != permission:
                     raise KeenableError("origin_not_authorized")
-                receipt, body = _capture(ledger, url, permission, api_key=api_key)
+                receipt, body = capture_bytes(client, CaptureTarget(url, permission), api_key)
                 calls.append(receipt)
                 if body is None:
                     withheld.append(url)
@@ -258,92 +259,3 @@ def _source_spans(body: bytes, case: Case) -> tuple[ReviewedSpan, ...]:
                     return tuple(spans)
             start += len(line)
     return tuple(spans)
-
-
-def _capture(
-    ledger: Ledger,
-    url: str,
-    permission: Permission | None,
-    *,
-    api_key: str,
-    rights_sha256: str | None = None,
-) -> tuple[CallReceipt, bytes | None]:
-    if canonical_url(url) != url:
-        raise KeenableError("origin_not_allowlisted")
-    pinned = permission.content_sha256 if isinstance(permission, PagePermission) else rights_sha256
-    kind = "rights" if permission is None else "origin"
-    media_type = permission.media_type if permission is not None else "text/plain"
-    slot = f"{kind}:{digest(url.encode())}"
-    if (prior := ledger.call(slot)) is not None:
-        receipt, body = prior
-        if receipt.state == "succeeded" and (
-            body is None or receipt.response_sha256 != digest(body) or (pinned and digest(body) != pinned)
-        ):
-            raise KeenableError("origin_body_integrity")
-        return receipt, body
-    receipt = ledger.reserve(
-        "origin",
-        SlotIdentity(slot=slot, target=url, request_sha256=digest(f"GET\n{url}\n{media_type}".encode())),
-    )
-    response: DirectResponse | None = None
-    try:
-        response = request_direct(Request(url, media_type))
-        if pinned is not None and digest(response.body) != pinned:
-            raise KeenableError("origin_pin_mismatch", 200)
-        text = response.body.decode("utf-8")
-        if permission is not None and permission.valid_until <= datetime.now(UTC):
-            raise KeenableError("authorization_expired", 200)
-        sensitive = any(pattern.search(text) for pattern in SECRET_PATTERNS) or bool(
-            api_key and api_key in text
-        )
-        notice = (
-            permission.page_notice
-            if permission is not None and not isinstance(permission, PagePermission)
-            else None
-        )
-        if notice is not None and notice.casefold() not in text.casefold():
-            return ledger.finish(
-                receipt,
-                state="withheld",
-                reason="license_notice_missing",
-                status=200,
-                peer=response.peer,
-                response=response.body,
-            ), None
-        if sensitive or (
-            isinstance(permission, PagePermission)
-            and any(
-                response.body[span.start : span.end].decode("utf-8", errors="replace")
-                not in COMMANDS[PAGE_CASES[url]]
-                or span.end > len(response.body)
-                for span in permission.spans
-            )
-        ):
-            return ledger.finish(
-                receipt,
-                state="withheld",
-                reason="content_policy",
-                status=200,
-                peer=response.peer,
-                response=response.body,
-            ), None
-    except (KeenableError, UnicodeDecodeError) as error:
-        failure = error if isinstance(error, KeenableError) else KeenableError("origin_encoding_invalid", 200)
-        ledger.finish(
-            receipt,
-            state="failed",
-            reason=failure.code,
-            status=failure.status,
-            peer=response.peer if response else None,
-            response=response.body if response else None,
-        )
-        raise failure from None
-    saved = ledger.finish(
-        receipt,
-        state="succeeded",
-        status=200,
-        peer=response.peer,
-        response=response.body,
-        payload=response.body,
-    )
-    return saved, response.body
