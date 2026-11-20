@@ -2,6 +2,25 @@
   "dataset_id": "cloud_infrastructure_commands_grounded_v1",
   "category_id": "CAT-3",
   "revision_label": "cat3-collection",
+  "merge": {
+    "dataset_source_weight": 0.6,
+    "documentation_source_weight": 0.9,
+    "keenable_source_weight": 0.3,
+    "repository_origin_weights": {
+      "cheat": 0.55,
+      "kubernetes-examples": 0.8,
+      "docker-awesome-compose": 0.62,
+      "gke-samples": 0.77,
+      "online-boutique": 0.65,
+      "opentelemetry-demo": 0.67,
+      "kubeflow-manifests": 0.69,
+      "prometheus-helm-charts": 0.71,
+      "terraform-gke-examples": 0.74,
+      "terraform-eks-examples": 0.73,
+      "tldr": 0.9,
+      "aws": 0.99
+    }
+  },
   "labeling": {
     "from_registration": true
   },

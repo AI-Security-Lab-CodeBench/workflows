@@ -26,6 +26,7 @@ from codebench_pipeline.dataset_config import DeduplicationPolicy, FilteringConf
 from codebench_pipeline.dataset_dependencies import preparation_stages
 from codebench_pipeline.dataset_registry import DatasetRegistry
 from codebench_pipeline.definitions import build_definitions
+from codebench_pipeline.declared_dataset_bundle import DeclaredDatasetBundle
 from codebench_pipeline.keenable_transport import DirectResponse
 from codebench_pipeline.labeling_stage_settings import ProposalRules
 from codebench_pipeline.runtime_instance import dataset_instance
@@ -51,9 +52,9 @@ class RegisteredConfigMaterializationTests(TestCase):
                 copy2(declared_graph.BUNDLE, bundle)
                 copytree(template / "categories/cat3", authored / "categories/cat3")
                 copytree(template / "labeling", authored / "labeling")
-                fixture = declared_graph.DeclaredDatasetGraphTests()
-                self.addCleanup(fixture.doCleanups)
-                seeded = fixture.collection_fixture(declared_graph.fixture_spec(home, bundle))
+                seeded = self.enterContext(
+                    declared_graph.collection_fixture(declared_graph.fixture_spec(home, bundle))
+                )
                 sources = seeded.declared_collection
                 assert sources is not None
                 category = authored / "categories/cat3"
@@ -63,6 +64,11 @@ class RegisteredConfigMaterializationTests(TestCase):
                     ("keenable/declaration.json", sources.keenable_use_cases),
                 ):
                     (category / relative).write_text(source.declaration.model_dump_json(), encoding="utf-8")
+                authored_bundle = DeclaredDatasetBundle.model_validate_json(bundle.read_bytes())
+                bundle.write_text(
+                    authored_bundle.model_copy(update={"merge": sources.merge_config}).model_dump_json(),
+                    encoding="utf-8",
+                )
                 spec = declared_graph.fixture_spec(home, bundle)
                 spec = spec.model_copy(
                     update={
@@ -167,9 +173,7 @@ class RegisteredConfigMaterializationTests(TestCase):
         template = declared_graph.BUNDLE.parent.parent
         copytree(template / "categories" / "cat3", authored / "categories" / "cat3")
         copytree(template / "labeling", authored / "labeling")
-        fixture = declared_graph.DeclaredDatasetGraphTests()
-        self.addCleanup(fixture.doCleanups)
-        spec = fixture.collection_fixture(declared_graph.fixture_spec(home, bundle))
+        spec = self.enterContext(declared_graph.collection_fixture(declared_graph.fixture_spec(home, bundle)))
         batch = spec.annotation.batch
         assert batch is not None
         provider_id = "/fixture/command-reference"

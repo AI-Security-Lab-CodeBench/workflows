@@ -10,17 +10,16 @@ from pandera.typing import DataFrame
 from pydantic import JsonValue, TypeAdapter
 
 from codebench_pipeline.category_eligibility import category_eligible_annotations as filter_category
+from codebench_pipeline.collection_merge import collection_merge_asset, merge_candidates
 from codebench_pipeline.config_assets import mapped_input
 from codebench_pipeline.dataframe_io import frame_bytes
 from codebench_pipeline.dataframe_schemas import (
-    CommandCandidatesTable,
     ProposedAnnotationsTable,
     ReviewQueueTable,
     frame_records,
     validated_frame,
 )
 from codebench_pipeline.dataset_asset_types import DATASET_PARTITIONS, TABLE_TYPES, table_input
-from codebench_pipeline.dataset_branches import Branch
 from codebench_pipeline.dataset_collection_binding import (
     FINALIZATION_BINDING,
     authorize_finalization_output,
@@ -31,7 +30,6 @@ from codebench_pipeline.dataset_config import DeduplicationPolicy
 from codebench_pipeline.dataset_tables import review_queue
 from codebench_pipeline.finalization_table_asset import FinalizationTable, finalization_table_assets
 from codebench_pipeline.object_store import sha256
-from codebench_pipeline.repository_config import DEFAULT_SOURCE_WEIGHTS, SourceWeight
 from codebench_pipeline.stage_configuration import ReviewQueueConfig
 
 __all__ = [
@@ -44,37 +42,6 @@ __all__ = [
     "merge_candidates",
     "normalized_command",
 ]
-
-
-def merge_candidates(
-    dataset: DataFrame[CommandCandidatesTable],
-    documentation: DataFrame[CommandCandidatesTable],
-    keenable: DataFrame[CommandCandidatesTable] | None = None,
-    *,
-    keenable_source_weight: SourceWeight = DEFAULT_SOURCE_WEIGHTS["keenable"],
-) -> DataFrame[CommandCandidatesTable]:
-    branches: dict[Branch, DataFrame[CommandCandidatesTable]] = {
-        "dataset": dataset,
-        "documentation": documentation,
-    }
-    if keenable is not None:
-        branches["keenable"] = keenable
-    rows: list[dict[str, JsonValue]] = []
-    origins: dict[str, JsonValue] = {}
-    for branch, frame in branches.items():
-        for row in frame_records(frame):
-            original = str(row["candidate_id"])
-            identifier = f"{branch}:{original}"
-            origins[identifier] = {"branch": branch, "candidate_id": original, "source_id": row["source_id"]}
-            if branch == "keenable":
-                row["source_weight"] = keenable_source_weight
-            elif keenable is not None:
-                row.setdefault("source_weight", DEFAULT_SOURCE_WEIGHTS[branch])
-            rows.append({**row, "candidate_id": identifier, "source_id": f"{branch}:{row['source_id']}"})
-    merged = validated_frame(rows, CommandCandidatesTable)
-    merged.attrs["origins"] = origins
-    merged.attrs["branch_metadata"] = {branch: dict(frame.attrs) for branch, frame in branches.items()}
-    return merged
 
 
 def normalized_command(command: str) -> str:
@@ -150,8 +117,6 @@ def category_eligible_annotations(
 
 
 def finalization_assets() -> list[AssetsDefinition]:
-    from codebench_pipeline.collection_merge import collection_merge_asset
-
     @asset(
         key_prefix=["datasets"],
         group_name="dataset_building",

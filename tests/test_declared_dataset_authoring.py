@@ -232,7 +232,7 @@ class DeclaredDatasetAuthoringTests(TestCase):
         bundle = authoring(
             labeling=explicit_labeling(self.home),
             storage={"backend": "s3", "bucket": "fixture-artifacts"},
-            merge={"keenable_weight": 0.19},
+            merge={"keenable_source_weight": 0.19},
         )
         spec = bundle.resolve(root / "datasets", home=self.home)
         assert spec.config_directory is not None
@@ -300,7 +300,7 @@ class DeclaredDatasetAuthoringTests(TestCase):
                 "preview_rows": 3,
             },
             filtering={"maximum_command_characters": 4096, "quarantine_dynamic_shell": False},
-            merge={"keenable_weight": 0.2},
+            merge={"keenable_source_weight": 0.2},
             review={"review_columns": ["command", "severity"]},
             release={"release_cap_per_risk": 13},
         )
@@ -311,7 +311,7 @@ class DeclaredDatasetAuthoringTests(TestCase):
         self.assertEqual(spec.filtering.maximum_command_characters, 4096)
         self.assertFalse(spec.filtering.quarantine_dynamic_shell)
         assert spec.declared_collection is not None
-        self.assertEqual(spec.declared_collection.merge_keenable_weight, 0.2)
+        self.assertEqual(spec.declared_collection.merge_config.keenable_source_weight, 0.2)
         self.assertEqual(spec.publication.review_columns, ["command", "severity"])
         self.assertEqual(spec.publication.limit_per_risk, 13)
         self.assertEqual(

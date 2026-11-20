@@ -28,8 +28,9 @@ DECLARED_COLLECTION_DESCRIPTIONS: Final = {
     ),
     "keenable/discover_use_cases": (
         "Record the leads from bounded, scoped searches and declared reference URLs. SourceCatalogTable "
-        "exposes selections and exclusions before any selected page is captured. A failed or ambiguous "
-        "search stops the generation."
+        "exposes selections and exclusions before any selected page is captured. Transient search failures "
+        "back off and retry within the call budget; saved successes are reused. A permanent failure, "
+        "ambiguous dispatch or exhausted retry allowance stops discovery."
     ),
     "keenable/capture_origin_pages": (
         "Verify usage rights and fetch the selected pages directly from their origins. "
@@ -46,8 +47,10 @@ DECLARED_COLLECTION_DESCRIPTIONS: Final = {
 FINALIZATION_DESCRIPTIONS: Final = {
     "merged_command_candidates": (
         "Combine the current typed candidate tables from the three registered collection branches. "
-        "CommandCandidatesTable prefixes candidate and source IDs with the branch and retains the originals, "
-        "acquisition receipts and source weights. Any unavailable or stale configured branch blocks the merge."
+        "Use each repository candidate's receipt to identify its origin and apply the merge configuration's "
+        "origin override or branch default. Keenable uses its branch weight. CommandCandidatesTable prefixes "
+        "candidate and source IDs with the branch and retains the original IDs and acquisition receipts. "
+        "Any unavailable or stale configured branch blocks the merge."
     ),
     "labeling_attempts": (
         "Consider eligible commands from the highest-trust sources first. Use the verified source "

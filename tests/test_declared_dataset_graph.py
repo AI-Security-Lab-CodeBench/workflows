@@ -235,6 +235,14 @@ class DeclaredDatasetGraphTests(unittest.TestCase):
                 },
             )
             data = DatasetDataService(home, instance)
+            for stage in (
+                "command_candidates",
+                "documentation/command_candidates",
+                "keenable/command_candidates",
+            ):
+                candidates = data.read_current(spec.dataset_id, stage).value
+                assert isinstance(candidates, pd.DataFrame)
+                self.assertNotIn("source_weight", candidates)
             documentation = data.read_current(spec.dataset_id, "documentation/capture_documentation")
             assert isinstance(documentation.value, pd.DataFrame)
             scope = RepositoryReceipt.model_validate_json(
@@ -633,7 +641,12 @@ def collection_fixture(spec: DatasetBuildSpec) -> Iterator[DatasetBuildSpec]:
                     "documentation_crawl": SourceDeclaration.from_declaration(
                         repository_branch_fixture("documentation", (tldr,))
                     ),
-                    "merge_keenable_weight": 0.24,
+                    "merge": collection.merge_config.model_copy(
+                        update={
+                            "keenable_source_weight": 0.24,
+                            "repository_origin_weights": {"docker-awesome-compose": 0.62},
+                        }
+                    ),
                 }
             )
         }

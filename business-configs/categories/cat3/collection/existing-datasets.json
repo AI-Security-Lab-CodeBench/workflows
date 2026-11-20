@@ -3,7 +3,6 @@
   "origins": [
     {
       "origin_id": "cheat",
-      "trust_weight": 0.55,
       "repository": "cheat/cheatsheets",
       "commit": "36bdb99dcfadde210503d8c2dcf94b34ee950e1d",
       "tree_digest": "8ba7ddbf5536cbb15ba747af0d62213fbe75a65faa3a318e391f79e287be7bd2",
@@ -28,7 +27,6 @@
     },
     {
       "origin_id": "kubernetes-examples",
-      "trust_weight": 0.8,
       "repository": "kubernetes/examples",
       "commit": "22934a040acbb0c0aa103023ccbd871507bf17f6",
       "tree_digest": "c3e30c4e211cbb7d2ff3b30e519434d0a13ee430a8c50f14656e3fd76e050504",
@@ -66,7 +64,6 @@
     },
     {
       "origin_id": "docker-awesome-compose",
-      "trust_weight": 0.62,
       "repository": "docker/awesome-compose",
       "commit": "30f4b7f6a6c3b0c0ecf4d4efb0de203c48d11562",
       "tree_digest": "7b4bf92b9571ee862658cd391e4f432a658785a5fdb098470b55f240a3ebc3e3",
@@ -104,7 +101,6 @@
     },
     {
       "origin_id": "gke-samples",
-      "trust_weight": 0.77,
       "repository": "GoogleCloudPlatform/kubernetes-engine-samples",
       "commit": "2c7091f9066e82d036e16f0a0ab68a18b09d29e1",
       "tree_digest": "57c4b057cf8a6c55faa32a7972a2e0c10e623b2b4d49de22929d6f90ccab5d7e",
@@ -270,7 +266,6 @@
     },
     {
       "origin_id": "online-boutique",
-      "trust_weight": 0.65,
       "repository": "GoogleCloudPlatform/microservices-demo",
       "commit": "c7cb6d5bfd6ea3aed768634ebbcb98cb7a523712",
       "tree_digest": "a2f78d80ddd82ba5e4b8f491fcc85714540dc98b9785b210bbb11332a3c79d9e",
@@ -327,7 +322,6 @@
     },
     {
       "origin_id": "opentelemetry-demo",
-      "trust_weight": 0.67,
       "repository": "open-telemetry/opentelemetry-demo",
       "commit": "155d637d14dfa7a80358c1114a71a924c058572f",
       "tree_digest": "c35eda51150b2d54ae800c5e381b21654ec4a1cb0511fed1d92bce4b5549f48f",
@@ -382,7 +376,6 @@
     },
     {
       "origin_id": "kubeflow-manifests",
-      "trust_weight": 0.69,
       "repository": "kubeflow/manifests",
       "commit": "65afa7c83c2a22fdb23e61b608d27709bc475504",
       "tree_digest": "ab9f11e0b78c2de62e5712baccfcf9a96434304010e5ac2f2027ebfebcd45cd3",
@@ -484,7 +477,6 @@
     },
     {
       "origin_id": "prometheus-helm-charts",
-      "trust_weight": 0.71,
       "repository": "prometheus-community/helm-charts",
       "commit": "5b1d5aed453921966b6e63d6e441f42d67183a6e",
       "tree_digest": "71407fd5563dc12b9e7a37a211f9c66ac8d77c9b5b37b7cbf61799b191462af4",
@@ -566,7 +558,6 @@
     },
     {
       "origin_id": "terraform-gke-examples",
-      "trust_weight": 0.74,
       "repository": "terraform-google-modules/terraform-google-kubernetes-engine",
       "commit": "3830b0c1f94aebbb51c3952a4300fcfcc722f12f",
       "tree_digest": "d9b14437488dee6bf7b06257eef0e2774d651f398bfe7eb4c3f14131a8751069",
@@ -672,7 +663,6 @@
     },
     {
       "origin_id": "terraform-eks-examples",
-      "trust_weight": 0.73,
       "repository": "terraform-aws-modules/terraform-aws-eks",
       "commit": "25c846a384bc66d16cc801d2f851431deb38de5d",
       "tree_digest": "1c79debb34f2b135ac2d234b02b8a0e51b91ecb80bfb2e8bef0421918e010e87",

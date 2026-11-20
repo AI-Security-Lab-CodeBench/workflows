@@ -7,7 +7,7 @@ from typing import Annotated, Final, Literal, assert_never
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, StringConstraints, model_validator
 from pydantic_core import PydanticCustomError
 
-from codebench_pipeline.dataset_branches import Branch
+from codebench_pipeline.merge_config import DEFAULT_KEENABLE_SOURCE_WEIGHT, SourceWeight
 from codebench_pipeline.models import Digest
 from codebench_pipeline.source_transform_contract import SourceTransformConfig
 from codebench_pipeline.storage import IntegrityError, fingerprint
@@ -21,16 +21,10 @@ RepositoryFormat = Literal["text", "markdown"]
 RepositoryLicense = Literal["Apache-2.0", "CC0-1.0", "CC-BY-4.0"]
 RepositoryUse = Literal["retain_and_quote_attributed_examples"]
 REPOSITORY_USE: Final[RepositoryUse] = "retain_and_quote_attributed_examples"
-SourceWeight = Annotated[float, Field(strict=True, ge=0, le=1, allow_inf_nan=False)]
 MaximumFileBytes = Annotated[int, Field(ge=1, le=8 * 1024 * 1024)]
 CaptureWorkers = Annotated[int, Field(ge=1, le=24)]
 DEFAULT_MAXIMUM_FILE_BYTES: Final = 512 * 1024
 DEFAULT_CAPTURE_WORKERS: Final = 12
-DEFAULT_SOURCE_WEIGHTS: Final[dict[Branch, float]] = {
-    "documentation": 0.9,
-    "dataset": 0.6,
-    "keenable": 0.3,
-}
 
 
 def check_path(path: str) -> None:
@@ -132,12 +126,8 @@ def repository_origin_matches(origin: RepositoryOriginScope, branch: RepositoryB
 
 
 class RepositorySettings(RepositoryModel):
-    source_weights: dict[RepositoryId, SourceWeight] = Field(default_factory=dict)
     maximum_file_bytes: MaximumFileBytes = DEFAULT_MAXIMUM_FILE_BYTES
     workers: CaptureWorkers = DEFAULT_CAPTURE_WORKERS
-
-    def source_weight(self, branch: RepositoryBranch, origin_id: str) -> float:
-        return self.source_weights.get(origin_id, DEFAULT_SOURCE_WEIGHTS[branch])
 
     def digest_for_origins(self, branch: RepositoryBranch, origins: tuple[RepositoryOrigin, ...]) -> str:
         from codebench_pipeline.repository_etl import parser_revisions
@@ -158,9 +148,6 @@ class RepositorySettings(RepositoryModel):
                         "workers",
                     },
                 ),
-                "source_weights": {
-                    origin.origin_id: self.source_weight(branch, origin.origin_id) for origin in origins
-                },
                 "origins": declarations,
                 "parsers": parser_revisions(tuple(origin.transform for origin in origins)),
             }
@@ -177,19 +164,14 @@ class RepositoryConfig(RepositorySettings):
     failure: Literal["block_branch_on_incomplete_scope_or_integrity_error"]
     dataset: tuple[RepositoryOrigin, ...] = Field(min_length=1)
     documentation: tuple[RepositoryOrigin, ...] = Field(min_length=1)
-    keenable_source_weight: SourceWeight = DEFAULT_SOURCE_WEIGHTS["keenable"]
+    source_weights: dict[RepositoryId, SourceWeight] = Field(default_factory=dict)
+    keenable_source_weight: SourceWeight = DEFAULT_KEENABLE_SOURCE_WEIGHT
 
     @model_validator(mode="after")
     def check_branches(self) -> RepositoryConfig:
         origins = (*self.dataset, *self.documentation)
         if len({item.origin_id for item in origins}) != len(origins):
             raise ValueError("Repository origin IDs must be unique across branches")
-        if self.source_weights.keys() - {item.origin_id for item in origins}:
-            raise ValueError("Source weight overrides must name declared repository origins")
-        dataset_weights = [self.source_weight("dataset", origin.origin_id) for origin in self.dataset]
-        doc_weights = [self.source_weight("documentation", origin.origin_id) for origin in self.documentation]
-        if not self.keenable_source_weight < min(dataset_weights) <= max(dataset_weights) < min(doc_weights):
-            raise ValueError("Source weights must keep documentation above datasets above Keenable")
         if len({item.repository.casefold() for item in origins}) != len(origins):
             raise ValueError("Repository origins must be independent")
         if any(not repository_origin_matches(origin, "dataset") for origin in self.dataset) or any(

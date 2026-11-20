@@ -11,12 +11,11 @@ import numpy as np
 from guarded_labeling_fixture import guarded_labeling
 from numpy.typing import NDArray
 from pandera.typing import DataFrame
-from pydantic import BaseModel, JsonValue, ValidationError
+from pydantic import BaseModel, JsonValue
 from test_batch_labeling import batch_config, remote_model, submitted, tool_reply
 from test_dataset_annotation import documentation
 from test_dataset_rules import make_candidate, make_label, make_rules
 from test_declared_dataset_graph import fixture_spec
-from test_repository import repository_config_fixture
 
 from codebench_pipeline.batch_labeling import (
     BatchExecution,
@@ -42,7 +41,6 @@ from codebench_pipeline.labeling_tables import proposed_from_attempts
 from codebench_pipeline.model_config import ModelConfig
 from codebench_pipeline.models import SemanticSnippet
 from codebench_pipeline.openai_transport import HTTPResponse
-from codebench_pipeline.repository_config import RepositoryConfig
 from codebench_pipeline.repository_receipts import RepositoryRun
 from codebench_pipeline.storage import fingerprint
 
@@ -470,43 +468,3 @@ class RankedLabelingTests(TestCase):
                 self.assertEqual(row["blocked_candidates"], len(expected))
                 self.assertEqual(row["failure_counts"], expected)
                 self.assertEqual(row["deferred_candidates"], 0)
-
-    def test_repository_weights_reject_invalid_numbers_unknown_origins_and_tier_inversions(self) -> None:
-        config = repository_config_fixture()
-        dataset_id = config.dataset[0].origin_id
-        for origin, value in (
-            (dataset_id, float("nan")),
-            (dataset_id, float("inf")),
-            (dataset_id, -0.01),
-            (dataset_id, 1.01),
-            (dataset_id, True),
-            (dataset_id, "0.55"),
-            (dataset_id, 0.99),
-            ("unknown-origin", 0.55),
-        ):
-            with self.subTest(origin=origin, value=value), self.assertRaises(ValidationError):
-                RepositoryConfig.model_validate(
-                    {**config.model_dump(), "source_weights": {**config.source_weights, origin: value}}
-                )
-
-    def test_source_weight_changes_only_its_branch_declaration_digest(self) -> None:
-        config = repository_config_fixture()
-        origin = config.dataset[0].origin_id
-        revised = RepositoryConfig.model_validate(
-            {**config.model_dump(), "source_weights": {**config.source_weights, origin: 0.51}}
-        )
-        self.assertEqual(revised.source_weight("dataset", origin), 0.51)
-        self.assertNotEqual(revised.branch_digest("dataset"), config.branch_digest("dataset"))
-        self.assertEqual(revised.branch_digest("documentation"), config.branch_digest("documentation"))
-
-    def test_keenable_weight_is_optional_for_older_declarations_and_cannot_tie_a_dataset(self) -> None:
-        config = repository_config_fixture()
-        old = RepositoryConfig.model_validate(config.model_dump(exclude={"keenable_source_weight"}))
-        self.assertEqual(old.keenable_source_weight, 0.3)
-        changed = RepositoryConfig.model_validate({**config.model_dump(), "keenable_source_weight": 0.24})
-        self.assertEqual(changed.branch_digest("dataset"), old.branch_digest("dataset"))
-        self.assertEqual(changed.branch_digest("documentation"), old.branch_digest("documentation"))
-        lowest = min(config.source_weight("dataset", origin.origin_id) for origin in config.dataset)
-        for invalid in (lowest, 1, float("inf"), True, "0.24"):
-            with self.subTest(invalid=invalid), self.assertRaises(ValidationError):
-                RepositoryConfig.model_validate({**config.model_dump(), "keenable_source_weight": invalid})

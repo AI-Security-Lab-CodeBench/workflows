@@ -4,6 +4,7 @@ from typing import Self
 from pydantic import ConfigDict, Field, RootModel, model_validator
 from pydantic_core import PydanticCustomError
 
+from codebench_pipeline.merge_config import SourceWeight
 from codebench_pipeline.models import Digest
 from codebench_pipeline.repository_config import (
     DEFAULT_CAPTURE_WORKERS,
@@ -22,7 +23,6 @@ from codebench_pipeline.repository_config import (
     RepositoryScope,
     RepositorySettings,
     RightsFile,
-    SourceWeight,
     repository_origin_matches,
     selector_format,
 )
@@ -53,7 +53,6 @@ class RepositoryRights(RepositoryModel):
 class DeclaredRepositoryOrigin(RepositoryOriginIdentity):
     file_selector: RepositoryScope
     rights: RepositoryRights
-    trust_weight: SourceWeight | None = Field(default=None, exclude_if=lambda weight: weight is None)
     parser: RepositoryParser
 
     @model_validator(mode="after")
@@ -84,11 +83,9 @@ class DeclaredRepositoryOrigin(RepositoryOriginIdentity):
         )
 
 
-class RepositoryBranchDeclaration(RepositoryModel):
-    """The authoring contract for one repository branch."""
-
+class _RepositoryBranchDeclaration[Origin: DeclaredRepositoryOrigin](RepositoryModel):
     refresh_revision: RepositoryId
-    origins: tuple[DeclaredRepositoryOrigin, ...] = Field(min_length=1)
+    origins: tuple[Origin, ...] = Field(min_length=1)
     maximum_file_bytes: MaximumFileBytes = Field(default=DEFAULT_MAXIMUM_FILE_BYTES, strict=True)
     capture_workers: CaptureWorkers = Field(default=DEFAULT_CAPTURE_WORKERS, strict=True)
 
@@ -104,12 +101,19 @@ class RepositoryBranchDeclaration(RepositoryModel):
             selected_origins=tuple(origin.runtime() for origin in self.origins),
             maximum_file_bytes=self.maximum_file_bytes,
             workers=self.capture_workers,
-            source_weights={
-                origin.origin_id: origin.trust_weight
-                for origin in self.origins
-                if origin.trust_weight is not None
-            },
         )
+
+
+class _HistoricalWeightedOrigin(DeclaredRepositoryOrigin):
+    trust_weight: SourceWeight | None = Field(default=None, exclude_if=lambda weight: weight is None)
+
+
+class RepositoryBranchDeclaration(_RepositoryBranchDeclaration[DeclaredRepositoryOrigin]):
+    """The authoring contract for one repository branch."""
+
+
+class HistoricalWeightedRepositoryBranch(_RepositoryBranchDeclaration[_HistoricalWeightedOrigin]):
+    """Decode a pre-merge repository declaration for historical inspection."""
 
 
 class _HistoricalRepositoryParser(RepositoryModel):
@@ -160,6 +164,7 @@ class _HistoricalRepositoryBranch(RepositorySettings):
 
     revision: RepositoryId
     origins: tuple[_HistoricalRepositoryOrigin, ...] = Field(min_length=1)
+    source_weights: dict[RepositoryId, SourceWeight] = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def check_origins(self) -> Self:
@@ -175,7 +180,6 @@ class _HistoricalRepositoryBranch(RepositorySettings):
             selected_origins=tuple(origin.runtime() for origin in self.origins),
             maximum_file_bytes=self.maximum_file_bytes,
             workers=self.workers,
-            source_weights=self.source_weights,
         )
 
 

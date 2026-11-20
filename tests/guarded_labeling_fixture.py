@@ -19,7 +19,12 @@ from test_keenable import source_declaration as source_scope_declaration
 from test_repository import RepositoryFixture, repository_branch_fixture, repository_config_fixture
 
 from codebench_pipeline.batch_labeling import BatchExecution
-from codebench_pipeline.collection_config import CAT3_DATASET_ID, DeclaredCollection, SourceDeclaration
+from codebench_pipeline.collection_config import (
+    CAT3_DATASET_ID,
+    CollectionMergeConfig,
+    DeclaredCollection,
+    SourceDeclaration,
+)
 from codebench_pipeline.dataframe_schemas import (
     CommandCandidatesTable,
     FilteredCommandsTable,
@@ -230,6 +235,13 @@ class LabelingFixture:
                     existing_datasets=SourceDeclaration.from_declaration(dataset),
                     documentation_crawl=SourceDeclaration.from_declaration(documentation),
                     keenable_use_cases=SourceDeclaration.from_declaration(self.declaration),
+                    merge=CollectionMergeConfig(
+                        repository_origin_weights={
+                            kube.origin.origin_id: 0.8,
+                            compose.origin.origin_id: 0.62,
+                            tldr.origin.origin_id: 0.9,
+                        }
+                    ),
                 ),
             }
         )
@@ -305,7 +317,7 @@ class LabelingFixture:
         search_rows = provider_candidates(provider, documents, provider_adapters(provider, documents))
         dataset, _ = repository("dataset")
         documentation, capture = repository("documentation")
-        merged = merge_candidates(dataset, documentation, search_rows)
+        merged = merge_candidates(dataset, documentation, search_rows, config=collection.merge_config)
         routes = tuple(RiskRoute.from_rule(risk) for risk in self.rules.risks)
         filtered = filter_candidates(merged, routes, self.spec.filtering)
         filtered.attrs = merged.attrs

@@ -3,7 +3,6 @@
   "origins": [
     {
       "origin_id": "tldr",
-      "trust_weight": 0.9,
       "repository": "tldr-pages/tldr",
       "commit": "aad0d0980df9e398bc269e8c31ffaeb936731d48",
       "tree_digest": "75dce741e1d5014eba1a62fa39ce7d846fdd713706cd6b667d2095a0fa25b0b3",
@@ -25,7 +24,6 @@
     },
     {
       "origin_id": "aws",
-      "trust_weight": 0.99,
       "repository": "aws/aws-cli",
       "commit": "d71d496a02aa28c4798f95820984e690badc352b",
       "tree_digest": "5db5e9bd3869dc8f6b3c0e0e711ec9b0d800c9e1cc4a4beba3d722bb016ccddd",

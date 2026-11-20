@@ -10,6 +10,7 @@ from unittest.mock import patch
 from pydantic import JsonValue, TypeAdapter
 
 from codebench_pipeline.dataframe_schemas import frame_records
+from codebench_pipeline.declared_dataset_bundle import DeclaredDatasetBundle
 from codebench_pipeline.repository import (
     RepositoryRun,
     repository_adapters,
@@ -109,7 +110,9 @@ def repository_config_fixture() -> RepositoryConfig:
         failure="block_branch_on_incomplete_scope_or_integrity_error",
         dataset=dataset.origins("dataset"),
         documentation=docs.origins("documentation"),
-        source_weights=dataset.source_weights | docs.source_weights,
+        source_weights=DeclaredDatasetBundle.model_validate_json(
+            Path("business-configs/datasets/cat3.json").read_bytes()
+        ).merge.repository_origin_weights,
     )
 
 

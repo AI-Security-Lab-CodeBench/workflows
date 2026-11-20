@@ -64,6 +64,6 @@ class KeenableMappingTests(TestCase):
                 self.assertEqual(access.sources, planless.sources)
                 self.assertEqual(access.raw_licenses, planless.raw_licenses)
                 self.assertEqual(access.budget.origin_calls, planless.budget.origin_calls)
-                self.assertEqual(access.budget.total_bytes, 13_107_200)
+                self.assertEqual(access.budget.total_bytes, planless.budget.total_bytes)
                 for field in (b'"search_plan":', b'"search_calls":', b'"planner":'):
                     self.assertNotIn(field, raw_access)

@@ -237,7 +237,6 @@ def repository_candidates(
         origin.origin_id: authorize_adapter(origin.parser.runtime(), source=implementation_source)
         for origin in settings.origins
     }
-    weights = {origin.origin_id: origin.source_weight for origin in settings.origins}
     rows: list[dict[str, JsonValue]] = []
     evidence: dict[str, JsonValue] = {}
     empty: list[JsonValue] = []
@@ -273,12 +272,7 @@ def repository_candidates(
                 transformations=row.transformations,
                 risk_candidates=[],
             )
-            rows.append(
-                {
-                    **candidate.model_dump(mode="json"),
-                    "source_weight": weights[capture.origin_id],
-                }
-            )
+            rows.append(candidate.model_dump(mode="json"))
             evidence[candidate_id] = {
                 "source_id": source_id,
                 "origin_id": capture.origin_id,

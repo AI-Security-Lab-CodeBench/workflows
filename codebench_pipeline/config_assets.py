@@ -292,7 +292,7 @@ def configuration_assets(home: Path, *, authoring_root: Path | None = None) -> l
             rules, compiled_collection = compile_directory(
                 directory.require_complete(spec.rules.category_id),
                 spec.dataset_id,
-                collection.merge_keenable_weight,
+                collection.merge_config,
             )
             if rules != spec.rules or compiled_collection != collection:
                 raise IntegrityError("Registered settings differ from the authorized directory capture")

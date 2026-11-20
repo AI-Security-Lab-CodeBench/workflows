@@ -7,7 +7,7 @@ from pydantic_core import PydanticCustomError
 from codebench_pipeline.batch_labeling_config import DeclaredBatchLabelingConfig
 from codebench_pipeline.business_config import compile_business_rules
 from codebench_pipeline.category_rules import CategoryRules
-from codebench_pipeline.collection_config import DeclaredCollection, SourceDeclaration
+from codebench_pipeline.collection_config import CollectionMergeConfig, DeclaredCollection, SourceDeclaration
 from codebench_pipeline.config_directory import ConfigDirectorySnapshot
 from codebench_pipeline.dataset_config import (
     AdapterConfig,
@@ -28,12 +28,11 @@ from codebench_pipeline.model_config import ModelConfig
 from codebench_pipeline.models import Identifier
 from codebench_pipeline.object_store import StorageConfig
 from codebench_pipeline.repository_branch_config import RepositoryBranchDeclaration
-from codebench_pipeline.repository_config import SourceWeight
 from codebench_pipeline.storage import IntegrityError
 
 
 def compile_directory(
-    directory: ConfigDirectorySnapshot, dataset_id: Identifier, keenable_weight: SourceWeight | None
+    directory: ConfigDirectorySnapshot, dataset_id: Identifier, merge: CollectionMergeConfig
 ) -> tuple[CategoryRules, DeclaredCollection]:
     from codebench_pipeline.keenable_policy import parse_declaration
 
@@ -52,7 +51,7 @@ def compile_directory(
         existing_datasets=SourceDeclaration.from_declaration(dataset),
         documentation_crawl=SourceDeclaration.from_declaration(documentation),
         keenable_use_cases=SourceDeclaration.from_declaration(keenable),
-        merge_keenable_weight=keenable_weight,
+        merge=merge,
     )
 
 
@@ -102,10 +101,6 @@ class DeclaredRelease(StrictStageConfig):
     release_cap_per_risk: ReleaseCap = 250
 
 
-class DeclaredMerge(StrictStageConfig):
-    keenable_weight: SourceWeight | None = None
-
-
 class DeclaredS3Storage(StrictStageConfig):
     backend: Literal["s3"]
     bucket: str
@@ -125,7 +120,7 @@ class DeclaredDatasetBundle(StrictStageConfig):
     storage: DeclaredS3Storage | FromRegistration
     filtering: FilteringConfig = FilteringConfig()
     deduplication: DeduplicationPolicy = DeduplicationPolicy()
-    merge: DeclaredMerge = DeclaredMerge()
+    merge: CollectionMergeConfig = CollectionMergeConfig()
     review: DeclaredReview = DeclaredReview()
     release: DeclaredRelease = DeclaredRelease()
 
@@ -184,7 +179,7 @@ class DeclaredDatasetBundle(StrictStageConfig):
             if observed_directory is None
             else observed_directory.require_complete(self.category_id)
         )
-        rules, collection = compile_directory(directory, self.dataset_id, self.merge.keenable_weight)
+        rules, collection = compile_directory(directory, self.dataset_id, self.merge)
         return DatasetBuildSpec(
             dataset_id=self.dataset_id,
             revision=self.revision_label,

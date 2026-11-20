@@ -17,7 +17,6 @@ from codebench_pipeline.repository_config import (
     RepositoryId,
     RepositoryName,
     RepositoryOriginScope,
-    SourceWeight,
 )
 from codebench_pipeline.repository_etl import RepositoryParserPin
 from codebench_pipeline.storage import IntegrityError
@@ -79,7 +78,6 @@ class RepositoryCaptureSettings(RepositoryStageBinding):
 class RepositoryExtractionOrigin(ConfigArtifact):
     origin_id: RepositoryId
     parser: RepositoryParserPin
-    source_weight: SourceWeight
 
 
 class RepositoryExtractionSettings(RepositoryStageBinding):
@@ -94,7 +92,6 @@ class RepositoryExtractionSettings(RepositoryStageBinding):
                 RepositoryExtractionOrigin(
                     origin_id=origin.origin_id,
                     parser=RepositoryParserPin.from_transform(origin.transform),
-                    source_weight=config.source_weight(branch, origin.origin_id),
                 )
                 for origin in config.origins(branch)
             ),

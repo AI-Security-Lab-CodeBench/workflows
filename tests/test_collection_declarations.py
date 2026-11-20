@@ -10,13 +10,14 @@ from test_keenable import source_declaration as historical_keenable_fixture
 from test_repository import COLLECTION, repository_config_fixture
 
 from codebench_pipeline.collection_config import (
+    CollectionMergeConfig,
     DeclaredCollection,
     DeclaredSourceStageConfig,
     SourceDeclaration,
 )
 from codebench_pipeline.dataset_branches import Branch
 from codebench_pipeline.dataset_registry import read_registered_spec
-from codebench_pipeline.keenable_policy import KeenableDeclaration, load_declaration
+from codebench_pipeline.keenable_policy import KeenableDeclaration
 from codebench_pipeline.repository_branch_config import (
     DeclaredRepositoryOrigin,
     RepositoryBranchConfig,
@@ -24,6 +25,7 @@ from codebench_pipeline.repository_branch_config import (
     load_repository_branch,
 )
 from codebench_pipeline.repository_config import RepositoryBranch
+from codebench_pipeline.stage_configuration import stage_configs
 from codebench_pipeline.storage import IntegrityError, fingerprint
 
 
@@ -129,6 +131,7 @@ class CollectionDeclarationTests(TestCase):
         origin = load_repository_branch(COLLECTION / "existing-datasets.json").origins[0]
         cases: tuple[tuple[str, JsonValue, str], ...] = (
             ("source_weights", {"cheat": 0.8}, "branch"),
+            ("trust_weight", 0.8, "origin"),
             ("workers", 4, "branch"),
             ("use", "retain_and_quote_attributed_examples", "origin"),
             ("format", "text", "origin"),
@@ -156,39 +159,58 @@ class CollectionDeclarationTests(TestCase):
                 error = raised.exception.errors()[0]
                 self.assertEqual((error["loc"][-1], error["type"]), (field, "extra_forbidden"))
 
-    def test_collection_rejects_weight_overrides_that_invert_branch_trust(self) -> None:
-        dataset = load_repository_branch(COLLECTION / "existing-datasets.json")
-        docs = load_repository_branch(COLLECTION / "documentation-crawl.json")
-        keenable = SourceDeclaration.from_declaration(
-            load_declaration(COLLECTION.parent / "keenable" / "declaration.json")
-        )
-        overridden = dataset.model_copy(
-            update={
-                "origins": (
-                    dataset.origins[0].model_copy(update={"trust_weight": 0.90}),
-                    *dataset.origins[1:],
+    def test_merge_configuration_rejects_invalid_weights_and_tier_inversions(self) -> None:
+        collection = fixture_spec(Path(self.enterContext(TemporaryDirectory()))).declared_collection
+        assert collection is not None
+        for changed, reason in (
+            ({"keenable_source_weight": 0.55}, "above Keenable"),
+            ({"repository_origin_weights": {"cheat": 0.9}}, "above Keenable"),
+            ({"repository_origin_weights": {"new": 0.55}}, "declared repository origins"),
+            *(
+                ({"repository_origin_weights": {"cheat": value}}, reason)
+                for value, reason in (
+                    (float("nan"), "finite"),
+                    (float("inf"), "finite"),
+                    (-0.01, "greater than or equal"),
+                    (1.01, "less than or equal"),
+                    (True, "valid number"),
+                    ("0.55", "valid number"),
                 )
-            }
-        )
-        for revisions in (
-            {
-                "existing_datasets": SourceDeclaration.from_declaration(dataset),
-                "merge_keenable_weight": 0.55,
-            },
-            {"existing_datasets": SourceDeclaration.from_declaration(overridden)},
+            ),
         ):
-            with (
-                self.subTest(fields=tuple(revisions)),
-                self.assertRaisesRegex(IntegrityError, "above Keenable"),
-            ):
+            with self.subTest(changed=changed), self.assertRaisesRegex(ValidationError, reason):
+                merge = CollectionMergeConfig.model_validate(
+                    {**collection.merge_config.model_dump(), **changed}
+                )
                 DeclaredCollection.model_validate(
                     {
-                        "existing_datasets": SourceDeclaration.from_declaration(dataset),
-                        "documentation_crawl": SourceDeclaration.from_declaration(docs),
-                        "keenable_use_cases": keenable,
-                        **revisions,
+                        "existing_datasets": collection.existing_datasets,
+                        "documentation_crawl": collection.documentation_crawl,
+                        "keenable_use_cases": collection.keenable_use_cases,
+                        "merge": merge,
                     }
                 )
+
+    def test_reweighting_changes_only_the_merge_stage_configuration(self) -> None:
+        spec = fixture_spec(Path(self.enterContext(TemporaryDirectory())))
+        collection = spec.declared_collection
+        assert collection is not None
+        original = collection.merge_config
+        changed = original.model_copy(
+            update={
+                "repository_origin_weights": {**original.repository_origin_weights, "cheat": 0.51},
+                "keenable_source_weight": 0.24,
+            }
+        )
+        revised = spec.model_copy(
+            update={"declared_collection": collection.model_copy(update={"merge": changed})}
+        )
+
+        before, after = stage_configs(spec), stage_configs(revised)
+
+        self.assertEqual(
+            {stage for stage in before if before[stage] != after[stage]}, {"merged_command_candidates"}
+        )
 
     def test_path_free_historical_snapshot_retains_its_options_and_digest(self) -> None:
         original = repository_config_fixture().dataset[0]
@@ -216,9 +238,32 @@ class CollectionDeclarationTests(TestCase):
         self.assertEqual(restored.digest, expected_digest)
         self.assertIsInstance(restored.declaration, RepositoryBranchConfig)
         self.assertEqual(restored.model_dump_json().encode(), wire)
-        self.assertEqual(runtime.source_weight("dataset", "cheat"), 0.59)
         self.assertEqual(origin.transform.options_json, old_options)
         self.assertEqual(origin.transform.batch_size, 17)
+
+    def test_historical_weighted_declaration_round_trips_as_read_only_evidence(self) -> None:
+        template = load_repository_branch(COLLECTION / "existing-datasets.json")
+        origin: dict[str, JsonValue] = {**template.origins[0].model_dump(mode="json"), "trust_weight": 0.57}
+        declaration: dict[str, JsonValue] = {"refresh_revision": "historical", "origins": [origin]}
+        expected_digest = fingerprint(declaration)
+        wire = TypeAdapter(dict[str, JsonValue]).dump_json(
+            {"declaration": declaration, "digest": expected_digest}
+        )
+
+        restored = SourceDeclaration.model_validate_json(wire)
+
+        self.assertEqual(restored.model_dump_json().encode(), wire)
+        self.assertEqual(restored.repository_config("dataset").origins("dataset")[0].origin_id, "cheat")
+        with self.assertRaisesRegex(IntegrityError, "re-register with merge ranking"):
+            restored.require_current("dataset")
+
+        current = fixture_spec(Path(self.enterContext(TemporaryDirectory()))).declared_collection
+        assert current is not None
+        registered = current.model_copy(update={"merge": None, "existing_datasets": restored})
+        registered.require_current_declarations()
+        self.assertEqual(registered.merge_config.weight("dataset", "cheat"), 0.57)
+        self.assertNotIn("trust_weight", registered.for_branch("dataset").model_dump_json())
+        self.assertEqual(registered.existing_datasets.model_dump_json().encode(), wire)
 
     def test_historical_raw_keenable_retains_omitted_defaults_and_original_key_order(self) -> None:
         source_scoped = historical_keenable_fixture()

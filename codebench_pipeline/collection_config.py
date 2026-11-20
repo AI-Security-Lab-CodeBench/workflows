@@ -21,22 +21,26 @@ from codebench_pipeline.keenable_policy import (
     KeenableDeclaration,
     parse_declaration,
 )
+from codebench_pipeline.merge_config import CollectionMergeConfig as CollectionMergeConfig
+from codebench_pipeline.merge_config import SourceWeight
 from codebench_pipeline.models import Digest
 from codebench_pipeline.repository_branch_config import (
+    HistoricalWeightedRepositoryBranch,
     RepositoryAcquisitionConfig,
     RepositoryBranchConfig,
     RepositoryBranchDeclaration,
 )
-from codebench_pipeline.repository_config import (
-    DEFAULT_SOURCE_WEIGHTS,
-    RepositoryBranch,
-    RepositoryConfig,
-    SourceWeight,
-)
+from codebench_pipeline.repository_config import RepositoryBranch, RepositoryConfig
 from codebench_pipeline.storage import IntegrityError, fingerprint
 from codebench_pipeline.typed_config import ConfigArtifact, TypedConfig
 
-type DeclaredSource = RepositoryBranchDeclaration | RepositoryBranchConfig | RepositoryConfig | Declaration
+type DeclaredSource = (
+    RepositoryBranchDeclaration
+    | HistoricalWeightedRepositoryBranch
+    | RepositoryBranchConfig
+    | RepositoryConfig
+    | Declaration
+)
 _JSON_OBJECT: Final = TypeAdapter(dict[str, JsonValue])
 
 
@@ -78,11 +82,16 @@ class SourceDeclaration(BaseModel):
         wire = _JSON_OBJECT.dump_json(raw)
         declaration: DeclaredSource
         if "origins" in raw:
-            declaration = (
-                RepositoryBranchDeclaration.model_validate_json(wire)
-                if "refresh_revision" in raw
-                else RepositoryBranchConfig.model_validate_json(wire)
-            )
+            if "refresh_revision" in raw:
+                origins = raw["origins"]
+                if isinstance(origins, list) and any(
+                    isinstance(origin, dict) and "trust_weight" in origin for origin in origins
+                ):
+                    declaration = HistoricalWeightedRepositoryBranch.model_validate_json(wire)
+                else:
+                    declaration = RepositoryBranchDeclaration.model_validate_json(wire)
+            else:
+                declaration = RepositoryBranchConfig.model_validate_json(wire)
         elif "dataset" in raw and "documentation" in raw:
             declaration = RepositoryConfig.model_validate_json(wire)
         else:
@@ -101,7 +110,11 @@ class SourceDeclaration(BaseModel):
     def repository_config(self, branch: RepositoryBranch) -> RepositoryAcquisitionConfig:
         declaration = self.declaration
         match declaration:
-            case RepositoryBranchDeclaration() | RepositoryBranchConfig():
+            case (
+                RepositoryBranchDeclaration()
+                | HistoricalWeightedRepositoryBranch()
+                | RepositoryBranchConfig()
+            ):
                 return declaration.runtime(branch)
             case RepositoryConfig():
                 return declaration
@@ -114,11 +127,20 @@ class SourceDeclaration(BaseModel):
         match declaration:
             case CurrentKeenableDeclaration() | KeenableDeclaration():
                 return declaration
-            case RepositoryBranchDeclaration() | RepositoryBranchConfig() | RepositoryConfig():
+            case (
+                RepositoryBranchDeclaration()
+                | HistoricalWeightedRepositoryBranch()
+                | RepositoryBranchConfig()
+                | RepositoryConfig()
+            ):
                 raise IntegrityError("Repository sources do not have Keenable acquisition configuration")
         assert_never(declaration)
 
     def require_current(self, branch: Branch) -> None:
+        if isinstance(self.declaration, HistoricalWeightedRepositoryBranch):
+            raise IntegrityError(
+                "Historical repository declaration contains source weights; re-register with merge ranking settings"
+            )
         if self.source_list is not None or isinstance(self.declaration, RepositoryConfig):
             raise IntegrityError(
                 "Historical declared collection contains source-list paths; re-register the path-free dataset configuration"
@@ -136,21 +158,24 @@ class DeclaredCollection(TypedConfig):
     documentation_crawl: SourceDeclaration
     keenable_use_cases: SourceDeclaration
     merge_keenable_weight: SourceWeight | None = Field(default=None, exclude_if=lambda weight: weight is None)
+    merge: CollectionMergeConfig | None = Field(default=None, exclude_if=lambda merge: merge is None)
 
     @property
-    def keenable_source_weight(self) -> float:
-        if self.merge_keenable_weight is not None:
-            return self.merge_keenable_weight
-        dataset = self.existing_datasets.declaration
-        docs = self.documentation_crawl.declaration
-        dataset_weight = (
-            dataset.keenable_source_weight
-            if isinstance(dataset, RepositoryConfig)
-            else DEFAULT_SOURCE_WEIGHTS["keenable"]
+    def merge_config(self) -> CollectionMergeConfig:
+        if self.merge is not None:
+            return self.merge
+        overrides = {
+            origin.origin_id: origin.trust_weight
+            for source in (self.existing_datasets, self.documentation_crawl)
+            if isinstance(source.declaration, HistoricalWeightedRepositoryBranch)
+            for origin in source.declaration.origins
+            if origin.trust_weight is not None
+        }
+        if self.merge_keenable_weight is None:
+            return CollectionMergeConfig(repository_origin_weights=overrides)
+        return CollectionMergeConfig(
+            keenable_source_weight=self.merge_keenable_weight, repository_origin_weights=overrides
         )
-        if isinstance(docs, RepositoryConfig) and docs.keenable_source_weight != dataset_weight:
-            raise IntegrityError("Collection declarations disagree on the Keenable source weight")
-        return dataset_weight
 
     @model_validator(mode="after")
     def verify_collection(self) -> Self:
@@ -164,22 +189,34 @@ class DeclaredCollection(TypedConfig):
             raise IntegrityError("Repository origin IDs must be unique across branches")
         if len({origin.repository.casefold() for origin in origins}) != len(origins):
             raise IntegrityError("Repository origins must be independent across branches")
-        dataset_weights = [dataset.source_weight("dataset", origin.origin_id) for origin in dataset_origins]
-        docs_weights = [docs.source_weight("documentation", origin.origin_id) for origin in docs_origins]
-        if not self.keenable_source_weight < min(dataset_weights) <= max(dataset_weights) < min(docs_weights):
-            raise IntegrityError("Source weights must keep documentation above datasets above Keenable")
+        if self.merge is not None and self.merge_keenable_weight is not None:
+            raise PydanticCustomError(
+                "source_weights", "Collection declares both current and historical merge weights"
+            )
+        self.merge_config.check_origins(
+            {origin.origin_id for origin in dataset_origins},
+            {origin.origin_id for origin in docs_origins},
+        )
         return self
 
     def for_branch(self, branch: Branch) -> SourceDeclaration:
-        return {
+        source = {
             "dataset": self.existing_datasets,
             "documentation": self.documentation_crawl,
             "keenable": self.keenable_use_cases,
         }[branch]
+        if source.source_list is None and isinstance(source.declaration, HistoricalWeightedRepositoryBranch):
+            unweighted = source.declaration.model_dump_json(
+                exclude={"origins": {"__all__": {"trust_weight"}}}
+            )
+            return SourceDeclaration.from_declaration(
+                RepositoryBranchDeclaration.model_validate_json(unweighted)
+            )
+        return source
 
     def require_current_declarations(self) -> None:
-        self.existing_datasets.require_current("dataset")
-        self.documentation_crawl.require_current("documentation")
+        self.for_branch("dataset").require_current("dataset")
+        self.for_branch("documentation").require_current("documentation")
         self.keenable_use_cases.require_current("keenable")
 
     def repository_config(self, branch: RepositoryBranch) -> RepositoryAcquisitionConfig:
@@ -232,10 +269,6 @@ class DeclaredSourceStageConfig(TypedConfig, ConfigArtifact):
                 return fingerprint([self.source.digest, self.planner.model_dump(mode="json")])
             return self.source.digest
         return self.repository_config.branch_digest(self.branch)
-
-
-class CollectionMergeConfig(TypedConfig, ConfigArtifact):
-    keenable_source_weight: SourceWeight
 
 
 CAT3_DATASET_ID: Final = "cloud_infrastructure_commands_grounded_v1"

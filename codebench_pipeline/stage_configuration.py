@@ -216,9 +216,7 @@ class DeclaredGlobalConfig(ConfigArtifact):
                 documentation_crawl=collection_asset_settings(spec, "documentation"),
                 keenable_use_cases=collection_asset_settings(spec, "keenable"),
                 merged_command_candidates=DeclaredMergeConfig(
-                    merged_command_candidates=CollectionMergeConfig(
-                        keenable_source_weight=spec.declared_collection.keenable_source_weight
-                    )
+                    merged_command_candidates=spec.declared_collection.merge_config
                 ),
                 filtered_commands=FilterSettings(filtered_commands=spec.filtering),
                 labeling_attempts=GuardedLabelingSettings.from_spec(spec),

@@ -65,10 +65,25 @@ def update_dataset_declaration(
     updated = declaration.model_copy(
         update={"refresh_revision": revision, "origins": declaration.origins if origins is None else origins}
     )
+    removed = {origin.origin_id for origin in declaration.origins} - {
+        origin.origin_id for origin in updated.origins
+    }
+    merge = collection.merge_config
     return spec.model_copy(
         update={
             "declared_collection": collection.model_copy(
-                update={"existing_datasets": SourceDeclaration.from_declaration(updated)}
+                update={
+                    "existing_datasets": SourceDeclaration.from_declaration(updated),
+                    "merge": merge.model_copy(
+                        update={
+                            "repository_origin_weights": {
+                                key: value
+                                for key, value in merge.repository_origin_weights.items()
+                                if key not in removed
+                            }
+                        }
+                    ),
+                }
             )
         }
     )
