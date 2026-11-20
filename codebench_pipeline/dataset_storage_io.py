@@ -1,4 +1,5 @@
 from pathlib import Path
+from typing import cast
 
 import pandas as pd
 from dagster import Field, InitResourceContext, InputContext, IOManagerDefinition, OutputContext, String
@@ -6,10 +7,12 @@ from dagster._core.storage.tags import PARTITION_NAME_TAG
 from pydantic import BaseModel
 
 from codebench_pipeline.category_rules import CategoryRules
+from codebench_pipeline.dagster_table_metadata import MetadataSink
 from codebench_pipeline.dataframe_io import AssetSnapshot, DataFrameIOManager
 from codebench_pipeline.dataset_branches import DECLARED_SOURCE_STAGES, FINALIZATION_STAGES
+from codebench_pipeline.dataset_dependencies import review_evidence_stages
 from codebench_pipeline.dataset_registry import DatasetRegistry
-from codebench_pipeline.finalization_publication import TableOutputAdmission
+from codebench_pipeline.finalization_publication import TABLE_REGISTRATION_METADATA, TableOutputAdmission
 from codebench_pipeline.human_review import HumanReviewError
 from codebench_pipeline.human_review_store import HumanReviewStore
 from codebench_pipeline.models import Digest
@@ -84,9 +87,13 @@ class RegisteredDatasetTableIO(DataFrameIOManager):
                     previous = self.current_reference(context)
                 except FileNotFoundError:
                     previous = None
-                if previous != reference:
+                if previous != reference and "/".join(key[1:]) in review_evidence_stages():
                     tx.invalidate(partition, "Upstream asset reference changed")
                 self.publish_reference(context, reference)
+        if admission is not None:
+            cast(MetadataSink, context).add_output_metadata(
+                {TABLE_REGISTRATION_METADATA: admission.registration_digest}
+            )
         self.record_output(context, value, reference)
 
     def _check_admission(

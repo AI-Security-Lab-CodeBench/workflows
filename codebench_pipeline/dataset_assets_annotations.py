@@ -15,13 +15,7 @@ from dagster import (
 from pandera.typing import DataFrame
 from pydantic import JsonValue, TypeAdapter
 
-from codebench_pipeline.category_rules import CategoryRules
-from codebench_pipeline.config_assets import (
-    GLOBAL_CONFIG,
-    REGISTERED_CONFIG_TYPE,
-    RegisteredConfig,
-    mapped_input,
-)
+from codebench_pipeline.config_assets import mapped_input
 from codebench_pipeline.dataframe_io import DataFrameIOManager
 from codebench_pipeline.dataframe_schemas import (
     LabelingAttemptsTable,
@@ -29,7 +23,7 @@ from codebench_pipeline.dataframe_schemas import (
     ProposedAnnotationsTable,
     SourceDocumentsTable,
 )
-from codebench_pipeline.dataset_asset_types import DATASET_PARTITIONS, RULES_TYPE, TABLE_TYPES
+from codebench_pipeline.dataset_asset_types import DATASET_PARTITIONS, TABLE_TYPES
 from codebench_pipeline.finalization_table_asset import (
     FINALIZATION_TABLE_IO,
     LABELING_INPUT,
@@ -47,7 +41,7 @@ from codebench_pipeline.labeling_tables import (
     failures_from_attempts,
     proposed_from_attempts,
 )
-from codebench_pipeline.stage_configuration import GuardedLabelingConfig
+from codebench_pipeline.stage_configuration import GuardedLabelingConfig, PolicyArtifact
 from codebench_pipeline.storage import IntegrityError
 
 
@@ -87,9 +81,7 @@ def annotation_assets() -> list[AssetsDefinition]:
         if filtered_commands.attempt is None:
             raise IntegrityError("Labeling input hooks did not prepare the attempt")
         signature, scratch_root = filtered_commands.attempt
-        capacity_paths = labeling_runtime.require_current(
-            context.run_id, context.partition_key, dataset_io_manager
-        )
+        capacity_paths = labeling_runtime.require_current(context.partition_key, dataset_io_manager)
         settings = mapped_config.labeling_attempts
         evidence_inputs = LabelingEvidenceInputs(
             dataset_io_manager.repository_run(context.partition_key, context.run_id),
@@ -129,9 +121,6 @@ def annotation_assets() -> list[AssetsDefinition]:
         input_manager_key=FINALIZATION_TABLE_IO,
         dagster_type=PROJECTION_INPUT,
     )
-    registered_edge = AssetIn(
-        key=GLOBAL_CONFIG, dagster_type=REGISTERED_CONFIG_TYPE, input_manager_key=FINALIZATION_TABLE_IO
-    )
 
     @asset(
         key_prefix=["datasets"],
@@ -142,23 +131,19 @@ def annotation_assets() -> list[AssetsDefinition]:
         hooks={retain_failed_finalization},
         ins={
             "labeling_attempts": attempts_edge,
-            "category_rules": AssetIn(
-                key=AssetKey(["datasets", "category_rules"]),
-                dagster_type=RULES_TYPE,
-                input_manager_key=FINALIZATION_TABLE_IO,
+            "mapped_config": mapped_input(
+                "proposed_annotations", PolicyArtifact, input_manager_key=FINALIZATION_TABLE_IO
             ),
-            "registered": registered_edge,
         },
     )
     def proposed_annotations(
         labeling_attempts: ProjectionInput,
-        category_rules: CategoryRules,
-        registered: RegisteredConfig,
+        mapped_config: PolicyArtifact,
     ) -> Output[DataFrame[ProposedAnnotationsTable]]:
         return projection_output(
             labeling_attempts,
             ProposedAnnotationsTable,
-            lambda attempts: proposed_from_attempts(attempts, category_rules),
+            lambda attempts: proposed_from_attempts(attempts, mapped_config.category_rules),
         )
 
     @asset(
@@ -168,14 +153,10 @@ def annotation_assets() -> list[AssetsDefinition]:
         io_manager_key=FINALIZATION_TABLE_IO,
         dagster_type=TABLE_TYPES[LabelingFailuresTable],
         hooks={retain_failed_finalization},
-        ins={
-            "labeling_attempts": attempts_edge,
-            "registered": registered_edge,
-        },
+        ins={"labeling_attempts": attempts_edge},
     )
     def labeling_failures(
         labeling_attempts: ProjectionInput,
-        registered: RegisteredConfig,
     ) -> Output[DataFrame[LabelingFailuresTable]]:
         return projection_output(labeling_attempts, LabelingFailuresTable, failures_from_attempts)
 

@@ -83,6 +83,10 @@ class FilteringConfig(StrictStageConfig):
     quarantine_dynamic_shell: bool = True
 
 
+class DeduplicationPolicy(StrictStageConfig):
+    normalize_safe_whitespace: bool = True
+
+
 RequestBytes = Annotated[int, Field(ge=1024, le=1048576)]
 ReleaseCap = Annotated[int, Field(ge=1, le=250)]
 AnnotationWorkers = Annotated[int, Field(ge=1, le=16)]
@@ -143,6 +147,9 @@ class DatasetBuildSpec(StrictStageConfig):
         default=None, exclude_if=lambda value: value is None
     )
     filtering: FilteringConfig
+    deduplication: DeduplicationPolicy = Field(
+        default=DeduplicationPolicy(), exclude_if=lambda policy: policy == DeduplicationPolicy()
+    )
     documentation: DocumentationConfig | None = Field(default=None, exclude_if=lambda value: value is None)
     declared_collection: DeclaredCollection | None = Field(
         default=None, exclude_if=lambda value: value is None

@@ -17,8 +17,10 @@ from codebench_pipeline.dataset_config import (
     AnnotationConfig,
     AnnotationWorkers,
     DatasetBuildSpec,
+    DeduplicationPolicy,
     FilteringConfig,
     PublicationConfig,
+    ReleaseCap,
     RequestBytes,
     require_guarded_annotation,
 )
@@ -65,6 +67,10 @@ class FilterSettings(ConfigArtifact):
 
 class FilterConfig(FilterSettings, PolicyArtifact):
     pass
+
+
+class DeduplicationConfig(ConfigArtifact):
+    deduplication: DeduplicationPolicy
 
 
 class ScopedBatchConfig(BatchPromptConfig, ConfigArtifact):
@@ -151,7 +157,44 @@ class ReviewQueueSettings(ConfigArtifact):
 
 
 class ReviewQueueConfig(ReviewQueueSettings, PolicyArtifact):
-    pass
+    registration_digest: Digest
+
+    @classmethod
+    def project(cls, registered: "DeclaredGlobalConfig", rules: CategoryRules) -> "ReviewQueueConfig":
+        return cls(
+            category_rules=rules,
+            human_review_queue=registered.scopes.human_review_queue.human_review_queue,
+            registration_digest=registered.registration_digest,
+        )
+
+
+class CategoryEligibilityConfig(TypedConfig, ConfigArtifact):
+    category_id: str
+
+
+class ReviewDecisionConfig(ConfigArtifact):
+    dataset_id: Identifier
+
+
+class DatasetReleaseConfig(ReviewDecisionConfig, PolicyArtifact):
+    limit_per_risk: ReleaseCap
+    collection: DeclaredCollection
+    grounding: GroundingConfig
+
+    @classmethod
+    def project(cls, registered: "DeclaredGlobalConfig", rules: CategoryRules) -> "DatasetReleaseConfig":
+        labeling = registered.scopes.labeling_attempts
+        return cls(
+            dataset_id=registered.dataset_id,
+            category_rules=rules,
+            limit_per_risk=registered.scopes.human_review_queue.human_review_queue.limit_per_risk,
+            collection=labeling.collection,
+            grounding=labeling.labeling_attempts.batch.grounding,
+        )
+
+    @property
+    def digest(self) -> Digest:
+        return fingerprint(self.model_dump(mode="json", by_alias=True))
 
 
 class DeclaredScopes(ConfigArtifact):
@@ -161,6 +204,10 @@ class DeclaredScopes(ConfigArtifact):
     merged_command_candidates: DeclaredMergeConfig
     filtered_commands: FilterSettings
     labeling_attempts: GuardedLabelingSettings
+    deduplicated_annotations: DeduplicationConfig = Field(
+        default=DeduplicationConfig(deduplication=DeduplicationPolicy()),
+        exclude_if=lambda value: value.deduplication == DeduplicationPolicy(),
+    )
     human_review_queue: ReviewQueueSettings
 
 
@@ -204,6 +251,7 @@ class DeclaredGlobalConfig(ConfigArtifact):
                 ),
                 filtered_commands=FilterSettings(filtered_commands=spec.filtering),
                 labeling_attempts=GuardedLabelingSettings.from_spec(spec),
+                deduplicated_annotations=DeduplicationConfig(deduplication=spec.deduplication),
                 human_review_queue=ReviewQueueSettings(human_review_queue=spec.publication),
             ),
         )
@@ -234,8 +282,8 @@ def stage_configs(settings: DatasetBuildSpec | DeclaredGlobalConfig) -> dict[str
         "labeling_attempts": GuardedLabelingCacheConfig.from_settings(scopes.labeling_attempts),
         "proposed_annotations": TypedConfig(),
         "labeling_failures": TypedConfig(),
-        "deduplicated_annotations": TypedConfig(),
-        "category_eligible_annotations": TypedConfig(),
+        "deduplicated_annotations": scopes.deduplicated_annotations.deduplication,
+        "category_eligible_annotations": CategoryEligibilityConfig(category_id=registered.rules.category_id),
         "human_review_queue": scopes.human_review_queue.human_review_queue,
         "human_review_decisions": HumanReviewConfig(),
         "dataset_release": HumanReviewConfig(),

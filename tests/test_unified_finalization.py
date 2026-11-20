@@ -10,7 +10,7 @@ from codebench_pipeline.dataframe_schemas import (
     ProposedAnnotationsTable,
     validated_frame,
 )
-from codebench_pipeline.dataset_config import PublicationConfig
+from codebench_pipeline.dataset_config import DeduplicationPolicy, PublicationConfig
 from codebench_pipeline.dataset_finalization import deduplicate_annotations, merge_candidates
 from codebench_pipeline.dataset_tables import review_queue
 
@@ -40,7 +40,7 @@ class UnifiedDeduplicationTests(unittest.TestCase):
             reviewed_row("uncertain", decision="needs_review", risk_confidence="low"),
         )
         original.attrs["duplicates"] = [{"duplicate_id": "duplicate", "survivor_id": "high"}]
-        retained = category_eligible_annotations(original, make_rules())
+        retained = category_eligible_annotations(original, "CAT-8")
         self.assertEqual(retained["candidate_id"].tolist(), ["high", "medium", "uncertain"])
         self.assertEqual(
             retained.attrs["category_exclusions"],
@@ -61,7 +61,7 @@ class UnifiedDeduplicationTests(unittest.TestCase):
             *(reviewed_row(field, **{field: "medium"}) for field in fields),
             reviewed_row("excluded", category_confidence="low"),
         )
-        retained = category_eligible_annotations(original, make_rules())
+        retained = category_eligible_annotations(original, "CAT-8")
         queue = review_queue(retained, make_rules(), PublicationConfig().review_columns)
         self.assertEqual(queue["candidate_id"].tolist(), list(fields))
 
@@ -87,7 +87,7 @@ class UnifiedDeduplicationTests(unittest.TestCase):
     def test_category_filter_accepts_empty_and_all_excluded_tables(self) -> None:
         for original in (annotations(), annotations(reviewed_row("low", category_confidence="low"))):
             with self.subTest(rows=len(original)):
-                retained = category_eligible_annotations(original, make_rules())
+                retained = category_eligible_annotations(original, "CAT-8")
                 self.assertTrue(retained.empty)
                 self.assertEqual(len(retained.attrs["category_exclusions"]), len(original))
 
@@ -122,6 +122,30 @@ class UnifiedDeduplicationTests(unittest.TestCase):
         self.assertEqual(
             deduplicated.attrs["origins"]["documentation:one"],
             {"branch": "documentation", "candidate_id": "one", "source_id": "maintainer-reference"},
+        )
+
+    def test_exact_mode_preserves_whitespace_variants_and_maps_literal_duplicates(self) -> None:
+        command = "probe \t inspect  example"
+        reviewed = annotations(
+            reviewed_row("canonical"),
+            reviewed_row("variant", command=command),
+            reviewed_row("duplicate", command=command),
+        )
+
+        result = deduplicate_annotations(reviewed, DeduplicationPolicy(normalize_safe_whitespace=False))
+
+        self.assertEqual(result["candidate_id"].tolist(), ["canonical", "variant"])
+        self.assertEqual(result["command"].tolist(), ["probe inspect example", command])
+        self.assertEqual(
+            result.attrs["duplicates"],
+            [
+                {
+                    "duplicate_id": "duplicate",
+                    "survivor_id": "variant",
+                    "normalized_command": command,
+                    "reason": "exact_command_and_annotation",
+                }
+            ],
         )
 
     def test_quotes_shell_syntax_context_and_label_disagreements_are_retained(self) -> None:

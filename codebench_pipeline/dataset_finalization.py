@@ -2,7 +2,6 @@ import json
 import re
 
 from dagster import (
-    AssetKey,
     AssetsDefinition,
     Output,
     asset,
@@ -11,13 +10,7 @@ from pandera.typing import DataFrame
 from pydantic import JsonValue, TypeAdapter
 
 from codebench_pipeline.category_eligibility import category_eligible_annotations as filter_category
-from codebench_pipeline.category_rules import CategoryRules
-from codebench_pipeline.config_assets import (
-    RegisteredConfig,
-    mapped_input,
-    registered_input,
-    require_registered_rules,
-)
+from codebench_pipeline.config_assets import mapped_input
 from codebench_pipeline.dataframe_io import frame_bytes
 from codebench_pipeline.dataframe_schemas import (
     CommandCandidatesTable,
@@ -34,13 +27,12 @@ from codebench_pipeline.dataset_collection_binding import (
     available_candidates,
     finalization_binding,
 )
-from codebench_pipeline.dataset_dependencies import preparation_stages
+from codebench_pipeline.dataset_config import DeduplicationPolicy
 from codebench_pipeline.dataset_tables import review_queue
 from codebench_pipeline.finalization_table_asset import FinalizationTable, finalization_table_assets
 from codebench_pipeline.object_store import sha256
 from codebench_pipeline.repository_config import DEFAULT_SOURCE_WEIGHTS, SourceWeight
 from codebench_pipeline.stage_configuration import ReviewQueueConfig
-from codebench_pipeline.storage import IntegrityError
 
 __all__ = [
     "FINALIZATION_BINDING",
@@ -93,7 +85,10 @@ def normalized_command(command: str) -> str:
 
 def deduplicate_annotations(
     annotations: DataFrame[ProposedAnnotationsTable],
+    policy: DeduplicationPolicy = DeduplicationPolicy(),
 ) -> DataFrame[ProposedAnnotationsTable]:
+    normalize = policy.normalize_safe_whitespace
+    reason = "exact_normalized_command_and_annotation" if normalize else "exact_command_and_annotation"
     survivors: dict[str, dict[str, JsonValue]] = {}
     identities: list[tuple[str, str, str]] = []
     provenance = {
@@ -107,7 +102,8 @@ def deduplicate_annotations(
     }
     for row in frame_records(annotations):
         identifier = str(row["candidate_id"])
-        normalized = normalized_command(str(row["command"]))
+        command = str(row["command"])
+        normalized = normalized_command(command) if normalize else command
         key = json.dumps(
             {
                 "command": normalized,
@@ -127,7 +123,7 @@ def deduplicate_annotations(
             "duplicate_id": identifier,
             "survivor_id": survivors[key]["candidate_id"],
             "normalized_command": normalized,
-            "reason": "exact_normalized_command_and_annotation",
+            "reason": reason,
         }
         for identifier, normalized, key in identities
         if identifier != survivors[key]["candidate_id"]
@@ -137,23 +133,19 @@ def deduplicate_annotations(
     return result
 
 
-def deduplicated_annotations(proposed_annotations: DataFrame[ProposedAnnotationsTable]) -> FinalizationTable:
-    frame = deduplicate_annotations(proposed_annotations)
+def deduplicated_annotations(
+    proposed_annotations: DataFrame[ProposedAnnotationsTable], policy: DeduplicationPolicy
+) -> FinalizationTable:
+    frame = deduplicate_annotations(proposed_annotations, policy)
     return FinalizationTable(frame, TypeAdapter(JsonValue).validate_python(frame.attrs["duplicates"]))
 
 
 def category_eligible_annotations(
-    deduplicated_annotations: DataFrame[ProposedAnnotationsTable], category_rules: CategoryRules
+    deduplicated_annotations: DataFrame[ProposedAnnotationsTable], category_id: str
 ) -> FinalizationTable:
-    frame = filter_category(deduplicated_annotations, category_rules)
+    frame = filter_category(deduplicated_annotations, category_id)
     return FinalizationTable(
         frame, TypeAdapter(JsonValue).validate_python(frame.attrs["category_exclusions"])
-    )
-
-
-def review_evidence_keys(*excluded: str) -> tuple[AssetKey, ...]:
-    return tuple(
-        AssetKey(["datasets", *stage.split("/")]) for stage in preparation_stages() if stage not in excluded
     )
 
 
@@ -167,29 +159,26 @@ def finalization_assets() -> list[AssetsDefinition]:
         io_manager_key="dataset_io_manager",
         dagster_type=TABLE_TYPES[ReviewQueueTable],
         config_schema={},
-        deps=review_evidence_keys("human_review_queue", "category_eligible_annotations"),
         ins={
             "category_eligible_annotations": table_input(
                 "category_eligible_annotations", ProposedAnnotationsTable
             ),
             "mapped_config": mapped_input("human_review_queue", ReviewQueueConfig),
-            "registered": registered_input(),
         },
     )
     def human_review_queue(
         category_eligible_annotations: DataFrame[ProposedAnnotationsTable],
         mapped_config: ReviewQueueConfig,
-        registered: RegisteredConfig,
     ) -> Output[DataFrame[ReviewQueueTable]]:
-        require_registered_rules(registered, mapped_config.category_rules)
         settings = mapped_config.human_review_queue
-        if settings != registered.scopes.human_review_queue.human_review_queue:
-            raise IntegrityError("Review settings differ from the registered configuration")
         return Output(
             review_queue(
                 category_eligible_annotations, mapped_config.category_rules, settings.review_columns
             ),
-            metadata={"review_input_digest": sha256(frame_bytes(category_eligible_annotations))},
+            metadata={
+                "review_input_digest": sha256(frame_bytes(category_eligible_annotations)),
+                "review_policy_digest": sha256(mapped_config.model_dump_json().encode()),
+            },
         )
 
     return [

@@ -20,9 +20,11 @@ from codebench_pipeline.dataframe_schemas import ProposedAnnotationsTable, Revie
 from codebench_pipeline.dataset_asset_types import DATASET_PARTITIONS
 from codebench_pipeline.dataset_engine import cached_table
 from codebench_pipeline.human_review import HumanReviewError
+from codebench_pipeline.object_store import sha256
 from codebench_pipeline.review_snapshots import ResolvedReview, ReviewSnapshots
 from codebench_pipeline.review_stages import annotation_stage
 from codebench_pipeline.review_workflow import ReviewWorkflow
+from codebench_pipeline.stage_configuration import ReviewQueueConfig
 
 
 class QueueMetadataSink(Protocol):
@@ -62,6 +64,11 @@ def prepare_review_queue(
     dataset_id = context.asset_partition_key
     registered = dataset_io_manager.run_configuration(context.run_id, dataset_id)
     settings = registered.scopes.human_review_queue.human_review_queue
+    policy = ReviewQueueConfig.project(registered, registered.rules)
+    if context.output_metadata.get("review_policy_digest") != TextMetadataValue(
+        sha256(policy.model_dump_json().encode())
+    ):
+        raise HumanReviewError("stale", "Mapped review policy differs from the registered policy")
     reference = dataset_io_manager.current_reference(
         build_input_context(
             instance=instance,

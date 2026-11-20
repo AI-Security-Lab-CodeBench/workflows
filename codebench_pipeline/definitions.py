@@ -5,6 +5,7 @@ from typing import Protocol
 from dagster import (
     AssetCheckKey,
     AssetKey,
+    AssetsDefinition,
     AssetSelection,
     AssetSpec,
     AutomationCondition,
@@ -36,6 +37,7 @@ from codebench_pipeline.config_assets import (
     GLOBAL_CONFIG,
     ConfigRunIOManager,
     configuration_assets,
+    mapping_key,
 )
 from codebench_pipeline.dataset_asset_types import DATASET_PARTITIONS
 from codebench_pipeline.dataset_assets_annotations import annotation_assets
@@ -57,7 +59,7 @@ from codebench_pipeline.review_assets import human_assets
 from codebench_pipeline.review_inputs import REVIEW_INPUT_MANAGER, review_input_manager
 from codebench_pipeline.stage_descriptions import describe_stage
 from codebench_pipeline.stage_implementation import ImplementationSource
-from codebench_pipeline.storage import fingerprint
+from codebench_pipeline.storage import IntegrityError, fingerprint
 
 DEFAULT_HOME = Path(os.environ.get("CODEBENCH_HOME", ".codebench-datasets")).resolve()
 
@@ -85,9 +87,6 @@ def automate_dataset_asset(spec: AutomationAsset, config_assets: AssetSelection)
     configuration = stage.startswith("map_")
     updates = AnyDepsCondition[AssetKey | AssetCheckKey](
         operand=AutomationCondition.data_version_changed() & ~AutomationCondition.executed_with_root_target(),
-        ignore_selection=(
-            None if configuration or stage == "human_review_queue" else AssetSelection.assets(GLOBAL_CONFIG)
-        ),
     )
     changes: AutomationCondition[AssetKey | AssetCheckKey] = updates
     if not configuration:
@@ -118,6 +117,26 @@ def automate_dataset_asset(spec: AutomationAsset, config_assets: AssetSelection)
     return spec.replace_attributes(automation_condition=condition, code_version=version)
 
 
+def _require_scoped_configuration_edges(
+    configuration: list[AssetsDefinition], consumers: list[AssetsDefinition]
+) -> None:
+    specs = [spec for definition in [*configuration, *consumers] for spec in definition.specs]
+    groups = {spec.key: spec.group_name for spec in specs}
+    mappings = {definition.key for definition in configuration if definition.key.path[-1].startswith("map_")}
+    for spec in specs:
+        for dependency in spec.deps:
+            parent = dependency.asset_key
+            if groups.get(parent) == "configuration" and spec.group_name != "configuration":
+                if spec.key not in mappings:
+                    raise IntegrityError(
+                        f"{spec.key.to_user_string()} bypasses scoped configuration: {parent.to_user_string()}"
+                    )
+            if parent in mappings and groups[parent] != spec.group_name:
+                raise IntegrityError(
+                    f"{parent.to_user_string()} must belong to the group of {spec.key.to_user_string()}"
+                )
+
+
 def build_definitions(home: Path) -> Definitions:
     registry = DatasetRegistry(home)
     config_io = ConfigRunIOManager(home=str(home))
@@ -134,6 +153,7 @@ def build_definitions(home: Path) -> Definitions:
             *finalization_assets(),
         ]
     ]
+    _require_scoped_configuration_edges(config_definitions, [*assets, bashguard_syntax_audit])
 
     def partition_config(key: str) -> dict[str, JsonValue]:
         return TypeAdapter(dict[str, JsonValue]).validate_python(
@@ -198,7 +218,9 @@ def build_definitions(home: Path) -> Definitions:
         name="release_dataset",
         description="Release eligible low-uncertainty rows automatically; uncertain rows require completed human review.",
         selection=AssetSelection.assets(
-            GLOBAL_CONFIG, ["datasets", "human_review_decisions"], ["datasets", "dataset_release"]
+            GLOBAL_CONFIG,
+            *(mapping_key(stage) for stage in RELEASE_STAGES),
+            *(AssetKey(["datasets", stage]) for stage in RELEASE_STAGES),
         ),
         config=PartitionedConfig(
             DATASET_PARTITIONS,

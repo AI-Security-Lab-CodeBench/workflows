@@ -19,17 +19,20 @@ from codebench_pipeline.config_assets import (
     mapping_key,
 )
 from codebench_pipeline.data_views import DatasetDataService
-from codebench_pipeline.dataset_config import FilteringConfig, PublicationConfig
+from codebench_pipeline.dataset_config import DeduplicationPolicy, FilteringConfig, PublicationConfig
 from codebench_pipeline.dataset_dependencies import preparation_stages
 from codebench_pipeline.dataset_registry import DatasetRegistry
 from codebench_pipeline.definitions import build_definitions
 from codebench_pipeline.keenable_transport import DirectResponse
 from codebench_pipeline.runtime_instance import dataset_instance
 from codebench_pipeline.stage_configuration import (
+    CategoryEligibilityConfig,
     DeclaredBranchConfig,
     DeclaredMergeConfig,
+    DeduplicationConfig,
     FilterConfig,
     GuardedLabelingConfig,
+    PolicyArtifact,
     ReviewQueueConfig,
 )
 from codebench_pipeline.storage import IntegrityError
@@ -176,6 +179,7 @@ class RegisteredConfigMaterializationTests(TestCase):
                     update={"batch": batch.model_copy(update={"grounding": grounding})}
                 ),
                 "filtering": FilteringConfig(maximum_command_characters=1),
+                "deduplication": DeduplicationPolicy(normalize_safe_whitespace=False),
                 "publication": PublicationConfig(review_columns=["command", "severity"]),
             }
         )
@@ -189,7 +193,12 @@ class RegisteredConfigMaterializationTests(TestCase):
             "merged_command_candidates": DeclaredMergeConfig,
             "filtered_commands": FilterConfig,
             "labeling_attempts": GuardedLabelingConfig,
+            "deduplicated_annotations": DeduplicationConfig,
             "human_review_queue": ReviewQueueConfig,
+        }
+        policy_projections = {
+            "proposed_annotations": PolicyArtifact(category_rules=spec.rules),
+            "category_eligible_annotations": CategoryEligibilityConfig(category_id=spec.rules.category_id),
         }
         rules = AssetKey(["datasets", "category_rules"])
         filtered = AssetKey(["datasets", "filtered_commands"])
@@ -198,7 +207,9 @@ class RegisteredConfigMaterializationTests(TestCase):
             AssetKey(["datasets", *stage.split("/")])
             for stage in stages[: stages.index("filtered_commands") + 1]
         )
-        selection = list(dict.fromkeys([*selection, *(mapping_key(scope) for scope in contracts)]))
+        selection = list(
+            dict.fromkeys([*selection, *(mapping_key(scope) for scope in contracts | policy_projections)])
+        )
         definitions = build_definitions(home)
         graph = definitions.resolve_asset_graph()
         self.assertEqual(
@@ -247,6 +258,8 @@ class RegisteredConfigMaterializationTests(TestCase):
                     mapped = contract.model_validate_json(payload)
                     self.assert_no_local_paths(mapped.model_dump(mode="json"))
                     expected = getattr(registered.scopes, scope).model_dump(mode="json")
+                    if scope == "human_review_queue":
+                        expected["registration_digest"] = registered.registration_digest
                     if isinstance(mapped, DeclaredBranchConfig):
                         if scope == "keenable_use_cases":
                             declaration = mapped.collection.source.keenable_config()
@@ -261,9 +274,14 @@ class RegisteredConfigMaterializationTests(TestCase):
                         mapped.model_dump(mode="json", exclude={"category_rules", "keenable_preview"}),
                         expected,
                     )
-                    if not isinstance(mapped, DeclaredMergeConfig):
+                    if isinstance(mapped, PolicyArtifact):
                         self.assertEqual(mapped.category_rules, spec.rules)
+            for scope, expected in policy_projections.items():
+                with self.subTest(scope=scope):
+                    payload = artifact_root.joinpath(*mapping_key(scope).path).read_bytes()
+                    self.assertEqual(type(expected).model_validate_json(payload), expected)
             self.assertEqual(registered.scopes.filtered_commands.filtered_commands, spec.filtering)
+            self.assertEqual(registered.scopes.deduplicated_annotations.deduplication, spec.deduplication)
             self.assertEqual(registered.scopes.human_review_queue.human_review_queue, spec.publication)
             self.assertEqual(
                 registered.scopes.labeling_attempts.labeling_attempts.batch.grounding.pinned_library_ids,

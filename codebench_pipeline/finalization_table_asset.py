@@ -11,8 +11,7 @@ from dagster import AssetIn, AssetKey, AssetsDefinition, DataVersion, Output, Py
 from pandera.typing import DataFrame
 from pydantic import JsonValue, PrivateAttr
 
-from codebench_pipeline.category_rules import CategoryRules
-from codebench_pipeline.config_assets import GLOBAL_CONFIG, REGISTERED_CONFIG_TYPE, RegisteredConfig
+from codebench_pipeline.config_assets import mapped_input
 from codebench_pipeline.dataframe_schemas import (
     CommandCandidatesTable,
     FilteredCommandsTable,
@@ -20,9 +19,14 @@ from codebench_pipeline.dataframe_schemas import (
     LabelingFailuresTable,
     ProposedAnnotationsTable,
 )
-from codebench_pipeline.dataset_asset_types import DATASET_PARTITIONS, RULES_TYPE, TABLE_TYPES
+from codebench_pipeline.dataset_asset_types import DATASET_PARTITIONS, TABLE_TYPES
 from codebench_pipeline.dataset_branches import Branch
-from codebench_pipeline.stage_configuration import DeclaredBranchConfig
+from codebench_pipeline.dataset_config import DeduplicationPolicy
+from codebench_pipeline.stage_configuration import (
+    CategoryEligibilityConfig,
+    DeclaredBranchConfig,
+    DeduplicationConfig,
+)
 from codebench_pipeline.storage import IntegrityError
 
 type Annotations = DataFrame[ProposedAnnotationsTable]
@@ -150,14 +154,10 @@ def table_output(
 
 
 def finalization_table_assets(
-    deduplicate: Callable[[Annotations], FinalizationTable],
-    select_eligible: Callable[[Annotations, CategoryRules], FinalizationTable],
+    deduplicate: Callable[[Annotations, DeduplicationPolicy], FinalizationTable],
+    select_eligible: Callable[[Annotations, str], FinalizationTable],
 ) -> tuple[AssetsDefinition, AssetsDefinition]:
     from codebench_pipeline.finalization_table_io import retain_failed_finalization
-
-    registered_edge = AssetIn(
-        key=GLOBAL_CONFIG, dagster_type=REGISTERED_CONFIG_TYPE, input_manager_key=FINALIZATION_TABLE_IO
-    )
 
     @asset(
         key_prefix=["datasets"],
@@ -172,15 +172,19 @@ def finalization_table_assets(
                 input_manager_key=FINALIZATION_TABLE_IO,
                 dagster_type=_INPUT,
             ),
-            "registered": registered_edge,
+            "mapped_config": mapped_input(
+                "deduplicated_annotations", DeduplicationConfig, input_manager_key=FINALIZATION_TABLE_IO
+            ),
         },
     )
     def deduplicated_annotations(
         proposed_annotations: FinalizationInput,
-        registered: RegisteredConfig,
+        mapped_config: DeduplicationConfig,
     ) -> Output[Annotations]:
         return table_output(
-            proposed_annotations, EVIDENCE_ATTRIBUTES["deduplicated_annotations"], deduplicate
+            proposed_annotations,
+            EVIDENCE_ATTRIBUTES["deduplicated_annotations"],
+            lambda table: deduplicate(table, mapped_config.deduplication),
         )
 
     @asset(
@@ -196,23 +200,21 @@ def finalization_table_assets(
                 input_manager_key=FINALIZATION_TABLE_IO,
                 dagster_type=_INPUT,
             ),
-            "category_rules": AssetIn(
-                key=AssetKey(["datasets", "category_rules"]),
+            "mapped_config": mapped_input(
+                "category_eligible_annotations",
+                CategoryEligibilityConfig,
                 input_manager_key=FINALIZATION_TABLE_IO,
-                dagster_type=RULES_TYPE,
             ),
-            "registered": registered_edge,
         },
     )
     def category_eligible_annotations(
         deduplicated_annotations: FinalizationInput,
-        category_rules: CategoryRules,
-        registered: RegisteredConfig,
+        mapped_config: CategoryEligibilityConfig,
     ) -> Output[Annotations]:
         return table_output(
             deduplicated_annotations,
             EVIDENCE_ATTRIBUTES["category_eligible_annotations"],
-            lambda table: select_eligible(table, category_rules),
+            lambda table: select_eligible(table, mapped_config.category_id),
         )
 
     return deduplicated_annotations, category_eligible_annotations

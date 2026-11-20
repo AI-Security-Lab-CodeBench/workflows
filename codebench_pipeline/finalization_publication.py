@@ -9,6 +9,7 @@ from codebench_pipeline.dataframe_io import AssetReference, UpstreamTableReferen
 from codebench_pipeline.models import Digest, FrozenModel
 
 FINALIZATION_PUBLICATION_METADATA: Final = "codebench/finalization_publication"
+TABLE_REGISTRATION_METADATA: Final = "codebench/registration_digest"
 
 
 @dataclass(frozen=True, slots=True)

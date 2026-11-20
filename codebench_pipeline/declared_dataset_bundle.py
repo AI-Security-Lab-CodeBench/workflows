@@ -15,6 +15,7 @@ from codebench_pipeline.dataset_config import (
     AnnotationWorkers,
     CatalogConfig,
     DatasetBuildSpec,
+    DeduplicationPolicy,
     ExtractionConfig,
     FilteringConfig,
     PublicationConfig,
@@ -123,6 +124,7 @@ class DeclaredDatasetBundle(StrictStageConfig):
     labeling: DeclaredLabeling | FromRegistration
     storage: DeclaredS3Storage | FromRegistration
     filtering: FilteringConfig = FilteringConfig()
+    deduplication: DeduplicationPolicy = DeduplicationPolicy()
     merge: DeclaredMerge = DeclaredMerge()
     review: DeclaredReview = DeclaredReview()
     release: DeclaredRelease = DeclaredRelease()
@@ -192,6 +194,7 @@ class DeclaredDatasetBundle(StrictStageConfig):
             adapters=AdapterConfig(),
             extraction=ExtractionConfig(),
             filtering=self.filtering,
+            deduplication=self.deduplication,
             annotation=annotation,
             publication=PublicationConfig(
                 limit_per_risk=self.release.release_cap_per_risk,

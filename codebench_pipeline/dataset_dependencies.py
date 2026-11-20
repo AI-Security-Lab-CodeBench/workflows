@@ -35,16 +35,24 @@ CACHE_INPUTS: dict[str, dict[str, str]] = {
     "proposed_annotations": {"attempts": "labeling_attempts", "category_rules": "category_rules"},
     "labeling_failures": {"attempts": "labeling_attempts"},
     "deduplicated_annotations": {"annotations": "proposed_annotations"},
-    "category_eligible_annotations": {
-        "annotations": "deduplicated_annotations",
-        "category_rules": "category_rules",
-    },
+    "category_eligible_annotations": {"annotations": "deduplicated_annotations"},
     "human_review_queue": {
         "annotations": "category_eligible_annotations",
         "category_rules": "category_rules",
     },
 }
 RELEASE_STAGES = ("human_review_decisions", "dataset_release")
+
+
+def review_evidence_stages() -> frozenset[str]:
+    stages: set[str] = set()
+    pending = ["category_eligible_annotations"]
+    while pending:
+        stage = pending.pop()
+        if stage not in stages:
+            stages.add(stage)
+            pending.extend(CACHE_INPUTS.get(stage, {}).values())
+    return frozenset(stages)
 
 
 def preparation_stages() -> tuple[str, ...]:

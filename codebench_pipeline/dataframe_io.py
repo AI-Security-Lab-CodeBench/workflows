@@ -30,11 +30,7 @@ from codebench_pipeline.dagster_table_metadata import MetadataSink, record_previ
 from codebench_pipeline.dataframe_schemas import current_labeling_attempts
 from codebench_pipeline.dataset_records import LabelDecision
 from codebench_pipeline.human_review_store import HumanReviewStore
-from codebench_pipeline.input_provenance import (
-    configuration_producer,
-    input_materialization,
-    producer_run_id,
-)
+from codebench_pipeline.input_provenance import input_materialization, producer_run_id
 from codebench_pipeline.models import Digest, SemanticSnippet
 from codebench_pipeline.object_store import ObjectStore, StorageConfig, sha256
 from codebench_pipeline.repository_receipts import RepositoryRun
@@ -184,7 +180,7 @@ class DataFrameIOManager(ConfigurableIOManager):
     registered_revision: Digest | None = None
     _review_store: HumanReviewStore | None = PrivateAttr(default=None)
     _object_store: ObjectStore | None = PrivateAttr(default=None)
-    _configuration_producers: dict[str, str] = PrivateAttr(default_factory=dict)
+    _configuration_producers: dict[str, EventLogRecord] = PrivateAttr(default_factory=dict)
 
     @staticmethod
     def from_environment(storage: StorageConfig, *, review_home: str | None = None) -> DataFrameIOManager:
@@ -222,8 +218,12 @@ class DataFrameIOManager(ConfigurableIOManager):
 
         if self.review_home is None or self.registered_revision is None:
             raise IntegrityError("Dataset processing requires a pinned registration")
-        producer = self._configuration_producers.get(run_id, run_id)
-        registered = ConfigRunIOManager(home=self.review_home).registered(producer)
+        producer = self._configuration_producers.get(run_id)
+        if producer is None:
+            raise IntegrityError("Dataset IO has no bound registration materialization")
+        registered = ConfigRunIOManager(home=self.review_home).registered(
+            producer.run_id, materialization=producer
+        )
         if (
             registered.dataset_id != dataset_id
             or registered.registration_digest != self.registered_revision
@@ -234,24 +234,17 @@ class DataFrameIOManager(ConfigurableIOManager):
         return registered
 
     def bind_configuration_producer(self, context: InputContext) -> None:
-        """Bind indirect registration reads to Dagster's producer for this run."""
+        """Pin the completed registration record used for storage admission."""
         if self.review_home is None:
             return
-        from codebench_pipeline.config_assets import (
-            GLOBAL_CONFIG,
-            ConfigRunIOManager,
-            current_configuration_record,
-        )
+        from codebench_pipeline.config_assets import GLOBAL_CONFIG, current_configuration_record
 
         step = context.step_context
         if step.run_id in self._configuration_producers:
             return
-        producer = configuration_producer(step, GLOBAL_CONFIG)
-        if producer is None:
-            record = current_configuration_record(context.instance, GLOBAL_CONFIG, context.partition_key)
-            producer = record.run_id
-            ConfigRunIOManager(home=self.review_home).registered(producer, materialization=record)
-        self._configuration_producers[step.run_id] = producer
+        self._configuration_producers[step.run_id] = current_configuration_record(
+            context.instance, GLOBAL_CONFIG, context.partition_key
+        )
 
     def object_store(self) -> ObjectStore:
         return self._object_store or ObjectStore(self.storage)

@@ -22,7 +22,13 @@ from codebench_pipeline.dataset_records import CandidateRecord, LabelDecision
 from codebench_pipeline.dataset_registry import DatasetRegistry
 from codebench_pipeline.dataset_run import run_registered
 from codebench_pipeline.grounding_tables import SUPPORT_ATTR
-from codebench_pipeline.guarded_publication import ReleaseInputs, ReleaseProposal, prepare_guarded_release
+from codebench_pipeline.guarded_publication import (
+    ReleaseExecution,
+    ReleaseProposal,
+    build_release_proposal,
+    prepare_guarded_release,
+)
+from codebench_pipeline.guarded_publication_evidence import ReleaseInputs
 from codebench_pipeline.guarded_publication_controls import record_control
 from codebench_pipeline.guarded_publication_runtime import (
     current_proposal,
@@ -41,7 +47,7 @@ from codebench_pipeline.release_runner import ReleaseContinuation, ReleaseRunner
 from codebench_pipeline.repository_receipts import RepositoryRun
 from codebench_pipeline.review_snapshots import ReviewManifest, ReviewSnapshots
 from codebench_pipeline.runtime_instance import dataset_instance
-from codebench_pipeline.stage_configuration import DeclaredGlobalConfig
+from codebench_pipeline.stage_configuration import DatasetReleaseConfig
 from codebench_pipeline.storage import IntegrityError, fingerprint
 
 
@@ -173,14 +179,10 @@ class GuardedPublicationTests(TestCase):
 
                 def change_registration_after_load(
                     inputs: ReleaseInputs,
-                    run: RepositoryRun,
-                    registered: DeclaredGlobalConfig,
-                    *,
-                    publication_versions: dict[str, str],
+                    policy: DatasetReleaseConfig,
+                    execution: ReleaseExecution,
                 ) -> ReleaseProposal:
-                    prepared = prepare_guarded_release(
-                        inputs, run, registered, publication_versions=publication_versions
-                    )
+                    prepared = build_release_proposal(inputs, policy, execution)
                     race.enter_context(
                         patch.object(
                             DatasetRegistry,
@@ -192,7 +194,7 @@ class GuardedPublicationTests(TestCase):
 
                 with (
                     patch(
-                        "codebench_pipeline.review_inputs.prepare_guarded_release",
+                        "codebench_pipeline.review_assets.build_release_proposal",
                         side_effect=change_registration_after_load,
                     ) as intercepted,
                     self.assertRaisesRegex(

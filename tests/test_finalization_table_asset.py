@@ -24,11 +24,18 @@ from test_dataset_rules import make_candidate, make_label
 from test_declared_dataset_graph import fixture_spec
 
 from codebench_pipeline.category_rules import CategoryRules
-from codebench_pipeline.config_assets import GLOBAL_CONFIG, ConfigRunIOManager, RegisteredConfig
+from codebench_pipeline.config_assets import (
+    GLOBAL_CONFIG,
+    ConfigRunIOManager,
+    RegisteredConfig,
+    configuration_assets,
+    mapping_key,
+)
 from codebench_pipeline.dataframe_io import DataFrameIOManager, frame_bytes
 from codebench_pipeline.dataframe_schemas import ProposedAnnotationsTable, validated_frame
 from codebench_pipeline.dataset_asset_types import DATASET_PARTITIONS, TABLE_TYPES
 from codebench_pipeline.dataset_collection_binding import FINALIZATION_BINDING
+from codebench_pipeline.dataset_config import DeduplicationPolicy
 from codebench_pipeline.dataset_engine import implementation_signature
 from codebench_pipeline.dataset_finalization import category_eligible_annotations, deduplicated_annotations
 from codebench_pipeline.dataset_storage_io import RegisteredDatasetTableIO
@@ -104,7 +111,9 @@ class FinalizationTableAssetTests(unittest.TestCase):
     def setUp(self) -> None:
         home = Path(self.enterContext(TemporaryDirectory()))
         self.home = home
-        spec = fixture_spec(home)
+        spec = fixture_spec(home).model_copy(
+            update={"deduplication": DeduplicationPolicy(normalize_safe_whitespace=False)}
+        )
         self.registered = RegisteredConfig.from_spec(spec)
         self.partition = spec.dataset_id
         self.instance = self.enterContext(DagsterInstance.local_temp(str(home)))
@@ -142,18 +151,18 @@ class FinalizationTableAssetTests(unittest.TestCase):
         self.fail_compute = False
         self.stale_on_publish = False
 
-    def dedup(self, table: Annotations) -> FinalizationTable:
+    def dedup(self, table: Annotations, policy: DeduplicationPolicy) -> FinalizationTable:
         self.calls += 1
         if self.fail_compute:
             raise ValueError("synthetic compute failure")
-        result = deduplicated_annotations(table)
+        result = deduplicated_annotations(table, policy)
         if self.stale_on_publish:
             self.authorization.return_value = {"dataset": {"state": "stale"}}
         return result
 
-    def eligible(self, table: Annotations, rules: CategoryRules) -> FinalizationTable:
+    def eligible(self, table: Annotations, category_id: str) -> FinalizationTable:
         self.eligibility_calls += 1
-        return category_eligible_annotations(table, rules)
+        return category_eligible_annotations(table, category_id)
 
     def run_tables(self, *, eligibility: bool = False) -> ExecuteInProcessResult:
         @asset(key=GLOBAL_CONFIG, partitions_def=DATASET_PARTITIONS, io_manager_key="config_run_io_manager")
@@ -169,18 +178,16 @@ class FinalizationTableAssetTests(unittest.TestCase):
         def proposed_annotations() -> Annotations:
             return self.input
 
-        @asset(
-            key_prefix=["datasets"], partitions_def=DATASET_PARTITIONS, io_manager_key="dataset_io_manager"
-        )
-        def category_rules() -> CategoryRules:
-            return self.registered.rules
-
         dedup, eligible = finalization_table_assets(self.dedup, self.eligible)
-        assets = [global_config, proposed_annotations, dedup]
-        if eligibility:
-            assets.extend((category_rules, eligible))
+        tables = (dedup, eligible) if eligibility else (dedup,)
+        mapping_keys = {mapping_key(table.key.path[-1]) for table in tables}
         return materialize(
-            assets,
+            [
+                global_config,
+                proposed_annotations,
+                *(item for item in configuration_assets(self.home) if item.key in mapping_keys),
+                *tables,
+            ],
             resources={
                 "config_run_io_manager": ConfigRunIOManager(home=str(self.home)),
                 "dataset_io_manager": IOManagerDefinition(resource_fn=lambda _: self.io),
@@ -219,7 +226,7 @@ class FinalizationTableAssetTests(unittest.TestCase):
                         "duplicate_id": "row-b",
                         "survivor_id": "row-a",
                         "normalized_command": "probe inspect example",
-                        "reason": "exact_normalized_command_and_annotation",
+                        "reason": "exact_command_and_annotation",
                     }
                 ],
             )
@@ -243,7 +250,11 @@ class FinalizationTableAssetTests(unittest.TestCase):
         observation = observations[0].asset_observation
         assert observation is not None
         attempt = observation.metadata["inference_attempt"].value
-        signature = self.io.stage_signature(DEDUP.path[-1], TypedConfig(), {"annotations": self.input})
+        signature = self.io.stage_signature(
+            DEDUP.path[-1],
+            self.registered.scopes.deduplicated_annotations.deduplication,
+            {"annotations": self.input},
+        )
         key = f"{self.partition}/{DEDUP.path[-1]}/{signature}"
         self.assertEqual(self.io.read_evidence(f"{key}/{attempt}/receipts.json"), b"{}")
         self.assertEqual(
@@ -384,9 +395,9 @@ class FinalizationTableAssetTests(unittest.TestCase):
         return signature, key, old_index, sidecar
 
     def test_runless_legacy_receipts_remain_readable_but_are_not_reused(self) -> None:
-        dedup = deduplicated_annotations(self.input)
+        dedup = deduplicated_annotations(self.input, DeduplicationPolicy())
         rules = self.registered.rules
-        eligibility = category_eligible_annotations(dedup.table, rules)
+        eligibility = category_eligible_annotations(dedup.table, rules.category_id)
         entries = (
             (DEDUP, LEGACY_DEDUP, {"annotations": self.input}, dedup, "duplicates.json"),
             (

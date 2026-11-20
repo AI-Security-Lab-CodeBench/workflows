@@ -335,9 +335,14 @@ class ConfidencePublicationTests(unittest.TestCase):
                     "/".join(record.asset_materialization.asset_key.path[1:])
                     for record in instance.get_records_for_run(published.dagster_run_id).records
                     if record.asset_materialization is not None
-                }
-                - {"global_config"},
-                {"human_review_decisions", "dataset_release"},
+                },
+                {
+                    "global_config",
+                    "map_human_review_decisions_config",
+                    "map_dataset_release_config",
+                    "human_review_decisions",
+                    "dataset_release",
+                },
             )
             data = DatasetDataService(home, instance)
             query = DatasetQueryRequest(dataset_id=spec.dataset_id)
@@ -357,7 +362,8 @@ class ConfidencePublicationTests(unittest.TestCase):
                 resolved = ReviewSnapshots.from_environment(home, data).current(spec.dataset_id)
             self.assertEqual(
                 set(resolved.manifest.references),
-                set(built) - {"human_review_queue", "human_review_decisions", "dataset_release"},
+                set(built)
+                - {"human_review_queue", "human_review_decisions", "dataset_release", "labeling_failures"},
             )
             reference = resolved.manifest.references["documentation/command_candidates"]
             manager = DataFrameIOManager(storage=spec.storage)

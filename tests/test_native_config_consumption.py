@@ -9,15 +9,14 @@ from native_dataset_cycle import NativeDatasetCycle
 from pydantic import BaseModel, JsonValue, RootModel
 
 from codebench_pipeline.config_assets import (
-    GLOBAL_CONFIG,
     ConfigRunIOManager,
-    RegisteredConfig,
     configured_selection,
     current_configuration_record,
     mapping_key,
 )
 from codebench_pipeline.dataset_registry import DatasetRegistry
 from codebench_pipeline.runtime_instance import dataset_instance
+from codebench_pipeline.stage_configuration import ConfigArtifact, PolicyArtifact
 
 
 class NativeConfigConsumptionTests(TestCase):
@@ -128,23 +127,21 @@ class NativeConfigConsumptionTests(TestCase):
                 repeated.metadata["input_fingerprint"], materialization.metadata["input_fingerprint"]
             )
 
-    def test_direct_policy_consumer_rejects_rules_from_another_registration(self) -> None:
+    def test_scoped_policy_consumer_rejects_rules_from_another_registration(self) -> None:
         home = Path(self.enterContext(TemporaryDirectory()))
         spec = LabelingFixture(self, home).spec
         dataset_id = DatasetRegistry(home).register(spec)
-        other_spec = spec.model_copy(
-            update={"rules": spec.rules.model_copy(update={"policy": "New policy."})}
-        )
-        other_registration = RegisteredConfig.from_spec(other_spec)
+        other_policy = PolicyArtifact(category_rules=spec.rules.model_copy(update={"policy": "New policy."}))
         cycle = NativeDatasetCycle(home)
         job = cycle.definitions.get_implicit_global_asset_job_def()
         proposed = AssetKey(["datasets", "proposed_annotations"])
-        read_config = ConfigRunIOManager.load_input
+        mapping = mapping_key("proposed_annotations")
+        read_scope = ConfigRunIOManager.load_scope
 
-        def read_other_registration(manager: ConfigRunIOManager, context: InputContext) -> BaseModel | None:
-            if context.asset_key == GLOBAL_CONFIG:
-                return other_registration
-            return read_config(manager, context)
+        def read_other_policy(manager: ConfigRunIOManager, context: InputContext) -> ConfigArtifact:
+            if context.asset_key == mapping:
+                return other_policy
+            return read_scope(manager, context)
 
         with dataset_instance(home) as instance:
             instance.add_dynamic_partitions("dataset_builds", [dataset_id])
@@ -153,7 +150,7 @@ class NativeConfigConsumptionTests(TestCase):
             )
             self.assertTrue(refreshed.success)
             self.assertIn("labeling_attempts", cycle.drain(instance, partition=dataset_id))
-            with patch.object(ConfigRunIOManager, "load_input", read_other_registration):
+            with patch.object(ConfigRunIOManager, "load_scope", read_other_policy):
                 result = job.execute_in_process(
                     instance=instance,
                     partition_key=dataset_id,

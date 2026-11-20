@@ -178,6 +178,9 @@ class NativeConfigEdgesTests(TestCase):
                 "merged_command_candidates",
                 "filtered_commands",
                 "labeling_attempts",
+                "proposed_annotations",
+                "deduplicated_annotations",
+                "category_eligible_annotations",
                 "human_review_queue",
             )
         }
@@ -347,7 +350,12 @@ class NativeConfigEdgesTests(TestCase):
             "merged_command_candidates",
             "filtered_commands",
             "labeling_attempts",
+            "proposed_annotations",
+            "deduplicated_annotations",
+            "category_eligible_annotations",
             "human_review_queue",
+            "human_review_decisions",
+            "dataset_release",
         )
         expected = {
             AssetKey(["datasets", *prefix, stage]): AssetKey(["datasets", f"map_{scope}_config"])
@@ -357,45 +365,50 @@ class NativeConfigEdgesTests(TestCase):
         rules = AssetKey(["datasets", "category_rules"])
         global_config = AssetKey(["datasets", "global_config"])
         all_keys = graph.get_all_asset_keys()
-        audit = AssetKey(["datasets", "bashguard_syntax_audit"])
-        policy = {
-            AssetKey(["datasets", name])
-            for name in (
-                "proposed_annotations",
-                "category_eligible_annotations",
-                "human_review_decisions",
-                "dataset_release",
-            )
-        }
-        registration_guard = {
-            AssetKey(["datasets", name]) for name in ("labeling_failures", "deduplicated_annotations")
-        }
+        configuration = {CONFIG_DIRECTORY, global_config, rules}
+        mappings = set(expected.values())
+        audit = {AssetKey(["datasets", name]) for name in ("bashguard_syntax_audit", "labeling_failures")}
+        self.assertEqual(len(all_keys), 34)
         self.assertEqual(
             set(all_keys),
-            set(expected)
-            | set(expected.values())
-            | policy
-            | registration_guard
-            | {CONFIG_DIRECTORY, rules, global_config, audit},
+            set(expected) | mappings | configuration | audit,
         )
         self.assertEqual(
             {key for key in all_keys if graph.get(key).group_name == "configuration"},
-            {CONFIG_DIRECTORY, global_config, rules},
+            configuration,
         )
         self.assertEqual(graph.get(CONFIG_DIRECTORY).parent_keys, set())
         self.assertEqual(graph.get(global_config).parent_keys, {CONFIG_DIRECTORY})
         self.assertEqual(graph.get(rules).parent_keys, {global_config})
+        self.assertEqual(
+            {child for parent in configuration for child in graph.get(parent).child_keys} - configuration,
+            mappings,
+        )
 
         for stage, mapping in expected.items():
             with self.subTest(stage=stage.to_user_string()):
                 parents = graph.get(stage).parent_keys
-                self.assertEqual(parents & set(expected.values()), {mapping})
-                if stage == AssetKey(["datasets", "human_review_queue"]):
-                    self.assertEqual(parents & {global_config, rules}, {global_config, rules})
-                else:
-                    self.assertNotIn(rules, parents)
-        configs = set(expected.values()) | {global_config, rules}
-        for stage in policy:
-            self.assertEqual(graph.get(stage).parent_keys & configs, {global_config, rules})
-        for stage in registration_guard:
-            self.assertEqual(graph.get(stage).parent_keys & configs, {global_config})
+                self.assertEqual(parents & mappings, {mapping})
+        for stage in audit:
+            self.assertFalse(graph.get(stage).parent_keys & mappings)
+
+    def test_registration_rejects_metadata_only_configuration_bypasses(self) -> None:
+        home = Path(self.enterContext(TemporaryDirectory()))
+        settings = AssetKey("future_settings")
+
+        @asset(key=settings, group_name="configuration")
+        def future_settings() -> str:
+            return "settings"
+
+        bypass = filtered_commands.map_asset_specs(lambda spec: spec.merge_attributes(deps=[settings]))
+        with (
+            patch(
+                "codebench_pipeline.definitions.configuration_assets",
+                return_value=[*configuration_assets(home), future_settings],
+            ),
+            patch("codebench_pipeline.definitions.filtered_commands", bypass),
+            self.assertRaisesRegex(
+                IntegrityError, "datasets/filtered_commands bypasses scoped configuration: future_settings"
+            ),
+        ):
+            build_definitions(home)

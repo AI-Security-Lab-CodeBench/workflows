@@ -209,9 +209,10 @@ class LabelingTableTests(unittest.TestCase):
             )
             self.assertFalse(storage.exists(f"{prefix}/evidence-index.json"))
             self.assertEqual(requests, fresh_requests[1:])
-            requested = {key for request in cycle.tick(instance) for key in request.asset_selection or ()}
-            self.assertIn(AssetKey(["datasets", "proposed_annotations"]), requested)
-            self.assertNotIn(asset_key, requested)
+            downstream = cycle.drain(instance, partition=spec.dataset_id)
+            self.assertIn("proposed_annotations", downstream)
+            self.assertNotIn("labeling_attempts", downstream)
+            self.assertEqual(requests, fresh_requests[1:])
 
             candidates = set(fresh_requests)
             requests.clear()

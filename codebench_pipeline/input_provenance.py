@@ -1,7 +1,5 @@
 """Resolve the materialization that identifies an asset input's bytes."""
 
-from typing import Protocol
-
 from dagster import (
     AssetKey,
     AssetRecordsFilter,
@@ -12,23 +10,6 @@ from dagster import (
     OutputContext,
 )
 from dagster._core.execution.context.output import RUN_ID_PLACEHOLDER
-from dagster._core.execution.plan.handle import StepHandle
-from dagster._core.execution.plan.outputs import StepOutputHandle
-from dagster._core.execution.plan.plan import ExecutionPlan
-
-
-class _OutputContextLookup(Protocol):
-    @property
-    def execution_plan(self) -> ExecutionPlan: ...
-
-    def get_output_context(self, step_output_handle: StepOutputHandle) -> OutputContext: ...
-
-
-def configuration_producer(step: _OutputContextLookup, key: AssetKey) -> str | None:
-    step_key = key.to_python_identifier()
-    if not step.execution_plan.has_step(StepHandle.parse_from_key(step_key)):
-        return None
-    return producer_run_id(step.get_output_context(StepOutputHandle(step_key, "result")))
 
 
 def producer_run_id(upstream: OutputContext | None) -> str | None:

@@ -154,6 +154,10 @@ existing data before replacing it; never overwrite concurrent work.
   may load local configuration files. This group currently contains
   `global_config` and `category_rules`; the latter consumes the former.
   `global_config` is the single source of loaded, validated business settings.
+  Every edge crossing from the configuration group to another group must end
+  at a scoped configuration mapping in the consumer's group. The mapping
+  publishes the settings its consumer actually uses. Enforce this on registered
+  asset definitions, including dependencies that do not load an input value.
   A mapping projects that structure and belongs beside its consumer. Processing
   assets and their helpers must not open local files to discover inputs, load
   policy or settings from the environment or registry, or accept a second copy

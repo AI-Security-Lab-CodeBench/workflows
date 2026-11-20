@@ -2,7 +2,14 @@ from functools import cached_property
 from pathlib import Path
 
 import pandas as pd
-from dagster import AssetKey, AssetRecordsFilter, DagsterInstance, EventLogRecord, JsonMetadataValue
+from dagster import (
+    AssetKey,
+    AssetRecordsFilter,
+    DagsterInstance,
+    EventLogRecord,
+    JsonMetadataValue,
+    TextMetadataValue,
+)
 from dagster._core.definitions.data_version import (
     CachingStaleStatusResolver,
     DataProvenance,
@@ -11,7 +18,7 @@ from dagster._core.definitions.data_version import (
     extract_data_provenance_from_entry,
     extract_data_version_from_entry,
 )
-from pydantic import AliasPath, BaseModel, Field, ValidationError
+from pydantic import AliasPath, BaseModel, Field, TypeAdapter, ValidationError
 
 from codebench_pipeline.artifact_approval import REUSABLE_PROCESSING_STAGES, effective_approval
 from codebench_pipeline.category_rules import CategoryRules
@@ -29,6 +36,7 @@ from codebench_pipeline.dataset_engine import scoped_code_versions
 from codebench_pipeline.dataset_provenance import provenance_resolver
 from codebench_pipeline.dataset_registry import DatasetRegistry
 from codebench_pipeline.finalization_cache_reuse import materialization_attempt_succeeded
+from codebench_pipeline.finalization_publication import TABLE_REGISTRATION_METADATA
 from codebench_pipeline.human_review import HumanReviewError
 from codebench_pipeline.human_review_store import HumanReviewStore
 from codebench_pipeline.models import Digest
@@ -102,6 +110,13 @@ class ArtifactCurrentness:
                 except (IntegrityError, ValidationError):
                     return None
                 return registered.registration_digest if registered.dataset_id == partition else None
+
+        admitted = materialization.metadata.get(TABLE_REGISTRATION_METADATA)
+        if isinstance(admitted, TextMetadataValue):
+            try:
+                return TypeAdapter(Digest).validate_python(admitted.value)
+            except ValidationError:
+                return None
 
         run = self.instance.get_run_by_id(record.run_id)
         if run is None:

@@ -9,16 +9,15 @@ from dagster import (
 )
 from pandera.typing import DataFrame
 
-from codebench_pipeline.category_rules import CategoryRules
-from codebench_pipeline.config_assets import RegisteredConfig, registered_input, require_registered_rules
+from codebench_pipeline.config_assets import mapped_input
 from codebench_pipeline.dataframe_io import REVIEW_PREPARATION
 from codebench_pipeline.dataframe_schemas import (
     CommandsTable,
     HumanReviewDecisionsTable,
     ProposedAnnotationsTable,
 )
-from codebench_pipeline.dataset_asset_types import DATASET_PARTITIONS, TABLE_TYPES, rules_input, table_input
-from codebench_pipeline.dataset_finalization import review_evidence_keys
+from codebench_pipeline.dataset_asset_types import DATASET_PARTITIONS, TABLE_TYPES, table_input
+from codebench_pipeline.guarded_publication import build_release_proposal
 from codebench_pipeline.human_review import HumanReviewError
 from codebench_pipeline.review_frames import require_decision_frame
 from codebench_pipeline.review_inputs import (
@@ -28,6 +27,7 @@ from codebench_pipeline.review_inputs import (
     DecisionInput,
     ReleaseInput,
 )
+from codebench_pipeline.stage_configuration import DatasetReleaseConfig, ReviewDecisionConfig
 from codebench_pipeline.storage import fingerprint
 
 
@@ -38,21 +38,20 @@ def human_assets() -> list[AssetsDefinition]:
         partitions_def=DATASET_PARTITIONS,
         io_manager_key="dataset_io_manager",
         dagster_type=TABLE_TYPES[HumanReviewDecisionsTable],
-        deps=review_evidence_keys("human_review_queue"),
         ins={
             "approved": AssetIn(
                 key=AssetKey(["datasets", "human_review_queue"]),
                 dagster_type=DECISION_INPUT,
                 input_manager_key=REVIEW_INPUT_MANAGER,
             ),
-            "registered": registered_input(),
+            "mapped_config": mapped_input("human_review_decisions", ReviewDecisionConfig),
         },
     )
     def human_review_decisions(
         approved: DecisionInput,
-        registered: RegisteredConfig,
+        mapped_config: ReviewDecisionConfig,
     ) -> Output[DataFrame[HumanReviewDecisionsTable]]:
-        if approved.token.dataset_id != registered.dataset_id or approved.queue.attrs.get(
+        if approved.token.dataset_id != mapped_config.dataset_id or approved.queue.attrs.get(
             REVIEW_PREPARATION
         ) != {
             "batch_id": approved.token.batch_id,
@@ -82,7 +81,6 @@ def human_assets() -> list[AssetsDefinition]:
         partitions_def=DATASET_PARTITIONS,
         io_manager_key="dataset_io_manager",
         dagster_type=TABLE_TYPES[CommandsTable],
-        deps=review_evidence_keys("category_rules", "category_eligible_annotations"),
         ins={
             "category_eligible_annotations": table_input(
                 "category_eligible_annotations", ProposedAnnotationsTable
@@ -92,33 +90,34 @@ def human_assets() -> list[AssetsDefinition]:
                 dagster_type=RELEASE_INPUT,
                 input_manager_key=REVIEW_INPUT_MANAGER,
             ),
-            "category_rules": rules_input(),
-            "registered": registered_input(),
+            "mapped_config": mapped_input("dataset_release", DatasetReleaseConfig),
         },
     )
     def dataset_release(
         category_eligible_annotations: DataFrame[ProposedAnnotationsTable],
         approved: ReleaseInput,
-        category_rules: CategoryRules,
-        registered: RegisteredConfig,
+        mapped_config: DatasetReleaseConfig,
     ) -> Output[DataFrame[CommandsTable]]:
         require_decision_frame(approved.persisted_decisions, approved.decisions)
-        require_registered_rules(registered, category_rules)
+        token = approved.evidence.token
         if (
-            approved.token.dataset_id != registered.dataset_id
-            or not ProposedAnnotationsTable.validate(category_eligible_annotations).equals(approved.reviewed)
-            or category_rules != approved.rules
+            token.dataset_id != mapped_config.dataset_id
+            or not ProposedAnnotationsTable.validate(category_eligible_annotations).equals(
+                approved.evidence.resolved.reviewed
+            )
+            or mapped_config.digest != approved.execution.mapping_digest
         ):
             raise HumanReviewError("stale", "Release inputs differ from the completed snapshot")
-        version = fingerprint(approved.token.model_dump(mode="json"))
+        proposal = build_release_proposal(approved.evidence, mapped_config, approved.execution)
+        version = fingerprint(token.model_dump(mode="json"))
         return Output(
-            approved.commands,
+            proposal.output,
             data_version=DataVersion(version),
             metadata={
                 "input_fingerprint": version,
                 "cache_hit": False,
                 "schema": "CommandsTable",
-                "evidence": MetadataValue.json(approved.token.model_dump(mode="json")),
+                "evidence": MetadataValue.json(token.model_dump(mode="json")),
             },
         )
 

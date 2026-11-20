@@ -73,15 +73,18 @@ from codebench_pipeline.finalization_table_asset import (
     MergeInput,
     ProjectionInput,
 )
-from codebench_pipeline.human_review import HumanReviewError
 from codebench_pipeline.object_store import safe_key
 from codebench_pipeline.source_evidence import retain_source_receipt, validate_source_receipt
 from codebench_pipeline.source_review_guard import authorize_inventory_input
 from codebench_pipeline.stage_configuration import (
+    CategoryEligibilityConfig,
+    ConfigArtifact,
     DeclaredMergeConfig,
+    DeduplicationConfig,
     FilterConfig,
     GuardedLabelingCacheConfig,
     GuardedLabelingConfig,
+    PolicyArtifact,
 )
 from codebench_pipeline.storage import IntegrityError
 from codebench_pipeline.typed_config import TypedConfig
@@ -103,8 +106,7 @@ class _FinalizationStep:
         | None
     ) = None
     registered: RegisteredConfig | None = None
-    rules: CategoryRules | None = None
-    mapped_config: DeclaredMergeConfig | FilterConfig | CollectionInput | GuardedLabelingConfig | None = None
+    mapped_config: ConfigArtifact | None = None
     documentation: pd.DataFrame | None = None
     cache: TableCache | None = None
     reused: ReusedTable[pa.DataFrameModel] | None = None
@@ -151,11 +153,7 @@ class FinalizationTableIO(IOManager):
         | LabelingInput
         | MergeInput
         | ProjectionInput
-        | RegisteredConfig
-        | DeclaredMergeConfig
-        | FilterConfig
-        | CollectionInput
-        | GuardedLabelingConfig
+        | ConfigArtifact
         | CategoryRules
         | pd.DataFrame
     ):
@@ -176,21 +174,8 @@ class FinalizationTableIO(IOManager):
             self.steps[identity] = step
         if step.stage in DECLARED_SOURCE_STAGES:
             return self._load_collection(context, step)
-        if context.name == "registered":
-            result = RegisteredConfig.model_validate(self.configuration.load_input(context))
-            if step.registered is not None and result != step.registered:
-                raise HumanReviewError("stale", "Registration changed during merge input loading")
-            step.registered = result
-        elif context.name == "mapped_config":
-            artifact = self.configuration.load_input(context)
-            match step.stage:
-                case "merged_command_candidates":
-                    result = DeclaredMergeConfig.model_validate(artifact)
-                case "labeling_attempts":
-                    result = GuardedLabelingConfig.model_validate(artifact)
-                    step.registered = self.tables.run_configuration(run.run_id, step.partition)
-                case _:
-                    result = FilterConfig.model_validate(artifact)
+        if context.name == "mapped_config":
+            result = self.configuration.load_scope(context)
             step.mapped_config = result
         elif step.stage == "merged_command_candidates":
             merge = self._load_merge(context, step)
@@ -205,27 +190,20 @@ class FinalizationTableIO(IOManager):
                     reference=snapshot.reference,
                 )
             )
-            if context.name == "category_rules":
-                result = CategoryRules.model_validate(snapshot.value)
-                step.rules = result
-            else:
-                value = snapshot.value
-                if not isinstance(value, pd.DataFrame):
-                    raise IntegrityError("Finalization annotations input must be a table")
-                if step.stage == "labeling_attempts":
-                    if context.name == "documentation_capture":
-                        result = step.documentation = SourceDocumentsTable.validate(value)
-                    else:
-                        result = step.loaded = LabelingInput(FilteredCommandsTable.validate(value))
-                elif step.stage == "filtered_commands":
-                    result = FilteringInput(CommandCandidatesTable.validate(value))
-                    step.loaded = result
-                elif step.stage in PROJECTION_SCHEMAS:
-                    result = ProjectionInput(LabelingAttemptsTable.validate(value))
-                    step.loaded = result
+            value = snapshot.value
+            if not isinstance(value, pd.DataFrame):
+                raise IntegrityError("Finalization annotations input must be a table")
+            if step.stage == "labeling_attempts":
+                if context.name == "documentation_capture":
+                    result = step.documentation = SourceDocumentsTable.validate(value)
                 else:
-                    result = FinalizationInput(ProposedAnnotationsTable.validate(value))
-                    step.loaded = result
+                    result = step.loaded = LabelingInput(FilteredCommandsTable.validate(value))
+            elif step.stage == "filtered_commands":
+                result = step.loaded = FilteringInput(CommandCandidatesTable.validate(value))
+            elif step.stage in PROJECTION_SCHEMAS:
+                result = step.loaded = ProjectionInput(LabelingAttemptsTable.validate(value))
+            else:
+                result = step.loaded = FinalizationInput(ProposedAnnotationsTable.validate(value))
         self._prepare(context, step)
         return result
 
@@ -234,7 +212,7 @@ class FinalizationTableIO(IOManager):
     ) -> CollectionInput | pd.DataFrame:
         if context.name == "mapped_config":
             result = CollectionInput.model_validate(
-                self.configuration.load_input(context), from_attributes=True
+                self.configuration.load_scope(context), from_attributes=True
             )
             step.mapped_config = result
         else:
@@ -312,27 +290,24 @@ class FinalizationTableIO(IOManager):
         return loaded
 
     def _prepare(self, context: InputContext, step: _FinalizationStep) -> None:
-        loaded, registered, rules = step.loaded, step.registered, step.rules
-        if loaded is None or registered is None or step.cache is not None:
+        loaded, mapped = step.loaded, step.mapped_config
+        if loaded is None or step.cache is not None:
             return
         if isinstance(loaded, MergeInput) and len(step.upstreams) != len(COLLECTION_BRANCHES):
             return
-        if step.stage in {"category_eligible_annotations", "proposed_annotations"} and rules is None:
-            return
+        run_id = context.step_context.run_id
+        registered = self.tables.run_configuration(run_id, step.partition)
         config: TypedConfig | FilteringConfig | CollectionMergeConfig = TypedConfig()
         inputs: dict[str, pd.DataFrame | CategoryRules]
         match loaded:
             case FilteringInput():
-                mapped = step.mapped_config
                 if not isinstance(mapped, FilterConfig):
                     return
                 config = mapped.filtered_commands
                 if config != registered.scopes.filtered_commands.filtered_commands:
                     raise IntegrityError("Mapped filter settings differ from the run configuration")
-                rules = mapped.category_rules
                 inputs = {"command_candidates": loaded.candidates}
             case MergeInput():
-                mapped = step.mapped_config
                 if not isinstance(mapped, DeclaredMergeConfig):
                     return
                 if mapped != registered.scopes.merged_command_candidates:
@@ -340,7 +315,6 @@ class FinalizationTableIO(IOManager):
                 config = mapped.merged_command_candidates
                 inputs = {f"{branch}_candidates": frame for branch, frame in loaded.frames.items()}
             case LabelingInput():
-                mapped = step.mapped_config
                 if not isinstance(mapped, GuardedLabelingConfig) or step.documentation is None:
                     return
                 settings = registered.scopes.labeling_attempts
@@ -350,19 +324,33 @@ class FinalizationTableIO(IOManager):
                 ):
                     raise IntegrityError("Mapped labeling settings differ from the run configuration")
                 config = GuardedLabelingCacheConfig.from_settings(mapped)
-                rules = mapped.category_rules
                 inputs = {"commands": loaded.commands, "documentation_capture": step.documentation}
             case ProjectionInput():
+                if step.stage == "proposed_annotations" and not isinstance(mapped, PolicyArtifact):
+                    return
                 inputs = {"attempts": loaded.attempts}
             case FinalizationInput():
+                if step.stage == "deduplicated_annotations":
+                    if not isinstance(mapped, DeduplicationConfig):
+                        return
+                    if mapped != registered.scopes.deduplicated_annotations:
+                        raise IntegrityError(
+                            "Mapped deduplication settings differ from the run configuration"
+                        )
+                    config = mapped.deduplication
+                elif step.stage == "category_eligible_annotations":
+                    if not isinstance(mapped, CategoryEligibilityConfig):
+                        return
+                    if mapped.category_id != registered.rules.category_id:
+                        raise IntegrityError("Mapped category differs from the run configuration")
+                    config = mapped
                 inputs = {"annotations": loaded.annotations}
             case pd.DataFrame():
                 raise IntegrityError("Collection inputs are prepared by the collection input hook")
-        if rules is not None:
-            require_registered_rules(registered, rules)
-            inputs["category_rules"] = rules
+        if isinstance(mapped, PolicyArtifact):
+            require_registered_rules(registered, mapped.category_rules)
+            inputs["category_rules"] = mapped.category_rules
 
-        run_id = context.step_context.run_id
         authorize_table_inputs(
             self.tables,
             context.instance,
@@ -373,6 +361,7 @@ class FinalizationTableIO(IOManager):
             registered=registered,
         )
         cache = prepare_table_cache(self.tables, step.stage, step.partition, "dataset", config, inputs)
+        step.registered = registered
         step.cache = cache
         if isinstance(loaded, LabelingInput):
             step.attempt = uuid.uuid4().hex

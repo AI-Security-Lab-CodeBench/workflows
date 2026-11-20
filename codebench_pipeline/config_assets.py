@@ -45,13 +45,18 @@ from codebench_pipeline.input_provenance import (
 from codebench_pipeline.keenable_policy import MAX_BYTES
 from codebench_pipeline.object_store import sha256
 from codebench_pipeline.stage_configuration import (
+    CategoryEligibilityConfig,
     ConfigArtifact,
+    DatasetReleaseConfig,
     DeclaredBranchConfig,
     DeclaredGlobalConfig,
     DeclaredMergeConfig,
+    DeduplicationConfig,
     FilterConfig,
     GuardedLabelingConfig,
     KeenableGrantPreview,
+    PolicyArtifact,
+    ReviewDecisionConfig,
     ReviewQueueConfig,
 )
 from codebench_pipeline.storage import IntegrityError, fingerprint
@@ -163,27 +168,31 @@ class ConfigRunIOManager(ConfigurableIOManager):
             if version is None or version.value != value.digest:
                 raise IntegrityError("Persisted configuration directory differs from its materialization")
             return value
-        upstream = context.upstream_output
-        if upstream is None:
-            payload = self._read_run_output(context.step_context.run_id, context.asset_key)
-        else:
-            from codebench_pipeline.finalization_cache_reuse import materialization_attempt_succeeded
-
-            record = input_materialization(context)
-            if record is None or not materialization_attempt_succeeded(
-                context.instance,
-                record,
-                output_name="result" if producer_run_id(upstream) is None else upstream.name,
-                retry_number="native",
-            ):
-                raise IntegrityError(f"No successful configuration for {context.asset_key.to_user_string()}")
-            payload = self._read_materialized(record)
         if context.asset_key == GLOBAL_CONFIG:
-            return RegisteredConfig.model_validate_json(payload, strict=True)
+            return RegisteredConfig.model_validate_json(self._upstream_payload(context), strict=True)
+        return self.load_scope(context)
+
+    def load_scope(self, context: InputContext) -> ConfigArtifact:
         contract = context.dagster_type.typing_type
         if not isinstance(contract, type) or not issubclass(contract, ConfigArtifact):
             raise IntegrityError(f"No scoped configuration contract for {context.asset_key.to_user_string()}")
-        return contract.model_validate_json(payload, strict=True)
+        return contract.model_validate_json(self._upstream_payload(context), strict=True)
+
+    def _upstream_payload(self, context: InputContext) -> bytes:
+        upstream = context.upstream_output
+        if upstream is None:
+            return self._read_run_output(context.step_context.run_id, context.asset_key)
+        from codebench_pipeline.finalization_cache_reuse import materialization_attempt_succeeded
+
+        record = input_materialization(context)
+        if record is None or not materialization_attempt_succeeded(
+            context.instance,
+            record,
+            output_name="result" if producer_run_id(upstream) is None else upstream.name,
+            retry_number="native",
+        ):
+            raise IntegrityError(f"No successful configuration for {context.asset_key.to_user_string()}")
+        return self._read_materialized(record)
 
     def registered(self, run_id: str, *, materialization: EventLogRecord | None = None) -> RegisteredConfig:
         payload = (
@@ -389,11 +398,33 @@ def configuration_assets(home: Path, *, authoring_root: Path | None = None) -> l
             ),
         ),
         mapping(
+            "proposed_annotations",
+            PolicyArtifact,
+            policy=lambda _, rules: PolicyArtifact(category_rules=rules),
+        ),
+        mapping(
+            "deduplicated_annotations",
+            DeduplicationConfig,
+            lambda registered: registered.scopes.deduplicated_annotations,
+        ),
+        mapping(
+            "category_eligible_annotations",
+            CategoryEligibilityConfig,
+            lambda registered: CategoryEligibilityConfig(category_id=registered.rules.category_id),
+        ),
+        mapping(
             "human_review_queue",
             ReviewQueueConfig,
-            policy=lambda registered, rules: ReviewQueueConfig(
-                category_rules=rules,
-                human_review_queue=registered.scopes.human_review_queue.human_review_queue,
-            ),
+            policy=ReviewQueueConfig.project,
+        ),
+        mapping(
+            "human_review_decisions",
+            ReviewDecisionConfig,
+            lambda registered: ReviewDecisionConfig(dataset_id=registered.dataset_id),
+        ),
+        mapping(
+            "dataset_release",
+            DatasetReleaseConfig,
+            policy=DatasetReleaseConfig.project,
         ),
     ]

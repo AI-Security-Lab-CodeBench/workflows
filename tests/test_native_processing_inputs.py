@@ -52,7 +52,7 @@ class NativeProcessingInputTests(TestCase):
                 for event in selected.all_events
                 if isinstance(data := event.event_specific_data, LoadedInputData)
             ],
-            ["mapped_config", "registered", *(f"{branch}_candidates" for branch in branch_references)],
+            ["mapped_config", *(f"{branch}_candidates" for branch in branch_references)],
         )
         [before] = prepared.asset_materializations_for_node(mapping.to_python_identifier())
         [after] = refreshed.asset_materializations_for_node(mapping.to_python_identifier())

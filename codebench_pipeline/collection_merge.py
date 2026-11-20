@@ -1,13 +1,7 @@
 from dagster import AssetIn, AssetKey, AssetsDefinition, DataVersion, Output, asset
 from pandera.typing import DataFrame
 
-from codebench_pipeline.config_assets import (
-    GLOBAL_CONFIG,
-    REGISTERED_CONFIG_TYPE,
-    RegisteredConfig,
-    mapped_input,
-    mapping_key,
-)
+from codebench_pipeline.config_assets import mapped_input
 from codebench_pipeline.dataframe_schemas import CommandCandidatesTable
 from codebench_pipeline.dataset_asset_types import DATASET_PARTITIONS, TABLE_TYPES
 from codebench_pipeline.dataset_branches import COLLECTION_BRANCHES, asset_path
@@ -28,14 +22,9 @@ def collection_merge_asset() -> AssetsDefinition:
         dagster_type=TABLE_TYPES[CommandCandidatesTable],
         hooks={retain_failed_finalization},
         ins={
-            "mapped_config": AssetIn(
-                key=mapping_key("merged_command_candidates"),
-                dagster_type=mapped_input("merged_command_candidates", DeclaredMergeConfig).dagster_type,
-                input_manager_key=FINALIZATION_TABLE_IO,
-            ),
-            "registered": AssetIn(
-                key=GLOBAL_CONFIG,
-                dagster_type=REGISTERED_CONFIG_TYPE,
+            "mapped_config": mapped_input(
+                "merged_command_candidates",
+                DeclaredMergeConfig,
                 input_manager_key=FINALIZATION_TABLE_IO,
             ),
             **{
@@ -55,7 +44,6 @@ def collection_merge_asset() -> AssetsDefinition:
         documentation_candidates: DataFrame[CommandCandidatesTable],
         keenable_candidates: DataFrame[CommandCandidatesTable],
         mapped_config: DeclaredMergeConfig,
-        registered: RegisteredConfig,
     ) -> Output[DataFrame[CommandCandidatesTable]]:
         if dataset_candidates.signature is None:
             raise IntegrityError("Merge input hooks did not prepare the table")

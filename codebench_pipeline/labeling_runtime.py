@@ -30,15 +30,17 @@ class LabelingRuntime:
 
     def require_current(
         self,
-        run_id: str,
         dataset_id: str,
         storage: DataFrameIOManager,
     ) -> CapacityPaths:
-        if storage.review_home is None or Path(storage.review_home).resolve() != self.dataset_home:
+        if (
+            storage.review_home is None
+            or Path(storage.review_home).resolve() != self.dataset_home
+            or storage.registered_revision is None
+        ):
             raise IntegrityError("Guarded labeling requires the registered dataset home")
-        registered = storage.run_configuration(run_id, dataset_id)
         return DatasetRegistry(self.dataset_home).labeling_capacity_paths(
-            dataset_id, revision=registered.registration_digest
+            dataset_id, revision=storage.registered_revision
         )
 
     def capacity_paths(self, dataset_id: str) -> CapacityPaths:

@@ -6,19 +6,19 @@ from dagster import InputContext, PythonObjectDagsterType, input_manager
 from pandera.typing import DataFrame
 from pydantic import ValidationError
 
-from codebench_pipeline.category_rules import CategoryRules
 from codebench_pipeline.data_views import DatasetDataService
 from codebench_pipeline.dataframe_io import DataFrameIOManager
 from codebench_pipeline.dataframe_schemas import (
-    CommandsTable,
     HumanReviewDecisionsTable,
     ProposedAnnotationsTable,
     ReviewQueueTable,
 )
-from codebench_pipeline.guarded_publication import ReleaseInputs, prepare_guarded_release
+from codebench_pipeline.guarded_publication import ReleaseExecution
+from codebench_pipeline.guarded_publication_evidence import ReleaseInputs
 from codebench_pipeline.human_review import CompletionToken, HumanReviewError
 from codebench_pipeline.review_frames import decision_frame
-from codebench_pipeline.review_snapshots import ReviewSnapshots
+from codebench_pipeline.review_snapshots import ReviewSnapshots, release_configuration_digest
+from codebench_pipeline.stage_configuration import DatasetReleaseConfig
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,10 +34,8 @@ class DecisionInput:
 class ReleaseInput:
     persisted_decisions: DataFrame[HumanReviewDecisionsTable]
     decisions: DataFrame[HumanReviewDecisionsTable]
-    reviewed: DataFrame[ProposedAnnotationsTable]
-    rules: CategoryRules
-    token: CompletionToken
-    commands: DataFrame[CommandsTable]
+    evidence: ReleaseInputs
+    execution: ReleaseExecution
 
 
 REVIEW_INPUT_MANAGER = "review_inputs"
@@ -77,19 +75,19 @@ def review_input_manager(context: InputContext) -> DecisionInput | ReleaseInput:
                 ReviewQueueTable.validate(table), reviewed, resolved.snapshot.candidate_ids, token, decisions
             )
         case "human_review_decisions":
-            proposal = prepare_guarded_release(
-                ReleaseInputs(snapshots, resolved, token, records),
-                manager.repository_run(dataset_id, run_id),
-                registered,
-                publication_versions=manager.review_store.publication_versions(),
-            )
+            evidence = ReleaseInputs(snapshots, resolved, token, records)
+            policy = DatasetReleaseConfig.project(registered, registered.rules)
             return ReleaseInput(
                 HumanReviewDecisionsTable.validate(table),
                 decisions,
-                reviewed,
-                resolved.rules,
-                token,
-                proposal.output,
+                evidence,
+                ReleaseExecution.bind(
+                    manager.repository_run(dataset_id, run_id),
+                    evidence,
+                    policy,
+                    release_configuration_digest(registered),
+                    manager.review_store.publication_versions(),
+                ),
             )
         case _:
             raise HumanReviewError("conflict", "Unsupported review input asset")

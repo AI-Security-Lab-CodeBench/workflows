@@ -3,11 +3,8 @@ from pandera.typing import DataFrame
 
 from codebench_pipeline.category_rules import CategoryRules
 from codebench_pipeline.config_assets import (
-    GLOBAL_CONFIG,
-    REGISTERED_CONFIG_TYPE,
     RegisteredConfig,
     mapped_input,
-    mapping_key,
     registered_input,
 )
 from codebench_pipeline.dataframe_schemas import FilteredCommandsTable
@@ -21,7 +18,7 @@ from codebench_pipeline.storage import IntegrityError, fingerprint
 
 @asset(
     key_prefix=["datasets"],
-    group_name="dataset_building",
+    group_name="configuration",
     partitions_def=DATASET_PARTITIONS,
     io_manager_key="dataset_io_manager",
     dagster_type=RULES_TYPE,
@@ -56,20 +53,14 @@ def category_rules(registered: RegisteredConfig) -> Output[CategoryRules]:
             dagster_type=FILTERING_INPUT,
             input_manager_key=FINALIZATION_TABLE_IO,
         ),
-        "mapped_config": AssetIn(
-            key=mapping_key("filtered_commands"),
-            dagster_type=mapped_input("filtered_commands", FilterConfig).dagster_type,
-            input_manager_key=FINALIZATION_TABLE_IO,
-        ),
-        "registered": AssetIn(
-            key=GLOBAL_CONFIG, dagster_type=REGISTERED_CONFIG_TYPE, input_manager_key=FINALIZATION_TABLE_IO
+        "mapped_config": mapped_input(
+            "filtered_commands", FilterConfig, input_manager_key=FINALIZATION_TABLE_IO
         ),
     },
 )
 def filtered_commands(
     command_candidates: FilteringInput,
     mapped_config: FilterConfig,
-    registered: RegisteredConfig,
 ) -> Output[DataFrame[FilteredCommandsTable]]:
     if command_candidates.signature is None:
         raise IntegrityError("Filtering input hooks did not prepare the table")

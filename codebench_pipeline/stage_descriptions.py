@@ -85,13 +85,13 @@ admission and release. An empty failure table is valid. Malformed failure record
 validation; capacity pauses remain execution state, not failed command judgments.
 """,
     "deduplicated_annotations": """
-**How it works:** Commands containing only a restricted set of plain characters have
-repeated spaces and tabs collapsed; commands with quoting or shell syntax are left
-unchanged. A comparison key combines that command with its annotation, context and
-documentation evidence. Only identical keys are collapsed, keeping the first row and
-recording a duplicate-to-survivor link; similar commands or disagreeing labels remain.
+**How it works:** The mapped policy determines whether plain commands are compared
+literally or with repeated spaces and tabs collapsed. Quoting and shell syntax always
+require a literal match. The command, annotation, context and documentation must all
+match. The highest source weight wins when weights differ; ties keep the first row.
+Each excluded duplicate links to its survivor.
 
-**Input:** The unified merged labels with original evidence and category rules.
+**Input:** Supported proposals with their evidence, and `map_deduplicated_annotations_config`.
 
 **Goal:** Remove only proven exact normalized command duplicates before uncertainty-based human review.
 
@@ -128,7 +128,8 @@ and any validated human corrections. Human exclusions are applied before categor
 caps, and authorization is checked again when the output is committed. The resulting
 canonical table and export preserve which rows were actually human reviewed.
 
-**Input:** Category-eligible annotations, category rules, completed human decisions and a version-bound authorization.
+**Input:** Category-eligible annotations, mapped release policy, completed human decisions
+and a version-bound authorization. The publication checks failures in the reviewed labeling attempts.
 
 **Goal:** Produce the accepted canonical dataset table.
 
@@ -175,7 +176,8 @@ reusing saved decisions by the original values of the configured review columns.
 Unresolved items leave a waiting batch instead of a sleeping worker; an empty queue
 can complete automatically without human decisions.
 
-**Input:** Category-eligible annotations and category rules.
+**Input:** Category-eligible annotations and the mapped review policy. Capture and labeling
+receipts explain the eligible rows; they do not supply additional rows to the queue.
 
 **Goal:** Expose final rows with medium or higher uncertainty for human value corrections and inclusion decisions.
 

@@ -2,6 +2,7 @@ from typing import Final
 
 from codebench_pipeline.dataset_branches import COLLECTION_BRANCHES, Branch
 from codebench_pipeline.dataset_catalog import source_scope
+from codebench_pipeline.dataset_dependencies import CACHE_INPUTS
 from codebench_pipeline.dataset_engine import implementation_signature
 from codebench_pipeline.stage_configuration import DeclaredGlobalConfig, stage_configs
 from codebench_pipeline.storage import fingerprint
@@ -35,13 +36,13 @@ def effective_approval(
         return (registered.registration_digest,)
 
     configurations = stage_configs(registered)
-    stages = ["merged_command_candidates"]
-    if stage != "merged_command_candidates":
-        stages.append("filtered_commands")
-    if stage not in stages:
-        stages.append("labeling_attempts")
-    if stage not in stages:
-        stages.append(stage)
+    stages: set[str] = set()
+    pending = [stage]
+    while pending:
+        current = pending.pop()
+        if current in REUSABLE_PROCESSING_STAGES and current not in stages:
+            stages.add(current)
+            pending.extend(CACHE_INPUTS[current].values())
     return (
         fingerprint(source_scope(rules)),
         *(registered.source_config(branch.namespace).declaration_digest for branch in COLLECTION_BRANCHES),
@@ -54,6 +55,6 @@ def effective_approval(
                 else {},
                 {},
             )
-            for scoped_stage in stages
+            for scoped_stage in sorted(stages)
         ),
     )

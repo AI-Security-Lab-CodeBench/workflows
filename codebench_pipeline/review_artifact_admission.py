@@ -16,7 +16,7 @@ from codebench_pipeline.dataframe_io import (
     DataFrameIOManager,
     materialized_reference,
 )
-from codebench_pipeline.dataset_dependencies import CACHE_INPUTS, preparation_stages
+from codebench_pipeline.dataset_dependencies import CACHE_INPUTS, review_evidence_stages
 from codebench_pipeline.dataset_engine import implementation_signature
 from codebench_pipeline.human_review import HumanReviewError
 from codebench_pipeline.input_provenance import current_materialization
@@ -49,9 +49,10 @@ def checked_review_artifacts(
     """Validate current successful receipts against their direct inputs and the review policy."""
     artifacts: dict[str, ReviewArtifact] = {}
     partition = registered.dataset_id
-    for stage in preparation_stages():
-        if stage == "human_review_queue" and not include_queue:
-            continue
+    stages = review_evidence_stages()
+    if include_queue:
+        stages = stages | {"human_review_queue"}
+    for stage in sorted(stages):
         key = AssetKey(["datasets", *stage.split("/")])
         record = current_materialization(instance, key, partition)
         if record is None:

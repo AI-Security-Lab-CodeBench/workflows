@@ -70,7 +70,11 @@ approved registration. Planned processing can consume an approved capture
 with the authored directory offline. Each mapping appears in the
 same group as its consumers. `filtering` contains candidate merging and filtering;
 `labeling` contains labeling inputs, attempts and supported proposals. `deduplication`
-contains `deduplicated_annotations` and can be selected without running review or release.
+contains `map_deduplicated_annotations_config` and `deduplicated_annotations`.
+The registered `deduplication.normalize_safe_whitespace` setting defaults to `true`.
+Set it to `false` to require exact command text even for unquoted whitespace.
+Neither mode merges differing labels, context or documentation. The group can be
+selected without running review or release.
 `dataset_release` consumes its output for category eligibility, human review and release. Inspect
 labeling failures alongside the BashGuard syntax audit in `dataset_audit`.
 Each dataset has its own `dataset_builds` partition.
@@ -389,6 +393,15 @@ readable, including original inference receipts, without rematerialization.
 They never authorize new shared processing or release.
 
 ## `datasets/deduplicated_annotations`
+
+Follow the successful labels in Global asset lineage: `proposed_annotations` feeds
+`deduplicated_annotations`, then `category_eligible_annotations`. The latter supplies
+the rows for `human_review_queue` and the full eligible table for `dataset_release`.
+`human_review_decisions` consumes the queue; release consumes those decisions.
+`labeling_failures` is a separate audit output. Its rows never enter review.
+Publication checks failures directly in the reviewed labeling attempts, so it does
+not have to wait for the audit projection. Source receipts remain inspectable through
+the eligible rows' evidence.
 
 **Input:** The shared `proposed_annotations` table, including per-row semantic evidence.
 

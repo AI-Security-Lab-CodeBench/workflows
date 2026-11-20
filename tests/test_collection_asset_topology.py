@@ -80,12 +80,11 @@ class CollectionAssetTopologyTests(unittest.TestCase):
                 key("documentation/command_candidates"),
                 key("keenable/command_candidates"),
                 key("map_merged_command_candidates_config"),
-                key("global_config"),
             },
         )
         self.assertEqual(
             graph.get(key("filtered_commands")).parent_keys,
-            {key("merged_command_candidates"), key("map_filtered_commands_config"), key("global_config")},
+            {key("merged_command_candidates"), key("map_filtered_commands_config")},
         )
         self.assertFalse(
             {"datasets__labeling_attempts", "datasets__human_review_queue"}
@@ -104,7 +103,7 @@ class CollectionAssetTopologyTests(unittest.TestCase):
         self.assertEqual(graph.get(key("labeling_attempts")).group_name, "labeling")
         self.assertEqual(
             {node for node in graph.get_all_asset_keys() if graph.get(node).group_name == "deduplication"},
-            {key("deduplicated_annotations")},
+            {key("deduplicated_annotations"), key("map_deduplicated_annotations_config")},
         )
         for stage in ("human_review_queue", "human_review_decisions", "dataset_release"):
             self.assertEqual(graph.get(key(stage)).group_name, "dataset_release")

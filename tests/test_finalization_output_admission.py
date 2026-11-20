@@ -23,12 +23,18 @@ from test_dataset_annotation import documentation
 from test_dataset_rules import make_candidate, make_label, make_rules
 from test_declared_dataset_graph import fixture_spec
 
-from codebench_pipeline.category_rules import CategoryRules
-from codebench_pipeline.config_assets import GLOBAL_CONFIG, ConfigRunIOManager, RegisteredConfig
+from codebench_pipeline.config_assets import (
+    GLOBAL_CONFIG,
+    ConfigRunIOManager,
+    RegisteredConfig,
+    configuration_assets,
+    mapping_key,
+)
 from codebench_pipeline.dataframe_io import AssetReference, DataFrameIOManager
 from codebench_pipeline.dataframe_schemas import LabelingAttemptsTable, validated_frame
 from codebench_pipeline.dataset_asset_types import DATASET_PARTITIONS
 from codebench_pipeline.dataset_assets_annotations import annotation_assets
+from codebench_pipeline.dataset_assets_sources import category_rules
 from codebench_pipeline.dataset_collection_binding import FINALIZATION_BINDING
 from codebench_pipeline.dataset_finalization import category_eligible_annotations, deduplicated_annotations
 from codebench_pipeline.dataset_storage_io import RegisteredDatasetTableIO
@@ -104,12 +110,6 @@ class FinalizationOutputAdmissionTests(unittest.TestCase):
         def global_config() -> RegisteredConfig:
             return registered
 
-        @asset(
-            key_prefix=["datasets"], partitions_def=DATASET_PARTITIONS, io_manager_key="dataset_io_manager"
-        )
-        def category_rules() -> CategoryRules:
-            return rules
-
         @asset(key=upstream_key, partitions_def=DATASET_PARTITIONS, io_manager_key="dataset_io_manager")
         def upstream_table() -> pd.DataFrame:
             return current_input
@@ -118,12 +118,10 @@ class FinalizationOutputAdmissionTests(unittest.TestCase):
             *annotation_assets(),
             *finalization_table_assets(deduplicated_annotations, category_eligible_annotations),
         ]
-        assets = [
-            global_config,
-            category_rules,
-            upstream_table,
-            *(a for a in migrated if a.key == target_key),
-        ]
+        mappings = [item for item in configuration_assets(home) if item.key == mapping_key(target)]
+        assets = [global_config, *mappings, upstream_table, *(a for a in migrated if a.key == target_key)]
+        if target == "proposed_annotations":
+            assets.append(category_rules)
         handle_output = FinalizationTableIO.handle_output
         lookup_partitions = StaticPartitionsDefinition([spec.dataset_id])
         with (
@@ -164,14 +162,7 @@ class FinalizationOutputAdmissionTests(unittest.TestCase):
             self.assertEqual(publication.output, previous_output)
             self.assertEqual(
                 {item.asset_key: item.reference for item in publication.upstreams},
-                {
-                    tuple(key): io.reference_at(key, spec.dataset_id)
-                    for key in (
-                        [upstream_key.path, ["datasets", "category_rules"]]
-                        if target in {"proposed_annotations", "category_eligible_annotations"}
-                        else [upstream_key.path]
-                    )
-                },
+                {tuple(upstream_key.path): io.reference_at(upstream_key.path, spec.dataset_id)},
             )
             current_input = input_frame("in-flight")
 
@@ -220,7 +211,7 @@ class FinalizationOutputAdmissionTests(unittest.TestCase):
                     resources=resources,
                     instance=instance,
                     partition_key=spec.dataset_id,
-                    selection=AssetSelection.assets(GLOBAL_CONFIG, upstream_key, target_key),
+                    selection=AssetSelection.assets(GLOBAL_CONFIG, *mappings, upstream_key, target_key),
                     raise_on_error=False,
                 )
             self.assertTrue(replacement_published)

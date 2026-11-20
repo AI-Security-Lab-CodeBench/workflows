@@ -1,18 +1,17 @@
 from pandera.typing import DataFrame
 from pydantic import JsonValue
 
-from codebench_pipeline.category_rules import CategoryRules
 from codebench_pipeline.dataframe_schemas import ProposedAnnotationsTable, frame_records, validated_frame
 
 
 def category_eligible_annotations(
-    annotations: DataFrame[ProposedAnnotationsTable], rules: CategoryRules
+    annotations: DataFrame[ProposedAnnotationsTable], category_id: str
 ) -> DataFrame[ProposedAnnotationsTable]:
     retained: list[dict[str, JsonValue]] = []
     exclusions: list[JsonValue] = []
     for row in frame_records(annotations):
         reasons: list[str] = []
-        if row["category_id"] != rules.category_id:
+        if row["category_id"] != category_id:
             reasons.append("different_category")
         if row["decision"] == "reject":
             reasons.append("label_rejected")

@@ -141,6 +141,27 @@ class InspectorSeparationTests(unittest.TestCase):
 
             initial = inspect()
             self.assertEqual({state for _, state in initial.values()}, {None})
+            registry.register(
+                spec.model_copy(
+                    update={
+                        "deduplication": spec.deduplication.model_copy(
+                            update={"normalize_safe_whitespace": False}
+                        )
+                    }
+                )
+            )
+            self.assertEqual(
+                inspect(),
+                {
+                    stage: (
+                        initial[stage][0],
+                        "stale"
+                        if stage in {"deduplicated_annotations", "category_eligible_annotations"}
+                        else None,
+                    )
+                    for stage in stages
+                },
+            )
             metadata = spec.model_copy(update={"revision": "inspector metadata only"})
             registry.register(metadata)
             self.assertEqual(inspect(), initial)

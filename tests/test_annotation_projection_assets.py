@@ -28,11 +28,18 @@ from test_dataset_rules import make_candidate, make_label, make_rules
 from test_declared_dataset_graph import fixture_spec
 
 from codebench_pipeline.category_rules import CategoryRules
-from codebench_pipeline.config_assets import GLOBAL_CONFIG, ConfigRunIOManager, RegisteredConfig
+from codebench_pipeline.config_assets import (
+    GLOBAL_CONFIG,
+    ConfigRunIOManager,
+    RegisteredConfig,
+    configuration_assets,
+    mapping_key,
+)
 from codebench_pipeline.dataframe_io import DataFrameIOManager, frame_bytes
 from codebench_pipeline.dataframe_schemas import LabelingAttemptsTable, validated_frame
 from codebench_pipeline.dataset_asset_types import DATASET_PARTITIONS, TABLE_TYPES
 from codebench_pipeline.dataset_assets_annotations import annotation_assets
+from codebench_pipeline.dataset_assets_sources import category_rules
 from codebench_pipeline.dataset_collection_binding import FINALIZATION_BINDING
 from codebench_pipeline.dataset_engine import implementation_signature
 from codebench_pipeline.dataset_storage_io import RegisteredDatasetTableIO
@@ -134,15 +141,11 @@ class AnnotationProjectionAssetTests(unittest.TestCase):
         def labeling_attempts() -> DataFrame[LabelingAttemptsTable]:
             return self.attempts
 
-        @asset(
-            key_prefix=["datasets"], partitions_def=DATASET_PARTITIONS, io_manager_key="dataset_io_manager"
-        )
-        def category_rules() -> CategoryRules:
-            return self.registered.rules
-
+        proposed_config = mapping_key("proposed_annotations")
+        mapped = next(item for item in configuration_assets(self.home) if item.key == proposed_config)
         projections = [definition for definition in annotation_assets() if definition.key in PROJECTIONS]
         return materialize(
-            [global_config, labeling_attempts, category_rules, *projections],
+            [global_config, category_rules, mapped, labeling_attempts, *projections],
             resources={
                 "config_run_io_manager": ConfigRunIOManager(home=str(self.home)),
                 "dataset_io_manager": IOManagerDefinition(resource_fn=lambda _: self.io),
