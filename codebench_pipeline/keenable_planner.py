@@ -30,13 +30,15 @@ from .openai_transport import parse_completion
 _PROMPT: Final = (
     "Choose one available option ID to find additional distinct pages matching the available topics, "
     'using the previous search counts. Return only {"option":"ID"} or {"option":null} to stop. '
-    "Prefer uncovered topics. After repeated or ineligible results, switch symptom or case."
+    "Try each unsearched case before repeating one. Use the available focus that best distinguishes "
+    "a real operator symptom from generic reference material. After repeated or ineligible results, "
+    "switch the symptom. Counts describe URLs only; never treat them as proof of useful commands."
 )
 _CASE_TOPICS: Final[dict[Case, str]] = {
-    "plan": "Terraform plan drift or unexpected validation output",
+    "plan": "Terraform plan or validate showing an unexpected difference between configuration and state",
     "workloads": "kubectl workload inventory with missing, stale or misleading status",
     "containers": "Docker container inventory and discrepancies in reported disk usage",
-    "storage_sql": "S3 or PostgreSQL inventory with unexpectedly empty metadata",
+    "storage_sql": "S3 listing with misleading prefixes or PostgreSQL metadata missing because of search_path",
     "rollout": "Kubernetes deployment whose rollout status disagreed with observed readiness",
 }
 _CASE_FOCUSES: Final = (

@@ -1,13 +1,13 @@
 {
   "schema_version": "3",
   "dataset_id": "cloud_infrastructure_commands_grounded_v1",
-  "generation": "cat3-keenable-community-cases-v1",
+  "generation": "cat3-keenable-community-cases-v2",
   "budget": {"search_calls": 5, "origin_calls": 23},
   "search_plan": {
     "mode": "adaptive",
     "community_use_cases": true,
-    "max_queries": 4,
-    "unrestricted_cases": ["workloads", "containers"]
+    "max_queries": 5,
+    "unrestricted_cases": ["plan", "workloads", "containers", "storage_sql", "rollout"]
   },
   "sources": [
     {

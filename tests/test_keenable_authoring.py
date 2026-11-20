@@ -51,7 +51,7 @@ class CurrentKeenableAuthoringTests(unittest.TestCase):
         current = load_declaration(DECLARATION)
         assert isinstance(current, CurrentKeenableDeclaration)
         self.assertNotEqual(current.generation, "cat3-keenable-administrative-fixed-v3")
-        self.assertEqual(current.search_cases, ("workloads", "containers"))
+        self.assertEqual(current.search_cases, ("plan", "workloads", "containers", "storage_sql", "rollout"))
         self.assertEqual(current.budget.total_bytes, 28 * RESPONSE_BYTES)
         self.assertEqual(len(current.raw_licenses), 3)
         self.assertEqual(sum(len(source.exact_urls) for source in current.sources), 14)
