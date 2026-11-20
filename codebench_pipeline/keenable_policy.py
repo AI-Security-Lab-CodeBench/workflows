@@ -392,6 +392,12 @@ class CurrentAdministrativeSearch(Record):
     scopes: tuple[CurrentAdministrativeScope, ...] = Field(min_length=1, max_length=len(CASES))
 
 
+class UnrestrictedSearch(Record):
+    mode: Literal["fixed", "adaptive"]
+    max_queries: int = Field(ge=1, le=MAX_SEARCH)
+    unrestricted_cases: tuple[Case, ...] = Field(min_length=1, max_length=len(CASES))
+
+
 class KeenableDeclaration(Record):
     dataset: Identity
     generation: Identity
@@ -404,6 +410,7 @@ class KeenableDeclaration(Record):
     revision: Literal["1", "2"] = "1"
     budget: AcquisitionBudget | None = Field(default=None, exclude_if=lambda budget: budget is None)
     search_plan: AdministrativeSearch | None = Field(default=None, exclude_if=lambda plan: plan is None)
+    inspect_unlisted: ClassVar[bool] = False
 
     @property
     def source_scoped(self) -> bool:
@@ -449,7 +456,7 @@ class CurrentKeenableDeclaration(Record):
     dataset_id: Identity
     generation: Identity
     budget: CallBudget = CallBudget()
-    search_plan: CurrentAdministrativeSearch | None = Field(
+    search_plan: CurrentAdministrativeSearch | UnrestrictedSearch | None = Field(
         default=None, exclude_if=lambda plan: plan is None
     )
     sources: tuple[CurrentSourcePermission, ...] = Field(max_length=20)
@@ -457,6 +464,10 @@ class CurrentKeenableDeclaration(Record):
     cases: ClassVar[tuple[Case, ...]] = CASES
     permissions: ClassVar[tuple[PagePermission, ...]] = ()
     source_scoped: ClassVar[bool] = True
+
+    @property
+    def inspect_unlisted(self) -> bool:
+        return isinstance(self.search_plan, UnrestrictedSearch)
 
     @model_validator(mode="after")
     def approved_scope(self) -> Self:
@@ -473,6 +484,8 @@ class CurrentKeenableDeclaration(Record):
 
     @property
     def search_cases(self) -> tuple[Case, ...]:
+        if isinstance(self.search_plan, UnrestrictedSearch):
+            return self.search_plan.unrestricted_cases
         return _search_cases(self.sources)
 
     @property
@@ -505,6 +518,7 @@ class KeenableSourceAccess(Record, ConfigArtifact):
     permissions: tuple[PagePermission, ...]
     sources: tuple[SourceGrant, ...]
     legacy_reviewed_spans: bool
+    inspect_unlisted: bool = Field(default=False, exclude_if=lambda enabled: not enabled)
 
     @classmethod
     def project(cls, declaration: Declaration) -> Self:
@@ -521,6 +535,7 @@ class KeenableSourceAccess(Record, ConfigArtifact):
             sources=declaration.sources,
             legacy_reviewed_spans=isinstance(declaration, KeenableDeclaration)
             and declaration.revision == "1",
+            inspect_unlisted=declaration.inspect_unlisted,
         )
 
     @property
@@ -613,6 +628,13 @@ def _validate_source_declaration(declaration: Declaration) -> None:
     if budget.search_calls < len(declaration.search_cases):
         raise ValueError("Search budget must cover each configured discovery case")
     if (plan := declaration.search_plan) is None:
+        return
+    if isinstance(plan, UnrestrictedSearch):
+        cases = plan.unrestricted_cases
+        if cases != tuple(case for case in CASES if case in cases):
+            raise ValueError("Expected unique unrestricted search cases in case order")
+        if not len(cases) <= plan.max_queries <= budget.search_calls:
+            raise ValueError("Query limit must cover all search cases and fit the search call budget")
         return
     if isinstance(plan, CurrentAdministrativeSearch) and plan.max_queries is not None:
         if not len(plan.scopes) <= plan.max_queries <= budget.search_calls:

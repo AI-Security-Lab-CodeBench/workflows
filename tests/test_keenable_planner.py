@@ -12,7 +12,7 @@ from test_keenable import DECLARATION, result
 from codebench_pipeline.inference_capacity import CapacityConfig, CapacityUnavailable
 from codebench_pipeline.keenable import KeenableCollection, KeenableError, load_declaration
 from codebench_pipeline.keenable_planner import GuardedSearchPlanner
-from codebench_pipeline.keenable_policy import digest, parse_declaration
+from codebench_pipeline.keenable_policy import CurrentAdministrativeSearch, digest, parse_declaration
 from codebench_pipeline.keenable_transport import DirectResponse, Request
 from codebench_pipeline.openai_transport import HTTPResponse
 
@@ -37,9 +37,37 @@ class AdministrativeSearchTests(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
-        self.fixed = load_declaration(DECLARATION)
-        assert self.fixed.search_plan is not None
-        values = self.fixed.model_dump(mode="json")
+        current = load_declaration(DECLARATION)
+        workload, docker = (source.url_prefix for source in current.sources if source.allow_discovery)
+        assert workload is not None and docker is not None
+        values = current.model_dump(mode="json")
+        values["generation"] = "scoped-fixture"
+        values["search_plan"] = {
+            "mode": "fixed",
+            "max_queries": 2,
+            "scopes": [
+                {
+                    "case": "workloads",
+                    "origin_id": "kubernetes-website-kubectl",
+                    "reviewed_urls": [workload + "quick-reference.md", workload + "jsonpath.md"],
+                },
+                {
+                    "case": "containers",
+                    "origin_id": "docker-engine-resource-docs",
+                    "reviewed_urls": [
+                        docker + name
+                        for name in (
+                            "manage-resources/labels.md",
+                            "daemon/live-restore.md",
+                            "containers/start-containers-automatically.md",
+                            "logging/drivers/local.md",
+                        )
+                    ],
+                },
+            ],
+        }
+        self.fixed = parse_declaration(json.dumps(values))
+        assert isinstance(self.fixed.search_plan, CurrentAdministrativeSearch)
         values["generation"] = "adaptive-fixture"
         values["search_plan"]["mode"] = "adaptive"
         self.adaptive = parse_declaration(json.dumps(values))

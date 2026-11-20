@@ -20,6 +20,7 @@ from .keenable_policy import (
     CurrentAdministrativeSearch,
     Declaration,
     KeenableError,
+    UnrestrictedSearch,
     digest,
 )
 from .keenable_receipts import CallReceipt, Lead, SearchDecision, SearchFeedback, SearchPlanReceipt
@@ -141,7 +142,7 @@ class SearchOption:
     case: Case
     focus: str
     payload: bytes
-    urls: frozenset[str]
+    urls: frozenset[str] | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -179,19 +180,27 @@ class SearchSession:
         if plan.mode == "adaptive" and planner is None:
             raise KeenableError("guarded_planner_required")
         options: list[SearchOption] = []
+        case_urls: tuple[tuple[Case, frozenset[str] | None], ...]
+        if isinstance(plan, UnrestrictedSearch):
+            case_urls = tuple((case, None) for case in plan.unrestricted_cases)
+        else:
+            case_urls = tuple((scope.case, frozenset(scope.reviewed_urls)) for scope in plan.scopes)
         for focus, suffix in _FOCUSES:
-            for scope in plan.scopes:
+            for case, urls in case_urls:
                 options.append(
                     SearchOption(
-                        f"{scope.case}-{focus}",
-                        scope.case,
+                        f"{case}-{focus}",
+                        case,
                         focus,
-                        search_payload(QUERIES[scope.case] + suffix, tuple(sorted(scope.reviewed_urls))),
-                        frozenset(scope.reviewed_urls),
+                        search_payload(QUERIES[case] + suffix, tuple(sorted(urls)) if urls else ()),
+                        urls,
                     )
                 )
         limit = self.declaration.budget.search_calls if self.declaration.budget is not None else MAX_SEARCH
-        if isinstance(plan, CurrentAdministrativeSearch) and plan.max_queries is not None:
+        if (
+            isinstance(plan, (CurrentAdministrativeSearch, UnrestrictedSearch))
+            and plan.max_queries is not None
+        ):
             limit = plan.max_queries
         policy = digest(
             json.dumps(

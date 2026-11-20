@@ -27,13 +27,15 @@ DECLARED_COLLECTION_DESCRIPTIONS: Final = {
         "A changed capture or unapproved parser fails extraction."
     ),
     "keenable/discover_use_cases": (
-        "Record the leads from bounded, scoped searches and declared reference URLs. SourceCatalogTable "
+        "Search for examples by use case. Open discovery can select public URLs beyond the approved "
+        "grounding sources; declared references remain available separately. SourceCatalogTable "
         "exposes selections and exclusions before any selected page is captured. Transient search failures "
         "back off and retry within the call budget; saved successes are reused. A permanent failure, "
         "ambiguous dispatch or exhausted retry allowance stops discovery."
     ),
     "keenable/capture_origin_pages": (
-        "Verify usage rights and fetch the selected pages directly from their origins. "
+        "Fetch selected pages from their origins and verify usage rights before retaining text. "
+        "A newly discovered page needs its own license evidence. "
         "SourceDocumentsTable stores the verified text and the capture lock. Withheld pages add no "
         "rows; an uncertain or failed mandatory request blocks the generation."
     ),
@@ -53,8 +55,9 @@ FINALIZATION_DESCRIPTIONS: Final = {
         "Any unavailable or stale configured branch blocks the merge."
     ),
     "labeling_attempts": (
-        "Consider eligible commands from the highest-trust sources first. Use the verified source "
-        "captures for operation evidence without a second Keenable crawl. Stop spending inference "
+        "Consider eligible commands from the highest-trust sources first. Ground operations in "
+        "approved captured sources without a second Keenable crawl. Discovery alone does not make "
+        "a page a grounding source. Stop spending inference "
         "on a subrisk once its quota of distinct, eligible, high-confidence commands is full. "
         "LabelingAttemptsTable records support, failures and quota deferrals separately; inference "
         "requires verified available capacity."

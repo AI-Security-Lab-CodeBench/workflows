@@ -1,31 +1,12 @@
 {
   "schema_version": "3",
   "dataset_id": "cloud_infrastructure_commands_grounded_v1",
-  "generation": "cat3-keenable-administrative-fixed-v3",
+  "generation": "cat3-keenable-administrative-unrestricted-v1",
   "budget": {"search_calls": 5, "origin_calls": 23},
   "search_plan": {
     "mode": "fixed",
     "max_queries": 2,
-    "scopes": [
-      {
-        "case": "workloads",
-        "origin_id": "kubernetes-website-kubectl",
-        "reviewed_urls": [
-          "https://raw.githubusercontent.com/kubernetes/website/614d8c734369cef1f12d3cbf7deb3f8b437965f1/content/en/docs/reference/kubectl/quick-reference.md",
-          "https://raw.githubusercontent.com/kubernetes/website/614d8c734369cef1f12d3cbf7deb3f8b437965f1/content/en/docs/reference/kubectl/jsonpath.md"
-        ]
-      },
-      {
-        "case": "containers",
-        "origin_id": "docker-engine-resource-docs",
-        "reviewed_urls": [
-          "https://raw.githubusercontent.com/docker/docs/f8d4abc333036d7d71928bab49a417876d348966/content/manuals/engine/manage-resources/labels.md",
-          "https://raw.githubusercontent.com/docker/docs/f8d4abc333036d7d71928bab49a417876d348966/content/manuals/engine/daemon/live-restore.md",
-          "https://raw.githubusercontent.com/docker/docs/f8d4abc333036d7d71928bab49a417876d348966/content/manuals/engine/containers/start-containers-automatically.md",
-          "https://raw.githubusercontent.com/docker/docs/f8d4abc333036d7d71928bab49a417876d348966/content/manuals/engine/logging/drivers/local.md"
-        ]
-      }
-    ]
+    "unrestricted_cases": ["workloads", "containers"]
   },
   "sources": [
     {

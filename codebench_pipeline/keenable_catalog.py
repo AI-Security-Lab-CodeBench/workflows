@@ -43,8 +43,8 @@ def search_leads(
                     excluded="invalid_url",
                 )
             )
-        elif (reviewed is not None and canonical not in reviewed) or not _admits_search_result(
-            declaration, canonical, case
+        elif (reviewed is not None and canonical not in reviewed) or (
+            not declaration.inspect_unlisted and not _admits_search_result(declaration, canonical, case)
         ):
             leads.append(
                 Lead(
@@ -102,7 +102,13 @@ def freeze_catalog(
             else:
                 permission = declaration.authority(url, lead.case)
                 selected[url] = SelectedPage(
-                    lead=lead, permission=permission, state="pending" if permission else "withheld"
+                    lead=lead,
+                    permission=permission,
+                    state="pending"
+                    if permission
+                    else "inspect"
+                    if declaration.inspect_unlisted
+                    else "withheld",
                 )
         ranked.append(lead)
     return CatalogReceipt(

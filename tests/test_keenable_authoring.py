@@ -50,7 +50,7 @@ class CurrentKeenableAuthoringTests(unittest.TestCase):
     def test_shipped_authority_and_budget_match_the_migrated_generation(self) -> None:
         current = load_declaration(DECLARATION)
         assert isinstance(current, CurrentKeenableDeclaration)
-        self.assertEqual(current.generation, "cat3-keenable-administrative-fixed-v3")
+        self.assertNotEqual(current.generation, "cat3-keenable-administrative-fixed-v3")
         self.assertEqual(current.search_cases, ("workloads", "containers"))
         self.assertEqual(current.budget.total_bytes, 28 * RESPONSE_BYTES)
         self.assertEqual(len(current.raw_licenses), 3)

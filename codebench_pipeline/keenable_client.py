@@ -37,6 +37,8 @@ class KeenableClient:
         kind: Literal["search", "origin"],
         identity: SlotIdentity,
         make_request: Callable[[], Request],
+        *,
+        inspect: bool = False,
     ) -> AcquiredResponse | StoredResponse:
         """Replay a completed slot or reserve and send one bounded sequence of attempts."""
         while True:
@@ -67,15 +69,19 @@ class KeenableClient:
             try:
                 return AcquiredResponse(receipt, self.send(request))
             except KeenableError as error:
-                self.ledger.finish(
+                transient = transient_request_failure(error.code, error.status)
+                withheld = inspect and not transient
+                saved = self.ledger.finish(
                     receipt,
-                    state="failed",
+                    state="withheld" if withheld else "failed",
                     reason=error.code,
                     status=error.status,
                     peer=error.peer if isinstance(error, HttpStatusError) else None,
                     retry_after=error.retry_after if isinstance(error, HttpStatusError) else None,
                 )
-                if not transient_request_failure(error.code, error.status):
+                if withheld:
+                    return StoredResponse(saved, None)
+                if not transient:
                     raise
 
 

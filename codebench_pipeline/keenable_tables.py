@@ -15,9 +15,7 @@ from codebench_pipeline.keenable import KeenableCollection
 from codebench_pipeline.keenable_policy import (
     PAGE_CASES,
     CurrentSourcePermission,
-    KeenableDeclaration,
     KeenableError,
-    KeenableSourceAccess,
     PagePermission,
     Permission,
 )
@@ -40,6 +38,7 @@ def provider_source_id(url: str) -> str:
 def provider_catalog(collection: KeenableCollection, api_key: str) -> DataFrame[SourceCatalogTable]:
     catalog = collection.discover_with_credential(api_key)
     permissions = {page.lead.url: page.permission for page in catalog.selected}
+    inspections = {page.lead.url for page in catalog.selected if page.state == "inspect"}
     frame = validated_frame(
         [
             {
@@ -50,8 +49,8 @@ def provider_catalog(collection: KeenableCollection, api_key: str) -> DataFrame[
                 "attribution": permission.attribution if permission else "",
                 "revision": collection.declaration.generation,
                 "retrieved_at": "",
-                "source_type": "official_documentation",
-                "provenance_type": "vendor_documentation",
+                "source_type": "web_page" if unlisted else "official_documentation",
+                "provenance_type": "web_search" if unlisted else "vendor_documentation",
                 "source_locator": lead.search_slot or lead.case,
                 "sha256": permission.content_sha256 if isinstance(permission, PagePermission) else "",
                 "format": "text",
@@ -59,8 +58,19 @@ def provider_catalog(collection: KeenableCollection, api_key: str) -> DataFrame[
                 "context_field": "",
                 "sample": "",
                 "captured_content": "",
-                "decision": "selected" if permission is not None and lead.excluded is None else "exclude",
-                "rationale": lead.excluded or ("permission" if permission is not None else "withheld"),
+                "decision": (
+                    "selected"
+                    if lead.excluded is None and (permission is not None or lead.url in inspections)
+                    else "exclude"
+                ),
+                "rationale": lead.excluded
+                or (
+                    "permission"
+                    if permission is not None
+                    else "inspect_page_license"
+                    if lead.url in inspections
+                    else "withheld"
+                ),
                 "analysis": (
                     _rights_description(permission) if isinstance(permission, CurrentSourcePermission) else ""
                 ),
@@ -68,6 +78,9 @@ def provider_catalog(collection: KeenableCollection, api_key: str) -> DataFrame[
             }
             for lead in catalog.leads
             for permission in (permissions.get(lead.url),)
+            for unlisted in (
+                collection.declaration.inspect_unlisted and lead.origin == "search" and permission is None,
+            )
             for license_ in (
                 permission.public_license
                 if permission is not None and not isinstance(permission, PagePermission)
@@ -89,6 +102,8 @@ def provider_documents(
     bodies = collection.read_bodies(lock)
     permissions: dict[str, Permission] = {}
     for page in lock.pages:
+        if page.observed_license is not None:
+            continue
         permission = collection.declaration.authority(page.url, page.case or PAGE_CASES[page.url])
         if permission is None:
             raise KeenableError("capture_authorization_mismatch")
@@ -98,13 +113,17 @@ def provider_documents(
             {
                 "source_id": provider_source_id(page.url),
                 "source_url": page.url,
-                "license": license_.identifier if license_ else "",
-                "license_url": license_.license_url if license_ else "",
-                "attribution": permission.attribution,
+                "license": "CC-BY-4.0" if observed else license_.identifier if license_ else "",
+                "license_url": observed.license_url if observed else license_.license_url if license_ else "",
+                "attribution": observed.attribution
+                if observed
+                else permission.attribution
+                if permission
+                else "",
                 "revision": collection.declaration.generation,
                 "retrieved_at": page.call.observed_at or "",
-                "source_type": "official_documentation",
-                "provenance_type": "vendor_documentation",
+                "source_type": "web_page" if observed else "official_documentation",
+                "provenance_type": "web_search" if observed else "vendor_documentation",
                 "source_locator": page.call.slot,
                 "sha256": page.body_sha256,
                 "format": "text",
@@ -113,8 +132,13 @@ def provider_documents(
                 "content": bodies[page.url].decode("utf-8"),
             }
             for page in lock.pages
-            for permission in (permissions[page.url],)
-            for license_ in (None if isinstance(permission, PagePermission) else permission.public_license,)
+            for observed in (page.observed_license,)
+            for permission in (permissions.get(page.url),)
+            for license_ in (
+                permission.public_license
+                if permission and not isinstance(permission, PagePermission)
+                else None,
+            )
         ],
         SourceDocumentsTable,
     )
@@ -150,13 +174,9 @@ def provider_candidates(
     adapters: DataFrame[DocumentAdaptersTable],
 ) -> DataFrame[CommandCandidatesTable]:
     lock = CaptureLock.model_validate_json(documents.attrs[PROVIDER_RECEIPT])
-    candidates = collection.candidates(lock, ADAPTER_RECEIPTS.validate_json(adapters.attrs[PROVIDER_RECEIPT]))
-    declaration = collection.declaration
-    legacy_spans = (
-        declaration.legacy_reviewed_spans
-        if isinstance(declaration, KeenableSourceAccess)
-        else isinstance(declaration, KeenableDeclaration) and declaration.revision == "1"
-    )
+    receipts = ADAPTER_RECEIPTS.validate_json(adapters.attrs[PROVIDER_RECEIPT])
+    candidates = collection.candidates(lock, receipts)
+    parsers = {adapter.url: adapter.parser for adapter in receipts}
     frame = validated_frame(
         [
             {
@@ -167,7 +187,7 @@ def provider_candidates(
                 "source_id": provider_source_id(candidate.url),
                 "source_url": candidate.url,
                 "source_position": f"bytes:{candidate.start}:{candidate.end}",
-                "transformations": ["reviewed-byte-spans-v1" if legacy_spans else "literal-code-blocks-v2"],
+                "transformations": [parsers[candidate.url]],
                 "risk_candidates": [],
             }
             for candidate in candidates

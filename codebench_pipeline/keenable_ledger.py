@@ -6,6 +6,7 @@ from fcntl import LOCK_EX, flock
 from pathlib import Path
 from typing import Literal
 
+from .keenable_observed import LicensedContent
 from .keenable_policy import (
     MAX_BYTES,
     MAX_ORIGINS,
@@ -234,6 +235,27 @@ def verify_lock(
         entry = selected.get(page.url)
         permission = declaration.authority(page.url, case) if case is not None else None
         if (
+            entry is None
+            or entry.lead.case != case
+            or entry.permission != permission
+            or page.call.target != page.url
+            or page.call.kind != "origin"
+            or page.call.state != "succeeded"
+        ):
+            raise KeenableError("capture_authorization_mismatch")
+        observed = page.observed_license
+        if observed is not None:
+            if (
+                not declaration.inspect_unlisted
+                or entry.state != "inspect"
+                or entry.lead.origin != "search"
+                or permission is not None
+                or page.origin_id != f"unlisted-{digest(page.url.encode())}"
+                or page.media_type != "text/html"
+                or page.rights_evidence_sha256 != observed.notice_sha256
+            ):
+                raise KeenableError("capture_authorization_mismatch")
+        elif (
             permission is None
             or (
                 page.rights_evidence_sha256,
@@ -246,13 +268,7 @@ def verify_lock(
                 permission.media_type,
             )
             or (
-                entry is None
-                or entry.lead.case != case
-                or entry.permission != permission
-                or (isinstance(permission, PagePermission) and page.body_sha256 != permission.content_sha256)
-                or page.call.target != page.url
-                or page.call.kind != "origin"
-                or page.call.state != "succeeded"
+                (isinstance(permission, PagePermission) and page.body_sha256 != permission.content_sha256)
                 or page.call.response_sha256 != page.body_sha256
                 or page.call.response_bytes != page.size
             )
@@ -267,6 +283,12 @@ def _verified_body(ledger: Ledger, page: VerifiedPage) -> bytes:
     if stored is None:
         raise KeenableError("origin_body_integrity")
     receipt, body = stored
-    if receipt != page.call or body is None or len(body) != page.size or digest(body) != page.body_sha256:
+    if receipt != page.call or body is None:
+        raise KeenableError("origin_body_integrity")
+    if page.observed_license is not None:
+        body, evidence = LicensedContent.replay(receipt, body)
+        if evidence != page.observed_license:
+            raise KeenableError("rights_receipt_binding_mismatch")
+    if len(body) != page.size or digest(body) != page.body_sha256:
         raise KeenableError("origin_body_integrity")
     return body

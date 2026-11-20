@@ -30,7 +30,7 @@ class Lead(Record):
 class SelectedPage(Record):
     lead: Lead
     permission: Permission | None
-    state: Literal["pending", "withheld"]
+    state: Literal["pending", "withheld", "inspect"]
 
 
 class CallReceipt(Record):
@@ -79,6 +79,14 @@ class CatalogReceipt(Record):
     plan: SearchPlanReceipt | None = Field(default=None, exclude_if=lambda plan: plan is None)
 
 
+class ObservedPageLicense(Record):
+    license_url: Literal["https://creativecommons.org/licenses/by/4.0/"]
+    attribution: str = Field(min_length=1, max_length=256)
+    notice: str = Field(min_length=1, max_length=512)
+    notice_sha256: Digest
+    retained_start: int = Field(ge=0)
+
+
 class VerifiedPage(Record):
     url: str
     origin_id: str
@@ -88,6 +96,9 @@ class VerifiedPage(Record):
     rights_evidence_sha256: Digest
     call: CallReceipt
     case: Case | None = Field(default=None, exclude_if=lambda case: case is None)
+    observed_license: ObservedPageLicense | None = Field(
+        default=None, exclude_if=lambda evidence: evidence is None
+    )
 
 
 class CaptureLock(Record):
@@ -103,7 +114,9 @@ class AdapterReceipt(Record):
     url: str
     body_sha256: Digest
     permission_sha256: Digest
-    parser: Literal["reviewed-byte-spans-v1", "literal-code-blocks-v2"] = "reviewed-byte-spans-v1"
+    parser: Literal["reviewed-byte-spans-v1", "literal-code-blocks-v2", "licensed-html-main-v1"] = (
+        "reviewed-byte-spans-v1"
+    )
 
 
 class CandidateReceipt(Record):
@@ -118,3 +131,6 @@ class CandidateReceipt(Record):
     case: Case
     attribution: str
     rights_evidence_sha256: Digest
+    observed_license: ObservedPageLicense | None = Field(
+        default=None, exclude_if=lambda evidence: evidence is None
+    )

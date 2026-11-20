@@ -7,6 +7,7 @@ from .keenable_capture import CaptureTarget, capture_bytes
 from .keenable_catalog import declared_leads, freeze_catalog
 from .keenable_client import KeenableClient
 from .keenable_ledger import open_ledger, verify_lock
+from .keenable_observed import licensed_shell_spans
 from .keenable_planner import GuardedSearchPlanner, SearchSession
 from .keenable_policy import (
     COMMANDS,
@@ -54,7 +55,7 @@ class KeenableCollection:
         return self.discover_with_credential(os.getenv("KEENABLE_API_KEY", ""))
 
     def discover_with_credential(self, api_key: str) -> CatalogReceipt:
-        """Search reviewed administrative cases and freeze the authorized selection."""
+        """Search configured administrative cases and freeze leads for acquisition."""
         declaration = self.declaration
         if isinstance(declaration, KeenableSourceAccess):
             raise KeenableError("discovery_requires_search_declaration")
@@ -96,7 +97,7 @@ class KeenableCollection:
         return self.capture_with_credential(catalog, os.getenv("KEENABLE_API_KEY", ""))
 
     def capture_with_credential(self, catalog: CatalogReceipt, api_key: str) -> CaptureLock:
-        """Capture permitted pinned pages and publish one all-or-nothing lock."""
+        """Capture declared or independently licensed pages and publish the collection lock."""
         with open_ledger(self.root, self.declaration) as ledger:
             ledger.require_healthy()
             if ledger.artifact("catalog") != catalog.model_dump_json().encode():
@@ -111,36 +112,51 @@ class KeenableCollection:
             rights_calls: list[CallReceipt] = []
             client = KeenableClient(ledger, self.declaration, request_direct)
             for url, expected in self.declaration.raw_licenses:
-                receipt, body = capture_bytes(client, CaptureTarget(url, rights_sha256=expected), api_key)
+                receipt, body, _ = capture_bytes(client, CaptureTarget(url, rights_sha256=expected), api_key)
                 if body is None:
                     raise KeenableError("rights_bytes_unavailable")
                 rights_calls.append(receipt)
             for selection in catalog.selected:
                 permission = selection.permission
-                if permission is None:
+                if selection.state == "withheld":
                     if selection.lead.url is not None:
                         withheld.append(selection.lead.url)
                     continue
                 self.declaration.check_current(datetime.now(UTC))
                 url = selection.lead.url
                 case = selection.lead.case
-                if url is None or self.declaration.authority(url, case) != permission:
+                inspect = selection.state == "inspect"
+                if (
+                    url is None
+                    or self.declaration.authority(url, case) != permission
+                    or inspect != (permission is None)
+                    or (inspect and not self.declaration.inspect_unlisted)
+                ):
                     raise KeenableError("origin_not_authorized")
-                receipt, body = capture_bytes(client, CaptureTarget(url, permission), api_key)
+                receipt, body, observed = capture_bytes(
+                    client, CaptureTarget(url, permission, inspect=inspect), api_key
+                )
                 calls.append(receipt)
                 if body is None:
                     withheld.append(url)
                     continue
+                if observed is not None:
+                    rights_digest = observed.notice_sha256
+                elif permission is not None:
+                    rights_digest = permission.rights_evidence_sha256
+                else:
+                    raise KeenableError("capture_authorization_mismatch")
                 pages.append(
                     VerifiedPage(
                         url=url,
-                        origin_id=permission.origin_id,
+                        origin_id=permission.origin_id if permission else f"unlisted-{digest(url.encode())}",
                         body_sha256=digest(body),
                         size=len(body),
-                        media_type=permission.media_type,
-                        rights_evidence_sha256=permission.rights_evidence_sha256,
+                        media_type=permission.media_type if permission else "text/html",
+                        rights_evidence_sha256=rights_digest,
                         call=receipt,
                         case=None if isinstance(permission, PagePermission) else case,
+                        observed_license=observed,
                     )
                 )
             self.declaration.check_current(datetime.now(UTC))
@@ -185,16 +201,22 @@ class KeenableCollection:
             for page in lock.pages:
                 case = page.case or PAGE_CASES[page.url]
                 permission = self.declaration.authority(page.url, case)
-                if permission is None:
-                    raise KeenableError("capture_authorization_mismatch")
                 body = bodies[page.url]
-                spans = (
-                    permission.spans
-                    if isinstance(permission, PagePermission)
-                    else _source_spans(body, case)
-                    if permission.permitted_use == "fetch_retain_extract_quote"
-                    else ()
-                )
+                observed = page.observed_license
+                if observed is not None:
+                    spans = licensed_shell_spans(body, case)
+                    attribution = observed.attribution
+                elif permission is not None:
+                    spans = (
+                        permission.spans
+                        if isinstance(permission, PagePermission)
+                        else _source_spans(body, case)
+                        if permission.permitted_use == "fetch_retain_extract_quote"
+                        else ()
+                    )
+                    attribution = permission.attribution
+                else:
+                    raise KeenableError("capture_authorization_mismatch")
                 for span in spans:
                     literal = body[span.start : span.end]
                     candidates.append(
@@ -202,7 +224,7 @@ class KeenableCollection:
                             candidate_id=digest(
                                 f"{page.url}\n{page.body_sha256}\n{span.start}:{span.end}".encode()
                             ),
-                            origin_id=permission.origin_id,
+                            origin_id=page.origin_id,
                             url=page.url,
                             body_sha256=page.body_sha256,
                             start=span.start,
@@ -210,8 +232,9 @@ class KeenableCollection:
                             span_sha256=digest(literal),
                             command=literal.decode("utf-8"),
                             case=case,
-                            attribution=permission.attribution,
-                            rights_evidence_sha256=permission.rights_evidence_sha256,
+                            attribution=attribution,
+                            rights_evidence_sha256=page.rights_evidence_sha256,
+                            observed_license=observed,
                         )
                     )
             return tuple(candidates)
@@ -220,14 +243,22 @@ class KeenableCollection:
         adapters: list[AdapterReceipt] = []
         for page in lock.pages:
             permission = self.declaration.authority(page.url, page.case or PAGE_CASES[page.url])
-            if permission is None:
+            observed = page.observed_license
+            evidence = observed if observed is not None else permission
+            if evidence is None:
                 raise KeenableError("capture_authorization_mismatch")
             adapters.append(
                 AdapterReceipt(
                     url=page.url,
                     body_sha256=page.body_sha256,
-                    permission_sha256=record_digest(permission),
-                    parser="literal-code-blocks-v2" if page.case else "reviewed-byte-spans-v1",
+                    permission_sha256=record_digest(evidence),
+                    parser=(
+                        "licensed-html-main-v1"
+                        if observed is not None
+                        else "literal-code-blocks-v2"
+                        if page.case
+                        else "reviewed-byte-spans-v1"
+                    ),
                 )
             )
         return tuple(adapters)

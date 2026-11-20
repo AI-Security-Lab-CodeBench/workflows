@@ -190,21 +190,26 @@ class GuardedEvidence:
         tokens = tuple(command_tokens(candidate))
         if not tokens or len(candidate.command.encode()) > 256:
             return []
+        operations = self.shared_operations
+        if operations is None:
+            raise IntegrityError("Source-level grounding requires a verified shared operation index")
         branch, _, original_id = candidate.candidate_id.partition(":")
         if branch == "keenable":
             origin = self.sources.provider_rows[original_id]
             start, end = origin.start, origin.end
+            page = operations.approved_pages.get(capture.url)
+            own_approved = page is not None and page.case == origin.case
         else:
             span = self.sources.repositories[branch].rows[original_id].source_span
             start, end = span.byte_start, span.byte_end
+            own_approved = True
         if Applicability(capture.body).overlaps(start, end):
             return []
         self.sources.provider.declaration.check_current(datetime.now(UTC))
-        operations = self.shared_operations
-        if operations is None:
-            raise IntegrityError("Source-level grounding requires a verified shared operation index")
-        own = shared_passages(capture.url, capture.source_binding, capture.body)
-        selected = next((entry for entry in own if entry.passage.matches(tokens)), None)
+        selected = None
+        if own_approved:
+            own = shared_passages(capture.url, capture.source_binding, capture.body)
+            selected = next((entry for entry in own if entry.passage.matches(tokens)), None)
         if selected is None:
             selected = next(
                 (
