@@ -11,6 +11,7 @@ from dagster import AssetIn, AssetKey, AssetsDefinition, DataVersion, Output, Py
 from pandera.typing import DataFrame
 from pydantic import JsonValue, PrivateAttr
 
+from codebench_pipeline.collection_stage_settings import CollectionOperationSettings
 from codebench_pipeline.config_assets import mapped_input
 from codebench_pipeline.dataframe_schemas import (
     CommandCandidatesTable,
@@ -24,10 +25,9 @@ from codebench_pipeline.dataset_branches import Branch
 from codebench_pipeline.dataset_config import DeduplicationPolicy
 from codebench_pipeline.stage_configuration import (
     CategoryEligibilityConfig,
-    DeclaredBranchConfig,
-    DeduplicationConfig,
 )
 from codebench_pipeline.storage import IntegrityError
+from codebench_pipeline.typed_config import ConfigArtifact
 
 type Annotations = DataFrame[ProposedAnnotationsTable]
 FINALIZATION_TABLE_IO: Final = "finalization_table_io_manager"
@@ -50,8 +50,14 @@ class CollectionCacheInput:
     scratch: Path | None
 
 
-class CollectionInput(DeclaredBranchConfig):
+class CollectionInput(ConfigArtifact):
+    settings: CollectionOperationSettings
     _cache: CollectionCacheInput | None = PrivateAttr(default=None)
+
+    def for_operation[Settings: CollectionOperationSettings](self, contract: type[Settings]) -> Settings:
+        if not isinstance(self.settings, contract):
+            raise IntegrityError(f"Expected mapped settings of type {contract.__name__}")
+        return self.settings
 
     def bind_cache(self, cache: CollectionCacheInput) -> None:
         self._cache = cache
@@ -69,6 +75,9 @@ class CollectionInput(DeclaredBranchConfig):
         else:
             raise IntegrityError("Collection cache miss has no attempt directory")
         return Output(table, data_version=DataVersion(cache.signature))
+
+
+COLLECTION_INPUT: Final = PythonObjectDagsterType(python_type=CollectionInput, name="CollectionInput")
 
 
 @dataclass(slots=True)
@@ -173,18 +182,18 @@ def finalization_table_assets(
                 dagster_type=_INPUT,
             ),
             "mapped_config": mapped_input(
-                "deduplicated_annotations", DeduplicationConfig, input_manager_key=FINALIZATION_TABLE_IO
+                "deduplicated_annotations", DeduplicationPolicy, input_manager_key=FINALIZATION_TABLE_IO
             ),
         },
     )
     def deduplicated_annotations(
         proposed_annotations: FinalizationInput,
-        mapped_config: DeduplicationConfig,
+        mapped_config: DeduplicationPolicy,
     ) -> Output[Annotations]:
         return table_output(
             proposed_annotations,
             EVIDENCE_ATTRIBUTES["deduplicated_annotations"],
-            lambda table: deduplicate(table, mapped_config.deduplication),
+            lambda table: deduplicate(table, mapped_config),
         )
 
     @asset(

@@ -32,6 +32,7 @@ from codebench_pipeline.dataset_records import (
     validate_label,
 )
 from codebench_pipeline.inference import infer_typed, typed_request
+from codebench_pipeline.labeling_stage_settings import LabelingRisk, LabelingRules
 from codebench_pipeline.model_config import ModelConfig
 from codebench_pipeline.models import SemanticSnippet
 
@@ -68,7 +69,7 @@ class PromptRisk(StrictModel):
     guidance: str
 
     @classmethod
-    def from_rule(cls, rule: RiskRule) -> PromptRisk:
+    def from_rule(cls, rule: RiskRule | LabelingRisk) -> PromptRisk:
         return cls(id=rule.id, name=rule.name, definition=rule.definition, guidance=rule.guidance)
 
 
@@ -77,15 +78,15 @@ class PromptTaxonomy(StrictModel):
     category_name: str
     version: str
     risks: list[PromptRisk]
-    classes: list[ClassRule]
-    severities: list[SeverityRule]
+    classes: tuple[ClassRule, ...]
+    severities: tuple[SeverityRule, ...]
     description_language: str
 
 
 def request(
     candidate: CandidateRecord,
     docs: list[SemanticSnippet],
-    rules: CategoryRules,
+    rules: CategoryRules | LabelingRules,
 ) -> tuple[str, dict[str, JsonValue]]:
     allowed = routing(candidate, rules)
     system = "\n\n".join(
@@ -97,8 +98,8 @@ def request(
                 category_name=rules.category_name,
                 version=rules.version,
                 risks=[PromptRisk.from_rule(rule) for rule in rules.risks],
-                classes=rules.classes,
-                severities=rules.severities,
+                classes=tuple(rules.classes),
+                severities=tuple(rules.severities),
                 description_language=rules.description_language,
             ).model_dump_json(),
         )

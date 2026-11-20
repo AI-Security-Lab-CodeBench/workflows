@@ -6,6 +6,11 @@ from http.client import HTTPException
 from pandera.typing import DataFrame
 from pydantic import JsonValue, ValidationError
 
+from codebench_pipeline.collection_stage_settings import (
+    RepositoryCaptureSettings,
+    RepositoryCatalogSettings,
+    RepositoryExtractionSettings,
+)
 from codebench_pipeline.dataframe_schemas import (
     CommandCandidatesTable,
     DocumentAdaptersTable,
@@ -47,15 +52,23 @@ from codebench_pipeline.storage import IntegrityError
 
 
 def repository_catalog(
-    config: RepositoryAcquisitionConfig, branch: RepositoryBranch, run: RepositoryRun
+    config: RepositoryCatalogSettings | RepositoryAcquisitionConfig,
+    branch: RepositoryBranch,
+    run: RepositoryRun,
 ) -> DataFrame[SourceCatalogTable]:
     """Enumerate a complete pinned scope and record policy and origin evidence."""
+    settings = (
+        config
+        if isinstance(config, RepositoryCatalogSettings)
+        else RepositoryCatalogSettings.project(config, branch)
+    )
+    settings.require_branch(branch)
     rows: list[dict[str, JsonValue]] = []
     sources: list[JsonValue] = []
     origins: dict[str, JsonValue] = {}
-    for origin in config.origins(branch):
+    for origin in settings.origins:
         try:
-            selected, evidence = catalog_origin(origin, run, config.maximum_file_bytes)
+            selected, evidence = catalog_origin(origin, run, settings.maximum_file_bytes)
         except (ValidationError, IntegrityError, OSError, HTTPException) as error:
             origin_receipt_failure(run, origin, error)
             raise
@@ -93,7 +106,7 @@ def repository_catalog(
             branch=branch,
             dataset_id=run.dataset_id,
             run_id=run.run_id,
-            config_digest=config.branch_digest(branch),
+            config_digest=settings.declaration_digest,
             table_digest="0" * 64,
             upstream=(),
             observations={"complete": True, "origins": origins, "sources": sources},
@@ -104,24 +117,30 @@ def repository_catalog(
 
 def repository_documents(
     catalog: DataFrame[SourceCatalogTable],
-    config: RepositoryAcquisitionConfig,
+    config: RepositoryCaptureSettings | RepositoryAcquisitionConfig,
     run: RepositoryRun,
     *,
     prepared_cache: PreparedCaptureCache | None = None,
 ) -> DataFrame[SourceDocumentsTable]:
     """Capture the complete authorized scope with byte-level integrity and replay."""
     receipt = read_receipt(catalog, "source_catalog", run)
-    if receipt.config_digest != config.branch_digest(receipt.branch):
+    settings = (
+        config
+        if isinstance(config, RepositoryCaptureSettings)
+        else RepositoryCaptureSettings.project(config, receipt.branch)
+    )
+    settings.require_branch(receipt.branch)
+    if receipt.config_digest != settings.declaration_digest:
         raise IntegrityError("Repository catalog is stale for the declared configuration")
     sources = CATALOG_SOURCES.validate_python(receipt.observations["sources"])
     indexed = {str(row["source_id"]): row for row in frame_records(catalog)}
     rows: list[dict[str, JsonValue]] = []
     captures: list[JsonValue] = []
     runtime = CaptureRuntime(
-        limit=config.maximum_file_bytes, workers=config.workers, run=run, prepared_cache=prepared_cache
+        limit=settings.maximum_file_bytes, workers=settings.workers, run=run, prepared_cache=prepared_cache
     )
     inherited = SourceDocumentsTable.to_schema().columns.keys() - {"content", "sha256", "retrieved_at"}
-    for origin in config.origins(receipt.branch):
+    for origin in settings.origins:
         eligible = tuple(
             source for source in sources if source.origin_id == origin.origin_id and not source.exclusion
         )
@@ -147,18 +166,24 @@ def repository_documents(
 
 def repository_adapters(
     documents: DataFrame[SourceDocumentsTable],
-    config: RepositoryAcquisitionConfig,
+    config: RepositoryExtractionSettings | RepositoryAcquisitionConfig,
     run: RepositoryRun,
     *,
     implementation_source: ImplementationSource | None = None,
 ) -> DataFrame[DocumentAdaptersTable]:
     """Resolve adapters against the independent deployment allowlist before imports."""
     receipt = read_receipt(documents, "source_documents", run)
-    if receipt.config_digest != config.branch_digest(receipt.branch):
+    settings = (
+        config
+        if isinstance(config, RepositoryExtractionSettings)
+        else RepositoryExtractionSettings.project(config, receipt.branch)
+    )
+    settings.require_branch(receipt.branch)
+    if receipt.config_digest != settings.declaration_digest:
         raise IntegrityError("Repository documents are stale for the declared configuration")
     origins = {
-        origin.origin_id: authorize_adapter(origin.transform, source=implementation_source)
-        for origin in config.origins(receipt.branch)
+        origin.origin_id: authorize_adapter(origin.parser.runtime(), source=implementation_source)
+        for origin in settings.origins
     }
     captures = CAPTURED_SOURCES.validate_python(receipt.observations["captures"])
     bindings: dict[str, JsonValue] = {
@@ -184,7 +209,7 @@ def repository_adapters(
 def repository_candidates(
     documents: DataFrame[SourceDocumentsTable],
     adapters: DataFrame[DocumentAdaptersTable],
-    config: RepositoryAcquisitionConfig,
+    config: RepositoryExtractionSettings | RepositoryAcquisitionConfig,
     run: RepositoryRun,
     *,
     implementation_source: ImplementationSource | None = None,
@@ -192,7 +217,13 @@ def repository_candidates(
     """Extract inert examples with capture, adapter and exact source span bindings."""
     receipt = read_receipt(documents, "source_documents", run)
     adapter_receipt = read_receipt(adapters, "document_adapters", run)
-    expected = config.branch_digest(receipt.branch)
+    settings = (
+        config
+        if isinstance(config, RepositoryExtractionSettings)
+        else RepositoryExtractionSettings.project(config, receipt.branch)
+    )
+    settings.require_branch(receipt.branch)
+    expected = settings.declaration_digest
     if (receipt.config_digest, adapter_receipt.config_digest) != (expected, expected):
         raise IntegrityError("Repository candidate inputs are stale for the declared configuration")
     if adapter_receipt.upstream != (receipt.digest,) or adapter_receipt.branch != receipt.branch:
@@ -203,9 +234,10 @@ def repository_candidates(
         for capture in CAPTURED_SOURCES.validate_python(receipt.observations["captures"])
     }
     approved = {
-        origin.origin_id: authorize_adapter(origin.transform, source=implementation_source)
-        for origin in config.origins(receipt.branch)
+        origin.origin_id: authorize_adapter(origin.parser.runtime(), source=implementation_source)
+        for origin in settings.origins
     }
+    weights = {origin.origin_id: origin.source_weight for origin in settings.origins}
     rows: list[dict[str, JsonValue]] = []
     evidence: dict[str, JsonValue] = {}
     empty: list[JsonValue] = []
@@ -244,7 +276,7 @@ def repository_candidates(
             rows.append(
                 {
                     **candidate.model_dump(mode="json"),
-                    "source_weight": config.source_weight(receipt.branch, capture.origin_id),
+                    "source_weight": weights[capture.origin_id],
                 }
             )
             evidence[candidate_id] = {

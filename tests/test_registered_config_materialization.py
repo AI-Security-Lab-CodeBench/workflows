@@ -7,14 +7,17 @@ from unittest.mock import patch
 import pandas as pd
 import test_declared_dataset_graph as declared_graph
 from dagster import AssetKey, DagsterInvalidConfigError
-from pydantic import JsonValue, TypeAdapter
+from pydantic import JsonValue, TypeAdapter, ValidationError
 from test_keenable import PEER, PLAN, SOURCE_BODY, result
 
+from codebench_pipeline.collection_config import CollectionMergeConfig
+from codebench_pipeline.collection_stage_settings import COLLECTION_OPERATIONS, RepositoryCatalogSettings
 from codebench_pipeline.config_assets import (
     CONFIG_DIRECTORY,
     GLOBAL_CONFIG,
     ConfigRunIOManager,
     RegisteredConfig,
+    collection_mapping_key,
     configured_selection,
     mapping_key,
 )
@@ -24,16 +27,14 @@ from codebench_pipeline.dataset_dependencies import preparation_stages
 from codebench_pipeline.dataset_registry import DatasetRegistry
 from codebench_pipeline.definitions import build_definitions
 from codebench_pipeline.keenable_transport import DirectResponse
+from codebench_pipeline.labeling_stage_settings import ProposalRules
 from codebench_pipeline.runtime_instance import dataset_instance
 from codebench_pipeline.stage_configuration import (
     CategoryEligibilityConfig,
-    DeclaredBranchConfig,
-    DeclaredMergeConfig,
-    DeduplicationConfig,
     FilterConfig,
     GuardedLabelingConfig,
-    PolicyArtifact,
     ReviewQueueConfig,
+    stage_configs,
 )
 from codebench_pipeline.storage import IntegrityError
 
@@ -186,19 +187,24 @@ class RegisteredConfigMaterializationTests(TestCase):
         dataset_id = DatasetRegistry(home).register(spec)
         rmtree(authored)
 
-        contracts = {
-            "existing_datasets": DeclaredBranchConfig,
-            "documentation_crawl": DeclaredBranchConfig,
-            "keenable_use_cases": DeclaredBranchConfig,
-            "merged_command_candidates": DeclaredMergeConfig,
+        shared_contracts = {
+            "merged_command_candidates": CollectionMergeConfig,
             "filtered_commands": FilterConfig,
             "labeling_attempts": GuardedLabelingConfig,
-            "deduplicated_annotations": DeduplicationConfig,
+            "proposed_annotations": ProposalRules,
+            "deduplicated_annotations": DeduplicationPolicy,
+            "category_eligible_annotations": CategoryEligibilityConfig,
             "human_review_queue": ReviewQueueConfig,
         }
-        policy_projections = {
-            "proposed_annotations": PolicyArtifact(category_rules=spec.rules),
-            "category_eligible_annotations": CategoryEligibilityConfig(category_id=spec.rules.category_id),
+        contracts = {
+            **{mapping_key(stage): (stage, contract) for stage, contract in shared_contracts.items()},
+            **{
+                collection_mapping_key(operation.branch, operation.stage): (
+                    operation.name,
+                    operation.contract,
+                )
+                for operation in COLLECTION_OPERATIONS
+            },
         }
         rules = AssetKey(["datasets", "category_rules"])
         filtered = AssetKey(["datasets", "filtered_commands"])
@@ -207,9 +213,7 @@ class RegisteredConfigMaterializationTests(TestCase):
             AssetKey(["datasets", *stage.split("/")])
             for stage in stages[: stages.index("filtered_commands") + 1]
         )
-        selection = list(
-            dict.fromkeys([*selection, *(mapping_key(scope) for scope in contracts | policy_projections)])
-        )
+        selection = list(dict.fromkeys([*selection, *contracts]))
         definitions = build_definitions(home)
         graph = definitions.resolve_asset_graph()
         self.assertEqual(
@@ -252,39 +256,47 @@ class RegisteredConfigMaterializationTests(TestCase):
             )
             self.assertEqual((registered.dataset_id, registered.rules), (dataset_id, spec.rules))
             self.assert_no_local_paths(registered.model_dump(mode="json"))
-            for scope, contract in contracts.items():
-                with self.subTest(scope=scope):
-                    payload = artifact_root.joinpath(*mapping_key(scope).path).read_bytes()
-                    mapped = contract.model_validate_json(payload)
+            expected = stage_configs(registered)
+            collection_stages = {operation.name for operation in COLLECTION_OPERATIONS}
+            for key, (stage, contract) in contracts.items():
+                with self.subTest(stage=stage):
+                    payload = artifact_root.joinpath(*key.path).read_bytes()
+                    mapped = contract.model_validate_json(payload, strict=True)
                     self.assert_no_local_paths(mapped.model_dump(mode="json"))
-                    expected = getattr(registered.scopes, scope).model_dump(mode="json")
-                    if scope == "human_review_queue":
-                        expected["registration_digest"] = registered.registration_digest
-                    if isinstance(mapped, DeclaredBranchConfig):
-                        if scope == "keenable_use_cases":
-                            declaration = mapped.collection.source.keenable_config()
-                            self.assertIsNotNone(mapped.keenable_preview)
-                            assert mapped.keenable_preview is not None
-                            self.assertEqual(
-                                mapped.keenable_preview.effective_cases, declaration.search_cases
+                    self.assertEqual(mapped, expected[stage])
+                    if stage in collection_stages:
+                        for field in (b'"category_rules":', b'"module_path":', b'"source_list":'):
+                            self.assertNotIn(field, payload)
+                        with self.assertRaisesRegex(ValidationError, "category_rules"):
+                            contract.model_validate_json(
+                                json_object.dump_json(
+                                    {
+                                        **json_object.validate_json(payload),
+                                        "category_rules": "unrelated policy",
+                                    }
+                                ),
+                                strict=True,
                             )
-                        else:
-                            self.assertIsNone(mapped.keenable_preview)
-                    self.assertEqual(
-                        mapped.model_dump(mode="json", exclude={"category_rules", "keenable_preview"}),
-                        expected,
-                    )
-                    if isinstance(mapped, PolicyArtifact):
-                        self.assertEqual(mapped.category_rules, spec.rules)
-            for scope, expected in policy_projections.items():
-                with self.subTest(scope=scope):
-                    payload = artifact_root.joinpath(*mapping_key(scope).path).read_bytes()
-                    self.assertEqual(type(expected).model_validate_json(payload), expected)
+                    if isinstance(mapped, RepositoryCatalogSettings):
+                        source = registered.source_config(mapped.branch).repository_config
+                        self.assertEqual(mapped.declaration_digest, source.branch_digest(mapped.branch))
+                        self.assertEqual(
+                            [
+                                (origin.commit, origin.tree_digest, origin.license)
+                                for origin in mapped.origins
+                            ],
+                            [
+                                (origin.commit, origin.tree_digest, origin.license)
+                                for origin in source.origins(mapped.branch)
+                            ],
+                        )
             self.assertEqual(registered.scopes.filtered_commands.filtered_commands, spec.filtering)
             self.assertEqual(registered.scopes.deduplicated_annotations.deduplication, spec.deduplication)
             self.assertEqual(registered.scopes.human_review_queue.human_review_queue, spec.publication)
             self.assertEqual(
-                registered.scopes.labeling_attempts.labeling_attempts.batch.grounding.pinned_library_ids,
+                GuardedLabelingConfig.model_validate_json(
+                    artifact_root.joinpath(*mapping_key("labeling_attempts").path).read_bytes()
+                ).labeling_attempts.batch.grounding.pinned_library_ids,
                 [provider_id],
             )
             published = DatasetDataService(home, instance).read_current(dataset_id, "filtered_commands").value

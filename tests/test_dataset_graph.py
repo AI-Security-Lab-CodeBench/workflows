@@ -18,7 +18,13 @@ from test_declared_dataset_graph import fixture_spec, with_keenable_declaration
 from test_keenable import source_declaration
 
 from codebench_pipeline.collection_config import SourceDeclaration
-from codebench_pipeline.config_assets import CONFIG_DIRECTORY, configured_selection, mapping_key
+from codebench_pipeline.collection_stage_settings import COLLECTION_OPERATIONS
+from codebench_pipeline.config_assets import (
+    CONFIG_DIRECTORY,
+    collection_mapping_key,
+    configured_selection,
+    mapping_key,
+)
 from codebench_pipeline.dataframe_io import AssetSnapshot, DataFrameIOManager
 from codebench_pipeline.dataframe_schemas import CommandsTable
 from codebench_pipeline.dataset_config import FilteringConfig
@@ -131,7 +137,7 @@ class DatasetGraphTests(unittest.TestCase):
             )
             self.assertEqual(
                 assets.get(decisions).parent_keys,
-                {queue, mapping_key("human_review_decisions")},
+                {queue},
             )
             self.assertEqual(
                 assets.get(AssetKey(["datasets", "dataset_release"])).parent_keys,
@@ -161,8 +167,8 @@ class DatasetGraphTests(unittest.TestCase):
             self.assertEqual(
                 assets.get(AssetKey(["datasets", "capture_corpus_files"])).parent_keys,
                 {
-                    AssetKey(["datasets", name])
-                    for name in ("enumerate_corpus_files", "map_existing_datasets_config")
+                    AssetKey(["datasets", "enumerate_corpus_files"]),
+                    collection_mapping_key("dataset", "capture_corpus_files"),
                 },
             )
             self.assertEqual(
@@ -175,7 +181,7 @@ class DatasetGraphTests(unittest.TestCase):
             )
             self.assertEqual(
                 assets.get(AssetKey(["datasets", "documentation", "capture_documentation"])).parent_keys,
-                {AssetKey(["datasets", "map_documentation_crawl_config"])},
+                {collection_mapping_key("documentation", "capture_documentation")},
             )
             self.assertEqual(
                 assets.get(AssetKey(["datasets", "proposed_annotations"])).parent_keys,
@@ -219,9 +225,8 @@ class DatasetGraphTests(unittest.TestCase):
             self.assertEqual(requests[0].partition_key, spec.dataset_id)
             self.assertTrue(
                 {
-                    AssetKey(["datasets", "map_existing_datasets_config"]),
-                    AssetKey(["datasets", "map_documentation_crawl_config"]),
-                    AssetKey(["datasets", "map_keenable_use_cases_config"]),
+                    collection_mapping_key(operation.branch, operation.stage)
+                    for operation in COLLECTION_OPERATIONS
                 }.issubset(requests[0].asset_selection or [])
             )
 
@@ -299,26 +304,25 @@ class DatasetGraphTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             spec = fixture_spec(Path(temporary))
             changed = spec.rules.model_copy(update={"policy": spec.rules.policy + " Additional review rule."})
-            original_inputs = {"category_rules": spec.rules}
-            changed_inputs = {"category_rules": changed}
+            original_configs = stage_configs(spec)
+            changed_configs = stage_configs(spec.model_copy(update={"rules": changed}))
             for stage in ("enumerate_corpus_files", "filtered_commands"):
-                config = stage_configs(spec)[stage]
                 self.assertEqual(
-                    stage_signature(stage, config, original_inputs),
-                    stage_signature(stage, config, changed_inputs),
+                    stage_signature(stage, original_configs[stage], {}),
+                    stage_signature(stage, changed_configs[stage], {}),
                 )
-            original = stage_configs(spec)["labeling_attempts"]
+            original = original_configs["labeling_attempts"]
             self.assertNotEqual(
-                stage_signature("labeling_attempts", original, original_inputs),
-                stage_signature("labeling_attempts", original, changed_inputs),
+                stage_signature("labeling_attempts", original, {}),
+                stage_signature("labeling_attempts", changed_configs["labeling_attempts"], {}),
             )
             annotation = spec.annotation.model_copy(
                 update={"model": spec.annotation.model.model_copy(update={"model": "another/labeler"})}
             )
             labeler = stage_configs(spec.model_copy(update={"annotation": annotation}))["labeling_attempts"]
             self.assertNotEqual(
-                stage_signature("labeling_attempts", original, original_inputs),
-                stage_signature("labeling_attempts", labeler, original_inputs),
+                stage_signature("labeling_attempts", original, {}),
+                stage_signature("labeling_attempts", labeler, {}),
             )
 
     def test_concurrent_first_initialization_preserves_both_partition_updates(self) -> None:

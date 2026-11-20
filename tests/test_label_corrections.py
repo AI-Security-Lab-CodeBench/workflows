@@ -30,6 +30,7 @@ from codebench_pipeline.human_review import (
 )
 from codebench_pipeline.human_review_store import HumanReviewStore
 from codebench_pipeline.label_corrections import annotation_review_validation, apply_label_corrections
+from codebench_pipeline.labeling_stage_settings import ProposalRules
 from codebench_pipeline.review_api_models import CompletionRequest, DecisionRequest
 from codebench_pipeline.review_frames import (
     CORRECTIONS_BINDING,
@@ -126,7 +127,7 @@ class LabelCorrectionTests(unittest.TestCase):
             id_column="candidate_id",
             columns=tuple(original),
             rows=(original,),
-            validation=annotation_review_validation(self.rules),
+            validation=annotation_review_validation(ProposalRules.from_rules(self.rules)),
         )
 
     def change(self, batch_id: str, **updates: JsonValue) -> DecisionChange:
@@ -250,7 +251,7 @@ class LabelCorrectionTests(unittest.TestCase):
                 update={
                     "snapshot": snapshot,
                     "rows": (row,),
-                    "validation": annotation_review_validation(rules),
+                    "validation": annotation_review_validation(ProposalRules.from_rules(rules)),
                 }
             )
             with self.subTest(index=index), self.store.transaction() as tx:
@@ -357,7 +358,7 @@ class LabelCorrectionTests(unittest.TestCase):
             batch = tx.prepare(self.prepared)
             saved = tx.save_decision(self.snapshot, self.change(batch.batch_id))
         before = self.annotations.copy(deep=True)
-        overlaid = apply_label_corrections(self.annotations, (saved,), self.rules)
+        overlaid = apply_label_corrections(self.annotations, (saved,), ProposalRules.from_rules(self.rules))
         self.assertEqual(
             overlaid.loc[0, ["category_id", "risk_id", "severity", "class"]].tolist(),
             ["CAT-99", "CAT-99.2", "critical", "deny"],
@@ -434,7 +435,7 @@ class LabelCorrectionTests(unittest.TestCase):
                     id_column="candidate_id",
                     columns=tuple(original),
                     rows=(original,),
-                    validation=annotation_review_validation(spec.rules),
+                    validation=annotation_review_validation(ProposalRules.from_rules(spec.rules)),
                     column_schema={"command": {"editable": True}},
                 )
             )

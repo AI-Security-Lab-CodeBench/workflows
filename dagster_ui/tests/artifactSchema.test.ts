@@ -53,6 +53,25 @@ test('local references resolve escaped keys, nested pointers, array indices and 
   assert.equal(schemaType({$ref: '#/$defs/a~1b~0c'}, root), 'string | null');
 });
 
+test('schema labels retain nested model and collection types without assigning models to storage', () => {
+  const root = {
+    $defs: {Rule: {type: 'object', title: 'Rule', properties: {enabled: {type: 'boolean'}}}},
+  };
+  const rule = {$ref: '#/$defs/Rule'};
+  const labels: SchemaObject = {
+    type: 'object',
+    additionalProperties: {anyOf: [{type: 'array', items: rule}, {type: 'null'}]},
+  };
+  const filters = {type: 'array', prefixItems: [{type: 'string'}, rule]};
+  assert.equal(schemaType(labels, root, [], 'declared'), 'map<string, array<Rule> | null>');
+  assert.equal(schemaType(filters, root, [], 'declared'), 'tuple<string, Rule>');
+  assert.equal(schemaType({type: ['array', 'null'], items: rule}, root, [], 'declared'), 'array<Rule> | null');
+  assert.equal(schemaType(labels, root, [], 'storage'), 'map<string, array<object> | null>');
+  assert.equal(schemaType({type: 'object', additionalProperties: false}, root, [], 'declared'), 'object');
+  assert.equal(schemaType(rule, root, ['#/$defs/Rule'], 'declared'), 'reference #/$defs/Rule');
+  assert.equal(schemaType(labels, root), 'object');
+});
+
 test('schema references stop at cycles, missing targets and external locations without fetching', () => {
   const root = {$defs: {A: {$ref: '#/$defs/B'}, B: {$ref: '#/$defs/A'}}};
   for (const ref of ['#/$defs/A', '#/$defs/missing', 'https://example.invalid/schema', '#/%not-encoded']) {

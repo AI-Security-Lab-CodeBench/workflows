@@ -22,10 +22,14 @@ from pydantic import AliasPath, BaseModel, Field, TypeAdapter, ValidationError
 
 from codebench_pipeline.artifact_approval import REUSABLE_PROCESSING_STAGES, effective_approval
 from codebench_pipeline.category_rules import CategoryRules
-from codebench_pipeline.config_assets import GLOBAL_CONFIG, ConfigRunIOManager, mapping_key
+from codebench_pipeline.config_assets import (
+    GLOBAL_CONFIG,
+    ConfigRunIOManager,
+    collection_mapping_key,
+    mapping_key,
+)
 from codebench_pipeline.dataframe_io import REVIEW_PREPARATION, AssetReference, DataFrameIOManager
 from codebench_pipeline.dataset_branches import (
-    BRANCH_BY_NAMESPACE,
     DECLARED_SOURCE_STAGES,
     FINALIZATION_STAGES,
     Branch,
@@ -85,16 +89,15 @@ class ArtifactCurrentness:
         provenance = extract_data_provenance_from_entry(record.event_log_entry)
         config = ConfigRunIOManager(home=str(self.home))
         if provenance is not None:
-            key = materialization.asset_key
-            stage = key.path[-1]
-            scope = (
-                BRANCH_BY_NAMESPACE[asset_branch(key.path)].group
-                if stage in DECLARED_SOURCE_STAGES
-                else stage
-            )
-            mapping = mapping_key(scope)
-            if GLOBAL_CONFIG not in provenance.input_storage_ids and mapping in provenance.input_storage_ids:
-                mapped = self._configuration_input(record, partition, provenance, mapping)
+            mappings = [
+                key
+                for key in provenance.input_storage_ids
+                if key.path[-1].startswith("map_") and key.path[-1].endswith("_config")
+            ]
+            if GLOBAL_CONFIG not in provenance.input_storage_ids and mappings:
+                if len(mappings) != 1:
+                    return None
+                mapped = self._configuration_input(record, partition, provenance, mappings[0])
                 if mapped is None:
                     return None
                 record = mapped
@@ -260,7 +263,7 @@ class ArtifactCurrentness:
             scoped_settings.update(
                 {
                     AssetKey(["datasets", "category_rules"]),
-                    mapping_key(BRANCH_BY_NAMESPACE[source_branch].group),
+                    collection_mapping_key(source_branch, key.path[-1]),
                 }
             )
         elif stage in REUSABLE_PROCESSING_STAGES:

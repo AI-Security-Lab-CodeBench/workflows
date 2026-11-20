@@ -23,6 +23,7 @@ from codebench_pipeline.dataset_config import (
 from codebench_pipeline.dataset_export import Publication, prepare_dataset
 from codebench_pipeline.dataset_records import CandidateRecord, LabelDecision, validate_label
 from codebench_pipeline.human_review import HumanReviewError
+from codebench_pipeline.labeling_stage_settings import ProposalRules
 from codebench_pipeline.models import SemanticSnippet
 from codebench_pipeline.review_policy import requires_human_review
 
@@ -103,7 +104,7 @@ def released_commands(
 @pa.check_types
 def review_queue(
     annotations: DataFrame[ProposedAnnotationsTable],
-    rules: CategoryRules,
+    rules: ProposalRules,
     review_columns: Sequence[str],
 ) -> DataFrame[ReviewQueueTable]:
     if not set(review_columns).issubset(annotations.columns):

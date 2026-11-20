@@ -34,7 +34,7 @@ from codebench_pipeline.repository_config import (
     SourceWeight,
 )
 from codebench_pipeline.storage import IntegrityError, fingerprint
-from codebench_pipeline.typed_config import TypedConfig
+from codebench_pipeline.typed_config import ConfigArtifact, TypedConfig
 
 type DeclaredSource = RepositoryBranchDeclaration | RepositoryBranchConfig | RepositoryConfig | Declaration
 _JSON_OBJECT: Final = TypeAdapter(dict[str, JsonValue])
@@ -198,7 +198,7 @@ class AdaptivePlannerConfig(TypedConfig):
     backend_revision: str
 
 
-class DeclaredSourceStageConfig(TypedConfig):
+class DeclaredSourceStageConfig(TypedConfig, ConfigArtifact):
     branch: Branch
     source: SourceDeclaration
     planner: AdaptivePlannerConfig | None = None
@@ -206,13 +206,24 @@ class DeclaredSourceStageConfig(TypedConfig):
     @model_validator(mode="after")
     def require_current_source(self) -> Self:
         self.source.require_current(self.branch)
+        if self.branch == "keenable":
+            plan = self.source.keenable_config().search_plan
+            adaptive = plan is not None and plan.mode == "adaptive"
+        else:
+            adaptive = False
+        if (self.planner is not None) != adaptive:
+            raise IntegrityError("Mapped planner settings are required only for adaptive Keenable discovery")
         return self
 
     @property
-    def repository_config(self) -> RepositoryAcquisitionConfig:
+    def repository_branch(self) -> RepositoryBranch:
         if self.branch == "keenable":
             raise IntegrityError("Keenable does not have repository acquisition configuration")
-        return self.source.repository_config(self.branch)
+        return self.branch
+
+    @property
+    def repository_config(self) -> RepositoryAcquisitionConfig:
+        return self.source.repository_config(self.repository_branch)
 
     @property
     def declaration_digest(self) -> str:
@@ -223,8 +234,8 @@ class DeclaredSourceStageConfig(TypedConfig):
         return self.repository_config.branch_digest(self.branch)
 
 
-class CollectionMergeConfig(TypedConfig):
-    keenable_source_weight: SourceWeight = DEFAULT_SOURCE_WEIGHTS["keenable"]
+class CollectionMergeConfig(TypedConfig, ConfigArtifact):
+    keenable_source_weight: SourceWeight
 
 
 CAT3_DATASET_ID: Final = "cloud_infrastructure_commands_grounded_v1"

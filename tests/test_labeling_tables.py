@@ -61,6 +61,7 @@ from codebench_pipeline.grounding_tables import GuardedLabeling, LabelingEvidenc
 from codebench_pipeline.grounding_tools import GroundingCredentials
 from codebench_pipeline.inference_capacity import CapacityConfig, CapacityUnavailable
 from codebench_pipeline.labeling_outcomes import LabelingAttempt, failed_attempt, label_attempt
+from codebench_pipeline.labeling_stage_settings import ProposalRules
 from codebench_pipeline.labeling_tables import failures_from_attempts, proposed_from_attempts
 from codebench_pipeline.models import SemanticSnippet
 from codebench_pipeline.object_store import ObjectStore
@@ -455,7 +456,7 @@ class LabelingTableTests(unittest.TestCase):
             ],
             LabelingAttemptsTable,
         )
-        proposals = proposed_from_attempts(table, rules)
+        proposals = proposed_from_attempts(table, ProposalRules.from_rules(rules))
         failures = failures_from_attempts(table)
         released = publication(proposals, rules, PublicationConfig())
         self.assertEqual(proposals["candidate_id"].tolist(), ["valid"])
@@ -472,7 +473,7 @@ class LabelingTableTests(unittest.TestCase):
             candidate, "tool_budget_exhausted", "Still unsupported.", [], "a" * 64, "label/1"
         )
         table = validated_frame([attempt.model_dump(mode="json")], LabelingAttemptsTable)
-        proposals = proposed_from_attempts(table, make_rules())
+        proposals = proposed_from_attempts(table, ProposalRules.from_rules(make_rules()))
         failures = failures_from_attempts(table)
         self.assertEqual(proposals["candidate_id"].tolist(), [])
         self.assertIn("class", proposals.columns)

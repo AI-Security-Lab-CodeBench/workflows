@@ -32,6 +32,13 @@ def declared_artifact_schemas(definitions: Definitions) -> dict[tuple[str, ...],
         node = asset.node_def
         if not isinstance(node, OpDefinition) or not isinstance(node.compute_fn, DecoratedOpFunction):
             continue
+        asset_key = next(iter(asset.keys))
+        key = tuple(asset_key.path)
+        output = node.output_def_named(asset.get_output_name_for_asset_key(asset_key))
+        contract = output.dagster_type.typing_type
+        if isinstance(contract, type) and issubclass(contract, BaseModel):
+            schemas[key] = TypeAdapter(dict[str, JsonValue]).validate_python(contract.model_json_schema())
+            continue
         annotation = get_type_hints(node.compute_fn.decorated_fn).get("return")
         while True:
             if isinstance(annotation, TypeAliasType):
@@ -42,7 +49,6 @@ def declared_artifact_schemas(definitions: Definitions) -> dict[tuple[str, ...],
                 break
         if get_origin(annotation) is DataFrame:
             annotation = get_args(annotation)[0]
-        key = tuple(next(iter(asset.keys)).path)
         if isinstance(annotation, type) and issubclass(annotation, pa.DataFrameModel):
             schemas[key] = declared_table_schema(annotation)
         elif isinstance(annotation, type) and issubclass(annotation, BaseModel):

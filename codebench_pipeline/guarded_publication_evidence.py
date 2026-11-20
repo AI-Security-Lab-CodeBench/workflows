@@ -5,9 +5,16 @@ import pandas as pd
 from pandera.typing import DataFrame
 from pydantic import JsonValue, TypeAdapter
 
-from codebench_pipeline.dataframe_schemas import LabelingAttemptsTable
+from codebench_pipeline.dataframe_schemas import LabelingAttemptsTable, SourceDocumentsTable, model_records
+from codebench_pipeline.dataset_finalization import normalized_command
+from codebench_pipeline.dataset_records import CandidateRecord
+from codebench_pipeline.grounding_tables import LabelingEvidenceInputs
+from codebench_pipeline.guarded_publication_selection import REQUIRED_CONTRIBUTIONS
 from codebench_pipeline.human_review import CompletionToken, HumanReviewError, ReviewDecision
 from codebench_pipeline.labeling_tables import failures_from_attempts
+from codebench_pipeline.models import Digest
+from codebench_pipeline.release_stage_settings import DatasetReleaseConfig
+from codebench_pipeline.repository_receipts import RepositoryRun, sha256
 from codebench_pipeline.review_snapshots import ResolvedReview, ReviewSnapshots
 
 
@@ -37,6 +44,87 @@ class ReleaseInputs:
         return LabelingAttemptsTable.validate(self.frame("labeling_attempts"))
 
 
+@dataclass(frozen=True, slots=True)
+class ReleaseAuthorization:
+    mapping_digest: Digest
+    configuration_digest: Digest
+    publication_versions: dict[str, str]
+
+
+@dataclass(frozen=True, slots=True)
+class ReleaseSource:
+    origin_id: str
+    capture_sha256: str
+    source_binding: str
+
+
+@dataclass(frozen=True, slots=True)
+class ReleaseExecution:
+    dataset_id: str
+    mapping_digest: Digest
+    attempts: DataFrame[LabelingAttemptsTable]
+    counts: dict[str, JsonValue]
+    sources: dict[str, ReleaseSource]
+    baseline: frozenset[str]
+    capture_locks: dict[str, str]
+    configuration_digest: Digest
+    publication_versions: dict[str, str]
+
+    @classmethod
+    def bind(
+        cls,
+        run: RepositoryRun,
+        inputs: ReleaseInputs,
+        settings: DatasetReleaseConfig,
+        authorization: ReleaseAuthorization,
+    ) -> "ReleaseExecution":
+        if run.dataset_id != inputs.token.dataset_id or run.dataset_id != inputs.resolved.snapshot.dataset_id:
+            raise HumanReviewError("stale", "Release evidence belongs to another dataset")
+        if settings.digest != authorization.mapping_digest:
+            raise HumanReviewError("stale", "Release mapping differs from the authorized configuration")
+        attempts = inputs.attempts()
+        candidates = model_records(inputs.resolved.reviewed, CandidateRecord)
+        labeling = LabelingEvidenceInputs(
+            run,
+            settings.collection,
+            settings.grounding.verifier_config(),
+            SourceDocumentsTable.validate(inputs.frame("documentation/capture_documentation")),
+        )
+        sources = labeling.verify(
+            attempts, selected=frozenset(candidate.candidate_id for candidate in candidates)
+        ).sources
+        captures: dict[str, ReleaseSource] = {}
+        for candidate in candidates:
+            source = sources.resolve(candidate)
+            captures[candidate.candidate_id] = ReleaseSource(
+                source.origin_id, source.capture_sha256, source.source_binding
+            )
+        merged = inputs.frame("merged_command_candidates")
+        baseline: set[str] = set()
+        if "source_weight" not in inputs.resolved.reviewed:
+            for candidate in model_records(merged, CandidateRecord):
+                branch, _, raw_id = candidate.candidate_id.partition(":")
+                if (
+                    branch != "keenable"
+                    and sources.repositories[branch].rows[raw_id].origin_id not in REQUIRED_CONTRIBUTIONS
+                ):
+                    baseline.add(normalized_command(candidate.command))
+        return cls(
+            run.dataset_id,
+            authorization.mapping_digest,
+            attempts,
+            reconciled_counts(inputs, attempts, merged),
+            captures,
+            frozenset(baseline),
+            {
+                **{branch: binding.receipt.upstream[0] for branch, binding in sources.repositories.items()},
+                "keenable": sha256(sources.lock.model_dump_json().encode()),
+            },
+            authorization.configuration_digest,
+            authorization.publication_versions,
+        )
+
+
 def _identity_set(frame: pd.DataFrame) -> set[str]:
     identities = set(frame["candidate_id"])
     if len(identities) != len(frame):
@@ -45,9 +133,8 @@ def _identity_set(frame: pd.DataFrame) -> set[str]:
 
 
 def reconciled_counts(
-    inputs: ReleaseInputs, attempts: DataFrame[LabelingAttemptsTable]
+    inputs: ReleaseInputs, attempts: DataFrame[LabelingAttemptsTable], merged: pd.DataFrame
 ) -> dict[str, JsonValue]:
-    merged = inputs.frame("merged_command_candidates")
     filtered = inputs.frame("filtered_commands")
     proposed = inputs.frame("proposed_annotations")
     failures = failures_from_attempts(attempts)

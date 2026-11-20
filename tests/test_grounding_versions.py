@@ -20,7 +20,7 @@ from codebench_pipeline.grounding_passages import Applicability, operation_passa
 from codebench_pipeline.grounding_policy import OperationGrant
 from codebench_pipeline.grounding_sources import CandidateCapture, CandidateEvidence
 from codebench_pipeline.labeling_outcomes import LabelingAttempt
-from codebench_pipeline.storage import IntegrityError
+from codebench_pipeline.storage import IntegrityError, fingerprint
 
 RESTRICTED_REFERENCE = (
     b"<h2>Listing pods</h2>"
@@ -71,7 +71,36 @@ class GroundingVersionTests(TestCase):
         fixture.inference.assert_called_once()
         fixture.inference.reset_mock()
         replay = runtime.attempts(pod, home / "replay")
-        runtime.evidence_inputs.verify(replay, selected=frozenset({accepted.candidate_id}))
+        verified = runtime.evidence_inputs.verify(replay, selected=frozenset({accepted.candidate_id}))
+        branch, _, original_id = accepted.candidate_id.partition(":")
+        self.assertEqual(branch, "dataset")
+        receipt_row = verified.sources.repositories[branch].rows[original_id]
+        collection = fixture.spec.declared_collection
+        assert collection is not None
+        origin = next(
+            item
+            for item in collection.repository_config("dataset").origins("dataset")
+            if item.origin_id == receipt_row.origin_id
+        )
+        self.assertEqual(
+            verified.sources.resolve(accepted).source_binding,
+            fingerprint(
+                {"source": receipt_row.model_dump(mode="json"), "origin": origin.model_dump(mode="json")}
+            ),
+        )
+        fixture.inference.assert_not_called()
+
+    def test_documentation_origin_binding_rejects_bytes_at_a_valid_address(self) -> None:
+        home = Path(self.enterContext(TemporaryDirectory()))
+        fixture = LabelingFixture(self, home)
+        filtered, runtime = fixture.labeling()
+        inputs = runtime.evidence_inputs
+        origin = inputs.collection.documentation_crawl.origins[0]
+        binding = inputs.run.root / "origin-bindings" / f"{origin.origin_sha256}.json"
+        binding.write_bytes(b'{"repository":"unapproved/replacement"}')
+
+        with self.assertRaisesRegex(IntegrityError, "origin binding bytes differ from the authorized digest"):
+            inputs.admission(filtered)
         fixture.inference.assert_not_called()
 
     def test_shared_operation_verification_rejects_linked_receipt_directory(self) -> None:

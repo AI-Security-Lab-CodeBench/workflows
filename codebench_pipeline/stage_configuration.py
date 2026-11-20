@@ -1,7 +1,6 @@
 from typing import Literal
 
-from dagster import Config
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, Field
 
 from codebench_pipeline.batch_labeling_config import BackendRevision, BatchLabelingConfig, BatchPromptConfig
 from codebench_pipeline.category_rules import CategoryRules
@@ -11,8 +10,9 @@ from codebench_pipeline.collection_config import (
     DeclaredCollection,
     DeclaredSourceStageConfig,
 )
+from codebench_pipeline.collection_stage_settings import COLLECTION_OPERATIONS, CollectionOperationSettings
 from codebench_pipeline.config_directory import ConfigDirectorySnapshot
-from codebench_pipeline.dataset_branches import BRANCH_BY_NAMESPACE, COLLECTION_BRANCHES, Branch, stage_name
+from codebench_pipeline.dataset_branches import COLLECTION_BRANCHES, Branch
 from codebench_pipeline.dataset_config import (
     AnnotationConfig,
     AnnotationWorkers,
@@ -20,41 +20,32 @@ from codebench_pipeline.dataset_config import (
     DeduplicationPolicy,
     FilteringConfig,
     PublicationConfig,
-    ReleaseCap,
     RequestBytes,
     require_guarded_annotation,
 )
 from codebench_pipeline.grounding_tools import GroundingConfig
 from codebench_pipeline.inference_capacity import ScopedCapacityConfig
-from codebench_pipeline.keenable_policy import Case
+from codebench_pipeline.labeling_stage_settings import (
+    LabelingRules,
+    LabelingSources,
+    ProposalRules,
+    RiskRoute,
+)
 from codebench_pipeline.model_config import ModelConfig
 from codebench_pipeline.models import Digest, Identifier
-from codebench_pipeline.review_config import HumanReviewConfig
+from codebench_pipeline.release_stage_settings import (
+    CategoryEligibilityConfig,
+    DatasetReleaseConfig,
+    PublicationTaxonomy,
+    ReleaseGroundingConfig,
+    ReviewQueueConfig,
+)
 from codebench_pipeline.storage import IntegrityError, fingerprint
-from codebench_pipeline.typed_config import TypedConfig
-
-
-class ConfigArtifact(BaseModel):
-    model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
-
-
-class PolicyArtifact(ConfigArtifact):
-    category_rules: CategoryRules
+from codebench_pipeline.typed_config import ConfigArtifact, TypedConfig
 
 
 class CollectionSettings(ConfigArtifact):
     collection: DeclaredSourceStageConfig
-
-
-class KeenableGrantPreview(ConfigArtifact):
-    effective_cases: tuple[Case, ...]
-    effective_byte_capacity: int
-
-
-class DeclaredBranchConfig(CollectionSettings, PolicyArtifact):
-    keenable_preview: KeenableGrantPreview | None = Field(
-        default=None, exclude_if=lambda preview: preview is None
-    )
 
 
 class DeclaredMergeConfig(ConfigArtifact):
@@ -65,8 +56,15 @@ class FilterSettings(ConfigArtifact):
     filtered_commands: FilteringConfig
 
 
-class FilterConfig(FilterSettings, PolicyArtifact):
-    pass
+class FilterConfig(FilterSettings):
+    routes: tuple[RiskRoute, ...]
+
+    @classmethod
+    def project(cls, registered: "DeclaredGlobalConfig", rules: CategoryRules) -> "FilterConfig":
+        return cls(
+            filtered_commands=registered.scopes.filtered_commands.filtered_commands,
+            routes=tuple(RiskRoute.from_rule(risk) for risk in rules.risks),
+        )
 
 
 class DeduplicationConfig(ConfigArtifact):
@@ -127,74 +125,26 @@ class GuardedLabelingSettings(ConfigArtifact):
         return cls(labeling_attempts=labeling_settings(spec.annotation), collection=collection)
 
 
-class GuardedLabelingConfig(GuardedLabelingSettings, PolicyArtifact):
+class GuardedLabelingConfig(ConfigArtifact):
+    labeling_attempts: ScopedAnnotationConfig
+    rules: LabelingRules
+    collection: LabelingSources
+
+    @classmethod
+    def project(cls, settings: GuardedLabelingSettings, rules: CategoryRules) -> "GuardedLabelingConfig":
+        return cls(
+            rules=LabelingRules.from_rules(rules),
+            labeling_attempts=settings.labeling_attempts,
+            collection=LabelingSources.from_collection(settings.collection),
+        )
+
     @classmethod
     def from_spec(cls, spec: DatasetBuildSpec) -> "GuardedLabelingConfig":
-        settings = GuardedLabelingSettings.from_spec(spec)
-        return cls(
-            category_rules=spec.rules,
-            labeling_attempts=settings.labeling_attempts,
-            collection=settings.collection,
-        )
-
-
-class GuardedLabelingCacheConfig(TypedConfig):
-    labeling_attempts: ScopedAnnotationConfig
-    declaration_digests: tuple[Digest, ...]
-
-    @classmethod
-    def from_settings(cls, settings: GuardedLabelingSettings) -> "GuardedLabelingCacheConfig":
-        return cls(
-            labeling_attempts=settings.labeling_attempts,
-            declaration_digests=tuple(
-                settings.collection.for_branch(branch.namespace).digest for branch in COLLECTION_BRANCHES
-            ),
-        )
+        return cls.project(GuardedLabelingSettings.from_spec(spec), spec.rules)
 
 
 class ReviewQueueSettings(ConfigArtifact):
     human_review_queue: PublicationConfig
-
-
-class ReviewQueueConfig(ReviewQueueSettings, PolicyArtifact):
-    registration_digest: Digest
-
-    @classmethod
-    def project(cls, registered: "DeclaredGlobalConfig", rules: CategoryRules) -> "ReviewQueueConfig":
-        return cls(
-            category_rules=rules,
-            human_review_queue=registered.scopes.human_review_queue.human_review_queue,
-            registration_digest=registered.registration_digest,
-        )
-
-
-class CategoryEligibilityConfig(TypedConfig, ConfigArtifact):
-    category_id: str
-
-
-class ReviewDecisionConfig(ConfigArtifact):
-    dataset_id: Identifier
-
-
-class DatasetReleaseConfig(ReviewDecisionConfig, PolicyArtifact):
-    limit_per_risk: ReleaseCap
-    collection: DeclaredCollection
-    grounding: GroundingConfig
-
-    @classmethod
-    def project(cls, registered: "DeclaredGlobalConfig", rules: CategoryRules) -> "DatasetReleaseConfig":
-        labeling = registered.scopes.labeling_attempts
-        return cls(
-            dataset_id=registered.dataset_id,
-            category_rules=rules,
-            limit_per_risk=registered.scopes.human_review_queue.human_review_queue.limit_per_risk,
-            collection=labeling.collection,
-            grounding=labeling.labeling_attempts.batch.grounding,
-        )
-
-    @property
-    def digest(self) -> Digest:
-        return fingerprint(self.model_dump(mode="json", by_alias=True))
 
 
 class DeclaredScopes(ConfigArtifact):
@@ -228,6 +178,27 @@ class DeclaredGlobalConfig(ConfigArtifact):
             "keenable": self.scopes.keenable_use_cases,
         }[branch].collection
 
+    def filter_config(self) -> FilterConfig:
+        return FilterConfig.project(self, self.rules)
+
+    def labeling_config(self) -> GuardedLabelingConfig:
+        return GuardedLabelingConfig.project(self.scopes.labeling_attempts, self.rules)
+
+    def proposal_config(self) -> ProposalRules:
+        return ProposalRules.from_rules(self.rules)
+
+    def eligibility_config(self) -> CategoryEligibilityConfig:
+        return CategoryEligibilityConfig(category_id=self.rules.category_id)
+
+    def review_queue_config(self) -> ReviewQueueConfig:
+        publication = self.scopes.human_review_queue.human_review_queue
+        return ReviewQueueConfig.from_rules(
+            self.rules, tuple(publication.review_columns), publication.limit_per_risk
+        )
+
+    def release_config(self) -> DatasetReleaseConfig:
+        return dataset_release_settings(self, self.rules)
+
     @classmethod
     def from_spec(
         cls, spec: DatasetBuildSpec, *, directory: ConfigDirectorySnapshot | None = None
@@ -257,16 +228,32 @@ class DeclaredGlobalConfig(ConfigArtifact):
         )
 
 
-def collection_stage_configs(registered: DeclaredGlobalConfig, branch: Branch) -> dict[str, Config]:
+def dataset_release_settings(registered: DeclaredGlobalConfig, rules: CategoryRules) -> DatasetReleaseConfig:
+    labeling = registered.scopes.labeling_attempts
+    return DatasetReleaseConfig(
+        taxonomy=PublicationTaxonomy.from_rules(rules),
+        limit_per_risk=registered.scopes.human_review_queue.human_review_queue.limit_per_risk,
+        collection=LabelingSources.from_collection(labeling.collection),
+        grounding=ReleaseGroundingConfig.from_grounding(labeling.labeling_attempts.batch.grounding),
+    )
+
+
+def collection_stage_configs(
+    registered: DeclaredGlobalConfig, branch: Branch
+) -> dict[str, CollectionOperationSettings]:
     config = registered.source_config(branch)
-    return {stage_name(name, branch): config for name in BRANCH_BY_NAMESPACE[branch].declared_stages}
+    return {
+        operation.name: operation.project(config)
+        for operation in COLLECTION_OPERATIONS
+        if operation.branch == branch
+    }
 
 
 def collection_asset_settings(spec: DatasetBuildSpec, branch: Branch) -> CollectionSettings:
     return CollectionSettings(collection=declared_source_config(spec, branch))
 
 
-def stage_configs(settings: DatasetBuildSpec | DeclaredGlobalConfig) -> dict[str, Config]:
+def stage_configs(settings: DatasetBuildSpec | DeclaredGlobalConfig) -> dict[str, BaseModel]:
     registered = (
         DeclaredGlobalConfig.from_spec(settings) if isinstance(settings, DatasetBuildSpec) else settings
     )
@@ -278,15 +265,15 @@ def stage_configs(settings: DatasetBuildSpec | DeclaredGlobalConfig) -> dict[str
             for stage, config in collection_stage_configs(registered, branch.namespace).items()
         },
         "merged_command_candidates": scopes.merged_command_candidates.merged_command_candidates,
-        "filtered_commands": scopes.filtered_commands.filtered_commands,
-        "labeling_attempts": GuardedLabelingCacheConfig.from_settings(scopes.labeling_attempts),
-        "proposed_annotations": TypedConfig(),
+        "filtered_commands": registered.filter_config(),
+        "labeling_attempts": registered.labeling_config(),
+        "proposed_annotations": registered.proposal_config(),
         "labeling_failures": TypedConfig(),
         "deduplicated_annotations": scopes.deduplicated_annotations.deduplication,
-        "category_eligible_annotations": CategoryEligibilityConfig(category_id=registered.rules.category_id),
-        "human_review_queue": scopes.human_review_queue.human_review_queue,
-        "human_review_decisions": HumanReviewConfig(),
-        "dataset_release": HumanReviewConfig(),
+        "category_eligible_annotations": registered.eligibility_config(),
+        "human_review_queue": registered.review_queue_config(),
+        "human_review_decisions": TypedConfig(),
+        "dataset_release": registered.release_config(),
     }
 
 

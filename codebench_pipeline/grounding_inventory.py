@@ -7,10 +7,14 @@ from pandera.typing import DataFrame
 
 from codebench_pipeline.dataframe_schemas import SourceDocumentsTable
 from codebench_pipeline.grounding_passages import OperationPassage, operation_passages
-from codebench_pipeline.grounding_sources import CandidateEvidence, RepositoryBranchEvidence
+from codebench_pipeline.grounding_sources import (
+    CandidateEvidence,
+    RepositoryBranchEvidence,
+    origin_binding_payload,
+)
 from codebench_pipeline.keenable_policy import RESPONSE_BYTES, canonical_url, record_digest
 from codebench_pipeline.repository_acquisition import CAPTURED_SOURCES, CATALOG_SOURCES
-from codebench_pipeline.repository_receipts import RepositoryReceipt, RepositoryRun, read_receipt
+from codebench_pipeline.repository_receipts import RepositoryReceipt, RepositoryRun, canonical, read_receipt
 from codebench_pipeline.repository_tree import git_blob_sha1, raw_url
 from codebench_pipeline.storage import IntegrityError, fingerprint
 from scripts.dataset_schema import SECRET_PATTERNS
@@ -115,10 +119,7 @@ def documentation_captures(
         ):
             raise IntegrityError("Documentation inventory has no current verified receipt")
     limit = min(branch.config.maximum_file_bytes, RESPONSE_BYTES)
-    origins = {
-        origin.origin_id: branch.current_origin(origin.origin_id)
-        for origin in branch.config.origins("documentation")
-    }
+    origins = {origin.origin_id: branch.current_origin(origin.origin_id) for origin in branch.config.origins}
     sources = {
         row.source_id: row
         for row in CATALOG_SOURCES.validate_python(catalog.observations["sources"])
@@ -138,13 +139,15 @@ def documentation_captures(
             captures.append(
                 DocumentationCapture(
                     url=raw_url(origin, source.path),
-                    binding=fingerprint(
-                        {
-                            "origin": origin.model_dump(mode="json"),
-                            "source": source.model_dump(mode="json"),
-                            "capture_sha256": capture.sha256,
-                        }
-                    ),
+                    binding=sha256(
+                        b'{"capture_sha256":'
+                        + canonical(capture.sha256)
+                        + b',"origin":'
+                        + origin_binding_payload(run, origin.origin_sha256)
+                        + b',"source":'
+                        + canonical(source.model_dump(mode="json"))
+                        + b"}"
+                    ).hexdigest(),
                     sha256=capture.sha256,
                     git_blob=source.git_blob_sha1,
                     size=capture.size,

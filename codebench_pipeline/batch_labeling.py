@@ -40,6 +40,7 @@ from codebench_pipeline.labeling_outcomes import (
     label_attempt,
     validate_attempts,
 )
+from codebench_pipeline.labeling_stage_settings import LabelingRules
 from codebench_pipeline.model_config import ModelConfig
 from codebench_pipeline.models import SemanticSnippet
 from codebench_pipeline.object_store import ObjectStore, StorageConfig
@@ -208,7 +209,7 @@ def _retrieved_evidence(candidate: CandidateRecord, document: GroundingDocument)
 def _logical_input(
     candidate: CandidateRecord,
     docs: list[SemanticSnippet],
-    rules: CategoryRules,
+    rules: CategoryRules | LabelingRules,
     model: ModelConfig,
     config: BatchLabelingConfig,
     implementation: dict[str, JsonValue] | str,
@@ -321,7 +322,7 @@ def _run_batch(
     candidates: list[CandidateRecord],
     row_fingerprints: dict[str, str],
     assigned: dict[str, dict[str, RowEvidence]],
-    rules: CategoryRules,
+    rules: CategoryRules | LabelingRules,
     model: ModelConfig,
     config: BatchLabelingConfig,
     out: Path,
@@ -905,7 +906,7 @@ def annotate_batches(
 def annotate_batches_bound(
     candidates: list[CandidateRecord],
     docs: list[SemanticSnippet],
-    rules: CategoryRules,
+    rules: CategoryRules | LabelingRules,
     model: ModelConfig,
     config: BatchLabelingConfig,
     out: Path,
@@ -1033,7 +1034,7 @@ def annotate_batches_bound(
 def prepare_batch_rows(
     candidates: list[CandidateRecord],
     docs: list[SemanticSnippet],
-    rules: CategoryRules,
+    rules: CategoryRules | LabelingRules,
     model: ModelConfig,
     config: BatchLabelingConfig,
     *,
@@ -1072,7 +1073,7 @@ def prepare_batch_rows(
 def run_prepared_batches(
     candidates: list[CandidateRecord],
     prepared: Mapping[str, PreparedBatchRow],
-    rules: CategoryRules,
+    rules: CategoryRules | LabelingRules,
     model: ModelConfig,
     config: BatchLabelingConfig,
     out: Path,
@@ -1111,7 +1112,7 @@ def _run_conversations(
     fingerprints: dict[str, str],
     assigned: dict[str, dict[str, RowEvidence]],
     completed: dict[str, LabelingAttempt],
-    rules: CategoryRules,
+    rules: CategoryRules | LabelingRules,
     model: ModelConfig,
     config: BatchLabelingConfig,
     out: Path,

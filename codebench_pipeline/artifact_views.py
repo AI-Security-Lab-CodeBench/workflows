@@ -93,18 +93,17 @@ class ArtifactDataService:
             query = request.query
             if query.search or query.filters or query.sort or query.offset:
                 raise TableQueryError("query", "JSON artifacts are not queryable tables")
-            preview = read_config_preview(binding.path, request.snapshot_id)
-            schema = ArtifactSchema(source="storage", schema=preview.schema)
-            if binding.use_declared_schema and "x-codebench-truncated" not in preview.schema:
-                declared = rules_artifact_schema(preview.value, self.schemas.get(request.asset_key))
-                if declared.source == "declared":
-                    schema = declared
+            preview = read_config_preview(
+                binding.path,
+                request.snapshot_id,
+                self.schemas.get(request.asset_key) if binding.use_declared_schema else None,
+            )
             return ArtifactJSON(
                 asset_key=request.asset_key,
                 partition_key=request.partition_key,
                 snapshot_id=preview.digest,
                 value=preview.value,
-                data_schema=schema,
+                data_schema=preview.schema,
                 publication_state=binding.publication_state,
             )
         if request.snapshot_id is not None and request.snapshot_id != binding.reference.digest:

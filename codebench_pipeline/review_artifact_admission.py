@@ -8,7 +8,6 @@ from dagster._core.definitions.data_version import extract_data_version_from_ent
 from pydantic import JsonValue, RootModel
 
 from codebench_pipeline.category_rules import CategoryRules
-from codebench_pipeline.collection_config import DeclaredSourceStageConfig
 from codebench_pipeline.data_view_models import DatasetViewError
 from codebench_pipeline.dataframe_io import (
     REVIEW_PREPARATION,
@@ -16,6 +15,7 @@ from codebench_pipeline.dataframe_io import (
     DataFrameIOManager,
     materialized_reference,
 )
+from codebench_pipeline.dataset_branches import DECLARED_SOURCE_STAGES, stage_branch
 from codebench_pipeline.dataset_dependencies import CACHE_INPUTS, review_evidence_stages
 from codebench_pipeline.dataset_engine import implementation_signature
 from codebench_pipeline.human_review import HumanReviewError
@@ -98,9 +98,10 @@ def checked_review_artifacts(
         if not isinstance(table, pd.DataFrame):
             raise DatasetViewError("not_ready", f"Preparation output is not a table: {stage}")
         try:
-            if isinstance(config, DeclaredSourceStageConfig):
-                require_source_rights(config)
-                validate_source_receipt(table, config, manager)
+            if stage.rsplit("/", 1)[-1] in DECLARED_SOURCE_STAGES:
+                declaration = registered.source_config(stage_branch(stage))
+                require_source_rights(declaration)
+                validate_source_receipt(table, declaration, manager)
             if stage == "human_review_queue":
                 with manager.review_store.reader() as tx:
                     batch = tx.get_current_batch(partition, "annotations", compact=True)

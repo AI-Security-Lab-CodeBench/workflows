@@ -6,19 +6,20 @@ from pydantic import JsonValue, RootModel, TypeAdapter
 from codebench_pipeline.dataframe_io import frame_bytes
 from codebench_pipeline.dataframe_schemas import (
     CommandsTable,
-    LabelingAttemptsTable,
-    SourceDocumentsTable,
     frame_records,
     model_records,
     validated_frame,
 )
-from codebench_pipeline.dataset_config import DatasetBuildSpec
 from codebench_pipeline.dataset_export import Publication, prepare_dataset
 from codebench_pipeline.dataset_finalization import FINALIZATION_BINDING, normalized_command
 from codebench_pipeline.dataset_records import CandidateRecord, LabelDecision
 from codebench_pipeline.grounding_policy import command_tokens
-from codebench_pipeline.grounding_tables import LabelingEvidenceInputs, labeling_supports
-from codebench_pipeline.guarded_publication_evidence import ReleaseInputs, reconciled_counts
+from codebench_pipeline.grounding_tables import labeling_supports
+from codebench_pipeline.guarded_publication_evidence import (
+    ReleaseAuthorization,
+    ReleaseExecution,
+    ReleaseInputs,
+)
 from codebench_pipeline.guarded_publication_sampling import BranchSample, sample_survivors
 from codebench_pipeline.guarded_publication_selection import (
     REQUIRED_CONTRIBUTIONS,
@@ -29,81 +30,13 @@ from codebench_pipeline.guarded_publication_selection import (
 from codebench_pipeline.human_review import HumanReviewError
 from codebench_pipeline.label_corrections import apply_label_corrections
 from codebench_pipeline.labeling_outcomes import LabelingAttempt
-from codebench_pipeline.models import Digest
+from codebench_pipeline.release_stage_settings import DatasetReleaseConfig, PublicationTaxonomy
 from codebench_pipeline.repository_config import SourceWeight
 from codebench_pipeline.repository_receipts import RepositoryRun, canonical, sha256
 from codebench_pipeline.review_frames import REVIEW_BINDING
 from codebench_pipeline.review_policy import requires_human_review
 from codebench_pipeline.review_snapshots import release_configuration_digest
-from codebench_pipeline.stage_configuration import DatasetReleaseConfig, DeclaredGlobalConfig
-
-
-@dataclass(frozen=True, slots=True)
-class ReleaseSource:
-    origin_id: str
-    capture_sha256: str
-    source_binding: str
-
-
-@dataclass(frozen=True, slots=True)
-class ReleaseExecution:
-    dataset_id: str
-    mapping_digest: Digest
-    attempts: DataFrame[LabelingAttemptsTable]
-    counts: dict[str, JsonValue]
-    sources: dict[str, ReleaseSource]
-    baseline: frozenset[str]
-    capture_locks: dict[str, str]
-    configuration_digest: Digest
-    publication_versions: dict[str, str]
-
-    @classmethod
-    def bind(
-        cls,
-        run: RepositoryRun,
-        inputs: ReleaseInputs,
-        settings: DatasetReleaseConfig,
-        configuration_digest: Digest,
-        versions: dict[str, str],
-    ) -> "ReleaseExecution":
-        attempts = inputs.attempts()
-        labeling = LabelingEvidenceInputs(
-            run,
-            settings.collection,
-            settings.grounding,
-            SourceDocumentsTable.validate(inputs.frame("documentation/capture_documentation")),
-        )
-        sources = labeling.admission(attempts).sources
-        captures: dict[str, ReleaseSource] = {}
-        for candidate in model_records(inputs.resolved.reviewed, CandidateRecord):
-            source = sources.resolve(candidate)
-            captures[candidate.candidate_id] = ReleaseSource(
-                source.origin_id, source.capture_sha256, source.source_binding
-            )
-        labeling.verify(attempts, selected=frozenset(captures))
-        baseline: set[str] = set()
-        if "source_weight" not in inputs.resolved.reviewed:
-            for candidate in model_records(inputs.frame("merged_command_candidates"), CandidateRecord):
-                branch, _, raw_id = candidate.candidate_id.partition(":")
-                if (
-                    branch != "keenable"
-                    and sources.repositories[branch].rows[raw_id].origin_id not in REQUIRED_CONTRIBUTIONS
-                ):
-                    baseline.add(normalized_command(candidate.command))
-        return cls(
-            run.dataset_id,
-            settings.digest,
-            attempts,
-            reconciled_counts(inputs, attempts),
-            captures,
-            frozenset(baseline),
-            {
-                **{branch: binding.receipt.upstream[0] for branch, binding in sources.repositories.items()},
-                "keenable": sha256(sources.lock.model_dump_json().encode()),
-            },
-            configuration_digest,
-            versions,
-        )
+from codebench_pipeline.stage_configuration import DeclaredGlobalConfig, dataset_release_settings
 
 
 @dataclass(frozen=True, slots=True)
@@ -137,22 +70,24 @@ class ReleaseProposal:
 def prepare_guarded_release(
     inputs: ReleaseInputs,
     run: RepositoryRun,
-    settings: DeclaredGlobalConfig | DatasetBuildSpec,
+    registered: DeclaredGlobalConfig,
     *,
     publication_versions: dict[str, str],
 ) -> ReleaseProposal:
     """Rebuild the exact proposal from registration for control-plane checks."""
-    registered = (
-        DeclaredGlobalConfig.from_spec(settings) if isinstance(settings, DatasetBuildSpec) else settings
-    )
     if registered.scopes.human_review_queue.human_review_queue != inputs.resolved.manifest.publication:
         raise HumanReviewError("stale", "Registered release policy differs from the completed snapshot")
-    policy = DatasetReleaseConfig.project(registered, registered.rules)
+    policy = dataset_release_settings(registered, registered.rules)
     return build_release_proposal(
         inputs,
         policy,
         ReleaseExecution.bind(
-            run, inputs, policy, release_configuration_digest(registered), publication_versions
+            run,
+            inputs,
+            policy,
+            ReleaseAuthorization(
+                policy.digest, release_configuration_digest(registered), publication_versions
+            ),
         ),
     )
 
@@ -162,18 +97,20 @@ def build_release_proposal(
 ) -> ReleaseProposal:
     resolved = inputs.resolved
     if (
-        settings.dataset_id != execution.dataset_id
-        or settings.dataset_id != resolved.snapshot.dataset_id
+        inputs.token.dataset_id != execution.dataset_id
+        or inputs.token.dataset_id != resolved.snapshot.dataset_id
         or settings.digest != execution.mapping_digest
     ):
         raise HumanReviewError("stale", "Release evidence belongs to another dataset")
-    rules = settings.category_rules
+    taxonomy = settings.taxonomy
     cap = settings.limit_per_risk
-    if rules != resolved.rules or cap != resolved.manifest.publication.limit_per_risk:
+    if taxonomy != PublicationTaxonomy.from_rules(resolved.rules) or (
+        cap != resolved.manifest.publication.limit_per_risk
+    ):
         raise HumanReviewError("stale", "Release settings differ from the completed snapshot")
     attempts = execution.attempts
     counts = execution.counts
-    corrected = apply_label_corrections(resolved.reviewed, inputs.decisions, rules)
+    corrected = apply_label_corrections(resolved.reviewed, inputs.decisions, taxonomy.label_validation())
     originals = {
         candidate.candidate_id: candidate for candidate in model_records(resolved.reviewed, CandidateRecord)
     }
@@ -239,7 +176,7 @@ def build_release_proposal(
                 contribution,
             )
         )
-    selected = select_survivors(survivors, {risk.id: cap for risk in rules.risks}, source_weights)
+    selected = select_survivors(survivors, {risk.id: cap for risk in taxonomy.risks}, source_weights)
     ordered = selected.ordered
     selected_ids = frozenset(ordered)
     selected_attempts = {
@@ -256,10 +193,11 @@ def build_release_proposal(
     published = prepare_dataset(
         [candidates[identity] for identity in identities],
         [labels[identity] for identity in identities],
-        rules,
+        taxonomy,
         cap,
         approved_ids=approved,
         selected_ids=selected_ids,
+        authored_rules_json=resolved.rules.model_dump_json(indent=2),
     )
     output = validated_frame(
         [{key: value for key, value in row.items()} for row in published.commands], CommandsTable
@@ -279,7 +217,7 @@ def build_release_proposal(
     csv = published.files["commands.csv"].encode()
     manifest = TypeAdapter(dict[str, JsonValue]).validate_python(
         {
-            "partition": settings.dataset_id,
+            "partition": execution.dataset_id,
             "release_configuration": execution.configuration_digest,
             "review_snapshot": resolved.snapshot.snapshot_id,
             "review_completion": inputs.token.model_dump(mode="json"),

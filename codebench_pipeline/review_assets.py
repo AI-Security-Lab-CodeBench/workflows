@@ -1,16 +1,18 @@
 from dagster import (
+    AssetExecutionContext,
     AssetIn,
     AssetKey,
     AssetsDefinition,
     DataVersion,
     MetadataValue,
     Output,
+    ResourceParam,
     asset,
 )
 from pandera.typing import DataFrame
 
 from codebench_pipeline.config_assets import mapped_input
-from codebench_pipeline.dataframe_io import REVIEW_PREPARATION
+from codebench_pipeline.dataframe_io import REVIEW_PREPARATION, DataFrameIOManager
 from codebench_pipeline.dataframe_schemas import (
     CommandsTable,
     HumanReviewDecisionsTable,
@@ -18,7 +20,9 @@ from codebench_pipeline.dataframe_schemas import (
 )
 from codebench_pipeline.dataset_asset_types import DATASET_PARTITIONS, TABLE_TYPES, table_input
 from codebench_pipeline.guarded_publication import build_release_proposal
+from codebench_pipeline.guarded_publication_evidence import ReleaseExecution
 from codebench_pipeline.human_review import HumanReviewError
+from codebench_pipeline.release_stage_settings import DatasetReleaseConfig
 from codebench_pipeline.review_frames import require_decision_frame
 from codebench_pipeline.review_inputs import (
     DECISION_INPUT,
@@ -27,7 +31,6 @@ from codebench_pipeline.review_inputs import (
     DecisionInput,
     ReleaseInput,
 )
-from codebench_pipeline.stage_configuration import DatasetReleaseConfig, ReviewDecisionConfig
 from codebench_pipeline.storage import fingerprint
 
 
@@ -44,16 +47,10 @@ def human_assets() -> list[AssetsDefinition]:
                 dagster_type=DECISION_INPUT,
                 input_manager_key=REVIEW_INPUT_MANAGER,
             ),
-            "mapped_config": mapped_input("human_review_decisions", ReviewDecisionConfig),
         },
     )
-    def human_review_decisions(
-        approved: DecisionInput,
-        mapped_config: ReviewDecisionConfig,
-    ) -> Output[DataFrame[HumanReviewDecisionsTable]]:
-        if approved.token.dataset_id != mapped_config.dataset_id or approved.queue.attrs.get(
-            REVIEW_PREPARATION
-        ) != {
+    def human_review_decisions(approved: DecisionInput) -> Output[DataFrame[HumanReviewDecisionsTable]]:
+        if approved.queue.attrs.get(REVIEW_PREPARATION) != {
             "batch_id": approved.token.batch_id,
             "snapshot_id": approved.token.snapshot_id,
         }:
@@ -94,21 +91,25 @@ def human_assets() -> list[AssetsDefinition]:
         },
     )
     def dataset_release(
+        context: AssetExecutionContext,
         category_eligible_annotations: DataFrame[ProposedAnnotationsTable],
         approved: ReleaseInput,
         mapped_config: DatasetReleaseConfig,
+        dataset_io_manager: ResourceParam[DataFrameIOManager],
     ) -> Output[DataFrame[CommandsTable]]:
         require_decision_frame(approved.persisted_decisions, approved.decisions)
         token = approved.evidence.token
-        if (
-            token.dataset_id != mapped_config.dataset_id
-            or not ProposedAnnotationsTable.validate(category_eligible_annotations).equals(
-                approved.evidence.resolved.reviewed
-            )
-            or mapped_config.digest != approved.execution.mapping_digest
+        if not ProposedAnnotationsTable.validate(category_eligible_annotations).equals(
+            approved.evidence.resolved.reviewed
         ):
             raise HumanReviewError("stale", "Release inputs differ from the completed snapshot")
-        proposal = build_release_proposal(approved.evidence, mapped_config, approved.execution)
+        execution = ReleaseExecution.bind(
+            dataset_io_manager.repository_run(context.partition_key, context.run_id),
+            approved.evidence,
+            mapped_config,
+            approved.authorization,
+        )
+        proposal = build_release_proposal(approved.evidence, mapped_config, execution)
         version = fingerprint(token.model_dump(mode="json"))
         return Output(
             proposal.output,

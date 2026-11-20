@@ -3,13 +3,13 @@ from __future__ import annotations
 import hashlib
 import re
 from pathlib import PurePosixPath
-from typing import Final, Literal, assert_never
+from typing import Final, Literal, Protocol, assert_never
 from urllib.parse import quote
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from codebench_pipeline.repository_config import Commit, RepositoryOrigin, check_path
+from codebench_pipeline.repository_config import Commit, RepositoryName, RepositoryOriginScope, check_path
 from codebench_pipeline.storage import IntegrityError
 
 TREE_LIMIT: Final = 32 * 1024 * 1024
@@ -34,11 +34,19 @@ def fetch_repository_bytes(url: str, limit: int) -> bytes:
     return body
 
 
-def raw_url(origin: RepositoryOrigin, path: str) -> str:
+class RepositoryLocation(Protocol):
+    @property
+    def repository(self) -> RepositoryName: ...
+
+    @property
+    def commit(self) -> Commit: ...
+
+
+def raw_url(origin: RepositoryLocation, path: str) -> str:
     return f"https://raw.githubusercontent.com/{origin.repository}/{origin.commit}/{quote(path, safe='/')}"
 
 
-def tree_url(origin: RepositoryOrigin) -> str:
+def tree_url(origin: RepositoryLocation) -> str:
     return f"https://api.github.com/repos/{origin.repository}/git/trees/{origin.commit}?recursive=1"
 
 
@@ -68,7 +76,7 @@ def git_blob_sha1(body: bytes) -> str:
     return hashlib.sha1(f"blob {len(body)}\0".encode() + body, usedforsecurity=False).hexdigest()
 
 
-def validate_tree(raw: bytes, origin: RepositoryOrigin) -> tuple[TreeEntry, ...]:
+def validate_tree(raw: bytes, origin: RepositoryOriginScope) -> tuple[TreeEntry, ...]:
     response = RepositoryTree.model_validate_json(raw)
     if response.truncated or response.sha != origin.commit or not response.tree:
         raise IntegrityError(f"Truncated, empty or unexpected tree for {origin.origin_id}")
@@ -89,7 +97,7 @@ def validate_tree(raw: bytes, origin: RepositoryOrigin) -> tuple[TreeEntry, ...]
     return entries
 
 
-def scope_matches(origin: RepositoryOrigin, entry: TreeEntry, regular_paths: set[str]) -> bool:
+def scope_matches(origin: RepositoryOriginScope, entry: TreeEntry, regular_paths: set[str]) -> bool:
     path = PurePosixPath(entry.path)
     match origin.scope:
         case "cheatsheet":
@@ -120,7 +128,7 @@ def scope_matches(origin: RepositoryOrigin, entry: TreeEntry, regular_paths: set
     assert_never(origin.scope)
 
 
-def undeclared_notices(origin: RepositoryOrigin, entries: tuple[TreeEntry, ...]) -> set[str]:
+def undeclared_notices(origin: RepositoryOriginScope, entries: tuple[TreeEntry, ...]) -> set[str]:
     if origin.scope not in {"readme", "compose", "markdown_files"}:
         return set()
     pinned = {item.path for item in (origin.license, *origin.notices)}

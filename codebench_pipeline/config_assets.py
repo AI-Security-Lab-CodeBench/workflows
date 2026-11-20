@@ -25,38 +25,39 @@ from dagster._core.definitions.data_version import extract_data_version_from_ent
 from pydantic import BaseModel, JsonValue, RootModel
 
 from codebench_pipeline.category_rules import CategoryRules
+from codebench_pipeline.collection_config import CollectionMergeConfig
+from codebench_pipeline.collection_stage_settings import (
+    COLLECTION_OPERATIONS,
+    CollectionOperation,
+    collection_operation,
+)
 from codebench_pipeline.config_directory import ConfigDirectorySnapshot
 from codebench_pipeline.dagster_table_metadata import MetadataSink
-from codebench_pipeline.dataset_asset_types import DATASET_PARTITIONS, rules_input
+from codebench_pipeline.dataset_asset_types import DATASET_PARTITIONS
 from codebench_pipeline.dataset_branches import (
     COLLECTION_BRANCHES,
     FINALIZATION_GROUPS,
     Branch,
 )
-from codebench_pipeline.dataset_config import DatasetBuildSpec
-from codebench_pipeline.dataset_engine import implementation_signature
+from codebench_pipeline.dataset_config import DatasetBuildSpec, DeduplicationPolicy
 from codebench_pipeline.dataset_registry import DatasetRegistry
 from codebench_pipeline.declared_dataset_bundle import compile_directory
+from codebench_pipeline.grounding_sources import persist_repository_origin_bindings
 from codebench_pipeline.input_provenance import (
     current_materialization,
     input_materialization,
     producer_run_id,
 )
-from codebench_pipeline.keenable_policy import MAX_BYTES
+from codebench_pipeline.labeling_stage_settings import ProposalRules
 from codebench_pipeline.object_store import sha256
+from codebench_pipeline.repository_receipts import RepositoryRun
 from codebench_pipeline.stage_configuration import (
     CategoryEligibilityConfig,
     ConfigArtifact,
     DatasetReleaseConfig,
-    DeclaredBranchConfig,
     DeclaredGlobalConfig,
-    DeclaredMergeConfig,
-    DeduplicationConfig,
     FilterConfig,
     GuardedLabelingConfig,
-    KeenableGrantPreview,
-    PolicyArtifact,
-    ReviewDecisionConfig,
     ReviewQueueConfig,
 )
 from codebench_pipeline.storage import IntegrityError, fingerprint
@@ -84,6 +85,10 @@ class GlobalConfig(Config):
 
 def mapping_key(scope: str) -> AssetKey:
     return AssetKey(["datasets", f"map_{scope}_config"])
+
+
+def collection_mapping_key(branch: Branch, stage: str) -> AssetKey:
+    return mapping_key(collection_operation(branch, stage).mapping_scope)
 
 
 def registered_input() -> AssetIn:
@@ -176,6 +181,11 @@ class ConfigRunIOManager(ConfigurableIOManager):
         contract = context.dagster_type.typing_type
         if not isinstance(contract, type) or not issubclass(contract, ConfigArtifact):
             raise IntegrityError(f"No scoped configuration contract for {context.asset_key.to_user_string()}")
+        return self.load_projected_scope(context, contract)
+
+    def load_projected_scope[Contract: ConfigArtifact](
+        self, context: InputContext, contract: type[Contract]
+    ) -> Contract:
         return contract.model_validate_json(self._upstream_payload(context), strict=True)
 
     def _upstream_payload(self, context: InputContext) -> bytes:
@@ -288,6 +298,10 @@ def configuration_assets(home: Path, *, authoring_root: Path | None = None) -> l
                 raise IntegrityError("Registered settings differ from the authorized directory capture")
             spec = spec.model_copy(update={"rules": rules, "declared_collection": compiled_collection})
         registered = RegisteredConfig.from_spec(spec, directory=approved if directory is None else directory)
+        persist_repository_origin_bindings(
+            registered.scopes.labeling_attempts.collection,
+            RepositoryRun(home, registered.dataset_id, context.run_id),
+        )
         applied = registered.config_directory
         return Output(
             registered,
@@ -304,127 +318,80 @@ def configuration_assets(home: Path, *, authoring_root: Path | None = None) -> l
     def mapping[Contract: ConfigArtifact](
         scope: str,
         contract: type[Contract],
-        projection: Callable[[RegisteredConfig], Contract] | None = None,
+        projection: Callable[[RegisteredConfig], Contract],
         *,
-        policy: Callable[[RegisteredConfig, CategoryRules], Contract] | None = None,
-        semantic_version: Callable[[Contract], str] | None = None,
+        group_name: str | None = None,
     ) -> AssetsDefinition:
-        def scoped_output(value: Contract) -> Output[Contract]:
-            if semantic_version is not None:
-                return Output(value, data_version=DataVersion(semantic_version(value)))
+        def project(registered: RegisteredConfig) -> Output[Contract]:
+            value = projection(registered)
             effective = RootModel[JsonValue].model_validate_json(value.model_dump_json(by_alias=True))
             return Output(value, data_version=DataVersion(fingerprint(effective.root)))
-
-        def project(registered: RegisteredConfig, category_rules: CategoryRules) -> Output[Contract]:
-            require_registered_rules(registered, category_rules)
-            assert policy is not None
-            return scoped_output(policy(registered, category_rules))
-
-        def settings_only(registered: RegisteredConfig) -> Output[Contract]:
-            assert projection is not None
-            return scoped_output(projection(registered))
 
         return asset(
             key=mapping_key(scope),
             partitions_def=DATASET_PARTITIONS,
-            group_name=scope if scope in COLLECTION_SCOPES.values() else FINALIZATION_GROUPS[scope],
+            group_name=FINALIZATION_GROUPS[scope] if group_name is None else group_name,
             io_manager_key="config_run_io_manager",
             dagster_type=_contract_type(contract),
-            ins={
-                "registered": registered_input(),
-                **({"category_rules": rules_input()} if policy is not None else {}),
-            },
-            description=f"**How it works:** Take only the registered settings for {scope} and "
-            "publish them as typed configuration with a version of the effective value. "
-            "Policy mappings also check and carry category rules.",
-        )(project if policy is not None else settings_only)
-
-    def declared_branch(scope: str, branch: Branch) -> AssetsDefinition:
-        def project(registered: RegisteredConfig, rules: CategoryRules) -> DeclaredBranchConfig:
-            scopes = registered.scopes
-            collection = {
-                "dataset": scopes.existing_datasets,
-                "documentation": scopes.documentation_crawl,
-                "keenable": scopes.keenable_use_cases,
-            }[branch]
-            config = collection.collection
-            preview = None
-            if branch == "keenable":
-                declaration = config.source.keenable_config()
-                preview = KeenableGrantPreview(
-                    effective_cases=declaration.search_cases,
-                    effective_byte_capacity=declaration.budget.total_bytes
-                    if declaration.budget is not None
-                    else MAX_BYTES,
-                )
-            return DeclaredBranchConfig(category_rules=rules, collection=config, keenable_preview=preview)
-
-        return mapping(
-            scope,
-            DeclaredBranchConfig,
-            policy=project,
-            semantic_version=lambda value: implementation_signature(
-                scope, value.collection, {"category_rules": value.category_rules}, {}
+            ins={"registered": registered_input()},
+            description=(
+                f"**How it works:** Project the registered settings for {scope} into "
+                f"`{contract.__name__}`. Its fields are "
+                + ", ".join(f"`{name}`" for name in contract.model_fields)
+                + ". The data version identifies the effective settings."
             ),
+        )(project)
+
+    def declared_branch(operation: CollectionOperation) -> AssetsDefinition:
+        return mapping(
+            operation.mapping_scope,
+            operation.contract,
+            lambda registered: operation.project(registered.source_config(operation.branch)),
+            group_name=COLLECTION_SCOPES[operation.branch],
         )
 
     return [
         config_directory_asset(home, authoring_root),
         global_config,
-        *(declared_branch(branch.group, branch.namespace) for branch in COLLECTION_BRANCHES),
+        *(declared_branch(operation) for operation in COLLECTION_OPERATIONS),
         mapping(
             "merged_command_candidates",
-            DeclaredMergeConfig,
-            lambda registered: registered.scopes.merged_command_candidates,
+            CollectionMergeConfig,
+            lambda registered: registered.scopes.merged_command_candidates.merged_command_candidates,
         ),
         mapping(
             "labeling_attempts",
             GuardedLabelingConfig,
-            policy=lambda registered, rules: GuardedLabelingConfig(
-                category_rules=rules,
-                labeling_attempts=registered.scopes.labeling_attempts.labeling_attempts,
-                collection=registered.scopes.labeling_attempts.collection,
-            ),
+            RegisteredConfig.labeling_config,
         ),
         mapping(
             "filtered_commands",
             FilterConfig,
-            policy=lambda registered, rules: FilterConfig(
-                category_rules=rules,
-                filtered_commands=registered.scopes.filtered_commands.filtered_commands,
-            ),
-            semantic_version=lambda value: implementation_signature(
-                "filtered_commands", value.filtered_commands, {"category_rules": value.category_rules}, {}
-            ),
+            RegisteredConfig.filter_config,
         ),
         mapping(
             "proposed_annotations",
-            PolicyArtifact,
-            policy=lambda _, rules: PolicyArtifact(category_rules=rules),
+            ProposalRules,
+            RegisteredConfig.proposal_config,
         ),
         mapping(
             "deduplicated_annotations",
-            DeduplicationConfig,
-            lambda registered: registered.scopes.deduplicated_annotations,
+            DeduplicationPolicy,
+            lambda registered: registered.scopes.deduplicated_annotations.deduplication,
         ),
         mapping(
             "category_eligible_annotations",
             CategoryEligibilityConfig,
-            lambda registered: CategoryEligibilityConfig(category_id=registered.rules.category_id),
+            RegisteredConfig.eligibility_config,
         ),
         mapping(
             "human_review_queue",
             ReviewQueueConfig,
-            policy=ReviewQueueConfig.project,
-        ),
-        mapping(
-            "human_review_decisions",
-            ReviewDecisionConfig,
-            lambda registered: ReviewDecisionConfig(dataset_id=registered.dataset_id),
+            RegisteredConfig.review_queue_config,
         ),
         mapping(
             "dataset_release",
             DatasetReleaseConfig,
-            policy=DatasetReleaseConfig.project,
+            RegisteredConfig.release_config,
         ),
     ]

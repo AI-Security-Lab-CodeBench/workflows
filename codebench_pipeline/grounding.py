@@ -80,7 +80,7 @@ class GuardedEvidence:
 
     @property
     def source_limited(self) -> bool:
-        return self.sources.provider.declaration.source_scoped
+        return self.sources.source_scoped
 
     def source(self, candidate: CandidateRecord) -> tuple[str, list[RowEvidence]]:
         capture = self.sources.resolve(candidate)

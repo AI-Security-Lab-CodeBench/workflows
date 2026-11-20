@@ -5,7 +5,12 @@ from pathlib import Path
 from dagster import AssetKey
 from guarded_labeling_fixture import LabelingFixture
 
-from codebench_pipeline.config_assets import configured_selection, current_configuration_record, mapping_key
+from codebench_pipeline.collection_stage_settings import collection_operation
+from codebench_pipeline.config_assets import (
+    collection_mapping_key,
+    configured_selection,
+    current_configuration_record,
+)
 from codebench_pipeline.dataset_engine import stage_signature
 from codebench_pipeline.dataset_registry import DatasetRegistry
 from codebench_pipeline.definitions import build_definitions, dataset_run_config
@@ -27,13 +32,13 @@ class ConfigAssetPolicyTests(unittest.TestCase):
             stale_launch = dataset_run_config(original)
             registry.register(pinned)
             capture = AssetKey(["datasets", "documentation", "capture_documentation"])
-            rules = AssetKey(["datasets", "category_rules"])
             definitions = build_definitions(home)
             job = definitions.resolve_job_def("build_documentation")
             selected_job = definitions.get_implicit_global_asset_job_def()
-            selection = configured_selection([rules, capture])
+            selection = configured_selection([capture])
             current_launch = dataset_run_config(pinned)
-            config = declared_source_config(pinned, "documentation")
+            operation = collection_operation("documentation", "capture_documentation")
+            config = operation.project(declared_source_config(pinned, "documentation"))
 
             with dataset_instance(home) as instance:
                 instance.add_dynamic_partitions("dataset_builds", [dataset_id])
@@ -56,13 +61,8 @@ class ConfigAssetPolicyTests(unittest.TestCase):
                 )
                 (materialization,) = result.asset_materializations_for_node(capture.to_python_identifier())
                 actual = materialization.metadata["input_fingerprint"].value
-                self.assertEqual(
-                    actual, stage_signature("capture_documentation", config, {"category_rules": pinned.rules})
-                )
-                self.assertNotEqual(
-                    actual,
-                    stage_signature("capture_documentation", config, {"category_rules": original.rules}),
-                )
+                self.assertEqual(actual, stage_signature("capture_documentation", config, {}))
+                self.assertEqual(config, operation.project(declared_source_config(original, "documentation")))
 
                 selected = selected_job.execute_in_process(
                     instance=instance,
@@ -75,7 +75,7 @@ class ConfigAssetPolicyTests(unittest.TestCase):
                 (captured,) = selected.asset_materializations_for_node(capture.to_python_identifier())
                 self.assertEqual(captured.metadata["input_fingerprint"].value, actual)
 
-                mapping = mapping_key("documentation_crawl")
+                mapping = collection_mapping_key("documentation", "capture_documentation")
                 producer = current_configuration_record(instance, mapping, dataset_id)
                 self.assertEqual(producer.run_id, result.run_id)
                 payload = home.joinpath("configuration-runs", producer.run_id, *mapping.path)

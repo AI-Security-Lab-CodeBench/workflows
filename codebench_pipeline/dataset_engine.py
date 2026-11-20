@@ -12,7 +12,6 @@ import pandera.pandas as pa
 from dagster import (
     AssetExecutionContext,
     AssetObservation,
-    Config,
     DagsterInstance,
     DataVersion,
     JsonMetadataValue,
@@ -20,10 +19,11 @@ from dagster import (
     Output,
 )
 from pandera.typing import DataFrame
-from pydantic import JsonValue, RootModel, TypeAdapter
+from pydantic import BaseModel, JsonValue, RootModel, TypeAdapter
 
 from codebench_pipeline.category_rules import CategoryRules
 from codebench_pipeline.collection_config import DeclaredSourceStageConfig
+from codebench_pipeline.collection_stage_settings import collection_settings_branch
 from codebench_pipeline.dataframe_io import AssetReference, AssetSnapshot, DataFrameIOManager, frame_bytes
 from codebench_pipeline.dataset_branches import Branch, asset_branch, stage_name
 from codebench_pipeline.dataset_catalog import source_scope
@@ -119,7 +119,7 @@ def receipt_source_versions(
 
 def stage_signature(
     stage: str,
-    config: Config,
+    config: BaseModel,
     inputs: Mapping[str, pd.DataFrame | CategoryRules | AssetSnapshot],
     *,
     source: ImplementationSource = ImplementationSource(),
@@ -136,9 +136,13 @@ def stage_signature(
     )
 
 
-def stage_code_versions(stage: str, config: Config, source: ImplementationSource) -> dict[str, str]:
+def stage_code_versions(stage: str, config: BaseModel, source: ImplementationSource) -> dict[str, str]:
     return scoped_code_versions(
-        stage, source, config.branch if isinstance(config, DeclaredSourceStageConfig) else None
+        stage,
+        source,
+        config.branch
+        if isinstance(config, DeclaredSourceStageConfig)
+        else collection_settings_branch(config),
     )
 
 
@@ -164,7 +168,7 @@ def review_policy_versions(source: ImplementationSource) -> dict[str, str]:
 
 def implementation_signature(
     stage: str,
-    config: Config,
+    config: BaseModel,
     inputs: Mapping[str, pd.DataFrame | CategoryRules | AssetSnapshot],
     implementation: Mapping[str, str],
     *,
@@ -214,7 +218,7 @@ def verified_legacy_table(
     key: str,
     *,
     stage: str,
-    config: Config,
+    config: BaseModel,
     inputs: Mapping[str, pd.DataFrame | CategoryRules | AssetSnapshot],
     implementation: Mapping[str, str],
     content_digest: str,
@@ -356,7 +360,7 @@ def prepare_table_cache(
     stage: str,
     partition: str,
     branch: Branch,
-    config: Config,
+    config: BaseModel,
     inputs: Mapping[str, pd.DataFrame | CategoryRules | AssetSnapshot],
 ) -> TableCache:
     source = storage.implementation_source
@@ -375,7 +379,12 @@ def prepare_table_cache(
         signature,
         source,
         receipt_source_versions(
-            scoped, source=source, include_legacy_inventory=not isinstance(config, DeclaredSourceStageConfig)
+            scoped,
+            source=source,
+            include_legacy_inventory=(
+                not isinstance(config, DeclaredSourceStageConfig)
+                and collection_settings_branch(config) is None
+            ),
         ),
         scoped,
         config.model_dump_json(indent=2),
@@ -387,7 +396,7 @@ def prepare_table_cache(
 def cached_table(
     context: AssetExecutionContext,
     storage: DataFrameIOManager,
-    config: Config,
+    config: BaseModel,
     inputs: Mapping[str, pd.DataFrame | CategoryRules],
     schema: type[Schema],
     compute: Callable[[Path], DataFrame[Schema]],

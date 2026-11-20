@@ -3,7 +3,7 @@ from pathlib import Path
 from typing import assert_never
 
 import pandas as pd
-from pydantic import JsonValue
+from pydantic import JsonValue, TypeAdapter
 
 from codebench_pipeline.category_rules import CategoryRules
 from codebench_pipeline.data_views import DatasetDataService
@@ -17,6 +17,7 @@ from codebench_pipeline.human_review import (
 )
 from codebench_pipeline.human_review_store import HumanReviewStore
 from codebench_pipeline.label_corrections import annotation_review_validation, validate_review_edits
+from codebench_pipeline.labeling_stage_settings import ProposalRules
 from codebench_pipeline.object_store import ObjectStore
 from codebench_pipeline.review_api_models import EvidenceResponse, EvidenceTarget, PublicationTarget
 from codebench_pipeline.review_evidence import review_evidence
@@ -38,7 +39,7 @@ class AnnotationReviewSource:
             resolved.snapshot,
             uncertain,
             "candidate_id",
-            validation=annotation_review_validation(resolved.rules),
+            validation=annotation_review_validation(ProposalRules.from_rules(resolved.rules)),
             evidence={"manifest": resolved.manifest.model_dump(mode="json")},
             column_schema={"command": {"editable": False}},
         )
@@ -83,7 +84,11 @@ class ReviewService(ReviewWorkflow):
         edits: dict[str, JsonValue],
         validation: dict[str, JsonValue],
     ) -> None:
-        rules = CategoryRules.model_validate(validation["rules"])
+        rules = (
+            ProposalRules.model_validate_json(TypeAdapter(JsonValue).dump_json(validation["taxonomy"]))
+            if "taxonomy" in validation
+            else ProposalRules.from_rules(CategoryRules.model_validate(validation["rules"]))
+        )
         for row in rows:
             validate_review_edits(row, edits, rules)
 

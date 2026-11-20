@@ -27,6 +27,7 @@ from codebench_pipeline.human_review import (
 from codebench_pipeline.human_review_schema import MIGRATIONS, timestamp
 from codebench_pipeline.human_review_store import HumanReviewStore
 from codebench_pipeline.label_corrections import annotation_review_validation
+from codebench_pipeline.labeling_stage_settings import ProposalRules
 from codebench_pipeline.review_api_models import EvidenceTarget, NextReviewRequest, ReviewQueryRequest
 from codebench_pipeline.storage import fingerprint
 from codebench_pipeline.table_query import ColumnSort, NullFilter, TableQuery, TextFilter
@@ -42,20 +43,29 @@ class ReviewPostgresTests(unittest.TestCase):
 
     def drop_schema(self) -> None:
         with psycopg.connect(self.store.dsn, autocommit=True) as connection:
-            connection.execute(sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(sql.Identifier(self.store.schema)))
+            connection.execute(
+                sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(sql.Identifier(self.store.schema))
+            )
 
     def test_scope_migration_requires_refresh_before_old_metadata_can_authorize_edits(self) -> None:
         prepared = self.prepared(())
         now = timestamp()
         legacy = ReviewBatch(
-            batch_id="legacy", snapshot=prepared.snapshot, generation=1, batch_revision=0,
-            state="open", created_at=now, updated_at=now,
+            batch_id="legacy",
+            snapshot=prepared.snapshot,
+            generation=1,
+            batch_revision=0,
+            state="open",
+            created_at=now,
+            updated_at=now,
         )
         metadata = prepared.model_dump(mode="json", exclude={"snapshot", "rows", "column_schema"})
         with psycopg.connect(self.store.dsn, row_factory=dict_row) as connection:
             connection.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(self.store.schema)))
             connection.execute(sql.SQL("SET search_path TO {}").format(sql.Identifier(self.store.schema)))
-            connection.execute("CREATE TABLE review_schema_versions(version integer PRIMARY KEY, applied_at text NOT NULL)")
+            connection.execute(
+                "CREATE TABLE review_schema_versions(version integer PRIMARY KEY, applied_at text NOT NULL)"
+            )
             for version, migration in enumerate(MIGRATIONS[:2], start=1):
                 for statement in migration:
                     connection.execute(statement)
@@ -63,7 +73,14 @@ class ReviewPostgresTests(unittest.TestCase):
             connection.execute(
                 """INSERT INTO review_batches(batch_id,dataset_id,review_stage,current,binding,data,prepared)
                     VALUES(%s,%s,%s,true,%s,%s,%s)""",
-                ("legacy", "qa", "selection", "legacy-binding", Jsonb(legacy.model_dump(mode="json")), Jsonb(metadata)),
+                (
+                    "legacy",
+                    "qa",
+                    "selection",
+                    "legacy-binding",
+                    Jsonb(legacy.model_dump(mode="json")),
+                    Jsonb(metadata),
+                ),
             )
         with self.assertRaises(HumanReviewError) as unmigrated:
             with self.store.reader():
@@ -79,49 +96,92 @@ class ReviewPostgresTests(unittest.TestCase):
             self.assertEqual(tx.column_schema(refreshed.batch_id)["text"]["editable"], True)
 
     def prepared(
-        self, rows: tuple[dict[str, JsonValue], ...], *, eligible: tuple[str, ...] | None = None,
-        minimum: int = 0, maximum: int | None = None, dataset: str = "qa",
-        stage: str = "selection", columns: tuple[str, ...] = ("text",),
+        self,
+        rows: tuple[dict[str, JsonValue], ...],
+        *,
+        eligible: tuple[str, ...] | None = None,
+        minimum: int = 0,
+        maximum: int | None = None,
+        dataset: str = "qa",
+        stage: str = "selection",
+        columns: tuple[str, ...] = ("text",),
         evidence: dict[str, JsonValue] | None = None,
-        artifact: str = "", scope: str = "",
+        artifact: str = "",
+        scope: str = "",
         schema: dict[str, dict[str, JsonValue]] | None = None,
     ) -> PreparedReview:
         identifiers = tuple(str(row["id"]) for row in rows)
         eligible_ids = identifiers if eligible is None else eligible
         snapshot = ReviewSnapshot(
-            dataset_id=dataset, review_stage=stage,
-            artifact_id=artifact, scope_id=scope,
-            snapshot_id=fingerprint({"rows": list(rows), "eligible": list(eligible_ids),
-                                     "minimum": minimum, "maximum": maximum,
-                                     "columns": list(columns), "evidence": evidence or {},
-                                     "schema": schema or {}, "artifact": artifact, "scope": scope}),
-            candidate_ids=identifiers, eligible_candidate_ids=eligible_ids, review_columns=columns,
-            min_approvals=minimum, max_approvals=maximum,
+            dataset_id=dataset,
+            review_stage=stage,
+            artifact_id=artifact,
+            scope_id=scope,
+            snapshot_id=fingerprint(
+                {
+                    "rows": list(rows),
+                    "eligible": list(eligible_ids),
+                    "minimum": minimum,
+                    "maximum": maximum,
+                    "columns": list(columns),
+                    "evidence": evidence or {},
+                    "schema": schema or {},
+                    "artifact": artifact,
+                    "scope": scope,
+                }
+            ),
+            candidate_ids=identifiers,
+            eligible_candidate_ids=eligible_ids,
+            review_columns=columns,
+            min_approvals=minimum,
+            max_approvals=maximum,
         )
-        return PreparedReview(snapshot=snapshot, id_column="id", columns=tuple(rows[0]) if rows else ("id", "text"),
-                              rows=rows, evidence=evidence or {}, column_schema=schema or {})
+        return PreparedReview(
+            snapshot=snapshot,
+            id_column="id",
+            columns=tuple(rows[0]) if rows else ("id", "text"),
+            rows=rows,
+            evidence=evidence or {},
+            column_schema=schema or {},
+        )
 
     def decide(
-        self, prepared: PreparedReview, candidate_id: str, choice: DecisionValue, *,
-        revision: int = 0, edits: dict[str, JsonValue] | None = None,
+        self,
+        prepared: PreparedReview,
+        candidate_id: str,
+        choice: DecisionValue,
+        *,
+        revision: int = 0,
+        edits: dict[str, JsonValue] | None = None,
     ) -> None:
         with self.store.transaction(dataset_id=prepared.snapshot.dataset_id) as tx:
             batch = tx.get_current_batch(
-                prepared.snapshot.dataset_id, prepared.snapshot.review_stage,
-                artifact_id=prepared.snapshot.artifact_id, scope_id=prepared.snapshot.scope_id,
+                prepared.snapshot.dataset_id,
+                prepared.snapshot.review_stage,
+                artifact_id=prepared.snapshot.artifact_id,
+                scope_id=prepared.snapshot.scope_id,
             )
-            tx.save_decision(prepared.snapshot, DecisionChange(
-                batch_id=batch.batch_id, generation=batch.generation, candidate_id=candidate_id,
-                expected_row_revision=revision, decision=choice, reviewer="synthetic QA reviewer",
-                edits=edits or {},
-            ))
+            tx.save_decision(
+                prepared.snapshot,
+                DecisionChange(
+                    batch_id=batch.batch_id,
+                    generation=batch.generation,
+                    candidate_id=candidate_id,
+                    expected_row_revision=revision,
+                    decision=choice,
+                    reviewer="synthetic QA reviewer",
+                    edits=edits or {},
+                ),
+            )
 
     def test_artifacts_partitions_and_named_scopes_keep_authority_and_heads_isolated(self) -> None:
         scopes = (
             self.prepared(({"id": "one", "text": "same"},), artifact="models", scope="primary"),
             self.prepared(({"id": "one", "text": "same"},), artifact="models", scope="secondary"),
             self.prepared(({"id": "one", "text": "same"},), artifact="metrics", scope="primary"),
-            self.prepared(({"id": "one", "text": "same"},), artifact="models", scope="primary", dataset="other"),
+            self.prepared(
+                ({"id": "one", "text": "same"},), artifact="models", scope="primary", dataset="other"
+            ),
         )
         batches = []
         for prepared in scopes:
@@ -130,44 +190,78 @@ class ReviewPostgresTests(unittest.TestCase):
         self.decide(scopes[0], "one", "approve")
         with self.store.transaction() as tx:
             token = tx.complete(scopes[0].snapshot, tx.get_batch(batches[0].batch_id), "synthetic QA")
-            published = tx.record_publication(scopes[0].snapshot, token, PublicationPayload(
-                payload_key="models", payload_hash="a" * 64, csv_reference="models.csv",
-                bundle_reference="models-bundle", dagster_run_id="models-run",
-            ))
+            published = tx.record_publication(
+                scopes[0].snapshot,
+                token,
+                PublicationPayload(
+                    payload_key="models",
+                    payload_hash="a" * 64,
+                    csv_reference="models.csv",
+                    bundle_reference="models-bundle",
+                    dagster_run_id="models-run",
+                ),
+            )
             for batch in batches[1:]:
                 self.assertEqual(tx.counts(batch.batch_id).pending, 1)
-            tx.invalidate("qa", "Only secondary changed", review_stage="selection",
-                          artifact_id="models", scope_id="secondary")
+            tx.invalidate(
+                "qa",
+                "Only secondary changed",
+                review_stage="selection",
+                artifact_id="models",
+                scope_id="secondary",
+            )
             self.assertEqual(tx.authorize_completion(scopes[0].snapshot, token), token)
             for index in (2, 3):
                 snapshot = scopes[index].snapshot
                 self.assertEqual(
-                    tx.get_current_batch(snapshot.dataset_id, "selection",
-                                         artifact_id=snapshot.artifact_id, scope_id=snapshot.scope_id).batch_id,
+                    tx.get_current_batch(
+                        snapshot.dataset_id,
+                        "selection",
+                        artifact_id=snapshot.artifact_id,
+                        scope_id=snapshot.scope_id,
+                    ).batch_id,
                     batches[index].batch_id,
                 )
         self.decide(scopes[2], "one", "approve")
         with self.store.transaction() as tx:
             other = tx.complete(scopes[2].snapshot, tx.get_batch(batches[2].batch_id), "synthetic QA")
-            tx.record_publication(scopes[2].snapshot, other, PublicationPayload(
-                payload_key="metrics", payload_hash="b" * 64, csv_reference="metrics.csv",
-                bundle_reference="metrics-bundle", dagster_run_id="metrics-run",
-            ))
-            page = tx.review_page(ReviewQueryRequest(
-                dataset_id="qa", artifact_id="models", scope_id="primary",
-            ), "selection")
+            tx.record_publication(
+                scopes[2].snapshot,
+                other,
+                PublicationPayload(
+                    payload_key="metrics",
+                    payload_hash="b" * 64,
+                    csv_reference="metrics.csv",
+                    bundle_reference="metrics-bundle",
+                    dagster_run_id="metrics-run",
+                ),
+            )
+            page = tx.review_page(
+                ReviewQueryRequest(
+                    dataset_id="qa",
+                    artifact_id="models",
+                    scope_id="primary",
+                ),
+                "selection",
+            )
             self.assertEqual(page.publication, published)
 
     def test_declared_schema_blocks_carried_edits_and_preserves_original_hash(self) -> None:
-        old = self.prepared(({"id": "one", "text": "original"},), schema={
-            "text": {"type": "string", "enum": ["original", "corrected"]},
-        })
+        old = self.prepared(
+            ({"id": "one", "text": "original"},),
+            schema={
+                "text": {"type": "string", "enum": ["original", "corrected"]},
+            },
+        )
         with self.store.transaction() as tx:
             tx.prepare(old)
         self.decide(old, "one", "approve", edits={"text": "corrected"})
-        changed = self.prepared(({"id": "renamed", "text": "original"},), schema={
-            "text": {"type": "string", "enum": ["original"]},
-        })
+        changed = self.prepared(
+            ({"id": "renamed", "text": "original"},),
+            schema={
+                "text": {"type": "string", "enum": ["original"]},
+            },
+        )
         with self.store.transaction() as tx:
             batch = tx.prepare(changed)
             self.assertEqual(tx.counts(batch.batch_id).approve, 1)
@@ -196,8 +290,9 @@ class ReviewPostgresTests(unittest.TestCase):
                 tx.authorize_completion(populated.snapshot, token)
 
     def test_selected_values_share_one_item_and_expand_downstream_occurrences(self) -> None:
-        prepared = self.prepared(({"id": "one", "text": "same", "source": "a"},
-                                  {"id": "two", "text": "same", "source": "b"}))
+        prepared = self.prepared(
+            ({"id": "one", "text": "same", "source": "a"}, {"id": "two", "text": "same", "source": "b"})
+        )
         with self.store.transaction() as tx:
             batch = tx.prepare(prepared)
             self.assertEqual(tx.prepare(prepared), batch)
@@ -214,7 +309,9 @@ class ReviewPostgresTests(unittest.TestCase):
             self.assertEqual(page.batch.snapshot.candidate_ids, ())
             self.assertEqual(page.batch.snapshot.eligible_candidate_ids, ())
             self.assertEqual(page.batch.snapshot.record_fingerprints, {})
-            self.assertEqual([decision.candidate_id for decision in tx.list_decisions(batch.batch_id)], ["one", "two"])
+            self.assertEqual(
+                [decision.candidate_id for decision in tx.list_decisions(batch.batch_id)], ["one", "two"]
+            )
             self.assertEqual(tx.prepared(batch.batch_id), prepared)
             self.assertEqual(tx.rows_for_hash(batch.batch_id, "two"), prepared.rows)
 
@@ -223,8 +320,12 @@ class ReviewPostgresTests(unittest.TestCase):
         with self.store.transaction() as tx:
             original_batch = tx.prepare(old)
         self.decide(old, "one", "approve", edits={"text": "corrected"})
-        changed = self.prepared(({"id": "renamed", "text": "original"}, {"id": "alias", "text": "corrected"}),
-                                minimum=1, maximum=2, evidence={"implementation": "changed"})
+        changed = self.prepared(
+            ({"id": "renamed", "text": "original"}, {"id": "alias", "text": "corrected"}),
+            minimum=1,
+            maximum=2,
+            evidence={"implementation": "changed"},
+        )
         with self.store.transaction() as tx:
             batch = tx.prepare(changed)
             decisions = {row.candidate_id: row for row in tx.list_decisions(batch.batch_id)}
@@ -249,8 +350,9 @@ class ReviewPostgresTests(unittest.TestCase):
             self.assertEqual(invalid.exception.code, "selection")
 
     def test_original_numeric_representation_survives_postgres_without_collapsing_hashes(self) -> None:
-        prepared = self.prepared(({"id": "one", "text": 1}, {"id": "two", "text": 1.0},
-                                  {"id": "three", "text": 1e20}))
+        prepared = self.prepared(
+            ({"id": "one", "text": 1}, {"id": "two", "text": 1.0}, {"id": "three", "text": 1e20})
+        )
         with self.store.transaction() as tx:
             batch = tx.prepare(prepared)
         with self.store.reader() as tx:
@@ -301,40 +403,77 @@ class ReviewPostgresTests(unittest.TestCase):
 
     def test_changed_rules_block_only_invalid_occurrence_without_discarding_shared_approval(self) -> None:
         rules = CategoryRules(
-            category_id="CAT-99", category_name="Synthetic QA", version="1",
-            description_language="English", policy="Inert fixtures",
-            risks=[RiskRule(id="CAT-99.1", name="Synthetic", definition="Synthetic",
-                            command_patterns=["^printf", "^echo"], guidance="Inert fixtures")],
+            category_id="CAT-99",
+            category_name="Synthetic QA",
+            version="1",
+            description_language="English",
+            policy="Inert fixtures",
+            risks=[
+                RiskRule(
+                    id="CAT-99.1",
+                    name="Synthetic",
+                    definition="Synthetic",
+                    command_patterns=["^printf", "^echo"],
+                    guidance="Inert fixtures",
+                )
+            ],
             classes=[ClassRule(name=name, definition="Synthetic") for name in ("allow", "deny", "ask")],
-            severities=[SeverityRule(name=name, definition="Synthetic") for name in ("low", "medium", "high", "critical")],
+            severities=[
+                SeverityRule(name=name, definition="Synthetic")
+                for name in ("low", "medium", "high", "critical")
+            ],
         )
         rows: list[dict[str, JsonValue]] = []
         for identifier, utility in (("one", "printf"), ("two", "echo")):
             candidate = CandidateRecord(
-                candidate_id=identifier, command=f"{utility} inert", util=utility, context="Never executed",
-                source_id="qa", source_url="https://example.org/qa", source_position="line 1",
-                transformations=[], risk_candidates=["CAT-99.1"],
+                candidate_id=identifier,
+                command=f"{utility} inert",
+                util=utility,
+                context="Never executed",
+                source_id="qa",
+                source_url="https://example.org/qa",
+                source_position="line 1",
+                transformations=[],
+                risk_candidates=["CAT-99.1"],
             )
             label = LabelDecision(
-                candidate_id=identifier, decision="accept", category_id="CAT-99", risk_id="CAT-99.1",
-                severity="low", class_="allow", description="Inert fixture", util=utility,
-                category_confidence="high", risk_confidence="high", severity_confidence="high",
-                class_confidence="high", rationale="Synthetic", documentation_urls=["https://example.org/docs"],
+                candidate_id=identifier,
+                decision="accept",
+                category_id="CAT-99",
+                risk_id="CAT-99.1",
+                severity="low",
+                class_="allow",
+                description="Inert fixture",
+                util=utility,
+                category_confidence="high",
+                risk_confidence="high",
+                severity_confidence="high",
+                class_confidence="high",
+                rationale="Synthetic",
+                documentation_urls=["https://example.org/docs"],
             )
-            rows.append({"id": identifier, **candidate.model_dump(mode="json"), **label.model_dump(mode="json", by_alias=True)})
+            rows.append(
+                {
+                    "id": identifier,
+                    **candidate.model_dump(mode="json"),
+                    **label.model_dump(mode="json", by_alias=True),
+                }
+            )
         old = self.prepared(tuple(rows), columns=("severity",)).model_copy(
-            update={"validation": annotation_review_validation(rules)}
+            update={"validation": annotation_review_validation(ProposalRules.from_rules(rules))}
         )
         with self.store.transaction() as tx:
             tx.prepare(old)
         self.decide(old, "one", "approve", edits={"severity": "high"})
-        changed_rules = rules.model_copy(update={"risks": [
-            rules.risks[0].model_copy(update={"command_patterns": ["^printf"]})
-        ]})
-        changed = old.model_copy(update={
-            "snapshot": old.snapshot.model_copy(update={"snapshot_id": "f" * 64}),
-            "validation": annotation_review_validation(changed_rules),
-        })
+        changed_rules = rules.model_copy(
+            update={"risks": [rules.risks[0].model_copy(update={"command_patterns": ["^printf"]})]}
+        )
+        changed = old.model_copy(
+            update={
+                "snapshot": old.snapshot.model_copy(update={"snapshot_id": "f" * 64}),
+                "validation": annotation_review_validation(ProposalRules.from_rules(changed_rules)),
+            }
+        )
         with self.store.transaction() as tx:
             batch = tx.prepare(changed)
             self.assertEqual(tx.counts(batch.batch_id).approve, 1)
@@ -350,15 +489,23 @@ class ReviewPostgresTests(unittest.TestCase):
 
     def test_edit_boundary_rejects_unselected_columns_and_changed_json_types(self) -> None:
         prepared = self.prepared(
-            ({"id": "one", "text": "value", "count": 1},), columns=("text", "count"),
-            schema={"text": {"type": "string", "enum": ["value", "fixed"]},
-                    "count": {"type": "number", "minimum": 0, "maximum": 2}},
+            ({"id": "one", "text": "value", "count": 1},),
+            columns=("text", "count"),
+            schema={
+                "text": {"type": "string", "enum": ["value", "fixed"]},
+                "count": {"type": "number", "minimum": 0, "maximum": 2},
+            },
         )
         with self.store.transaction() as tx:
             tx.prepare(prepared)
         for edits in (
-            {"id": "renamed"}, {"count": True}, {"text": None}, {"count": "1"},
-            {"count": 3}, {"count": -1}, {"text": "outside-enum"},
+            {"id": "renamed"},
+            {"count": True},
+            {"text": None},
+            {"count": "1"},
+            {"count": 3},
+            {"count": -1},
+            {"text": "outside-enum"},
         ):
             with self.subTest(edits=edits), self.assertRaises(HumanReviewError):
                 self.decide(prepared, "one", "approve", edits=edits)
@@ -367,12 +514,14 @@ class ReviewPostgresTests(unittest.TestCase):
             self.assertEqual(tx.get_current_batch("qa", "selection").batch_revision, 1)
 
     def test_sql_pages_literal_search_numeric_filters_null_last_and_casefold(self) -> None:
-        prepared = self.prepared((
-            {"id": "one", "text": "Stra\u00dfe %_", "score": 2},
-            {"id": "two", "text": "strasse", "score": None},
-            {"id": "three", "text": "other", "score": 10},
-            {"id": "four", "text": "literal", "score": 1.0},
-        ))
+        prepared = self.prepared(
+            (
+                {"id": "one", "text": "Stra\u00dfe %_", "score": 2},
+                {"id": "two", "text": "strasse", "score": None},
+                {"id": "three", "text": "other", "score": 10},
+                {"id": "four", "text": "literal", "score": 1.0},
+            )
+        )
         with self.store.transaction() as tx:
             tx.prepare(prepared)
         cases = (
@@ -381,7 +530,10 @@ class ReviewPostgresTests(unittest.TestCase):
             (TableQuery(filters=(TextFilter(field="score", operator="equals", value="1e0"),)), ("four",)),
             (TableQuery(filters=(TextFilter(field="score", operator="equals", value="1e100000000"),)), ()),
             (TableQuery(filters=(NullFilter(field="score", operator="is_null"),)), ("two",)),
-            (TableQuery(sort=(ColumnSort(field="score", direction="desc"),), offset=1, limit=2), ("one", "four")),
+            (
+                TableQuery(sort=(ColumnSort(field="score", direction="desc"),), offset=1, limit=2),
+                ("one", "four"),
+            ),
         )
         with self.store.reader() as tx:
             for query, identifiers in cases:
@@ -392,33 +544,50 @@ class ReviewPostgresTests(unittest.TestCase):
                     self.assertEqual(page.page.total_rows, 4)
 
     def test_item_and_next_pending_are_independent_of_offset_and_represent_duplicates(self) -> None:
-        prepared = self.prepared(({"id": "one", "text": "a"}, {"id": "duplicate", "text": "a"},
-                                  {"id": "two", "text": "b"}, {"id": "three", "text": "c"}))
+        prepared = self.prepared(
+            (
+                {"id": "one", "text": "a"},
+                {"id": "duplicate", "text": "a"},
+                {"id": "two", "text": "b"},
+                {"id": "three", "text": "c"},
+            )
+        )
         with self.store.transaction() as tx:
             batch = tx.prepare(prepared)
         self.decide(prepared, "two", "reject")
         with self.store.reader() as tx:
             item = tx.item(EvidenceTarget(dataset_id="qa", batch_id=batch.batch_id, candidate_id="duplicate"))
             self.assertEqual((item.row.review_record_id, item.row.occurrence_count), ("one", 2))
-            following = tx.next_pending(NextReviewRequest(dataset_id="qa", after_id="duplicate",
-                                                         query=TableQuery(offset=999)), "selection")
+            following = tx.next_pending(
+                NextReviewRequest(dataset_id="qa", after_id="duplicate", query=TableQuery(offset=999)),
+                "selection",
+            )
             self.assertIsNotNone(following)
             assert following is not None
             self.assertEqual(following.row.review_record_id, "three")
-            self.assertIsNone(tx.next_pending(NextReviewRequest(dataset_id="qa", after_id="three"), "selection"))
+            self.assertIsNone(
+                tx.next_pending(NextReviewRequest(dataset_id="qa", after_id="three"), "selection")
+            )
 
     def test_review_page_metadata_reads_do_not_grow_with_page_size(self) -> None:
-        prepared = self.prepared((
-            {"id": "one", "text": "first"},
-            {"id": "two", "text": "second"},
-        ), schema={"text": {"type": "string", "minLength": 1}})
+        prepared = self.prepared(
+            (
+                {"id": "one", "text": "first"},
+                {"id": "two", "text": "second"},
+            ),
+            schema={"text": {"type": "string", "minLength": 1}},
+        )
         with self.store.transaction() as tx:
             tx.prepare(prepared)
         with self.store.reader() as tx, patch.object(tx, "_metadata", wraps=tx._metadata) as metadata:
-            single = tx.review_page(DatasetQueryRequest(dataset_id="qa", query=TableQuery(limit=1)), "selection")
+            single = tx.review_page(
+                DatasetQueryRequest(dataset_id="qa", query=TableQuery(limit=1)), "selection"
+            )
             single_reads = metadata.call_count
             metadata.reset_mock()
-            page = tx.review_page(DatasetQueryRequest(dataset_id="qa", query=TableQuery(limit=2)), "selection")
+            page = tx.review_page(
+                DatasetQueryRequest(dataset_id="qa", query=TableQuery(limit=2)), "selection"
+            )
             self.assertEqual((len(single.page.rows), len(page.page.rows)), (1, 2))
             self.assertEqual(page.column_schema, single.column_schema)
             self.assertEqual(page.column_schema["text"]["minLength"], 1)
@@ -429,8 +598,14 @@ class ReviewPostgresTests(unittest.TestCase):
         with self.store.transaction(dataset_id="qa") as tx:
             tx.prepare(prepared)
             with self.store.transaction(dataset_id="independent") as other:
-                other.ensure_current_batch(ReviewSnapshot(dataset_id="independent", snapshot_id="f" * 64,
-                                                         candidate_ids=(), eligible_candidate_ids=()))
+                other.ensure_current_batch(
+                    ReviewSnapshot(
+                        dataset_id="independent",
+                        snapshot_id="f" * 64,
+                        candidate_ids=(),
+                        eligible_candidate_ids=(),
+                    )
+                )
             with self.assertRaises(HumanReviewError) as conflict:
                 with self.store.transaction(dataset_id="qa"):
                     self.fail("Competing dataset lock succeeded")
@@ -484,10 +659,17 @@ class ReviewPostgresTests(unittest.TestCase):
         self.decide(prepared, "one", "approve")
         with self.store.transaction() as tx:
             token = tx.complete(prepared.snapshot, tx.get_batch(batch.batch_id), "synthetic QA")
-            publication = tx.record_publication(prepared.snapshot, token, PublicationPayload(
-                payload_key="qa", payload_hash="a" * 64, csv_reference="qa.csv",
-                bundle_reference="qa-bundle", dagster_run_id="qa-run",
-            ))
+            publication = tx.record_publication(
+                prepared.snapshot,
+                token,
+                PublicationPayload(
+                    payload_key="qa",
+                    payload_hash="a" * 64,
+                    csv_reference="qa.csv",
+                    bundle_reference="qa-bundle",
+                    dagster_run_id="qa-run",
+                ),
+            )
             tx.record_continuation(prepared.snapshot, token, "continuation-run")
         restarted = HumanReviewStore(self.home)
         with restarted.transaction() as tx:
@@ -508,32 +690,60 @@ class ReviewPostgresTests(unittest.TestCase):
             batch = tx.prepare(prepared)
         with self.assertRaisesRegex(RuntimeError, "abort synthetic transaction"):
             with self.store.transaction() as tx:
-                tx.save_decision(prepared.snapshot, DecisionChange(
-                    batch_id=batch.batch_id, generation=1, candidate_id="one", expected_row_revision=0,
-                    decision="approve", reviewer="synthetic QA",
-                ))
+                tx.save_decision(
+                    prepared.snapshot,
+                    DecisionChange(
+                        batch_id=batch.batch_id,
+                        generation=1,
+                        candidate_id="one",
+                        expected_row_revision=0,
+                        decision="approve",
+                        reviewer="synthetic QA",
+                    ),
+                )
                 token = tx.complete(prepared.snapshot, tx.get_batch(batch.batch_id), "synthetic QA")
-                tx.record_publication(prepared.snapshot, token, PublicationPayload(
-                    payload_key="qa", payload_hash="a" * 64, csv_reference="qa.csv",
-                    bundle_reference="qa-bundle", dagster_run_id="qa-run",
-                ))
+                tx.record_publication(
+                    prepared.snapshot,
+                    token,
+                    PublicationPayload(
+                        payload_key="qa",
+                        payload_hash="a" * 64,
+                        csv_reference="qa.csv",
+                        bundle_reference="qa-bundle",
+                        dagster_run_id="qa-run",
+                    ),
+                )
                 raise RuntimeError("abort synthetic transaction")
         with self.store.reader() as tx:
             self.assertEqual(tx.counts(batch.batch_id).pending, 1)
             self.assertEqual(tuple(entry.event for entry in tx.history("qa")), ("created",))
             self.assertEqual(tx.list_publications("qa"), ())
-            self.assertEqual(tx.connection.execute("SELECT count(*) AS count FROM review_heads").fetchone()["count"], 0)
+            self.assertEqual(
+                tx.connection.execute("SELECT count(*) AS count FROM review_heads").fetchone()["count"], 0
+            )
 
     def test_direct_snapshots_reuse_fingerprints_with_dataset_stage_and_home_isolation(self) -> None:
-        original = ReviewSnapshot(dataset_id="qa", snapshot_id="a" * 64, candidate_ids=("one",),
-                                  eligible_candidate_ids=("one",), record_fingerprints={"one": "b" * 64},
-                                  review_columns=("text",))
+        original = ReviewSnapshot(
+            dataset_id="qa",
+            snapshot_id="a" * 64,
+            candidate_ids=("one",),
+            eligible_candidate_ids=("one",),
+            record_fingerprints={"one": "b" * 64},
+            review_columns=("text",),
+        )
         with self.store.transaction() as tx:
             batch = tx.ensure_current_batch(original)
-            tx.save_decision(original, DecisionChange(
-                batch_id=batch.batch_id, generation=1, candidate_id="one", expected_row_revision=0,
-                decision="reject", reviewer="synthetic QA",
-            ))
+            tx.save_decision(
+                original,
+                DecisionChange(
+                    batch_id=batch.batch_id,
+                    generation=1,
+                    candidate_id="one",
+                    expected_row_revision=0,
+                    decision="reject",
+                    reviewer="synthetic QA",
+                ),
+            )
             changed = original.model_copy(update={"snapshot_id": "c" * 64, "min_approvals": 1})
             fresh = tx.ensure_current_batch(changed)
             self.assertEqual(tx.list_decisions(fresh.batch_id)[0].decision, "reject")
@@ -546,4 +756,6 @@ class ReviewPostgresTests(unittest.TestCase):
                 self.assertEqual(tx.counts(foreign.batch_id).pending, 1)
         finally:
             with psycopg.connect(separate.dsn, autocommit=True) as connection:
-                connection.execute(sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(sql.Identifier(separate.schema)))
+                connection.execute(
+                    sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(sql.Identifier(separate.schema))
+                )

@@ -13,6 +13,7 @@ from codebench_pipeline.dataframe_schemas import CommandCandidatesTable, validat
 from codebench_pipeline.dataset_config import CatalogConfig, DatasetBuildSpec
 from codebench_pipeline.dataset_extract import filter_candidates
 from codebench_pipeline.dataset_registry import DatasetRegistry
+from codebench_pipeline.labeling_stage_settings import RiskRoute
 from codebench_pipeline.source_manifests import (
     DocumentationManifest,
     SourceManifest,
@@ -190,7 +191,8 @@ class SourceManifestTests(unittest.TestCase):
             ],
             CommandCandidatesTable,
         )
-        filtered = filter_candidates(candidates, self.spec.rules, self.spec.filtering)
+        routes = tuple(RiskRoute.from_rule(risk) for risk in self.spec.rules.risks)
+        filtered = filter_candidates(candidates, routes, self.spec.filtering)
         self.assertEqual(list(filtered["command"]), [command for command, _ in commands])
         self.assertEqual(list(filtered["util"]), ["//", "https://example.org/reference/", "git"])
         self.assertEqual(

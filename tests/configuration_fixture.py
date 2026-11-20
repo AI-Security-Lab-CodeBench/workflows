@@ -203,10 +203,13 @@ def write_fixture(root: Path, category: FixtureCategory = "CAT-99") -> Path:
 def seed_prepared_snapshot(
     home: Path, spec: DatasetBuildSpec, documentation: DocumentationConfig
 ) -> tuple[DatasetBuildSpec, str]:
-    archived = spec.model_copy(update={"declared_collection": None, "documentation": documentation})
-    version = fingerprint(archived.model_dump_json())
+    payload = spec.model_copy(
+        update={"declared_collection": None, "documentation": documentation}
+    ).model_dump_json()
+    archived = DatasetBuildSpec.model_validate_json(payload)
+    version = fingerprint(payload)
     directory = DatasetRegistry(home).root / archived.dataset_id
     directory.mkdir(parents=True, exist_ok=True)
-    (directory / f"{version}.json").write_text(archived.model_dump_json(), encoding="utf-8")
+    (directory / f"{version}.json").write_text(payload, encoding="utf-8")
     (directory / "current").write_text(version, encoding="ascii")
     return archived, version

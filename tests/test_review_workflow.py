@@ -9,6 +9,7 @@ from unittest.mock import patch
 import pandas as pd
 from configuration_fixture import example_config
 from jsonschema.exceptions import ValidationError
+from pydantic import ValidationError as ConfigValidationError
 from starlette.testclient import TestClient
 from test_declared_dataset_graph import fixture_spec
 
@@ -27,6 +28,9 @@ from codebench_pipeline.human_review import (
 )
 from codebench_pipeline.human_review_transactions import schema_validator
 from codebench_pipeline.label_corrections import annotation_review_validation
+from codebench_pipeline.labeling_stage_settings import ProposalRules
+from codebench_pipeline.object_store import ObjectStore, StorageConfig
+from codebench_pipeline.release_stage_settings import ReviewQueueConfig
 from codebench_pipeline.review_api_models import (
     CompletionRequest,
     DecisionRequest,
@@ -38,7 +42,6 @@ from codebench_pipeline.review_api_models import (
 from codebench_pipeline.review_legacy_import import import_legacy
 from codebench_pipeline.review_stages import ReviewRegistration, ReviewStage, ReviewStageList
 from codebench_pipeline.review_tables import ReviewTable, TableReviewSource
-from codebench_pipeline.object_store import ObjectStore, StorageConfig
 from codebench_pipeline.review_workflow import ReviewWorkflow
 from codebench_pipeline.runtime_instance import dataset_instance
 from codebench_pipeline.table_query import TableQuery, TextFilter
@@ -78,7 +81,7 @@ class TableReviewSourceTests(unittest.TestCase):
             documentation_urls=["https://example.org/docs"],
         )
         row = {**candidate.model_dump(mode="json"), **label.model_dump(mode="json", by_alias=True)}
-        schema = annotation_review_validation(rules)["row_schema"]
+        schema = annotation_review_validation(ProposalRules.from_rules(rules))["row_schema"]
         assert isinstance(schema, dict)
         validator = schema_validator(schema)
         validator.validate({**row, "command": "git status --short", "severity": "high", "class": "ask"})
@@ -93,6 +96,23 @@ class TableReviewSourceTests(unittest.TestCase):
         ):
             with self.subTest(edits=edits), self.assertRaises(ValidationError):
                 validator.validate({**row, **edits})
+
+    def test_review_queue_projection_ignores_prompt_but_versions_routing_and_review_columns(self) -> None:
+        rules = example_config().rules
+        baseline = ReviewQueueConfig.from_rules(rules, ("command", "severity"), 4)
+        prompt = rules.model_copy(update={"policy": "Modified model instructions."})
+        risk = rules.risks[0].model_copy(update={"command_patterns": ["^git status --short$"]})
+        routing = rules.model_copy(update={"risks": [risk]})
+
+        self.assertEqual(ReviewQueueConfig.from_rules(prompt, baseline.review_columns, 4), baseline)
+        self.assertNotEqual(ReviewQueueConfig.from_rules(routing, baseline.review_columns, 4), baseline)
+        self.assertNotEqual(ReviewQueueConfig.from_rules(rules, ("command", "class"), 4), baseline)
+        self.assertNotEqual(ReviewQueueConfig.from_rules(rules, baseline.review_columns, 1), baseline)
+        with self.assertRaises(ConfigValidationError) as rejected:
+            ReviewQueueConfig.model_validate_json(
+                json.dumps({**baseline.model_dump(mode="json"), "dataset_id": "unrelated"})
+            )
+        self.assertEqual(rejected.exception.errors()[0]["loc"], ("dataset_id",))
 
     def test_native_partition_mapping_distinguishes_null_and_literal_strings(self) -> None:
         self.assertEqual(review_partition_id(None), "partition-" + hashlib.sha256(b"null").hexdigest())

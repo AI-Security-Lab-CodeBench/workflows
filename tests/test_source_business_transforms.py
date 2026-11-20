@@ -1,18 +1,23 @@
 import hashlib
 import unittest
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
+from pydantic import ValidationError
 from test_dataset_rules import make_candidate, make_rules
+from test_declared_dataset_graph import fixture_spec
 
 from codebench_pipeline.dataframe_schemas import CommandCandidatesTable, validated_frame
 from codebench_pipeline.dataset_config import FilteringConfig
 from codebench_pipeline.dataset_extract import filter_candidates
+from codebench_pipeline.labeling_stage_settings import RiskRoute
 from codebench_pipeline.source_transform_contract import (
     CanonicalSourceRow,
     SourceTransformConfig,
     TransformContext,
 )
 from codebench_pipeline.source_transforms import source_rows, transformed_rows
+from codebench_pipeline.stage_configuration import DeclaredGlobalConfig, FilterConfig
 
 
 class SourceBusinessTransformationTests(unittest.TestCase):
@@ -68,7 +73,8 @@ class SourceBusinessTransformationTests(unittest.TestCase):
             make_candidate("comparison").model_copy(update={"command": "probe inspect --query 'a<b && c>d'"}),
         ]
         frame = validated_frame([row.model_dump(mode="json") for row in examples], CommandCandidatesTable)
-        filtered = filter_candidates(frame, make_rules(), FilteringConfig())
+        routes = tuple(RiskRoute.from_rule(risk) for risk in make_rules().risks)
+        filtered = filter_candidates(frame, routes, FilteringConfig())
         self.assertEqual(list(filtered["filter_decision"]), ["needs_review", "eligible"])
         self.assertEqual(list(filtered["filter_reason"]), ["unresolved_template", ""])
         self.assertEqual(list(filtered["command"]), [row.command for row in examples])
@@ -87,11 +93,37 @@ class SourceBusinessTransformationTests(unittest.TestCase):
             make_candidate(str(index)).model_copy(update={"command": command}).model_dump(mode="json")
             for index, (command, _) in enumerate(cases)
         ]
-        result = filter_candidates(
-            validated_frame(rows, CommandCandidatesTable), make_rules(), FilteringConfig()
-        )
+        routes = tuple(RiskRoute.from_rule(risk) for risk in make_rules().risks)
+        result = filter_candidates(validated_frame(rows, CommandCandidatesTable), routes, FilteringConfig())
         self.assertEqual(list(result["filter_decision"]), [decision for _, decision in cases])
         self.assertEqual(
             list(result["filter_reason"]),
             ["" if decision == "eligible" else "unresolved_template" for _, decision in cases],
+        )
+
+    def test_filter_scope_uses_matching_patterns_and_rejects_prompt_fields(self) -> None:
+        root = Path(self.enterContext(TemporaryDirectory()))
+        rules = make_rules()
+        registered = DeclaredGlobalConfig.from_spec(fixture_spec(root).model_copy(update={"rules": rules}))
+        mapped = FilterConfig.project(registered, rules)
+        candidate = make_candidate()
+        raw = validated_frame([candidate.model_dump(mode="json")], CommandCandidatesTable)
+        risk = rules.risks[0]
+        revised = rules.model_copy(update={"policy": "Different instructions for inference."})
+        self.assertEqual(FilterConfig.project(registered, revised), mapped)
+        original = filter_candidates(raw, mapped.routes, mapped.filtered_commands)
+        self.assertEqual(original["risk_candidates"].tolist(), [[risk.id]])
+
+        unavailable = risk.model_copy(update={"command_patterns": [r"^fixture unavailable$"]})
+        changed = rules.model_copy(update={"risks": [unavailable, *rules.risks[1:]]})
+        mapped_changed = FilterConfig.project(registered, changed)
+        filtered = filter_candidates(raw, mapped_changed.routes, mapped_changed.filtered_commands)
+        self.assertEqual(filtered["filter_reason"].tolist(), ["outside_configured_command_families"])
+        self.assertEqual(filtered["source_position"].tolist(), [candidate.source_position])
+
+        with self.assertRaises(ValidationError) as rejected:
+            FilterConfig.model_validate({**mapped.model_dump(), "policy": rules.policy})
+        self.assertIn(
+            (("policy",), "extra_forbidden"),
+            {(error["loc"], error["type"]) for error in rejected.exception.errors()},
         )

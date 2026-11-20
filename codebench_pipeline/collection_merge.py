@@ -1,6 +1,7 @@
 from dagster import AssetIn, AssetKey, AssetsDefinition, DataVersion, Output, asset
 from pandera.typing import DataFrame
 
+from codebench_pipeline.collection_config import CollectionMergeConfig
 from codebench_pipeline.config_assets import mapped_input
 from codebench_pipeline.dataframe_schemas import CommandCandidatesTable
 from codebench_pipeline.dataset_asset_types import DATASET_PARTITIONS, TABLE_TYPES
@@ -9,7 +10,6 @@ from codebench_pipeline.dataset_collection_binding import FINALIZATION_BINDING
 from codebench_pipeline.dataset_finalization import merge_candidates
 from codebench_pipeline.finalization_table_asset import FINALIZATION_TABLE_IO, MERGE_INPUT, MergeInput
 from codebench_pipeline.finalization_table_io import retain_failed_finalization
-from codebench_pipeline.stage_configuration import DeclaredMergeConfig
 from codebench_pipeline.storage import IntegrityError
 
 
@@ -24,7 +24,7 @@ def collection_merge_asset() -> AssetsDefinition:
         ins={
             "mapped_config": mapped_input(
                 "merged_command_candidates",
-                DeclaredMergeConfig,
+                CollectionMergeConfig,
                 input_manager_key=FINALIZATION_TABLE_IO,
             ),
             **{
@@ -43,7 +43,7 @@ def collection_merge_asset() -> AssetsDefinition:
         dataset_candidates: MergeInput,
         documentation_candidates: DataFrame[CommandCandidatesTable],
         keenable_candidates: DataFrame[CommandCandidatesTable],
-        mapped_config: DeclaredMergeConfig,
+        mapped_config: CollectionMergeConfig,
     ) -> Output[DataFrame[CommandCandidatesTable]]:
         if dataset_candidates.signature is None:
             raise IntegrityError("Merge input hooks did not prepare the table")
@@ -52,7 +52,7 @@ def collection_merge_asset() -> AssetsDefinition:
                 dataset_candidates.frames["dataset"],
                 documentation_candidates,
                 keenable_candidates,
-                keenable_source_weight=mapped_config.merged_command_candidates.keenable_source_weight,
+                keenable_source_weight=mapped_config.keenable_source_weight,
             )
             table.attrs[FINALIZATION_BINDING] = dataset_candidates.binding
         else:

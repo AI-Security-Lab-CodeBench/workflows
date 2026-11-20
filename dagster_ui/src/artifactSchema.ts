@@ -49,7 +49,12 @@ export function resolveSchema(node: SchemaNode | undefined, root: SchemaObject, 
   return {...resolved, schema: {...resolved.schema, ...siblings}};
 }
 
-export function schemaType(node: SchemaNode | undefined, root: SchemaObject, ancestors: readonly string[] = []): string {
+export function schemaType(
+  node: SchemaNode | undefined,
+  root: SchemaObject,
+  ancestors: readonly string[] = [],
+  detail?: 'declared' | 'storage',
+): string {
   const resolved = resolveSchema(node, root, ancestors);
   const schema = resolved.schema;
   if (resolved.unresolved) {return `reference ${resolved.unresolved}`;}
@@ -58,8 +63,30 @@ export function schemaType(node: SchemaNode | undefined, root: SchemaObject, anc
   for (const keyword of ['anyOf', 'oneOf', 'allOf'] as const) {
     const branches = schema[keyword];
     if (Array.isArray(branches)) {
-      const types = branches.map((branch) => schemaType(schemaValue(branch), root, resolved.references));
+      const types = branches.map((branch) => schemaType(schemaValue(branch), root, resolved.references, detail));
       return [...new Set(types)].join(keyword === 'allOf' ? ' & ' : ' | ');
+    }
+  }
+  if (detail) {
+    const types = Array.isArray(schema.type) ? schema.type : [schema.type];
+    if (types.includes('array') || schema.type === undefined && (schema.items !== undefined || schema.prefixItems !== undefined)) {
+      const memberType = (child: JsonValue | undefined) =>
+        schemaType(schemaValue(child), root, resolved.references, detail);
+      const items = schema.items === undefined ? 'array' : `array<${memberType(schema.items)}>`;
+      const collection = Array.isArray(schema.prefixItems)
+        ? `tuple<${schema.prefixItems.map(memberType).join(', ')}>` : items;
+      return types.map((type) => type === undefined || type === 'array' ? collection : type).join(' | ');
+    }
+    if (schema.type === 'object' || schema.type === undefined &&
+      (schema.properties !== undefined || schema.additionalProperties !== undefined)) {
+      if (detail === 'declared' && typeof node === 'object' && typeof node.$ref === 'string' &&
+        typeof schema.title === 'string') {
+        return schema.title;
+      }
+      if (schema.properties === undefined && schemaValue(schema.additionalProperties) !== undefined &&
+        schema.additionalProperties !== false) {
+        return `map<string, ${schemaType(schemaValue(schema.additionalProperties), root, resolved.references, detail)}>`;
+      }
     }
   }
   if (Array.isArray(schema.type)) {return schema.type.filter((type) => typeof type === 'string').join(' | ');}

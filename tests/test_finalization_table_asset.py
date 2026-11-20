@@ -128,7 +128,9 @@ class FinalizationTableAssetTests(unittest.TestCase):
                 return_value=self.binding,
             )
         )
-        self.enterContext(patch.object(DataFrameIOManager, "run_configuration", return_value=self.registered))
+        self.enterContext(
+            patch.object(DataFrameIOManager, "run_configuration", side_effect=lambda *_: self.registered)
+        )
         self.enterContext(
             patch(
                 "codebench_pipeline.review_output_state.registered_materialization_stale", return_value=False
@@ -236,6 +238,35 @@ class FinalizationTableAssetTests(unittest.TestCase):
                 for event in second.all_events
             )
         )
+
+    def test_eligibility_reuses_policy_prose_changes_but_recomputes_target_category_changes(self) -> None:
+        node = ELIGIBILITY.to_python_identifier()
+        original = self.run_tables(eligibility=True)
+        self.assertTrue(original.success)
+        self.assertEqual(len(original.output_for_node(node)), 1)
+        rules = self.registered.rules
+        prose = rules.model_copy(update={"policy": "Revised instructions for model inference only."})
+        self.registered = self.registered.model_copy(update={"rules": prose})
+        reused = self.run_tables(eligibility=True)
+        self.assertTrue(reused.success)
+        self.assertIs(reused.asset_materializations_for_node(node)[0].metadata["cache_hit"].value, True)
+
+        changed = prose.model_copy(
+            update={
+                "category_id": "CAT-404",
+                "risks": [
+                    risk.model_copy(update={"id": f"CAT-404.{index}"})
+                    for index, risk in enumerate(prose.risks, 1)
+                ],
+                "examples": [],
+            }
+        )
+        self.registered = self.registered.model_copy(update={"rules": changed})
+        rebuilt = self.run_tables(eligibility=True)
+        self.assertTrue(rebuilt.success)
+        self.assertIs(rebuilt.asset_materializations_for_node(node)[0].metadata["cache_hit"].value, False)
+        self.assertTrue(rebuilt.output_for_node(node).empty)
+        self.assertEqual(self.calls, 1)
 
     def test_failed_compute_records_diagnostics_without_materializing(self) -> None:
         self.fail_compute = True

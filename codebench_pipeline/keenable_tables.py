@@ -17,6 +17,7 @@ from codebench_pipeline.keenable_policy import (
     CurrentSourcePermission,
     KeenableDeclaration,
     KeenableError,
+    KeenableSourceAccess,
     PagePermission,
     Permission,
 )
@@ -150,6 +151,12 @@ def provider_candidates(
 ) -> DataFrame[CommandCandidatesTable]:
     lock = CaptureLock.model_validate_json(documents.attrs[PROVIDER_RECEIPT])
     candidates = collection.candidates(lock, ADAPTER_RECEIPTS.validate_json(adapters.attrs[PROVIDER_RECEIPT]))
+    declaration = collection.declaration
+    legacy_spans = (
+        declaration.legacy_reviewed_spans
+        if isinstance(declaration, KeenableSourceAccess)
+        else isinstance(declaration, KeenableDeclaration) and declaration.revision == "1"
+    )
     frame = validated_frame(
         [
             {
@@ -160,12 +167,7 @@ def provider_candidates(
                 "source_id": provider_source_id(candidate.url),
                 "source_url": candidate.url,
                 "source_position": f"bytes:{candidate.start}:{candidate.end}",
-                "transformations": [
-                    "reviewed-byte-spans-v1"
-                    if isinstance(collection.declaration, KeenableDeclaration)
-                    and collection.declaration.revision == "1"
-                    else "literal-code-blocks-v2"
-                ],
+                "transformations": ["reviewed-byte-spans-v1" if legacy_spans else "literal-code-blocks-v2"],
                 "risk_candidates": [],
             }
             for candidate in candidates

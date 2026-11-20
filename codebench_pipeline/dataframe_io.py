@@ -15,7 +15,6 @@ import pyarrow
 import pyarrow.parquet as parquet
 from dagster import (
     AssetKey,
-    Config,
     ConfigurableIOManager,
     DagsterInstance,
     EventLogRecord,
@@ -261,7 +260,7 @@ class DataFrameIOManager(ConfigurableIOManager):
     def stage_signature(
         self,
         stage: str,
-        config: Config,
+        config: BaseModel,
         inputs: Mapping[str, pd.DataFrame | CategoryRules | AssetSnapshot],
     ) -> str:
         from codebench_pipeline.dataset_engine import stage_signature

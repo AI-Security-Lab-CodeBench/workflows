@@ -3,8 +3,13 @@ from typing import Literal
 
 from pydantic import Field, JsonValue, TypeAdapter, model_validator
 
-from codebench_pipeline.category_rules import CategoryRules
-from codebench_pipeline.dataset_records import CandidateRecord, LabelDecision, index_records, validate_label
+from codebench_pipeline.dataset_records import (
+    CandidateRecord,
+    LabelDecision,
+    LabelPolicy,
+    index_records,
+    validate_label,
+)
 from codebench_pipeline.models import SemanticSnippet
 from codebench_pipeline.storage import fingerprint
 
@@ -56,7 +61,7 @@ def historical_attempt_cells(row: dict[str, JsonValue]) -> dict[str, JsonValue]:
 def validate_attempts(
     candidates: Sequence[CandidateRecord],
     attempts: Sequence[LabelingAttempt],
-    rules: CategoryRules,
+    rules: LabelPolicy,
 ) -> None:
     expected = index_records(candidates)
     actual = index_records(attempts)

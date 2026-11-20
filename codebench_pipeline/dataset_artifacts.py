@@ -15,11 +15,13 @@ from codebench_pipeline.artifact_views import (
     ArtifactTarget,
     RunConfigBinding,
 )
+from codebench_pipeline.collection_stage_settings import COLLECTION_OPERATIONS
 from codebench_pipeline.config_assets import (
     COLLECTION_SCOPES,
     CONFIG_DIRECTORY,
     GLOBAL_CONFIG,
     ConfigRunIOManager,
+    collection_mapping_key,
     mapping_key,
 )
 from codebench_pipeline.data_view_models import DatasetViewError
@@ -42,6 +44,7 @@ CONFIG_KEYS: Final = frozenset(
         CONFIG_DIRECTORY,
         mapping_key("semantic_evidence"),
         mapping_key("labeling_documentation"),
+        *(collection_mapping_key(operation.branch, operation.stage) for operation in COLLECTION_OPERATIONS),
         *(mapping_key(scope) for scope in (*COLLECTION_SCOPES.values(), *FINALIZATION_STAGES)),
     )
 )
@@ -107,7 +110,7 @@ class DatasetArtifactCatalog:
                             )
                         except (FileNotFoundError, IntegrityError, ValidationError):
                             stale = True
-                    return RunConfigBinding(path, "stale" if stale else None, use_declared_schema=directory)
+                    return RunConfigBinding(path, "stale" if stale else None, use_declared_schema=not retired)
             raise DatasetViewError("not_materialized", "This config has no persisted output")
         if not records:
             raise DatasetViewError("not_materialized", "This artifact has no persisted materialization")

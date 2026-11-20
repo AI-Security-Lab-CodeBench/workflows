@@ -3,6 +3,7 @@ from typing import Final
 import pandera.polars as pa
 
 from codebench_pipeline.category_rules import CategoryRules
+from codebench_pipeline.release_stage_settings import PublicationTaxonomy
 
 FIELDS: Final = (
     "command",
@@ -37,12 +38,14 @@ def one_of(values: list[str]) -> pa.Check:
     return pa.Check(included, element_wise=True)
 
 
-def table_schema(rules: CategoryRules) -> pa.DataFrameSchema:
+def table_schema(rules: PublicationTaxonomy | CategoryRules) -> pa.DataFrameSchema:
+    if isinstance(rules, CategoryRules):
+        rules = PublicationTaxonomy.from_rules(rules)
     values: dict[str, list[str]] = {
         "category": [rules.canonical],
         "risk": [risk.canonical for risk in rules.risks],
-        "class": [rule.name for rule in rules.classes],
-        "severity": [rule.name for rule in rules.severities],
+        "class": list(rules.classes),
+        "severity": list(rules.severities),
         "seed": ["-"],
         "human_reviewed": ["true", "false"],
     }

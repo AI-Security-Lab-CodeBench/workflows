@@ -170,11 +170,8 @@ def finalization_assets() -> list[AssetsDefinition]:
         category_eligible_annotations: DataFrame[ProposedAnnotationsTable],
         mapped_config: ReviewQueueConfig,
     ) -> Output[DataFrame[ReviewQueueTable]]:
-        settings = mapped_config.human_review_queue
         return Output(
-            review_queue(
-                category_eligible_annotations, mapped_config.category_rules, settings.review_columns
-            ),
+            review_queue(category_eligible_annotations, mapped_config.taxonomy, mapped_config.review_columns),
             metadata={
                 "review_input_digest": sha256(frame_bytes(category_eligible_annotations)),
                 "review_policy_digest": sha256(mapped_config.model_dump_json().encode()),

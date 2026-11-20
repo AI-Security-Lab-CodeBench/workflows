@@ -22,7 +22,7 @@ from dagster import (
     materialize,
 )
 from pandera.typing import DataFrame
-from pydantic import JsonValue, TypeAdapter
+from pydantic import JsonValue, TypeAdapter, ValidationError
 from test_dataset_annotation import documentation
 from test_dataset_rules import make_candidate, make_label, make_rules
 from test_declared_dataset_graph import fixture_spec
@@ -49,6 +49,7 @@ from codebench_pipeline.finalization_table_asset import FINALIZATION_TABLE_IO
 from codebench_pipeline.finalization_table_io import finalization_table_io
 from codebench_pipeline.human_review_store import HumanReviewStore
 from codebench_pipeline.labeling_outcomes import failed_attempt, label_attempt
+from codebench_pipeline.labeling_stage_settings import ProposalRules
 from codebench_pipeline.labeling_tables import failures_from_attempts, proposed_from_attempts
 from codebench_pipeline.object_store import ObjectStore
 from codebench_pipeline.stage_implementation import ImplementationSource, processing_versions
@@ -110,7 +111,9 @@ class AnnotationProjectionAssetTests(unittest.TestCase):
         self.enterContext(
             patch("codebench_pipeline.dataset_collection_binding.finalization_binding", return_value=binding)
         )
-        self.enterContext(patch.object(DataFrameIOManager, "run_configuration", return_value=self.registered))
+        self.enterContext(
+            patch.object(DataFrameIOManager, "run_configuration", side_effect=lambda *_: self.registered)
+        )
         self.enterContext(
             patch(
                 "codebench_pipeline.review_output_state.registered_materialization_stale", return_value=False
@@ -206,6 +209,40 @@ class AnnotationProjectionAssetTests(unittest.TestCase):
             any(event.asset_key in PROJECTIONS for event in second.all_events if event.is_asset_observation)
         )
 
+    def test_proposal_cache_tracks_routing_but_not_labeling_prose(self) -> None:
+        node = PROPOSED.to_python_identifier()
+        first = self.materialize_projections()
+        original = first.asset_materializations_for_node(node)[0].metadata
+        rules = self.registered.rules
+        prose = rules.model_copy(update={"policy": "Revised instructions for inference only."})
+        self.registered = self.registered.model_copy(update={"rules": prose})
+        reused = self.materialize_projections()
+        cached = reused.asset_materializations_for_node(node)[0].metadata
+        self.assertIs(cached["cache_hit"].value, True)
+        self.assertEqual(cached["input_fingerprint"], original["input_fingerprint"])
+        self.assertEqual(cached["evidence"], original["evidence"])
+
+        risk = rules.risks[0]
+        rerouted = risk.model_copy(update={"command_patterns": [*risk.command_patterns, r"^probe other$"]})
+        changed = prose.model_copy(update={"risks": [rerouted, *rules.risks[1:]]})
+        self.registered = self.registered.model_copy(update={"rules": changed})
+        rebuilt = self.materialize_projections()
+        revised = rebuilt.asset_materializations_for_node(node)[0].metadata
+        self.assertIs(revised["cache_hit"].value, False)
+        self.assertNotEqual(revised["input_fingerprint"], original["input_fingerprint"])
+        self.assertEqual(frame_bytes(rebuilt.output_for_node(node)), frame_bytes(first.output_for_node(node)))
+
+    def test_proposal_mapping_rejects_inference_policy_in_persisted_payload(self) -> None:
+        rules = self.registered.rules
+        scope = ProposalRules.from_rules(rules)
+        payload = {**scope.model_dump(mode="json"), "policy": rules.policy}
+        with self.assertRaises(ValidationError) as rejected:
+            ProposalRules.model_validate_json(json.dumps(payload), strict=True)
+        self.assertEqual(
+            [(error["loc"], error["type"]) for error in rejected.exception.errors()],
+            [(("policy",), "extra_forbidden")],
+        )
+
     def retain_legacy_projections(
         self, *, corrupt_attempt: AssetKey | None = None
     ) -> dict[AssetKey, tuple[str, str, bytes]]:
@@ -240,7 +277,7 @@ class AnnotationProjectionAssetTests(unittest.TestCase):
                 else {"attempts": self.attempts}
             )
             table = (
-                proposed_from_attempts(self.attempts, rules)
+                proposed_from_attempts(self.attempts, ProposalRules.from_rules(rules))
                 if key == PROPOSED
                 else failures_from_attempts(self.attempts)
             )
@@ -316,7 +353,9 @@ class AnnotationProjectionAssetTests(unittest.TestCase):
         run = self.materialize_projections()
         metadata = run.asset_materializations_for_node(PROPOSED.to_python_identifier())[0].metadata
         digest = TypeAdapter(str).validate_python(metadata["codebench/content_digest"].value)
-        alternate = proposed_from_attempts(self.attempts.head(0), self.registered.rules)
+        alternate = proposed_from_attempts(
+            self.attempts.head(0), ProposalRules.from_rules(self.registered.rules)
+        )
         self.io.object_store().write(f"objects/{digest}.parquet", frame_bytes(alternate), replace=True)
 
         with self.assertRaisesRegex(IntegrityError, "Asset reference content mismatch"):

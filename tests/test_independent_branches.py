@@ -254,7 +254,8 @@ class IndependentBranchDatasetTests(unittest.TestCase):
             replace(inputs, documentation_capture=unbound_capture).admission(commands)
         labeling = GuardedLabeling(mapped, inputs, batch, BatchExecution(None, fixture_vectors))
         attempts = labeling.attempts(commands, self.home / "attempts")
-        inputs.verify(attempts)
+        verified = inputs.verify(attempts)
+        self.assertEqual(set(verified.sources.repositories), {"dataset", "documentation"})
         self.assertEqual(
             {row.command: row.status for row in model_records(attempts, LabelingAttempt)},
             {"kubectl get pods": "success", "docker compose ps": "success", "terraform plan": "success"},
@@ -401,7 +402,8 @@ class IndependentBranchDatasetTests(unittest.TestCase):
             path,
             b"Display all containers, including stopped ones:\n```bash\ndocker ps --all\n```\n",
         )
-        collection = GuardedLabelingConfig.from_spec(spec).collection
+        collection = spec.declared_collection
+        assert collection is not None
         docs = repository_branch_fixture("documentation", (fixture.repositories[2], added))
         original, extension = docs.origins
         parser = extension.parser
@@ -505,7 +507,8 @@ class IndependentBranchDatasetTests(unittest.TestCase):
         self, fixture: LabelingFixture, field: Literal["existing_datasets", "documentation_crawl"]
     ) -> DatasetBuildSpec:
         spec = fixture.spec
-        collection = GuardedLabelingConfig.from_spec(spec).collection
+        collection = spec.declared_collection
+        assert collection is not None
         source = (
             collection.existing_datasets if field == "existing_datasets" else collection.documentation_crawl
         )

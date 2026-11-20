@@ -33,6 +33,7 @@ from codebench_pipeline.object_store import ObjectStore
 from codebench_pipeline.openai_transport import HTTPResponse
 from codebench_pipeline.publication_authorization import authorize_publication
 from codebench_pipeline.release_runner import ReleaseRunner
+from codebench_pipeline.release_stage_settings import PublicationTaxonomy
 from codebench_pipeline.review_api_models import (
     CompletionRequest,
     DecisionRequest,
@@ -85,6 +86,7 @@ def mixed_confidence_reply(
 class ConfidencePublicationTests(unittest.TestCase):
     def test_each_uncertain_judgment_requires_human_approval_and_marks_the_result(self) -> None:
         rules = make_rules()
+        taxonomy = PublicationTaxonomy.from_rules(rules)
         candidate = make_candidate()
         for field in (
             "category_confidence",
@@ -96,7 +98,7 @@ class ConfidencePublicationTests(unittest.TestCase):
                 with self.subTest(field=field, confidence=confidence):
                     label = make_label(candidate, rules)
                     label = label.model_copy(update={field: confidence})
-                    pending = prepare_dataset([candidate], [label], rules, 250)
+                    pending = prepare_dataset([candidate], [label], taxonomy, 250)
                     if confidence == "high":
                         self.assertEqual(
                             [(row["command"], row["human_reviewed"]) for row in pending.commands],
@@ -109,7 +111,7 @@ class ConfidencePublicationTests(unittest.TestCase):
                     accepted = prepare_dataset(
                         [candidate],
                         [label],
-                        rules,
+                        taxonomy,
                         250,
                         approved_ids=frozenset({candidate.candidate_id}),
                     )
@@ -338,7 +340,6 @@ class ConfidencePublicationTests(unittest.TestCase):
                 },
                 {
                     "global_config",
-                    "map_human_review_decisions_config",
                     "map_dataset_release_config",
                     "human_review_decisions",
                     "dataset_release",

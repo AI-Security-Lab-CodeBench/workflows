@@ -27,8 +27,9 @@ from dagster._core.events import AssetObservationData
 from pydantic import JsonValue
 
 from codebench_pipeline.category_rules import CategoryRules
-from codebench_pipeline.collection_config import CollectionMergeConfig
-from codebench_pipeline.config_assets import ConfigRunIOManager, RegisteredConfig, require_registered_rules
+from codebench_pipeline.collection_config import CollectionMergeConfig, DeclaredSourceStageConfig
+from codebench_pipeline.collection_stage_settings import collection_operation
+from codebench_pipeline.config_assets import ConfigRunIOManager, RegisteredConfig
 from codebench_pipeline.dataframe_io import AssetSnapshot, UpstreamTableReference
 from codebench_pipeline.dataframe_schemas import (
     CommandCandidatesTable,
@@ -44,7 +45,7 @@ from codebench_pipeline.dataset_branches import (
     DECLARED_SOURCE_STAGES,
     asset_branch,
 )
-from codebench_pipeline.dataset_config import FilteringConfig
+from codebench_pipeline.dataset_config import DeduplicationPolicy
 from codebench_pipeline.dataset_engine import (
     ReusedTable,
     TableCache,
@@ -73,18 +74,19 @@ from codebench_pipeline.finalization_table_asset import (
     MergeInput,
     ProjectionInput,
 )
+from codebench_pipeline.labeling_stage_settings import ProposalRules
 from codebench_pipeline.object_store import safe_key
-from codebench_pipeline.source_evidence import retain_source_receipt, validate_source_receipt
+from codebench_pipeline.source_evidence import (
+    require_source_rights,
+    retain_source_receipt,
+    validate_source_receipt,
+)
 from codebench_pipeline.source_review_guard import authorize_inventory_input
 from codebench_pipeline.stage_configuration import (
     CategoryEligibilityConfig,
     ConfigArtifact,
-    DeclaredMergeConfig,
-    DeduplicationConfig,
     FilterConfig,
-    GuardedLabelingCacheConfig,
     GuardedLabelingConfig,
-    PolicyArtifact,
 )
 from codebench_pipeline.storage import IntegrityError
 from codebench_pipeline.typed_config import TypedConfig
@@ -210,9 +212,11 @@ class FinalizationTableIO(IOManager):
     def _load_collection(
         self, context: InputContext, step: _FinalizationStep
     ) -> CollectionInput | pd.DataFrame:
+        branch = asset_branch(step.key.path)
+        operation = collection_operation(branch, step.stage)
         if context.name == "mapped_config":
-            result = CollectionInput.model_validate(
-                self.configuration.load_scope(context), from_attributes=True
+            result = CollectionInput(
+                settings=self.configuration.load_projected_scope(context, operation.contract)
             )
             step.mapped_config = result
         else:
@@ -230,18 +234,17 @@ class FinalizationTableIO(IOManager):
         mapped = step.mapped_config
         if not isinstance(mapped, CollectionInput):
             return result
-        branch = asset_branch(step.key.path)
         descriptor = BRANCH_BY_NAMESPACE[branch]
         first_stage = descriptor.declared_stages[0] == step.stage
         if not first_stage and not isinstance(step.loaded, pd.DataFrame):
             return result
         registered = self.tables.run_configuration(context.step_context.run_id, step.partition)
         step.registered = registered
-        config = mapped.collection
-        require_registered_rules(registered, mapped.category_rules)
-        if config != registered.source_config(branch):
+        declaration = registered.source_config(branch)
+        require_source_rights(declaration)
+        if mapped.settings != operation.project(declaration):
             raise IntegrityError("Mapped collection differs from the run configuration")
-        inputs: dict[str, AssetSnapshot | CategoryRules]
+        inputs: dict[str, AssetSnapshot] = {}
         if isinstance(step.loaded, pd.DataFrame):
             name = "source_catalog" if step.stage == descriptor.capture else "source_documents"
             snapshot = AssetSnapshot(step.upstreams[0].reference, step.loaded)
@@ -254,14 +257,12 @@ class FinalizationTableIO(IOManager):
                 snapshot,
                 inventory_input=name == "source_catalog" or branch == "documentation",
             )
-        else:
-            inputs = {"category_rules": mapped.category_rules}
         cache = step.cache = prepare_table_cache(
-            self.tables, step.stage, step.partition, branch, config, inputs
+            self.tables, step.stage, step.partition, branch, mapped.settings, inputs
         )
         cached = self.tables.read_cached_frame(cache.key)
         if cached is not None:
-            validate_source_receipt(cached, config, self.tables)
+            validate_source_receipt(cached, declaration, self.tables)
             step.collection_hit = True
             mapped.bind_cache(CollectionCacheInput(cache.signature, cached, None))
         else:
@@ -297,47 +298,47 @@ class FinalizationTableIO(IOManager):
             return
         run_id = context.step_context.run_id
         registered = self.tables.run_configuration(run_id, step.partition)
-        config: TypedConfig | FilteringConfig | CollectionMergeConfig = TypedConfig()
+        config: ConfigArtifact | TypedConfig = TypedConfig()
         inputs: dict[str, pd.DataFrame | CategoryRules]
         match loaded:
             case FilteringInput():
                 if not isinstance(mapped, FilterConfig):
                     return
-                config = mapped.filtered_commands
-                if config != registered.scopes.filtered_commands.filtered_commands:
+                config = mapped
+                if mapped != registered.filter_config():
                     raise IntegrityError("Mapped filter settings differ from the run configuration")
                 inputs = {"command_candidates": loaded.candidates}
             case MergeInput():
-                if not isinstance(mapped, DeclaredMergeConfig):
+                if not isinstance(mapped, CollectionMergeConfig):
                     return
-                if mapped != registered.scopes.merged_command_candidates:
+                if mapped != registered.scopes.merged_command_candidates.merged_command_candidates:
                     raise IntegrityError("Mapped merge settings differ from the run configuration")
-                config = mapped.merged_command_candidates
+                config = mapped
                 inputs = {f"{branch}_candidates": frame for branch, frame in loaded.frames.items()}
             case LabelingInput():
                 if not isinstance(mapped, GuardedLabelingConfig) or step.documentation is None:
                     return
-                settings = registered.scopes.labeling_attempts
-                if (
-                    mapped.collection != settings.collection
-                    or mapped.labeling_attempts != settings.labeling_attempts
-                ):
+                if mapped != registered.labeling_config():
                     raise IntegrityError("Mapped labeling settings differ from the run configuration")
-                config = GuardedLabelingCacheConfig.from_settings(mapped)
+                config = mapped
                 inputs = {"commands": loaded.commands, "documentation_capture": step.documentation}
             case ProjectionInput():
-                if step.stage == "proposed_annotations" and not isinstance(mapped, PolicyArtifact):
-                    return
+                if step.stage == "proposed_annotations":
+                    if not isinstance(mapped, ProposalRules):
+                        return
+                    if mapped != registered.proposal_config():
+                        raise IntegrityError("Mapped proposal rules differ from the run configuration")
+                    config = mapped
                 inputs = {"attempts": loaded.attempts}
             case FinalizationInput():
                 if step.stage == "deduplicated_annotations":
-                    if not isinstance(mapped, DeduplicationConfig):
+                    if not isinstance(mapped, DeduplicationPolicy):
                         return
-                    if mapped != registered.scopes.deduplicated_annotations:
+                    if mapped != registered.scopes.deduplicated_annotations.deduplication:
                         raise IntegrityError(
                             "Mapped deduplication settings differ from the run configuration"
                         )
-                    config = mapped.deduplication
+                    config = mapped
                 elif step.stage == "category_eligible_annotations":
                     if not isinstance(mapped, CategoryEligibilityConfig):
                         return
@@ -347,10 +348,6 @@ class FinalizationTableIO(IOManager):
                 inputs = {"annotations": loaded.annotations}
             case pd.DataFrame():
                 raise IntegrityError("Collection inputs are prepared by the collection input hook")
-        if isinstance(mapped, PolicyArtifact):
-            require_registered_rules(registered, mapped.category_rules)
-            inputs["category_rules"] = mapped.category_rules
-
         authorize_table_inputs(
             self.tables,
             context.instance,
@@ -394,7 +391,8 @@ class FinalizationTableIO(IOManager):
         if cache is None or registered is None:
             raise IntegrityError("Finalization output has no cache plan")
         if isinstance(step.mapped_config, CollectionInput):
-            self._record_collection(context, step, obj, cache, step.mapped_config)
+            declaration = registered.source_config(asset_branch(step.key.path))
+            self._record_collection(context, step, obj, cache, declaration)
             self.tables.handle_output(
                 context,
                 obj,
@@ -419,7 +417,7 @@ class FinalizationTableIO(IOManager):
         step: _FinalizationStep,
         table: pd.DataFrame,
         cache: TableCache,
-        mapped: CollectionInput,
+        declaration: DeclaredSourceStageConfig,
     ) -> None:
         if not step.collection_hit:
             attempt = step.attempt
@@ -434,7 +432,7 @@ class FinalizationTableIO(IOManager):
                     }
                 else:
                     table.attrs[inventory_binding(branch)] = step.inventory.model_dump(mode="json")
-                retain_source_receipt(table, mapped.collection, self.tables)
+                retain_source_receipt(table, declaration, self.tables)
             finally:
                 receipts = self._retain_scratch_attempt(step, cache, attempt)
                 context.log_event(

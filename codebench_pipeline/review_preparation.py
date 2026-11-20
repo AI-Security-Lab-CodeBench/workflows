@@ -24,7 +24,6 @@ from codebench_pipeline.object_store import sha256
 from codebench_pipeline.review_snapshots import ResolvedReview, ReviewSnapshots
 from codebench_pipeline.review_stages import annotation_stage
 from codebench_pipeline.review_workflow import ReviewWorkflow
-from codebench_pipeline.stage_configuration import ReviewQueueConfig
 
 
 class QueueMetadataSink(Protocol):
@@ -63,8 +62,7 @@ def prepare_review_queue(
     instance = context_run.instance
     dataset_id = context.asset_partition_key
     registered = dataset_io_manager.run_configuration(context.run_id, dataset_id)
-    settings = registered.scopes.human_review_queue.human_review_queue
-    policy = ReviewQueueConfig.project(registered, registered.rules)
+    policy = registered.review_queue_config()
     if context.output_metadata.get("review_policy_digest") != TextMetadataValue(
         sha256(policy.model_dump_json().encode())
     ):
@@ -88,8 +86,8 @@ def prepare_review_queue(
     cached = cached_table(
         execution,
         dataset_io_manager,
-        settings,
-        {"annotations": annotations, "category_rules": registered.rules},
+        policy,
+        {"annotations": annotations},
         ReviewQueueTable,
         lambda _: ReviewQueueTable.validate(queue),
         registered=registered,
@@ -97,9 +95,7 @@ def prepare_review_queue(
     snapshots = ReviewSnapshots.for_manager(home, DatasetDataService(home, instance), dataset_io_manager)
 
     def capture(_: str) -> ResolvedReview:
-        resolved = snapshots.capture_registered(
-            registered, dataset_io_manager, tuple(settings.review_columns)
-        )
+        resolved = snapshots.capture_registered(registered, dataset_io_manager, policy.review_columns)
         if resolved.manifest.references["category_eligible_annotations"] != reference or set(
             resolved.snapshot.candidate_ids
         ) != set(cached.value["candidate_id"]):

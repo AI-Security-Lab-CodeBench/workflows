@@ -18,7 +18,7 @@ from codebench_pipeline.data_api import make_dataset_api
 from codebench_pipeline.data_views import DatasetDataService
 from codebench_pipeline.dataset_registry import DatasetRegistry
 from codebench_pipeline.object_store import sha256
-from codebench_pipeline.stage_configuration import FilterConfig
+from codebench_pipeline.stage_configuration import DeclaredGlobalConfig
 
 ORIGIN = "http://127.0.0.1:3000"
 
@@ -40,7 +40,7 @@ def check_config_inspector(tmp_path: Path, *, scope: str) -> None:
     registry.register(spec.model_copy(update={"dataset_id": "unmaterialized"}))
     key = mapping_key(scope)
     selected = (
-        FilterConfig(category_rules=spec.rules, filtered_commands=spec.filtering).model_dump_json()
+        DeclaredGlobalConfig.from_spec(spec).filter_config().model_dump_json()
         if scope == "filtered_commands"
         else dumps({scope: {}})
     ).encode()
@@ -91,8 +91,13 @@ def check_config_inspector(tmp_path: Path, *, scope: str) -> None:
             assert body["kind"] == "json"
             assert body["snapshot_id"] == sha256(selected)
             assert body["value"] == expected
-            assert body["data_schema"]["source"] == "storage"
+            assert body["data_schema"]["source"] == (
+                "declared" if scope == "filtered_commands" else "storage"
+            )
             schema = body["data_schema"]["schema"]
+            if scope == "filtered_commands":
+                assert schema["title"] == "FilterConfig"
+                assert schema["properties"]["routes"]["items"]["$ref"] == "#/$defs/RiskRoute"
             Draft202012Validator.check_schema(schema)
             validator = Draft202012Validator(schema)
             assert validator.is_valid(body["value"])

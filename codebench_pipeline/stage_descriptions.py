@@ -64,7 +64,7 @@ outcomes are decoded into complete command labels. Each label retains its own do
 and original inference reference. Grounded rejections and context-dependent needs_review
 labels remain inspectable; failed attempts cannot enter this projection.
 
-**Input:** Current labeling attempts and category rules.
+**Input:** Current labeling attempts, the target category, risk routing patterns, and allowed class and severity names.
 **Goal:** Supply complete, validated proposals to exact deduplication and eligibility.
 **Why:** Retrieval or protocol failures must not masquerade as accepted or rejected labels.
 **Output:** `ProposedAnnotationsTable` with original evidence, category, risk, severity, class,
@@ -109,7 +109,7 @@ Target-category rows with medium or high category confidence are retained, along
 their other confidence values for the next review step. Excluded identities and reasons
 are recorded separately, so an empty result is explainable rather than padded.
 
-**Input:** Exact-deduplicated annotations and the configured category rules.
+**Input:** Exact-deduplicated annotations and the target category ID.
 
 **Goal:** Keep relevant category labels with medium or high category confidence.
 

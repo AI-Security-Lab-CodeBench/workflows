@@ -49,17 +49,20 @@ class CollectionAssetTopologyTests(unittest.TestCase):
             with self.subTest(job=job_name):
                 job = definitions.resolve_job_def(job_name)
                 validate_run_config(job, dataset_run_config(spec).to_config_dict())
-                mapping = key(f"map_{group}_config")
-                self.assertEqual(graph.get(mapping).group_name, group)
+                branch = stages[0].split("/")[0] if "/" in stages[0] else "dataset"
+                mappings = [key(f"map_{branch}_{stage.split('/')[-1]}_config") for stage in stages]
                 self.assertEqual(
                     {node.name for node in job.nodes},
                     {
                         node.to_python_identifier()
-                        for node in (key("global_config"), key("category_rules"), mapping, *map(key, stages))
+                        for node in (key("global_config"), *mappings, *map(key, stages))
                     },
                 )
                 for position, stage in enumerate(stages):
                     asset = graph.get(key(stage))
+                    mapping = mappings[position]
+                    self.assertEqual(graph.get(mapping).group_name, group)
+                    self.assertEqual(graph.get(mapping).parent_keys, {key("global_config")})
                     expected = {mapping}
                     if position:
                         expected.add(key(stages[position - 1]))

@@ -37,13 +37,13 @@ from codebench_pipeline.inference_capacity import CapacityUnavailable
 from codebench_pipeline.labeling_checkpoint_io import labeling_generation_identity
 from codebench_pipeline.labeling_checkpoint_store import LabelingCheckpointCache
 from codebench_pipeline.labeling_outcomes import LabelingAttempt, failed_attempt, label_attempt
+from codebench_pipeline.labeling_stage_settings import LabelingRules, ProposalRules
 from codebench_pipeline.labeling_tables import proposed_from_attempts
 from codebench_pipeline.model_config import ModelConfig
 from codebench_pipeline.models import SemanticSnippet
 from codebench_pipeline.openai_transport import HTTPResponse
 from codebench_pipeline.repository_config import RepositoryConfig
 from codebench_pipeline.repository_receipts import RepositoryRun
-from codebench_pipeline.stage_configuration import GuardedLabelingCacheConfig
 from codebench_pipeline.storage import fingerprint
 
 
@@ -219,7 +219,7 @@ class RankedLabelingTests(TestCase):
         self.enterContext(patch.object(LabelingEvidenceInputs, "admission", return_value=guard))
         self.enterContext(patch("codebench_pipeline.batch_labeling.guarded_complete", side_effect=provider))
         checkpoint = LabelingCheckpointCache(home / "cache", home / "operations")
-        settings = GuardedLabelingCacheConfig.from_settings(labeling.mapped)
+        settings = labeling.mapped
 
         def generation(
             commands: DataFrame[FilteredCommandsTable],
@@ -229,7 +229,7 @@ class RankedLabelingTests(TestCase):
             signature = stage_signature(
                 "labeling_attempts",
                 settings,
-                {"commands": commands, "category_rules": rules, "documentation_capture": capture},
+                {"commands": commands, "documentation_capture": capture},
                 storage_identity=storage,
             )
             return labeling_generation_identity(spec.dataset_id, signature, "/fixture/model")
@@ -255,7 +255,7 @@ class RankedLabelingTests(TestCase):
         )
         self.assertEqual(calls[-2:], ["later", "first"])
         self.assertEqual(len(calls), 5)
-        proposal = proposed_from_attempts(replay, rules).set_index("candidate_id")
+        proposal = proposed_from_attempts(replay, ProposalRules.from_rules(rules)).set_index("candidate_id")
         self.assertEqual(proposal.loc["first", "source_weight"], 0.79)
 
         changed_io = spec.storage.model_copy(update={"sample_rows": spec.storage.sample_rows + 1})
@@ -301,7 +301,7 @@ class RankedLabelingTests(TestCase):
             )
             weights[identity] = weight
         scheduler = RankedLabeling(
-            rules,
+            LabelingRules.from_rules(rules),
             remote_model(),
             batch_config(home),
             home / "stage",
@@ -389,7 +389,7 @@ class RankedLabelingTests(TestCase):
             "source-failures.json",
         )
         scheduler = RankedLabeling(
-            rules,
+            LabelingRules.from_rules(rules),
             remote_model(),
             batch_config(home),
             home / "stage",
@@ -438,7 +438,7 @@ class RankedLabelingTests(TestCase):
             for candidate in candidates
         ]
         scheduler = RankedLabeling(
-            rules,
+            LabelingRules.from_rules(rules),
             remote_model(),
             batch_config(home).model_copy(update={"batch_size": 1}),
             home / "stage",

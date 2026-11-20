@@ -10,13 +10,16 @@ from pydantic import BaseModel, JsonValue, RootModel
 
 from codebench_pipeline.config_assets import (
     ConfigRunIOManager,
+    RegisteredConfig,
     configured_selection,
     current_configuration_record,
     mapping_key,
 )
 from codebench_pipeline.dataset_registry import DatasetRegistry
+from codebench_pipeline.labeling_stage_settings import ProposalRules
 from codebench_pipeline.runtime_instance import dataset_instance
-from codebench_pipeline.stage_configuration import ConfigArtifact, PolicyArtifact
+from codebench_pipeline.stage_configuration import FilterConfig
+from codebench_pipeline.typed_config import ConfigArtifact
 
 
 class NativeConfigConsumptionTests(TestCase):
@@ -30,12 +33,17 @@ class NativeConfigConsumptionTests(TestCase):
         key = AssetKey(["datasets", "filtered_commands"])
         mapping = mapping_key("filtered_commands")
         selection = configured_selection([key])
+        expected = FilterConfig.project(RegisteredConfig.from_spec(spec), spec.rules).model_dump(mode="json")
         payloads: tuple[tuple[dict[str, JsonValue], str], ...] = (
             ({"another_scope": {}}, "another_scope"),
+            ({**expected, "category_rules": spec.rules.model_dump(mode="json")}, "category_rules"),
             (
                 {
-                    "category_rules": spec.rules.model_dump(mode="json"),
-                    "filtered_commands": {"unregistered_setting": True},
+                    **expected,
+                    "filtered_commands": {
+                        **spec.filtering.model_dump(mode="json"),
+                        "unregistered_setting": True,
+                    },
                 },
                 "unregistered_setting",
             ),
@@ -127,11 +135,13 @@ class NativeConfigConsumptionTests(TestCase):
                 repeated.metadata["input_fingerprint"], materialization.metadata["input_fingerprint"]
             )
 
-    def test_scoped_policy_consumer_rejects_rules_from_another_registration(self) -> None:
+    def test_scoped_policy_consumer_rejects_routes_from_another_registration(self) -> None:
         home = Path(self.enterContext(TemporaryDirectory()))
         spec = LabelingFixture(self, home).spec
         dataset_id = DatasetRegistry(home).register(spec)
-        other_policy = PolicyArtifact(category_rules=spec.rules.model_copy(update={"policy": "New policy."}))
+        risk, *rest = spec.rules.risks
+        other_risk = risk.model_copy(update={"command_patterns": ["^fixture-different-route$"]})
+        other_policy = ProposalRules.from_rules(spec.rules.model_copy(update={"risks": [other_risk, *rest]}))
         cycle = NativeDatasetCycle(home)
         job = cycle.definitions.get_implicit_global_asset_job_def()
         proposed = AssetKey(["datasets", "proposed_annotations"])
@@ -162,4 +172,4 @@ class NativeConfigConsumptionTests(TestCase):
         self.assertEqual(failure.step_key, proposed.to_python_identifier())
         error = failure.step_failure_data.error
         assert error is not None
-        self.assertIn("Category rules differ from the run configuration", error.to_string())
+        self.assertIn("Mapped proposal rules differ from the run configuration", error.to_string())

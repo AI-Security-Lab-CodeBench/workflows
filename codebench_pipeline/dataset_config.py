@@ -18,7 +18,7 @@ from codebench_pipeline.dataset_seed_config import (
 from codebench_pipeline.model_config import ModelConfig
 from codebench_pipeline.models import Identifier
 from codebench_pipeline.object_store import StorageConfig
-from codebench_pipeline.typed_config import TypedConfig
+from codebench_pipeline.typed_config import ConfigArtifact, TypedConfig
 
 
 class StrictStageConfig(TypedConfig):
@@ -83,7 +83,7 @@ class FilteringConfig(StrictStageConfig):
     quarantine_dynamic_shell: bool = True
 
 
-class DeduplicationPolicy(StrictStageConfig):
+class DeduplicationPolicy(StrictStageConfig, ConfigArtifact):
     normalize_safe_whitespace: bool = True
 
 

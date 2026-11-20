@@ -76,7 +76,7 @@ def retry_job(directory: str, with_registration: bool = False) -> JobDefinition:
     def config(registered: RegisteredConfig) -> FilterConfig:
         value = int((home / "source").read_text(encoding="utf-8"))
         return FilterConfig(
-            category_rules=registered.rules,
+            routes=registered.filter_config().routes,
             filtered_commands=FilteringConfig(maximum_command_characters=value),
         )
 

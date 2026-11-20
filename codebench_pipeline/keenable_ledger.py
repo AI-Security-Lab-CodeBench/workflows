@@ -17,6 +17,8 @@ from .keenable_policy import (
     Declaration,
     Digest,
     KeenableError,
+    KeenableOriginBudget,
+    KeenableSourceAccess,
     PagePermission,
     Record,
     digest,
@@ -31,7 +33,7 @@ def timestamp() -> str:
 
 
 @contextmanager
-def open_ledger(root: Path, declaration: Declaration) -> Generator["Ledger"]:
+def open_ledger(root: Path, declaration: Declaration | KeenableSourceAccess) -> Generator["Ledger"]:
     namespace = root / declaration.dataset / "keenable" / declaration.generation
     namespace.mkdir(mode=0o700, parents=True, exist_ok=True)
     with (namespace / "writer.lock").open("ab") as guard:
@@ -63,7 +65,9 @@ def open_ledger(root: Path, declaration: Declaration) -> Generator["Ledger"]:
 class Ledger:
     """One generation's serialized receipts and immutable objects."""
 
-    def __init__(self, db: sqlite3.Connection, budget: AcquisitionBudget | CallBudget | None) -> None:
+    def __init__(
+        self, db: sqlite3.Connection, budget: AcquisitionBudget | CallBudget | KeenableOriginBudget | None
+    ) -> None:
         self.db = db
         self.budget = budget
 
@@ -107,7 +111,12 @@ class Ledger:
             (kind, kind == "plan"),
         ).fetchone()
         size = RESPONSE_BYTES
-        if kind == "plan":
+        if isinstance(self.budget, KeenableOriginBudget):
+            if kind != "origin":
+                raise KeenableError("discovery_requires_search_declaration")
+            limit = self.budget.origin_calls
+            maximum = self.budget.total_bytes
+        elif kind == "plan":
             size = PLAN_RESPONSE_BYTES
             limit = self.budget.search_calls if self.budget is not None else MAX_SEARCH
             maximum = limit * size
@@ -184,7 +193,9 @@ class SlotIdentity(Record):
     request_sha256: Digest
 
 
-def verify_lock(ledger: Ledger, lock: CaptureLock, declaration: Declaration) -> dict[str, bytes]:
+def verify_lock(
+    ledger: Ledger, lock: CaptureLock, declaration: Declaration | KeenableSourceAccess
+) -> dict[str, bytes]:
     ledger.require_healthy()
     if ledger.artifact("lock") != lock.model_dump_json().encode():
         raise KeenableError("capture_lock_binding_mismatch")

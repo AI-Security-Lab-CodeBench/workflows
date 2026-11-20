@@ -1,3 +1,4 @@
+import csv
 import io
 import json
 import tempfile
@@ -11,6 +12,7 @@ from dagster import AssetKey, AssetRecordsFilter
 from guarded_labeling_fixture import LabelingFixture
 from native_dataset_cycle import NativeDatasetCycle
 from pydantic import BaseModel
+from test_review_release import attest_fixture_release
 
 from codebench_pipeline.collection_config import SourceDeclaration
 from codebench_pipeline.data_views import DatasetDataService
@@ -24,6 +26,8 @@ from codebench_pipeline.human_review import DecisionChange, HumanReviewError
 from codebench_pipeline.human_review_store import HumanReviewStore
 from codebench_pipeline.keenable_policy import KeenableDeclaration
 from codebench_pipeline.model_config import ModelConfig
+from codebench_pipeline.object_store import ObjectStore
+from codebench_pipeline.release_runner import ReleaseRunner
 from codebench_pipeline.repository_branch_config import RepositoryBranchDeclaration
 from codebench_pipeline.review_snapshots import ReviewSnapshots
 from codebench_pipeline.runtime_instance import dataset_instance
@@ -222,7 +226,7 @@ class IncrementalDatasetTests(unittest.TestCase):
             self.assertEqual(snapshots.current(dataset_id).manifest.publication.limit_per_risk, 1)
         assert isinstance(before, pd.DataFrame) and isinstance(after, pd.DataFrame)
         pd.testing.assert_frame_equal(before, after)
-        with store.reader() as tx:
+        with store.transaction(dataset_id=dataset_id) as tx:
             fresh = tx.get_current_batch(dataset_id, "annotations")
             self.assertEqual(fresh.snapshot.candidate_ids, original.snapshot.candidate_ids)
             self.assertEqual(fresh.snapshot.record_fingerprints, original.snapshot.record_fingerprints)
@@ -232,24 +236,48 @@ class IncrementalDatasetTests(unittest.TestCase):
             with self.assertRaises(HumanReviewError) as rejected:
                 tx.authorize_completion(fresh.snapshot, token)
             self.assertEqual(rejected.exception.code, "stale")
+            decisions = tx.list_decisions(fresh.batch_id)
+            self.assertEqual(
+                {row.candidate_id for row in decisions if row.decision == "approve"},
+                set(original.snapshot.candidate_ids),
+            )
+            self.assertIsNone(tx.last_publication(dataset_id))
+            updated_token = tx.complete(fresh.snapshot, fresh, "synthetic QA")
         self.assertEqual(run.job_name, "__ASSET_JOB")
+        with dataset_instance(self.home) as instance:
+            runner = ReleaseRunner(self.home, instance)
+            with self.assertRaises(HumanReviewError) as rejected:
+                runner(token)
+            self.assertEqual(rejected.exception.code, "stale")
+            attest_fixture_release(self.home, instance, dataset_id)
+            published = runner(updated_token)
+        payload = ObjectStore(self.spec.storage).read(published.csv_reference)
+        (row,) = csv.DictReader(io.StringIO(payload.decode()))
+        self.assertEqual(row["human_reviewed"], "true")
+        self.assertIn(row["command"], before["command"].tolist())
 
-    def test_registered_metadata_revision_refreshes_only_review_authority(self) -> None:
+    def test_registered_metadata_revision_reuses_review_queue_and_authority(self) -> None:
         before = self.materializations(self.spec.dataset_id)
+        store = HumanReviewStore(self.home)
+        with store.reader() as transaction:
+            original = transaction.get_current_batch(self.spec.dataset_id, "annotations")
         self.spec = self.spec.model_copy(update={"revision": "metadata-only"})
         with patch(
             "codebench_pipeline.batch_labeling.guarded_complete",
             side_effect=AssertionError("Inference reran"),
         ):
-            self.assertEqual(self.build(), {"human_review_queue": True})
-        after = self.materializations(self.spec.dataset_id)
-        self.assertEqual({stage for stage in before if before[stage] != after[stage]}, {"human_review_queue"})
+            self.assertEqual(self.build(), {})
+        self.assertEqual(self.materializations(self.spec.dataset_id), before)
         with dataset_instance(self.home) as instance:
             data = DatasetDataService(self.home, instance)
             queue = data.read_current(self.spec.dataset_id, "human_review_queue").value
             assert isinstance(queue, pd.DataFrame)
-            with HumanReviewStore(self.home).reader() as transaction:
+            with store.reader() as transaction:
                 batch = transaction.get_current_batch(self.spec.dataset_id, "annotations")
+            self.assertEqual(
+                (batch.batch_id, batch.snapshot.snapshot_id),
+                (original.batch_id, original.snapshot.snapshot_id),
+            )
             self.assertEqual(
                 queue.attrs[REVIEW_PREPARATION],
                 {"batch_id": batch.batch_id, "snapshot_id": batch.snapshot.snapshot_id},

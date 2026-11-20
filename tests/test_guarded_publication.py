@@ -12,6 +12,8 @@ from unittest.mock import patch
 
 import pandas as pd
 from guarded_labeling_fixture import CORPUS, LabelingFixture, fixture_vectors
+from pydantic import ValidationError
+from test_declared_dataset_graph import fixture_spec, with_keenable_declaration
 
 from codebench_pipeline import guarded_publication_sampling
 from codebench_pipeline.data_views import DatasetDataService
@@ -28,8 +30,8 @@ from codebench_pipeline.guarded_publication import (
     build_release_proposal,
     prepare_guarded_release,
 )
-from codebench_pipeline.guarded_publication_evidence import ReleaseInputs
 from codebench_pipeline.guarded_publication_controls import record_control
+from codebench_pipeline.guarded_publication_evidence import ReleaseInputs
 from codebench_pipeline.guarded_publication_runtime import (
     current_proposal,
     preview_proposal,
@@ -44,14 +46,65 @@ from codebench_pipeline.models import SemanticSnippet
 from codebench_pipeline.object_store import ObjectStore
 from codebench_pipeline.release_admission import read_publication
 from codebench_pipeline.release_runner import ReleaseContinuation, ReleaseRunner
+from codebench_pipeline.release_stage_settings import DatasetReleaseConfig
 from codebench_pipeline.repository_receipts import RepositoryRun
 from codebench_pipeline.review_snapshots import ReviewManifest, ReviewSnapshots
 from codebench_pipeline.runtime_instance import dataset_instance
-from codebench_pipeline.stage_configuration import DatasetReleaseConfig
+from codebench_pipeline.stage_configuration import DeclaredGlobalConfig, dataset_release_settings
 from codebench_pipeline.storage import IntegrityError, fingerprint
 
 
 class GuardedPublicationTests(TestCase):
+    def test_release_mapping_digest_tracks_evidence_authority_and_excludes_inference_transport(self) -> None:
+        spec = fixture_spec(Path(self.enterContext(TemporaryDirectory())))
+        registered = DeclaredGlobalConfig.from_spec(spec)
+        baseline = dataset_release_settings(registered, spec.rules)
+        collection = spec.declared_collection
+        batch = spec.annotation.batch
+        self.assertIsNotNone(collection)
+        self.assertIsNotNone(batch)
+        assert collection is not None and batch is not None
+        grounding = batch.grounding
+        self.assertEqual(baseline.grounding.allowed_domains, tuple(grounding.allowed_domains))
+        self.assertEqual(
+            baseline.collection.keenable_use_cases.generation, collection.keenable_declaration.generation
+        )
+        changed_source = with_keenable_declaration(
+            spec, collection.keenable_declaration.model_copy(update={"generation": "updated-source"})
+        )
+        self.assertNotEqual(
+            dataset_release_settings(DeclaredGlobalConfig.from_spec(changed_source), spec.rules).digest,
+            baseline.digest,
+        )
+        for settings, unchanged in (
+            ({"maximum_provider_calls": grounding.maximum_provider_calls + 1}, True),
+            ({"allowed_domains": ["another.example"]}, False),
+        ):
+            with self.subTest(settings=settings):
+                annotation = spec.annotation.model_copy(
+                    update={
+                        "batch": batch.model_copy(update={"grounding": grounding.model_copy(update=settings)})
+                    }
+                )
+                updated = DeclaredGlobalConfig.from_spec(spec.model_copy(update={"annotation": annotation}))
+                self.assertEqual(
+                    dataset_release_settings(updated, spec.rules).digest == baseline.digest, unchanged
+                )
+        payload = baseline.model_dump(mode="json")
+        self.assertEqual(DatasetReleaseConfig.model_validate_json(json.dumps(payload)), baseline)
+        for unrelated, location in (
+            ({**payload, "dataset_id": spec.dataset_id}, ("dataset_id",)),
+            (
+                {**payload, "grounding": {**baseline.grounding.model_dump(mode="json"), "timeout": 60}},
+                ("grounding", "timeout"),
+            ),
+        ):
+            with self.subTest(location=location):
+                with self.assertRaises(ValidationError) as rejected:
+                    DatasetReleaseConfig.model_validate_json(json.dumps(unrelated))
+                error = rejected.exception.errors()[0]
+                self.assertEqual((error["loc"], error["type"]), (location, "extra_forbidden"))
+
     def test_exact_release_requires_attestation_and_hold_clearance_and_rechecks_cached_output(self) -> None:
         home = Path(self.enterContext(TemporaryDirectory()))
         fixture = LabelingFixture(self, home, limit_per_risk=4)
@@ -87,7 +140,7 @@ class GuardedPublicationTests(TestCase):
                 prepare_guarded_release(
                     ReleaseInputs(snapshots, approved, token, ()),
                     RepositoryRun(home, dataset_id, "release-verification"),
-                    different_cap,
+                    DeclaredGlobalConfig.from_spec(different_cap),
                     publication_versions={},
                 )
             proposal, path = preview_proposal(home, instance, dataset_id)
@@ -210,10 +263,15 @@ class GuardedPublicationTests(TestCase):
             publication = runner(token)
             self.assertEqual(publication.proposal_digest, proposal)
             self.assertEqual(runner(token), publication)
-            published_manifest = ObjectStore(fixture.spec.storage).read(
+            published_store = ObjectStore(fixture.spec.storage)
+            published_manifest = published_store.read(
                 f"{publication.bundle_reference}/proposal-manifest.json"
             )
             self.assertEqual(published_manifest, (path / "manifest.json").read_bytes())
+            self.assertEqual(
+                published_store.read(f"{publication.bundle_reference}/rules.json"),
+                (fixture.spec.rules.model_dump_json(indent=2) + "\n").encode(),
+            )
             with patch.object(ReviewSnapshots, "frame", changed_support):
                 with store.transaction(dataset_id=dataset_id) as tx:
                     changed = current_proposal(

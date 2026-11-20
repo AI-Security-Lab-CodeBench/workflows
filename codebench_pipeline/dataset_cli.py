@@ -164,8 +164,6 @@ def main() -> None:
             configs = stage_configs(spec)
             stage = str(args.stage)
             view = {"stage": stage, "settings": configs[stage].model_dump(mode="json")}
-            if stage == "labeling_attempts":
-                view["policy"] = spec.rules.model_dump(mode="json")
             print(json.dumps(view, ensure_ascii=False, indent=2))
             return
         if args.action == "register":

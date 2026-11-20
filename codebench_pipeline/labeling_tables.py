@@ -25,6 +25,7 @@ from codebench_pipeline.dataset_config import AnnotationConfig
 from codebench_pipeline.dataset_records import CandidateRecord, LabelDecision
 from codebench_pipeline.dataset_tables import proposed_annotations
 from codebench_pipeline.labeling_outcomes import LabelingAttempt, label_attempt, validate_attempts
+from codebench_pipeline.labeling_stage_settings import ProposalRules
 from codebench_pipeline.models import SemanticSnippet
 
 
@@ -99,7 +100,7 @@ def labeling_attempts_table(
 
 def proposed_from_attempts(
     attempts: DataFrame[LabelingAttemptsTable],
-    rules: CategoryRules,
+    rules: ProposalRules,
 ) -> DataFrame[ProposedAnnotationsTable]:
     outcomes = model_records(attempts, LabelingAttempt)
     candidates = model_records(attempts, CandidateRecord)

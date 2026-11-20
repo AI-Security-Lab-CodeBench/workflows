@@ -177,7 +177,7 @@ def build_definitions(home: Path) -> Definitions:
     live_configuration = AssetSelection.assets(CONFIG_DIRECTORY)
     build_selection = (
         AssetSelection.assets(
-            ["datasets", "human_review_queue"], ["datasets", "labeling_failures"]
+            ["datasets", "human_review_queue"], ["datasets", "labeling_failures"], category_rules
         ).upstream()
         - live_configuration
     )
@@ -211,7 +211,7 @@ def build_definitions(home: Path) -> Definitions:
     preparation_job = UnresolvedAssetJobDefinition(
         name="prepare_dataset",
         description="Acquire and filter all three branches before labeling.",
-        selection=AssetSelection.assets(filtered_commands).upstream() - live_configuration,
+        selection=AssetSelection.assets(filtered_commands, category_rules).upstream() - live_configuration,
         config=build_config,
     )
     release_job = UnresolvedAssetJobDefinition(
@@ -219,7 +219,7 @@ def build_definitions(home: Path) -> Definitions:
         description="Release eligible low-uncertainty rows automatically; uncertain rows require completed human review.",
         selection=AssetSelection.assets(
             GLOBAL_CONFIG,
-            *(mapping_key(stage) for stage in RELEASE_STAGES),
+            mapping_key("dataset_release"),
             *(AssetKey(["datasets", stage]) for stage in RELEASE_STAGES),
         ),
         config=PartitionedConfig(

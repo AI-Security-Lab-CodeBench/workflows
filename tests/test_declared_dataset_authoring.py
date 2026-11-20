@@ -278,9 +278,7 @@ class DeclaredDatasetAuthoringTests(TestCase):
                     manager.registered(result.run_id).config_directory, expected.config_directory
                 )
                 self.assertEqual(
-                    result.output_for_node(
-                        mapped.to_python_identifier()
-                    ).merged_command_candidates.keenable_source_weight,
+                    result.output_for_node(mapped.to_python_identifier()).keenable_source_weight,
                     0.19,
                 )
             self.assertEqual(versions[0], versions[1])

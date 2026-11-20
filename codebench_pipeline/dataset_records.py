@@ -1,16 +1,18 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import Annotated, Literal, Protocol, TypeVar
+from typing import Annotated, Literal, Protocol, TypeVar, assert_never
 
 from pydantic import ConfigDict, Field, model_validator
 
 from codebench_pipeline.category_rules import CategoryRules, ClassName, SeverityName, StrictModel, Text
+from codebench_pipeline.labeling_stage_settings import LabelingRules, ProposalRules, matching_risks
 from codebench_pipeline.models import SemanticSnippet
 
 DocumentationSnippet = SemanticSnippet
 HttpURL = Annotated[str, Field(pattern=r"^https?://[^\s/]+(?:/[^\s]*)?$")]
 Confidence = Literal["low", "medium", "high"]
+type LabelPolicy = CategoryRules | LabelingRules | ProposalRules
 
 
 class CandidateRecord(StrictModel):
@@ -78,11 +80,11 @@ def index_records(records: Sequence[Record]) -> dict[str, Record]:
     return indexed
 
 
-def routing(candidate: CandidateRecord, rules: CategoryRules) -> list[str]:
+def routing(candidate: CandidateRecord, rules: LabelPolicy) -> list[str]:
     known = {risk.id for risk in rules.risks}
     if not set(candidate.risk_candidates) <= known:
         raise ValueError(f"Unknown routing risk for {candidate.candidate_id}")
-    matching = set(rules.matching_risks(candidate.command))
+    matching = set(matching_risks(candidate.command, rules.risks))
     allowed = [risk for risk in candidate.risk_candidates if risk in matching]
     if not allowed:
         raise ValueError(f"No supplied command pattern supports {candidate.candidate_id}")
@@ -92,16 +94,25 @@ def routing(candidate: CandidateRecord, rules: CategoryRules) -> list[str]:
 def validate_label(
     candidate: CandidateRecord,
     label: LabelDecision,
-    rules: CategoryRules,
+    rules: LabelPolicy,
     documentation_urls: set[str] | None = None,
 ) -> None:
     if label.candidate_id != candidate.candidate_id:
         raise ValueError("Label identity differs from candidate")
     if label.category_id != rules.category_id or label.risk_id not in routing(candidate, rules):
         raise ValueError("Label taxonomy differs from supplied routing rules")
-    if label.class_ not in {rule.name for rule in rules.classes}:
+    match rules:
+        case ProposalRules():
+            classes = set(rules.classes)
+            severities = set(rules.severities)
+        case CategoryRules() | LabelingRules():
+            classes = {rule.name for rule in rules.classes}
+            severities = {rule.name for rule in rules.severities}
+        case _:
+            assert_never(rules)
+    if label.class_ not in classes:
         raise ValueError("Class is absent from supplied rules")
-    if label.severity not in {rule.name for rule in rules.severities}:
+    if label.severity not in severities:
         raise ValueError("Severity is absent from supplied rules")
     if label.util != candidate.util:
         raise ValueError("Label utility differs from source utility")

@@ -10,11 +10,11 @@ from pydantic import JsonValue, TypeAdapter
 
 from codebench_pipeline.batch_labeling import BatchExecution, EvidenceAdmission, annotate_batches_bound
 from codebench_pipeline.batch_labeling_config import BatchLabelingConfig
-from codebench_pipeline.category_rules import CategoryRules
 from codebench_pipeline.command_batches import similarity_batches
 from codebench_pipeline.dataset_finalization import normalized_command
 from codebench_pipeline.dataset_records import CandidateRecord, index_records, routing
 from codebench_pipeline.labeling_outcomes import LabelingAttempt, failed_attempt, validate_attempts
+from codebench_pipeline.labeling_stage_settings import LabelingRules
 from codebench_pipeline.model_config import ModelConfig
 from codebench_pipeline.repository_config import SourceWeight
 from codebench_pipeline.storage import IntegrityError, fingerprint
@@ -28,7 +28,7 @@ _RECEIPT: Final = TypeAdapter(dict[str, JsonValue])
 
 @dataclass(frozen=True, slots=True)
 class RankedLabeling:
-    rules: CategoryRules
+    rules: LabelingRules
     model: ModelConfig
     config: BatchLabelingConfig
     out: Path

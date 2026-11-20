@@ -66,7 +66,7 @@ def filtered_commands(
         raise IntegrityError("Filtering input hooks did not prepare the table")
     if command_candidates.cached is None:
         candidates = command_candidates.candidates
-        table = filter_candidates(candidates, mapped_config.category_rules, mapped_config.filtered_commands)
+        table = filter_candidates(candidates, mapped_config.routes, mapped_config.filtered_commands)
         table.attrs = {**candidates.attrs, **table.attrs}
     else:
         table = FilteredCommandsTable.validate(command_candidates.cached)

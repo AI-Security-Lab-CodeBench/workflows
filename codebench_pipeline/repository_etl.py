@@ -18,6 +18,7 @@ from codebench_pipeline.source_transform_contract import (
 from codebench_pipeline.source_transforms import execute_transformation, source_rows, verify_transformation
 from codebench_pipeline.stage_implementation import ImplementationSource
 from codebench_pipeline.storage import IntegrityError, digest
+from codebench_pipeline.typed_config import ConfigArtifact
 
 _DEPLOYMENT_ROOT: Final = Path(__file__).resolve().parents[1]
 _RUNTIME_DIGEST: Final = "a41476c5723d996fc5863b653c52efb8c1d4c0fc9fd57392d16cae02e69a7b60"
@@ -140,6 +141,59 @@ def _is_approved(transform: SourceTransformConfig) -> bool:
 
 def _parser_path(relative: str) -> str:
     return _CHEATSHEETS_FRONT_MATTER if relative == _HISTORICAL_CHEATSHEETS_PATH else relative
+
+
+type RepositoryRuntimeParserId = (
+    RepositoryParserId | Literal["legacy_cheatsheets", "historical_cheatsheets_front_matter"]
+)
+_RUNTIME_PARSER_PINS: Final[
+    dict[RepositoryRuntimeParserId, tuple[str, str, str, Literal["function", "class"]]]
+] = {
+    **_REVIEWED_PARSERS,
+    "legacy_cheatsheets": _LEGACY_CHEATSHEETS,
+    "historical_cheatsheets_front_matter": (
+        _HISTORICAL_CHEATSHEETS_PATH,
+        *_REVIEWED_PARSERS["cheatsheets_front_matter"][1:],
+    ),
+}
+
+
+class RepositoryParserPin(ConfigArtifact):
+    parser_id: RepositoryRuntimeParserId
+    sha256: Digest
+    options_json: str
+    batch_size: Annotated[int, Field(ge=1, le=10000)]
+
+    @classmethod
+    def from_transform(cls, transform: SourceTransformConfig) -> RepositoryParserPin:
+        if not _is_approved(transform):
+            raise IntegrityError(
+                f"Repository ETL is absent from the deployment allowlist: {transform.module_path}"
+            )
+        return cls(
+            parser_id=next(
+                name
+                for name, (path, _, _, _) in _RUNTIME_PARSER_PINS.items()
+                if path == transform.module_path
+            ),
+            sha256=transform.sha256,
+            options_json=transform.options_json,
+            batch_size=transform.batch_size,
+        )
+
+    def runtime(self) -> SourceTransformConfig:
+        path, pin, entrypoint, kind = _RUNTIME_PARSER_PINS[self.parser_id]
+        if self.sha256 != pin:
+            raise IntegrityError(f"Repository parser SHA-256 differs from its reviewed pin: {self.parser_id}")
+        return SourceTransformConfig(
+            module_path=path,
+            sha256=pin,
+            entrypoint=entrypoint,
+            kind=kind,
+            trusted=True,
+            options_json=self.options_json,
+            batch_size=self.batch_size,
+        )
 
 
 def _deployment_path(relative: str, root: Path | None = None) -> Path:

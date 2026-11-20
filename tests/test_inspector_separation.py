@@ -6,13 +6,14 @@ from unittest.mock import patch
 from dagster import AssetKey, DataVersion, IOManagerDefinition, Output, asset, materialize
 from guarded_labeling_fixture import LabelingFixture
 from native_dataset_cycle import NativeDatasetCycle
+from pydantic import JsonValue, TypeAdapter
 from test_dataframe_io import s3_fixture
 from test_declared_dataset_graph import BUNDLE, fixture_spec
 from test_review_release import attest_fixture_release
 
 from codebench_pipeline.artifact_views import ArtifactJSON, ArtifactQuery, ArtifactTable
 from codebench_pipeline.category_rules import CategoryRules
-from codebench_pipeline.config_assets import CONFIG_DIRECTORY, GLOBAL_CONFIG
+from codebench_pipeline.config_assets import CONFIG_DIRECTORY, GLOBAL_CONFIG, mapping_key
 from codebench_pipeline.data_view_models import DatasetQueryRequest, DatasetViewError, TableResponse
 from codebench_pipeline.data_views import DatasetDataService
 from codebench_pipeline.dataframe_io import DataFrameIOManager, asset_storage_key
@@ -170,7 +171,7 @@ class InspectorSeparationTests(unittest.TestCase):
                 side_effect=AssertionError("Metadata-only approval triggered inference"),
             ):
                 refresh_registered_configuration(dataset, home)
-                self.assertEqual(set(cycle.drain(instance, partition=dataset)), {"human_review_queue"})
+                self.assertEqual(cycle.drain(instance, partition=dataset), {})
             self.assertEqual(inspect(), initial)
 
             labeler = metadata.annotation.model
@@ -252,6 +253,19 @@ class InspectorSeparationTests(unittest.TestCase):
                     self.assertEqual(result.page.total_rows, 4)
 
             inspect("published")
+            policy = data.artifacts.query(
+                ArtifactQuery(asset_key=tuple(mapping_key("dataset_release").path), partition_key=dataset)
+            )
+            self.assertIsInstance(policy, ArtifactJSON)
+            assert isinstance(policy, ArtifactJSON)
+            object_adapter = TypeAdapter(dict[str, JsonValue])
+            effective = object_adapter.validate_python(policy.value)
+            grounding = object_adapter.validate_python(effective["grounding"])
+            self.assertEqual(effective["limit_per_risk"], 4)
+            self.assertNotIn("dataset_id", effective)
+            self.assertNotIn("category_rules", effective)
+            self.assertEqual(grounding["allowed_domains"], fixture.grounding.allowed_domains)
+            self.assertNotIn("keenable_api_key_env", grounding)
             with patch(
                 "codebench_pipeline.keenable_policy.KeenableDeclaration.check_current",
                 side_effect=KeenableError("authorization_expired", 200),

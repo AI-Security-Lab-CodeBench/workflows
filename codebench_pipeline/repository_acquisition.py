@@ -9,7 +9,8 @@ from typing import Literal
 
 from pydantic import JsonValue, TypeAdapter, ValidationError
 
-from codebench_pipeline.repository_config import Commit, RepositoryModel, RepositoryOrigin
+from codebench_pipeline.collection_stage_settings import RepositoryCaptureOrigin
+from codebench_pipeline.repository_config import Commit, RepositoryModel, RepositoryOriginScope
 from codebench_pipeline.repository_legacy import PreparedCaptureCache
 from codebench_pipeline.repository_receipts import RepositoryRun, canonical, sha256
 from codebench_pipeline.repository_tree import (
@@ -51,7 +52,7 @@ class CapturedSource(RepositoryModel):
     retrieved_at: str
 
 
-def _fetch_blob(origin: RepositoryOrigin, entry: TreeEntry, limit: int) -> bytes:
+def _fetch_blob(origin: RepositoryOriginScope, entry: TreeEntry, limit: int) -> bytes:
     body = fetch_repository_bytes(raw_url(origin, entry.path), limit)
     if git_blob_sha1(body) != entry.sha or len(body) != entry.size:
         raise IntegrityError(
@@ -61,7 +62,7 @@ def _fetch_blob(origin: RepositoryOrigin, entry: TreeEntry, limit: int) -> bytes
 
 
 def catalog_origin(
-    origin: RepositoryOrigin, run: RepositoryRun, limit: int
+    origin: RepositoryOriginScope, run: RepositoryRun, limit: int
 ) -> tuple[list[CatalogSource], dict[str, JsonValue]]:
     tree_key = f"trees/{origin.tree_digest}.json"
     raw = (
@@ -153,7 +154,7 @@ def catalog_origin(
 
 
 def capture_sources(
-    sources: tuple[CatalogSource, ...], origin: RepositoryOrigin, runtime: CaptureRuntime
+    sources: tuple[CatalogSource, ...], origin: RepositoryCaptureOrigin, runtime: CaptureRuntime
 ) -> list[tuple[CapturedSource, str]]:
     run = runtime.run
 
@@ -239,7 +240,7 @@ CAPTURED_SOURCES = TypeAdapter(tuple[CapturedSource, ...])
 
 def origin_receipt_failure(
     run: RepositoryRun,
-    origin: RepositoryOrigin,
+    origin: RepositoryOriginScope,
     error: ValidationError | IntegrityError | OSError | HTTPException,
 ) -> None:
     failure = canonical(

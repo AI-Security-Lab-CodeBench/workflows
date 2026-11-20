@@ -17,6 +17,7 @@ from .keenable_policy import (
     Declaration,
     KeenableDeclaration,
     KeenableError,
+    KeenableSourceAccess,
     PagePermission,
     Permission,
     ReviewedSpan,
@@ -44,7 +45,11 @@ class KeenableCollection:
     """Bounded CAT-3 collection with durable cross-run receipts and inert source bytes."""
 
     def __init__(
-        self, root: Path, declaration: Declaration, *, planner: GuardedSearchPlanner | None = None
+        self,
+        root: Path,
+        declaration: Declaration | KeenableSourceAccess,
+        *,
+        planner: GuardedSearchPlanner | None = None,
     ) -> None:
         self.root = root
         self.declaration = declaration
@@ -55,7 +60,10 @@ class KeenableCollection:
 
     def discover_with_credential(self, api_key: str) -> CatalogReceipt:
         """Search reviewed administrative cases and freeze the authorized selection."""
-        with open_ledger(self.root, self.declaration) as ledger:
+        declaration = self.declaration
+        if isinstance(declaration, KeenableSourceAccess):
+            raise KeenableError("discovery_requires_search_declaration")
+        with open_ledger(self.root, declaration) as ledger:
             ledger.require_healthy()
             if (prior := ledger.artifact("catalog")) is not None:
                 catalog = CatalogReceipt.model_validate_json(prior)
@@ -67,24 +75,22 @@ class KeenableCollection:
                 ):
                     raise KeenableError("planner_binding_mismatch")
                 return catalog
-            leads = declared_leads(self.declaration)
+            leads = declared_leads(declaration)
             searches: list[CallReceipt] = []
             plan = None
-            if self.declaration.search_plan is not None:
-                hits, receipts, plan = SearchSession(ledger, self.declaration, self.planner).run(
-                    lambda option: _search(
-                        ledger, self.declaration, option.case, api_key=api_key, option=option
-                    )
+            if declaration.search_plan is not None:
+                hits, receipts, plan = SearchSession(ledger, declaration, self.planner).run(
+                    lambda option: _search(ledger, declaration, option.case, api_key=api_key, option=option)
                 )
                 leads.extend(hits)
                 searches.extend(receipts)
             else:
-                for case in self.declaration.search_cases:
-                    receipt, hits = _search(ledger, self.declaration, case, api_key=api_key)
+                for case in declaration.search_cases:
+                    receipt, hits = _search(ledger, declaration, case, api_key=api_key)
                     leads.extend(hits)
                     searches.append(receipt)
-            self.declaration.check_current(datetime.now(UTC))
-            catalog = freeze_catalog(self.declaration, leads, searches, plan)
+            declaration.check_current(datetime.now(UTC))
+            catalog = freeze_catalog(declaration, leads, searches, plan)
             ledger.publish("catalog", catalog.model_dump_json().encode())
             return catalog
 

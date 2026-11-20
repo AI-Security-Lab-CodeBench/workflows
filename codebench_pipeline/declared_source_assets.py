@@ -13,7 +13,14 @@ from dagster import (
 from pandera.typing import DataFrame
 
 from codebench_pipeline.collection_config import DeclaredSourceStageConfig
-from codebench_pipeline.config_assets import mapped_input
+from codebench_pipeline.collection_stage_settings import (
+    DocumentationCaptureSettings,
+    KeenableDiscoverySettings,
+    RepositoryCaptureSettings,
+    RepositoryCatalogSettings,
+    RepositoryExtractionSettings,
+)
+from codebench_pipeline.config_assets import collection_mapping_key
 from codebench_pipeline.dataframe_io import DataFrameIOManager
 from codebench_pipeline.dataframe_schemas import (
     CommandCandidatesTable,
@@ -21,12 +28,17 @@ from codebench_pipeline.dataframe_schemas import (
     SourceDocumentsTable,
 )
 from codebench_pipeline.dataset_asset_types import DATASET_PARTITIONS, TABLE_TYPES, table_input
-from codebench_pipeline.dataset_branches import CollectionBranch, asset_branch, asset_path
-from codebench_pipeline.finalization_table_asset import FINALIZATION_TABLE_IO, CollectionInput
+from codebench_pipeline.dataset_branches import CollectionBranch, asset_path
+from codebench_pipeline.finalization_table_asset import (
+    COLLECTION_INPUT,
+    FINALIZATION_TABLE_IO,
+    CollectionInput,
+)
 from codebench_pipeline.finalization_table_io import retain_failed_finalization
 from codebench_pipeline.inference_capacity import CapacityConfig
 from codebench_pipeline.keenable import KeenableCollection
 from codebench_pipeline.keenable_planner import GuardedSearchPlanner
+from codebench_pipeline.keenable_policy import KeenableSourceAccess
 from codebench_pipeline.keenable_tables import (
     provider_adapters,
     provider_candidates,
@@ -43,31 +55,29 @@ from codebench_pipeline.repository import (
 )
 from codebench_pipeline.repository_legacy import PreparedCaptureCache
 from codebench_pipeline.repository_receipts import RECEIPT_ATTR
-from codebench_pipeline.source_evidence import require_source_rights
-from codebench_pipeline.stage_configuration import DeclaredBranchConfig
 from codebench_pipeline.storage import IntegrityError
 
 
-def source_run(
-    context: AssetExecutionContext, storage: DataFrameIOManager, mapped_config: DeclaredBranchConfig
-) -> tuple[DeclaredSourceStageConfig, RepositoryRun]:
-    config = mapped_config.collection
-    branch = asset_branch(context.asset_key.path)
-    if config.branch != branch:
-        raise IntegrityError("Collection mapping belongs to another branch")
-    require_source_rights(config)
-    return config, storage.repository_run(context.partition_key, context.run_id)
+def source_run(context: AssetExecutionContext, storage: DataFrameIOManager) -> RepositoryRun:
+    return storage.repository_run(context.partition_key, context.run_id)
 
 
 def provider_collection(
-    config: DeclaredSourceStageConfig,
+    config: KeenableDiscoverySettings | KeenableSourceAccess | DeclaredSourceStageConfig,
     run: RepositoryRun,
     *,
     plan_receipts: Path | None = None,
     model_key: str | None = None,
     capacity: CapacityConfig | None = None,
 ) -> KeenableCollection:
-    declaration = config.source.keenable_config()
+    if isinstance(config, KeenableSourceAccess):
+        if config.dataset != run.dataset_id:
+            raise IntegrityError("Keenable declaration belongs to another partition")
+        return KeenableCollection(run.dataset_home, config)
+    settings = (
+        KeenableDiscoverySettings.project(config) if isinstance(config, DeclaredSourceStageConfig) else config
+    )
+    declaration = settings.declaration
     if declaration.dataset != run.dataset_id:
         raise IntegrityError("Keenable declaration belongs to another partition")
     if (
@@ -75,7 +85,7 @@ def provider_collection(
         and declaration.search_plan is not None
         and declaration.search_plan.mode == "adaptive"
     ):
-        planner = config.planner
+        planner = settings.planner
         if planner is None or capacity is None:
             raise IntegrityError("Adaptive discovery requires mapped planner settings and bound capacity")
         return KeenableCollection(
@@ -90,7 +100,10 @@ def provider_collection(
                 backend_revision=planner.backend_revision,
             ),
         )
-    return KeenableCollection(run.dataset_home, declaration)
+    return KeenableCollection(
+        run.dataset_home,
+        declaration if plan_receipts is not None else KeenableSourceAccess.project(declaration),
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -102,7 +115,7 @@ class KeenableDiscovery:
         return cls(os.getenv("KEENABLE_API_KEY", ""))
 
     def catalog(
-        self, config: DeclaredSourceStageConfig, run: RepositoryRun, evidence: Path, runtime: LabelingRuntime
+        self, config: KeenableDiscoverySettings, run: RepositoryRun, evidence: Path, runtime: LabelingRuntime
     ) -> DataFrame[SourceCatalogTable]:
         planner = config.planner
         key = os.environ.get(planner.api_key_env) if planner and planner.api_key_env else None
@@ -118,21 +131,25 @@ class KeenableDiscovery:
 
 def declared_source_assets(branch: CollectionBranch) -> list[AssetsDefinition]:
     prefix = asset_path(branch.capture, branch.namespace)[:-1]
-    mapping = mapped_input(branch.group, DeclaredBranchConfig)
-    mapped_edge = AssetIn(
-        key=mapping.key, dagster_type=mapping.dagster_type, input_manager_key=FINALIZATION_TABLE_IO
-    )
     assets: list[AssetsDefinition] = []
+
+    def mapped_edge(stage: str) -> AssetIn:
+        return AssetIn(
+            key=collection_mapping_key(branch.namespace, stage),
+            dagster_type=COLLECTION_INPUT,
+            input_manager_key=FINALIZATION_TABLE_IO,
+        )
 
     def index_sources(
         context: AssetExecutionContext,
         mapped_config: CollectionInput,
         dataset_io_manager: ResourceParam[DataFrameIOManager],
     ) -> Output[DataFrame[SourceCatalogTable]]:
-        config, run = source_run(context, dataset_io_manager, mapped_config)
+        run = source_run(context, dataset_io_manager)
+        settings = mapped_config.for_operation(RepositoryCatalogSettings)
 
         def compute(evidence: Path) -> DataFrame[SourceCatalogTable]:
-            return repository_catalog(config.repository_config, "dataset", run)
+            return repository_catalog(settings, "dataset", run)
 
         return mapped_config.output(SourceCatalogTable, compute)
 
@@ -143,12 +160,11 @@ def declared_source_assets(branch: CollectionBranch) -> list[AssetsDefinition]:
         dataset_io_manager: ResourceParam[DataFrameIOManager],
         prepared_capture_cache: ResourceParam[PreparedCaptureCache],
     ) -> Output[DataFrame[SourceDocumentsTable]]:
-        config, run = source_run(context, dataset_io_manager, mapped_config)
+        run = source_run(context, dataset_io_manager)
+        settings = mapped_config.for_operation(RepositoryCaptureSettings)
 
         def compute(evidence: Path) -> DataFrame[SourceDocumentsTable]:
-            return repository_documents(
-                source_catalog, config.repository_config, run, prepared_cache=prepared_capture_cache
-            )
+            return repository_documents(source_catalog, settings, run, prepared_cache=prepared_capture_cache)
 
         return mapped_config.output(SourceDocumentsTable, compute)
 
@@ -159,11 +175,12 @@ def declared_source_assets(branch: CollectionBranch) -> list[AssetsDefinition]:
         dataset_io_manager: ResourceParam[DataFrameIOManager],
         keenable_discovery: ResourceParam[KeenableDiscovery],
     ) -> Output[DataFrame[SourceDocumentsTable]]:
-        config, run = source_run(context, dataset_io_manager, mapped_config)
+        run = source_run(context, dataset_io_manager)
+        settings = mapped_config.for_operation(KeenableSourceAccess)
         return mapped_config.output(
             SourceDocumentsTable,
             lambda evidence: provider_documents(
-                provider_collection(config, run), source_catalog, keenable_discovery.api_key
+                provider_collection(settings, run), source_catalog, keenable_discovery.api_key
             ),
         )
 
@@ -173,14 +190,16 @@ def declared_source_assets(branch: CollectionBranch) -> list[AssetsDefinition]:
         dataset_io_manager: ResourceParam[DataFrameIOManager],
         prepared_capture_cache: ResourceParam[PreparedCaptureCache],
     ) -> Output[DataFrame[SourceDocumentsTable]]:
-        config, run = source_run(context, dataset_io_manager, mapped_config)
+        run = source_run(context, dataset_io_manager)
+        settings = mapped_config.for_operation(DocumentationCaptureSettings)
 
         def compute(evidence: Path) -> DataFrame[SourceDocumentsTable]:
-            repository = config.repository_config
-            catalog = repository_catalog(repository, "documentation", run)
+            catalog = repository_catalog(settings, "documentation", run)
             scope_receipt = catalog.attrs[RECEIPT_ATTR]
             (evidence / "documentation-scope.json").write_text(scope_receipt, encoding="utf-8")
-            captured = repository_documents(catalog, repository, run, prepared_cache=prepared_capture_cache)
+            captured = repository_documents(
+                catalog, settings.capture(), run, prepared_cache=prepared_capture_cache
+            )
             captured.attrs["documentation_scope_receipt_json"] = scope_receipt
             return captured
 
@@ -193,10 +212,11 @@ def declared_source_assets(branch: CollectionBranch) -> list[AssetsDefinition]:
         keenable_discovery: ResourceParam[KeenableDiscovery],
         labeling_runtime: ResourceParam[LabelingRuntime],
     ) -> Output[DataFrame[SourceCatalogTable]]:
-        config, run = source_run(context, dataset_io_manager, mapped_config)
+        run = source_run(context, dataset_io_manager)
+        settings = mapped_config.for_operation(KeenableDiscoverySettings)
         return mapped_config.output(
             SourceCatalogTable,
-            lambda evidence: keenable_discovery.catalog(config, run, evidence, labeling_runtime),
+            lambda evidence: keenable_discovery.catalog(settings, run, evidence, labeling_runtime),
         )
 
     if branch.index is not None:
@@ -209,7 +229,7 @@ def declared_source_assets(branch: CollectionBranch) -> list[AssetsDefinition]:
                 io_manager_key=FINALIZATION_TABLE_IO,
                 hooks={retain_failed_finalization},
                 dagster_type=TABLE_TYPES[SourceCatalogTable],
-                ins={"mapped_config": mapped_edge},
+                ins={"mapped_config": mapped_edge(branch.index)},
             )(discover_use_cases if branch.namespace == "keenable" else index_sources)
         )
     assets.append(
@@ -222,7 +242,7 @@ def declared_source_assets(branch: CollectionBranch) -> list[AssetsDefinition]:
             hooks={retain_failed_finalization},
             dagster_type=TABLE_TYPES[SourceDocumentsTable],
             ins={
-                "mapped_config": mapped_edge,
+                "mapped_config": mapped_edge(branch.capture),
                 **(
                     {"source_catalog": table_input(branch.index, SourceCatalogTable, branch.namespace)}
                     if branch.index is not None
@@ -244,10 +264,11 @@ def declared_source_assets(branch: CollectionBranch) -> list[AssetsDefinition]:
         mapped_config: CollectionInput,
         dataset_io_manager: ResourceParam[DataFrameIOManager],
     ) -> Output[DataFrame[CommandCandidatesTable]]:
-        config, run = source_run(context, dataset_io_manager, mapped_config)
+        run = source_run(context, dataset_io_manager)
+        settings = mapped_config.for_operation(KeenableSourceAccess)
 
         def compute(evidence: Path) -> DataFrame[CommandCandidatesTable]:
-            collection = provider_collection(config, run)
+            collection = provider_collection(settings, run)
             return provider_candidates(
                 collection, source_documents, provider_adapters(collection, source_documents)
             )
@@ -260,10 +281,10 @@ def declared_source_assets(branch: CollectionBranch) -> list[AssetsDefinition]:
         mapped_config: CollectionInput,
         dataset_io_manager: ResourceParam[DataFrameIOManager],
     ) -> Output[DataFrame[CommandCandidatesTable]]:
-        config, run = source_run(context, dataset_io_manager, mapped_config)
+        run = source_run(context, dataset_io_manager)
+        repository = mapped_config.for_operation(RepositoryExtractionSettings)
 
         def compute(evidence: Path) -> DataFrame[CommandCandidatesTable]:
-            repository = config.repository_config
             source = dataset_io_manager.implementation_source
             return repository_candidates(
                 source_documents,
@@ -286,7 +307,7 @@ def declared_source_assets(branch: CollectionBranch) -> list[AssetsDefinition]:
             dagster_type=TABLE_TYPES[CommandCandidatesTable],
             ins={
                 "source_documents": table_input(branch.capture, SourceDocumentsTable, branch.namespace),
-                "mapped_config": mapped_edge,
+                "mapped_config": mapped_edge("command_candidates"),
             },
         )(keenable_command_candidates if branch.namespace == "keenable" else command_candidates)
     )

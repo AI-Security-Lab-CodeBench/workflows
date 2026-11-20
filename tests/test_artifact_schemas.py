@@ -222,12 +222,15 @@ class ArtifactSchemaTests(unittest.TestCase):
                         self.assertEqual(body["kind"], "json")
                         self.assertEqual(body["value"], loads(raw))
                         self.assertEqual(body["snapshot_id"], sha256(raw.encode()))
-                        self.assertEqual(body["data_schema"]["source"], "storage")
+                        self.assertEqual(body["data_schema"]["source"], "declared")
                         schema = body["data_schema"]["schema"]
+                        self.assertEqual(schema["title"], type(value).__name__)
+                        self.assertTrue(set(body["value"]).issubset(schema["properties"]))
                         Draft202012Validator.check_schema(schema)
                         validator = Draft202012Validator(schema)
                         self.assertTrue(validator.is_valid(body["value"]))
                         self.assertFalse(validator.is_valid(raw))
+                        self.assertFalse(validator.is_valid({**body["value"], "unrelated_setting": 1}))
 
     def test_observed_directory_snapshot_conforms_to_declared_schema(self) -> None:
         spec = fixture_spec(self.home)

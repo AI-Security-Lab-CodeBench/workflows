@@ -5,6 +5,7 @@ from dagster import AssetKey, AssetRecordsFilter, DagsterEventType, DagsterInsta
 from pandera.typing import DataFrame
 from pydantic import JsonValue, TypeAdapter
 
+from codebench_pipeline.collection_stage_settings import collection_operation
 from codebench_pipeline.dataframe_io import (
     AssetReference,
     AssetSnapshot,
@@ -19,7 +20,6 @@ from codebench_pipeline.dataset_branches import (
     asset_path,
     stage_name,
 )
-from codebench_pipeline.dataset_catalog import source_scope
 from codebench_pipeline.documentation_authorization import (
     frame_inventory_authorization,
     inventory_materialization,
@@ -45,7 +45,6 @@ def unavailable_candidates(
                 stage: config.model_dump_json()
                 for stage, config in collection_stage_configs(registered, branch).items()
             },
-            "rules": source_scope(registered.rules),
         }
     )
     return empty
@@ -106,7 +105,9 @@ def current_candidates(
         raise HumanReviewError("stale", "Source capture differs from its recorded output")
     capture = manager.read_version(capture_ref)
     expected = manager.stage_signature(
-        "command_candidates", config, {"source_documents": AssetSnapshot(capture_ref, capture)}
+        "command_candidates",
+        collection_operation(branch, "command_candidates").project(config),
+        {"source_documents": AssetSnapshot(capture_ref, capture)},
     )
     materialization = record.asset_materialization
     assert materialization is not None

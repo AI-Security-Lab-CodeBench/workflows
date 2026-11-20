@@ -5,6 +5,7 @@ from dagster import AssetKey, DagsterInstance, TextMetadataValue
 from pandera.typing import DataFrame
 from pydantic import BaseModel, ConfigDict, ValidationError
 
+from codebench_pipeline.collection_stage_settings import collection_operation
 from codebench_pipeline.dataframe_io import DataFrameIOManager, materialized_reference
 from codebench_pipeline.dataframe_schemas import SourceCatalogTable, SourceDocumentsTable
 from codebench_pipeline.dataset_branches import BRANCH_BY_NAMESPACE, Branch, asset_path
@@ -51,7 +52,7 @@ def inventory_materialization(
     stage = BRANCH_BY_NAMESPACE[branch].declared_stages[0]
     config = registered.source_config(branch)
     require_source_rights(config)
-    expected = manager.stage_signature(stage, config, {"category_rules": registered.rules})
+    expected = manager.stage_signature(stage, collection_operation(branch, stage).project(config), {})
     key = AssetKey(asset_path(stage, branch))
     record = current_materialization(instance, key, dataset_id)
     if record is None or (materialization := record.asset_materialization) is None:

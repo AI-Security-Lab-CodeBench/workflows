@@ -20,17 +20,19 @@ from codebench_pipeline.dataset_records import (
 )
 from codebench_pipeline.dataset_table_contract import FIELDS, REVIEW_FIELDS
 from codebench_pipeline.dataset_table_contract import table_schema as table_schema
+from codebench_pipeline.release_stage_settings import PublicationTaxonomy
 from codebench_pipeline.review_policy import requires_human_review
 
 
 def prepare_dataset(
     candidates: list[CandidateRecord],
     labels: list[LabelDecision],
-    rules: CategoryRules,
+    rules: PublicationTaxonomy | CategoryRules,
     limit_per_risk: int,
     *,
     approved_ids: frozenset[str] | None = None,
     selected_ids: frozenset[str] | None = None,
+    authored_rules_json: str | None = None,
 ) -> Publication:
     if type(limit_per_risk) is not int or limit_per_risk < 0:
         raise ValueError("Per-risk limit must be a nonnegative integer")
@@ -38,10 +40,13 @@ def prepare_dataset(
     proposed = index_records(labels)
     if indexed.keys() != proposed.keys():
         raise ValueError("Missing or extra label identities")
+    rules_json = rules.model_dump_json(indent=2) if authored_rules_json is None else authored_rules_json
+    if isinstance(rules, CategoryRules):
+        rules = PublicationTaxonomy.from_rules(rules)
+    taxonomy = rules.label_validation()
     risks = {risk.id: risk.canonical for risk in rules.risks}
     for candidate in candidates:
-        label = LabelDecision.model_validate(proposed[candidate.candidate_id].model_dump(by_alias=True))
-        validate_label(candidate, label, rules)
+        validate_label(candidate, proposed[candidate.candidate_id], taxonomy)
     counts: Counter[str] = Counter()
     rows: list[dict[str, str]] = []
     accepted: list[dict[str, str]] = []
@@ -138,10 +143,8 @@ def prepare_dataset(
             "name": risk.name,
             "total": counts[risk.id],
             "deficit": max(0, limit_per_risk - counts[risk.id]),
-            "class": {rule.name: sum(row["class"] == rule.name for row in subset) for rule in rules.classes},
-            "severity": {
-                rule.name: sum(row["severity"] == rule.name for row in subset) for rule in rules.severities
-            },
+            "class": {name: sum(row["class"] == name for row in subset) for name in rules.classes},
+            "severity": {name: sum(row["severity"] == name for row in subset) for name in rules.severities},
             "utilities": dict(Counter(row["util"] for row in subset)),
         }
     source_coverage: dict[str, JsonValue] = {}
@@ -175,10 +178,8 @@ def prepare_dataset(
         },
         "by_risk": by_risk,
         "sources": source_coverage,
-        "by_class": {rule.name: sum(row["class"] == rule.name for row in rows) for rule in rules.classes},
-        "by_severity": {
-            rule.name: sum(row["severity"] == rule.name for row in rows) for rule in rules.severities
-        },
+        "by_class": {name: sum(row["class"] == name for row in rows) for name in rules.classes},
+        "by_severity": {name: sum(row["severity"] == name for row in rows) for name in rules.severities},
         "exclusions": dict(Counter(row["exclusion_reason"] for row in pending)),
     }
     readme = (
@@ -229,7 +230,7 @@ def prepare_dataset(
         "review/pending.jsonl": "".join(line + "\n" for line in pending_evidence),
         "review/reviewed.jsonl": "".join(line + "\n" for line in all_evidence),
         "statistics.json": json_text(statistics) + "\n",
-        "rules.json": rules.model_dump_json(indent=2) + "\n",
+        "rules.json": rules_json + "\n",
         "README.md": readme,
     }
     return Publication(artifacts, statistics, rows, pending, tuple(eligible_ids), tuple(human_review_ids))

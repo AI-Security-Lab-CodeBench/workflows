@@ -37,11 +37,12 @@ from codebench_pipeline.grounding_tables import GuardedLabeling, LabelingEvidenc
 from codebench_pipeline.labeling_checkpoint_io import LABELING_ATTEMPTS, labeling_generation_identity
 from codebench_pipeline.labeling_checkpoint_store import LabelingCheckpointCache
 from codebench_pipeline.labeling_runtime import LabelingRuntime
+from codebench_pipeline.labeling_stage_settings import ProposalRules
 from codebench_pipeline.labeling_tables import (
     failures_from_attempts,
     proposed_from_attempts,
 )
-from codebench_pipeline.stage_configuration import GuardedLabelingConfig, PolicyArtifact
+from codebench_pipeline.stage_configuration import GuardedLabelingConfig
 from codebench_pipeline.storage import IntegrityError
 
 
@@ -132,18 +133,18 @@ def annotation_assets() -> list[AssetsDefinition]:
         ins={
             "labeling_attempts": attempts_edge,
             "mapped_config": mapped_input(
-                "proposed_annotations", PolicyArtifact, input_manager_key=FINALIZATION_TABLE_IO
+                "proposed_annotations", ProposalRules, input_manager_key=FINALIZATION_TABLE_IO
             ),
         },
     )
     def proposed_annotations(
         labeling_attempts: ProjectionInput,
-        mapped_config: PolicyArtifact,
+        mapped_config: ProposalRules,
     ) -> Output[DataFrame[ProposedAnnotationsTable]]:
         return projection_output(
             labeling_attempts,
             ProposedAnnotationsTable,
-            lambda attempts: proposed_from_attempts(attempts, mapped_config.category_rules),
+            lambda attempts: proposed_from_attempts(attempts, mapped_config),
         )
 
     @asset(

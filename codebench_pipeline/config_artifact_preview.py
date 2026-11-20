@@ -4,6 +4,7 @@ from typing import Final
 
 from pydantic import JsonValue, TypeAdapter
 
+from codebench_pipeline.artifact_schemas import ArtifactSchema, rules_artifact_schema
 from codebench_pipeline.data_view_models import DatasetViewError
 from codebench_pipeline.human_review import HumanReviewError
 from codebench_pipeline.models import Digest
@@ -18,10 +19,12 @@ CONFIG_OBJECT: Final = TypeAdapter(dict[str, JsonValue])
 class ConfigPreview:
     digest: Digest
     value: dict[str, JsonValue]
-    schema: dict[str, JsonValue]
+    schema: ArtifactSchema
 
 
-def read_config_preview(path: Path, snapshot_id: Digest | None) -> ConfigPreview:
+def read_config_preview(
+    path: Path, snapshot_id: Digest | None, declared: dict[str, JsonValue] | None = None
+) -> ConfigPreview:
     """Return complete top-level fields within the inspector budget."""
     try:
         with path.open("rb") as source:
@@ -43,8 +46,10 @@ def read_config_preview(path: Path, snapshot_id: Digest | None) -> ConfigPreview
             preview[name] = field
             remaining -= size
 
-    schema: dict[str, JsonValue] = {"title": "Stored configuration", "type": "object"}
+    schema = rules_artifact_schema(value, declared)
     if len(preview) < len(value):
-        schema["x-codebench-truncated"] = True
-        schema["description"] = "Some top-level fields exceed the inspector preview budget and were omitted."
+        schema = ArtifactSchema(
+            source=schema.source,
+            schema={**schema.schema_, "x-codebench-truncated": True},
+        )
     return ConfigPreview(digest, preview, schema)

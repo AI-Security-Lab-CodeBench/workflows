@@ -13,12 +13,11 @@ from codebench_pipeline.dataframe_schemas import (
     ProposedAnnotationsTable,
     ReviewQueueTable,
 )
-from codebench_pipeline.guarded_publication import ReleaseExecution
-from codebench_pipeline.guarded_publication_evidence import ReleaseInputs
+from codebench_pipeline.guarded_publication_evidence import ReleaseAuthorization, ReleaseInputs
 from codebench_pipeline.human_review import CompletionToken, HumanReviewError
 from codebench_pipeline.review_frames import decision_frame
 from codebench_pipeline.review_snapshots import ReviewSnapshots, release_configuration_digest
-from codebench_pipeline.stage_configuration import DatasetReleaseConfig
+from codebench_pipeline.stage_configuration import dataset_release_settings
 
 
 @dataclass(frozen=True, slots=True)
@@ -35,7 +34,7 @@ class ReleaseInput:
     persisted_decisions: DataFrame[HumanReviewDecisionsTable]
     decisions: DataFrame[HumanReviewDecisionsTable]
     evidence: ReleaseInputs
-    execution: ReleaseExecution
+    authorization: ReleaseAuthorization
 
 
 REVIEW_INPUT_MANAGER = "review_inputs"
@@ -75,16 +74,12 @@ def review_input_manager(context: InputContext) -> DecisionInput | ReleaseInput:
                 ReviewQueueTable.validate(table), reviewed, resolved.snapshot.candidate_ids, token, decisions
             )
         case "human_review_decisions":
-            evidence = ReleaseInputs(snapshots, resolved, token, records)
-            policy = DatasetReleaseConfig.project(registered, registered.rules)
             return ReleaseInput(
                 HumanReviewDecisionsTable.validate(table),
                 decisions,
-                evidence,
-                ReleaseExecution.bind(
-                    manager.repository_run(dataset_id, run_id),
-                    evidence,
-                    policy,
+                ReleaseInputs(snapshots, resolved, token, records),
+                ReleaseAuthorization(
+                    dataset_release_settings(registered, registered.rules).digest,
                     release_configuration_digest(registered),
                     manager.review_store.publication_versions(),
                 ),

@@ -1,7 +1,11 @@
 from typing import Self
 
 from dagster import Config
-from pydantic import ConfigDict
+from pydantic import BaseModel, ConfigDict
+
+
+class ConfigArtifact(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
 
 class TypedConfig(Config):

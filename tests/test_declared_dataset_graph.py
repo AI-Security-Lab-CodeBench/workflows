@@ -36,6 +36,8 @@ from test_repository import (
 
 from codebench_pipeline.artifact_views import ArtifactJSON, ArtifactQuery, ArtifactTable
 from codebench_pipeline.collection_config import CAT3_DATASET_ID, SourceDeclaration
+from codebench_pipeline.collection_stage_settings import KeenableDiscoverySettings, RepositoryCatalogSettings
+from codebench_pipeline.config_assets import collection_mapping_key
 from codebench_pipeline.data_views import DatasetDataService
 from codebench_pipeline.dataframe_io import DataFrameIOManager, asset_storage_key
 from codebench_pipeline.dataframe_schemas import frame_records
@@ -53,7 +55,7 @@ from codebench_pipeline.declared_dataset_bundle import (
 )
 from codebench_pipeline.definitions import build_definitions
 from codebench_pipeline.human_review import HumanReviewError
-from codebench_pipeline.keenable_policy import CASES, Declaration, KeenableDeclaration
+from codebench_pipeline.keenable_policy import CASES, Declaration, KeenableDeclaration, KeenableSourceAccess
 from codebench_pipeline.keenable_transport import DirectResponse
 from codebench_pipeline.object_store import ObjectStore, StorageConfig
 from codebench_pipeline.repository_branch_config import RepositoryBranchDeclaration
@@ -112,16 +114,15 @@ def with_keenable_declaration(spec: DatasetBuildSpec, declaration: Declaration) 
 
 class DeclaredDatasetGraphTests(unittest.TestCase):
     def test_adaptive_catalog_constructs_planner_from_mapped_config_without_registry(self) -> None:
-        from codebench_pipeline.collection_config import DeclaredSourceStageConfig
         from codebench_pipeline.declared_source_assets import provider_collection
         from codebench_pipeline.repository import RepositoryRun
-        from codebench_pipeline.stage_configuration import declared_source_config
 
         with tempfile.TemporaryDirectory() as directory:
             home = Path(directory)
             spec = fixture_spec(home)
-            fixed = declared_source_config(spec, "keenable")
-            declaration = fixed.source.keenable_config()
+            collection = spec.declared_collection
+            assert collection is not None
+            declaration = collection.keenable_declaration
             assert declaration.search_plan is not None
             adaptive = with_keenable_declaration(
                 spec,
@@ -129,8 +130,13 @@ class DeclaredDatasetGraphTests(unittest.TestCase):
                     update={"search_plan": declaration.search_plan.model_copy(update={"mode": "adaptive"})}
                 ),
             )
-            mapped = declared_source_config(adaptive, "keenable")
-            config = DeclaredSourceStageConfig.model_validate_json(mapped.model_dump_json())
+            configs = stage_configs(adaptive)
+            config = KeenableDiscoverySettings.model_validate_json(
+                configs["keenable/discover_use_cases"].model_dump_json(), strict=True
+            )
+            access = KeenableSourceAccess.model_validate_json(
+                configs["keenable/capture_origin_pages"].model_dump_json(), strict=True
+            )
             batch = adaptive.annotation.batch
             assert batch is not None
             run = RepositoryRun(home, spec.dataset_id, "offline")
@@ -146,7 +152,8 @@ class DeclaredDatasetGraphTests(unittest.TestCase):
                 self.assertEqual(planner.capacity, batch.capacity)
                 self.assertEqual(planner.backend_revision, batch.backend_revision)
                 self.assertEqual(planner.receipt_directory, home)
-                self.assertIsNone(provider_collection(config, run).planner)
+                self.assertIsNone(provider_collection(access, run).planner)
+                self.assertEqual(access.declaration_sha256, config.declaration.declaration_sha256)
 
     def test_declared_collection_requires_guarded_batch_and_rejects_local_documentation(self) -> None:
         payload = json.loads(BUNDLE.read_bytes())
@@ -303,8 +310,9 @@ class DeclaredDatasetGraphTests(unittest.TestCase):
             self.assertIsNone(
                 data.read_current(spec.dataset_id, "documentation/command_candidates").publication_state
             )
+            mapping_key = collection_mapping_key("dataset", "enumerate_corpus_files")
             mapping_filter = AssetRecordsFilter(
-                asset_key=AssetKey(["datasets", "map_existing_datasets_config"]),
+                asset_key=mapping_key,
                 asset_partitions=[spec.dataset_id],
             )
             (prior,) = instance.fetch_materializations(mapping_filter, limit=1).records
@@ -328,10 +336,17 @@ class DeclaredDatasetGraphTests(unittest.TestCase):
             (updated,) = instance.fetch_materializations(mapping_filter, limit=1).records
             self.assertGreater(updated.storage_id, prior.storage_id)
             assert prior.asset_materialization is not None and updated.asset_materialization is not None
+            prior_tags = prior.asset_materialization.tags
+            updated_tags = updated.asset_materialization.tags
+            assert prior_tags is not None and updated_tags is not None
             self.assertNotEqual(
-                prior.asset_materialization.tags["dagster/data_version"],
-                updated.asset_materialization.tags["dagster/data_version"],
+                prior_tags["dagster/data_version"],
+                updated_tags["dagster/data_version"],
             )
+            payload = home.joinpath("configuration-runs", updated.run_id, *mapping_key.path).read_bytes()
+            mapped = RepositoryCatalogSettings.model_validate_json(payload, strict=True)
+            self.assertEqual(mapped.origins[0].attribution, rights.attribution)
+            self.assertEqual(mapped.origins[0].license.sha256, origin.rights.license_file.sha256)
             self.assertEqual(
                 set(reloaded),
                 {
@@ -351,13 +366,16 @@ class DeclaredDatasetGraphTests(unittest.TestCase):
             self.assertLess(candidates.storage_id, filtered_record.storage_id)
             self.assertEqual(capture.run_id, candidates.run_id)
             assert capture.asset_materialization is not None and candidates.asset_materialization is not None
+            capture_tags = capture.asset_materialization.tags
+            candidate_tags = candidates.asset_materialization.tags
+            assert capture_tags is not None and candidate_tags is not None
             self.assertEqual(
-                candidates.asset_materialization.tags[get_input_event_pointer_tag(capture_key)],
+                candidate_tags[get_input_event_pointer_tag(capture_key)],
                 str(capture.storage_id),
             )
-            capture_version = capture.asset_materialization.tags["dagster/data_version"]
+            capture_version = capture_tags["dagster/data_version"]
             self.assertEqual(
-                candidates.asset_materialization.tags[get_input_data_version_tag(capture_key)],
+                candidate_tags[get_input_data_version_tag(capture_key)],
                 sha256(capture_version.encode()).hexdigest(),
             )
             self.assertEqual({key: record_for(key).storage_id for key in siblings}, untouched)
@@ -539,7 +557,12 @@ class DeclaredDatasetGraphTests(unittest.TestCase):
             self.assertEqual(
                 inspected["settings"], stage_configs(declared)["labeling_attempts"].model_dump(mode="json")
             )
-            self.assertEqual(inspected["policy"], declared.rules.model_dump(mode="json"))
+            self.assertNotIn("policy", inspected)
+            self.assertEqual(inspected["settings"]["rules"]["policy"], declared.rules.policy)
+            self.assertEqual(
+                [risk["id"] for risk in inspected["settings"]["rules"]["risks"]],
+                [risk.id for risk in declared.rules.risks],
+            )
             self.assertNotIn(str(home), stdout.getvalue())
             registry.register(declared)
 

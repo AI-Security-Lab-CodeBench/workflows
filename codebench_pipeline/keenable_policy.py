@@ -15,6 +15,8 @@ from pydantic import (
     model_validator,
 )
 
+from codebench_pipeline.typed_config import ConfigArtifact
+
 type Case = Literal["plan", "workloads", "containers", "storage_sql", "rollout"]
 type Digest = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
 type Identity = Annotated[str, StringConstraints(pattern=r"^[a-zA-Z0-9_-]{1,128}$")]
@@ -438,10 +440,7 @@ class KeenableDeclaration(Record):
         _check_current(self, now)
 
     def authority(self, url: str, case: Case) -> PagePermission | SourcePermission | None:
-        for source in self.sources:
-            if source.covers(url, case):
-                return source
-        return next((permission for permission in self.permissions if permission.url == url), None)
+        return _source_authority(self.sources, self.permissions, url, case)
 
 
 class CurrentKeenableDeclaration(Record):
@@ -492,6 +491,57 @@ class CurrentKeenableDeclaration(Record):
 type Declaration = KeenableDeclaration | CurrentKeenableDeclaration
 
 
+class KeenableOriginBudget(Record):
+    origin_calls: int = Field(ge=1, le=64)
+    total_bytes: int = Field(ge=RESPONSE_BYTES, le=69 * RESPONSE_BYTES)
+
+
+class KeenableSourceAccess(Record, ConfigArtifact):
+    dataset: Identity
+    generation: Identity
+    declaration_sha256: Digest
+    budget: KeenableOriginBudget
+    permissions: tuple[PagePermission, ...]
+    sources: tuple[SourceGrant, ...]
+    legacy_reviewed_spans: bool
+
+    @classmethod
+    def project(cls, declaration: Declaration) -> Self:
+        budget = declaration.budget
+        return cls(
+            dataset=declaration.dataset,
+            generation=declaration.generation,
+            declaration_sha256=declaration.declaration_sha256,
+            budget=KeenableOriginBudget(
+                origin_calls=MAX_ORIGINS if budget is None else budget.origin_calls,
+                total_bytes=MAX_BYTES if budget is None else budget.total_bytes,
+            ),
+            permissions=declaration.permissions,
+            sources=declaration.sources,
+            legacy_reviewed_spans=isinstance(declaration, KeenableDeclaration)
+            and declaration.revision == "1",
+        )
+
+    @property
+    def raw_licenses(self) -> tuple[tuple[str, str], ...]:
+        return _raw_licenses(self.sources)
+
+    def check_current(self, now: datetime) -> None:
+        _check_current(self, now)
+
+    def authority(self, url: str, case: Case) -> Permission | None:
+        return _source_authority(self.sources, self.permissions, url, case)
+
+
+def _source_authority[Grant: SourceGrant](
+    sources: tuple[Grant, ...], permissions: tuple[PagePermission, ...], url: str, case: Case
+) -> Grant | PagePermission | None:
+    for source in sources:
+        if source.covers(url, case):
+            return source
+    return next((permission for permission in permissions if permission.url == url), None)
+
+
 def _raw_licenses(sources: tuple[SourceGrant, ...]) -> tuple[tuple[str, str], ...]:
     return tuple(
         sorted(
@@ -529,7 +579,7 @@ def _declaration_digest(declaration: Declaration) -> str:
     assert_never(declaration)
 
 
-def _check_current(declaration: Declaration, now: datetime) -> None:
+def _check_current(declaration: Declaration | KeenableSourceAccess, now: datetime) -> None:
     if any(permission.valid_until <= now for permission in (*declaration.permissions, *declaration.sources)):
         raise KeenableError("authorization_expired")
 

@@ -24,6 +24,7 @@ from codebench_pipeline.dataset_records import CandidateRecord
 from codebench_pipeline.dataset_tables import review_queue
 from codebench_pipeline.human_review import ReviewModel, ReviewSnapshot
 from codebench_pipeline.human_review_store import HumanReviewStore
+from codebench_pipeline.labeling_stage_settings import ProposalRules
 from codebench_pipeline.models import Digest, Identifier
 from codebench_pipeline.object_store import ObjectStore, StorageConfig, sha256
 from codebench_pipeline.review_artifact_admission import checked_review_artifacts
@@ -49,7 +50,6 @@ REVIEW_POLICY_FILES: Final = (
     "release_runner.py",
     "review_frames.py",
     "review_assets.py",
-    "review_config.py",
     "review_workflow.py",
     "review_stages.py",
     "review_service.py",
@@ -250,7 +250,7 @@ class ReviewSnapshots:
         )
         payload = manifest.payload()
         snapshot_id = sha256(payload)
-        queue = review_queue(reviewed, rules, review_columns)
+        queue = review_queue(reviewed, ProposalRules.from_rules(rules), review_columns)
         candidate_ids = tuple(candidate.candidate_id for candidate in model_records(queue, CandidateRecord))
         eligible_candidate_ids = tuple(
             candidate.candidate_id

@@ -30,6 +30,7 @@ from codebench_pipeline.dataset_extract import filter_candidates
 from codebench_pipeline.dataset_finalization import merge_candidates
 from codebench_pipeline.dataset_records import CandidateRecord
 from codebench_pipeline.grounding_policy import OperationGrant, SourceVersion, VersionIndependent
+from codebench_pipeline.grounding_sources import persist_repository_origin_bindings
 from codebench_pipeline.grounding_tables import GuardedLabeling, LabelingEvidenceInputs
 from codebench_pipeline.inference_capacity import CapacityConfig
 from codebench_pipeline.keenable import KeenableCollection
@@ -41,6 +42,7 @@ from codebench_pipeline.keenable_tables import (
     provider_documents,
 )
 from codebench_pipeline.keenable_transport import DirectResponse, Request
+from codebench_pipeline.labeling_stage_settings import RiskRoute
 from codebench_pipeline.openai_transport import HTTPResponse
 from codebench_pipeline.repository import (
     RepositoryRun,
@@ -282,6 +284,9 @@ class LabelingFixture:
 
     def collect(self) -> tuple[DataFrame[FilteredCommandsTable], DataFrame[SourceDocumentsTable]]:
         run = RepositoryRun(self.home, self.spec.dataset_id, "synthetic-filter")
+        collection = self.spec.declared_collection
+        assert collection is not None
+        persist_repository_origin_bindings(collection, run)
 
         def repository(
             branch: RepositoryBranch,
@@ -301,7 +306,8 @@ class LabelingFixture:
         dataset, _ = repository("dataset")
         documentation, capture = repository("documentation")
         merged = merge_candidates(dataset, documentation, search_rows)
-        filtered = filter_candidates(merged, self.rules, self.spec.filtering)
+        routes = tuple(RiskRoute.from_rule(risk) for risk in self.rules.risks)
+        filtered = filter_candidates(merged, routes, self.spec.filtering)
         filtered.attrs = merged.attrs
         return filtered, capture
 

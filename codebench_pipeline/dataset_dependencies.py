@@ -11,11 +11,11 @@ CACHE_INPUTS: dict[str, dict[str, str]] = {
         for stage, dependencies in (
             (
                 (
-                    (branch.index, {"category_rules": "category_rules"}),
+                    (branch.index, {}),
                     (branch.capture, {"source_catalog": stage_name(branch.index, branch.namespace)}),
                 )
                 if branch.index is not None
-                else ((branch.capture, {"category_rules": "category_rules"}),)
+                else ((branch.capture, {}),)
             )
             + (("command_candidates", {"source_documents": stage_name(branch.capture, branch.namespace)}),)
         )
@@ -25,27 +25,24 @@ CACHE_INPUTS: dict[str, dict[str, str]] = {
     },
     "filtered_commands": {
         "command_candidates": "merged_command_candidates",
-        "category_rules": "category_rules",
     },
     "labeling_attempts": {
         "commands": "filtered_commands",
-        "category_rules": "category_rules",
         "documentation_capture": "documentation/capture_documentation",
     },
-    "proposed_annotations": {"attempts": "labeling_attempts", "category_rules": "category_rules"},
+    "proposed_annotations": {"attempts": "labeling_attempts"},
     "labeling_failures": {"attempts": "labeling_attempts"},
     "deduplicated_annotations": {"annotations": "proposed_annotations"},
     "category_eligible_annotations": {"annotations": "deduplicated_annotations"},
     "human_review_queue": {
         "annotations": "category_eligible_annotations",
-        "category_rules": "category_rules",
     },
 }
 RELEASE_STAGES = ("human_review_decisions", "dataset_release")
 
 
 def review_evidence_stages() -> frozenset[str]:
-    stages: set[str] = set()
+    stages = {"category_rules"}
     pending = ["category_eligible_annotations"]
     while pending:
         stage = pending.pop()

@@ -47,6 +47,7 @@ from codebench_pipeline.finalization_table_io import FinalizationTableIO, finali
 from codebench_pipeline.human_review import HumanReviewError
 from codebench_pipeline.human_review_store import HumanReviewStore
 from codebench_pipeline.labeling_outcomes import failed_attempt, label_attempt
+from codebench_pipeline.labeling_stage_settings import ProposalRules
 from codebench_pipeline.labeling_tables import proposed_from_attempts
 
 
@@ -98,7 +99,7 @@ class FinalizationOutputAdmissionTests(unittest.TestCase):
             attempts.attrs[FINALIZATION_BINDING] = binding
             if upstream == "labeling_attempts":
                 return attempts
-            return proposed_from_attempts(attempts, rules)
+            return proposed_from_attempts(attempts, ProposalRules.from_rules(rules))
 
         current_input = input_frame("previous")
         io = RegisteredDatasetTableIO(storage=spec.storage, review_home=str(home))

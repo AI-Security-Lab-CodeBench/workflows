@@ -6,7 +6,6 @@ import pandera.pandas as pa
 from pandera.typing import DataFrame
 from pydantic import JsonValue
 
-from codebench_pipeline.category_rules import CategoryRules
 from codebench_pipeline.dataframe_schemas import (
     CommandCandidatesTable,
     FilteredCommandsTable,
@@ -15,6 +14,7 @@ from codebench_pipeline.dataframe_schemas import (
 )
 from codebench_pipeline.dataset_config import FilteringConfig
 from codebench_pipeline.dataset_records import CandidateRecord
+from codebench_pipeline.labeling_stage_settings import RiskRoute, matching_risks
 
 
 def unresolved_template(command: str) -> bool:
@@ -45,13 +45,13 @@ def unresolved_template(command: str) -> bool:
 
 @pa.check_types
 def filter_candidates(
-    raw: DataFrame[CommandCandidatesTable], rules: CategoryRules, config: FilteringConfig
+    raw: DataFrame[CommandCandidatesTable], routes: tuple[RiskRoute, ...], config: FilteringConfig
 ) -> DataFrame[FilteredCommandsTable]:
     rows: list[dict[str, JsonValue]] = []
     for row in frame_records(raw):
         candidate = CandidateRecord.model_validate({name: row[name] for name in CandidateRecord.model_fields})
         reason = ""
-        risks = rules.matching_risks(candidate.command)
+        risks = matching_risks(candidate.command, routes)
         if not risks:
             reason = "outside_configured_command_families"
         elif len(candidate.command) > config.maximum_command_characters or "\x00" in candidate.command:

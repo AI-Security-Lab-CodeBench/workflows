@@ -16,7 +16,6 @@ from codebench_pipeline.batch_labeling import (
 from codebench_pipeline.batch_labeling_config import BatchLabelingConfig
 from codebench_pipeline.batch_labeling_ranked import QUOTA_DEFERRED, RankedLabeling
 from codebench_pipeline.batch_labeling_rows import BatchRow
-from codebench_pipeline.collection_config import DeclaredCollection
 from codebench_pipeline.dataframe_schemas import (
     FilteredCommandsTable,
     LabelingAttemptsTable,
@@ -32,6 +31,7 @@ from codebench_pipeline.grounding_tools import GroundingConfig
 from codebench_pipeline.keenable_policy import KeenableError
 from codebench_pipeline.labeling_checkpoint_store import LabelingCheckpointCache
 from codebench_pipeline.labeling_outcomes import LabelingAttempt, failed_attempt, validate_attempts
+from codebench_pipeline.labeling_stage_settings import LabelingSources
 from codebench_pipeline.repository_config import SourceWeight
 from codebench_pipeline.repository_receipts import RepositoryRun, canonical, publish_bytes
 from codebench_pipeline.stage_configuration import GuardedLabelingConfig
@@ -50,7 +50,7 @@ def labeling_supports(frame: DataFrame[LabelingAttemptsTable]) -> dict[str, str]
 @dataclass(frozen=True, slots=True)
 class LabelingEvidenceInputs:
     run: RepositoryRun
-    collection: DeclaredCollection
+    collection: LabelingSources
     grounding: GroundingConfig
     documentation_capture: DataFrame[SourceDocumentsTable]
 
@@ -62,7 +62,6 @@ class LabelingEvidenceInputs:
     ) -> GuardedEvidence:
         run = self.run
         sources = CandidateEvidence.from_frame(frame, run, self.collection)
-        source_limited = sources.provider.declaration.source_scoped
         return GuardedEvidence(
             sources,
             self.grounding,
@@ -74,14 +73,14 @@ class LabelingEvidenceInputs:
                     sources.repositories["documentation"], self.documentation_capture, run
                 ),
             )
-            if source_limited
+            if sources.source_scoped
             else None,
             operation_receipts,
         )
 
     def verify(
         self, frame: DataFrame[LabelingAttemptsTable], *, selected: frozenset[str] | None = None
-    ) -> None:
+    ) -> GuardedEvidence:
         guard = self.admission(frame)
         supports = labeling_supports(frame)
         successes = {
@@ -94,6 +93,7 @@ class LabelingEvidenceInputs:
         for identity in successes.keys() if selected is None else selected:
             attempt = successes[identity]
             validate_guarded_support(guard, attempt, attempt, supports[identity].encode())
+        return guard
 
 
 @dataclass(frozen=True, slots=True)
@@ -174,7 +174,7 @@ class GuardedLabeling:
         config = self.mapped.labeling_attempts
         run = self.evidence_inputs.run
         return RankedLabeling(
-            self.mapped.category_rules,
+            self.mapped.rules,
             config.model,
             self.batch,
             evidence,
@@ -211,7 +211,7 @@ class GuardedLabeling:
         selection = self.selection(commands, guard)
         selection.write_scratch(evidence)
         ranked = self.ranked(evidence, guard)
-        rules = self.mapped.category_rules
+        rules = self.mapped.rules
         config = self.mapped.labeling_attempts
         prepared = prepare_batch_rows(
             selection.grounded, [], rules, config.model, self.batch, implementation=identity, admission=guard
@@ -256,7 +256,7 @@ class GuardedLabeling:
         outcomes: list[LabelingAttempt],
         quota: dict[str, JsonValue],
     ) -> DataFrame[LabelingAttemptsTable]:
-        validate_attempts(selection.candidates, outcomes, self.mapped.category_rules)
+        validate_attempts(selection.candidates, outcomes, self.mapped.rules)
         frame = validated_frame(
             [
                 {
