@@ -24,6 +24,7 @@ from .keenable_policy import (
     digest,
 )
 from .keenable_receipts import CallReceipt, CaptureLock, CatalogReceipt, VerifiedPage
+from .keenable_transport import transient_search_failure
 
 PLAN_RESPONSE_BYTES = 16 * 1024
 
@@ -94,12 +95,16 @@ class Ledger:
         for (raw,) in rows:
             receipt = CallReceipt.model_validate_json(raw)
             self.finish(receipt, state="failed", reason="ambiguous_dispatch")
-        row = self.db.execute(
-            "SELECT receipt FROM call WHERE state = 'failed' ORDER BY slot LIMIT 1"
+        for (raw,) in self.db.execute("SELECT receipt FROM call WHERE state = 'failed' ORDER BY slot"):
+            receipt = CallReceipt.model_validate_json(raw)
+            if receipt.kind != "search" or not transient_search_failure(receipt.reason, receipt.status):
+                raise KeenableError(receipt.reason or "generation_failed", receipt.status)
+
+    def search_attempts(self, slot: str) -> int:
+        (count,) = self.db.execute(
+            "SELECT COUNT(*) FROM call WHERE slot = ? OR slot GLOB ?", (slot, f"{slot}#*")
         ).fetchone()
-        if row is not None:
-            receipt = CallReceipt.model_validate_json(row[0])
-            raise KeenableError(receipt.reason or "generation_failed", receipt.status)
+        return count
 
     def reserve(self, kind: Literal["search", "origin", "plan"], identity: "SlotIdentity") -> CallReceipt:
         count, reserved = self.db.execute(
@@ -138,6 +143,11 @@ class Ledger:
             state="dispatched",
         )
         with self.db:
+            if kind == "search":
+                self.db.execute(
+                    "UPDATE call SET slot = slot || '#' || rowid WHERE slot = ? AND kind = 'search' AND state = 'failed'",
+                    (identity.slot,),
+                )
             self.db.execute(
                 "INSERT INTO call VALUES (?, ?, ?, ?, ?, NULL)",
                 (receipt.slot, kind, size, receipt.state, receipt.model_dump_json()),
@@ -154,6 +164,7 @@ class Ledger:
         peer: str | None = None,
         response: bytes | None = None,
         payload: bytes | None = None,
+        retry_after: int | None = None,
     ) -> CallReceipt:
         outcome = receipt.model_copy(
             update={
@@ -165,6 +176,7 @@ class Ledger:
                 "response_sha256": digest(response) if response is not None else None,
                 "response_bytes": len(response) if response is not None else None,
                 "retained_sha256": digest(payload) if payload is not None else None,
+                "retry_after": retry_after,
             }
         )
         with self.db:

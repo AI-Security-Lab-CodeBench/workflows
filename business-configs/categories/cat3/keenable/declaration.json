@@ -1,10 +1,11 @@
 {
   "schema_version": "3",
   "dataset_id": "cloud_infrastructure_commands_grounded_v1",
-  "generation": "cat3-keenable-administrative-fixed-v2",
-  "budget": {"search_calls": 2, "origin_calls": 23},
+  "generation": "cat3-keenable-administrative-fixed-v3",
+  "budget": {"search_calls": 5, "origin_calls": 23},
   "search_plan": {
     "mode": "fixed",
+    "max_queries": 2,
     "scopes": [
       {
         "case": "workloads",

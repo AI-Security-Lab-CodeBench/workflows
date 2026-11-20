@@ -3,8 +3,11 @@ import socket
 import ssl
 from contextlib import closing
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
 from http.client import HTTPConnection, HTTPException, HTTPResponse
 from ipaddress import IPv4Address
+from math import ceil
 from queue import Empty, Queue
 from re import fullmatch
 from threading import Thread, Timer
@@ -15,6 +18,19 @@ from urllib.parse import urlsplit
 from .keenable_policy import MAX_RESULTS, PROVIDER, QUERIES, RESPONSE_BYTES, Case, KeenableError
 
 TIMEOUT: Final = 30.0
+
+
+class HttpStatusError(KeenableError):
+    def __init__(self, status: int, retry_after: int | None, peer: str | None) -> None:
+        super().__init__("http_status", status)
+        self.retry_after = retry_after
+        self.peer = peer
+
+
+def transient_search_failure(code: str | None, status: int | None) -> bool:
+    return code in {"request_timeout", "dns_temporary", "connection_unavailable"} or (
+        code == "http_status" and status is not None and (status == 429 or 500 <= status < 600)
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -52,20 +68,23 @@ def search_request(
 
 
 def _public_address(host: str, timeout: float) -> str:
-    result: Queue[tuple[str, ...]] = Queue(maxsize=1)
+    result: Queue[tuple[str, ...] | KeenableError] = Queue(maxsize=1)
 
     def resolve() -> None:
         try:
             records = socket.getaddrinfo(host, 443, socket.AF_INET, socket.SOCK_STREAM)
             result.put(tuple(str(record[4][0]) for record in records))
-        except OSError:
-            result.put(())
+        except OSError as error:
+            result.put(KeenableError("dns_temporary" if error.errno == socket.EAI_AGAIN else "dns_empty"))
 
     Thread(target=resolve, daemon=True).start()
     try:
-        addresses = tuple(IPv4Address(value) for value in result.get(timeout=timeout))
+        resolved = result.get(timeout=timeout)
     except Empty:
         raise KeenableError("request_timeout") from None
+    if isinstance(resolved, KeenableError):
+        raise resolved
+    addresses = tuple(IPv4Address(value) for value in resolved)
     if not addresses:
         raise KeenableError("dns_empty")
     if any(not ip.is_global or ip.is_multicast or ip.is_reserved for ip in addresses):
@@ -80,9 +99,25 @@ def _remaining(deadline: float) -> float:
     return remaining
 
 
-def _read_response(response: HTTPResponse, expected: str) -> bytes:
+def _retry_after(value: str) -> int | None:
+    header = value.strip()
+    if not header:
+        return None
+    if fullmatch(r"[0-9]+", header):
+        digits = header.lstrip("0")
+        return 10**18 if len(digits) > 18 else int(digits or "0")
+    try:
+        until = parsedate_to_datetime(header)
+    except (ValueError, OverflowError):
+        return None
+    if until.tzinfo is None:
+        return None
+    return max(0, ceil((until - datetime.now(UTC)).total_seconds()))
+
+
+def _read_response(response: HTTPResponse, expected: str, peer: str | None = None) -> bytes:
     if response.status != 200:
-        raise KeenableError("http_status", response.status)
+        raise HttpStatusError(response.status, _retry_after(response.headers.get("Retry-After", "")), peer)
     headers = response.headers
     lengths = headers.get_all("Content-Length", [])
     transfers = headers.get_all("Transfer-Encoding", [])
@@ -166,7 +201,7 @@ def request_direct(request: Request) -> DirectResponse:
                             headers=headers,
                         )
                         with connection.getresponse() as response:
-                            body = _read_response(response, request.media_type)
+                            body = _read_response(response, request.media_type, peer)
                     _remaining(deadline)
                     return DirectResponse(body, peer)
                 finally:
@@ -176,4 +211,6 @@ def request_direct(request: Request) -> DirectResponse:
         _remaining(deadline)
         if isinstance(error, TimeoutError):
             raise KeenableError("request_timeout") from None
+        if isinstance(error, ConnectionError):
+            raise KeenableError("connection_unavailable") from None
         raise KeenableError("transport_error") from None

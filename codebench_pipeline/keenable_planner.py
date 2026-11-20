@@ -13,7 +13,15 @@ from pydantic import ValidationError
 from .agent_events import InferenceError, parse_json
 from .inference_capacity import CapacityConfig, CapacityQuarantined, guarded_complete
 from .keenable_ledger import PLAN_RESPONSE_BYTES, Ledger, SlotIdentity
-from .keenable_policy import MAX_SEARCH, QUERIES, Case, Declaration, KeenableError, digest
+from .keenable_policy import (
+    MAX_SEARCH,
+    QUERIES,
+    Case,
+    CurrentAdministrativeSearch,
+    Declaration,
+    KeenableError,
+    digest,
+)
 from .keenable_receipts import CallReceipt, Lead, SearchDecision, SearchFeedback, SearchPlanReceipt
 from .keenable_transport import search_payload
 from .openai_transport import parse_completion
@@ -183,6 +191,8 @@ class SearchSession:
                     )
                 )
         limit = self.declaration.budget.search_calls if self.declaration.budget is not None else MAX_SEARCH
+        if isinstance(plan, CurrentAdministrativeSearch) and plan.max_queries is not None:
+            limit = plan.max_queries
         policy = digest(
             json.dumps(
                 [self.declaration.declaration_sha256, [digest(option.payload) for option in options]]

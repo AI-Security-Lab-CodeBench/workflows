@@ -50,9 +50,9 @@ class CurrentKeenableAuthoringTests(unittest.TestCase):
     def test_shipped_authority_and_budget_match_the_migrated_generation(self) -> None:
         current = load_declaration(DECLARATION)
         assert isinstance(current, CurrentKeenableDeclaration)
-        self.assertEqual(current.generation, "cat3-keenable-administrative-fixed-v2")
+        self.assertEqual(current.generation, "cat3-keenable-administrative-fixed-v3")
         self.assertEqual(current.search_cases, ("workloads", "containers"))
-        self.assertEqual(current.budget.total_bytes, 25 * RESPONSE_BYTES)
+        self.assertEqual(current.budget.total_bytes, 28 * RESPONSE_BYTES)
         self.assertEqual(len(current.raw_licenses), 3)
         self.assertEqual(sum(len(source.exact_urls) for source in current.sources), 14)
         self.assertEqual(
@@ -75,6 +75,27 @@ class CurrentKeenableAuthoringTests(unittest.TestCase):
         values["rights"]["evidence_sha256"] = "2" * 64
         with self.assertRaisesRegex(ValidationError, "evidence_sha256"):
             CurrentSourcePermission.model_validate_json(json.dumps(values))
+
+    def test_shipped_plan_retries_both_queries_without_spending_headroom_on_new_queries(self) -> None:
+        declaration = load_declaration(DECLARATION)
+        with (
+            tempfile.TemporaryDirectory() as root,
+            patch("codebench_pipeline.keenable_search.sleep"),
+            patch(
+                "codebench_pipeline.keenable.request_direct",
+                side_effect=(
+                    KeenableError("request_timeout"),
+                    result(),
+                    KeenableError("request_timeout"),
+                    result(),
+                ),
+            ),
+        ):
+            catalog = KeenableCollection(Path(root), declaration).discover()
+            self.assertEqual(
+                [entry.slot for entry in catalog.searches],
+                ["search:workloads-reference", "search:containers-reference"],
+            )
 
     def test_exact_seed_cannot_inherit_its_case_from_list_order(self) -> None:
         with self.assertRaisesRegex(ValidationError, "single case"):

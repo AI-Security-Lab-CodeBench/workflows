@@ -48,6 +48,7 @@ class CallReceipt(Record):
     retained_sha256: Digest | None = None
     peer: str | None = None
     reason: str | None = None
+    retry_after: int | None = Field(default=None, ge=0, exclude_if=lambda seconds: seconds is None)
 
 
 class SearchDecision(Record):

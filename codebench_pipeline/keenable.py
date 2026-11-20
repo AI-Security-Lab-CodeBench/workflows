@@ -3,13 +3,11 @@ from datetime import UTC, datetime
 from pathlib import Path
 from re import DOTALL, compile
 
-from pydantic import ValidationError
-
 from scripts.dataset_schema import SECRET_PATTERNS
 
-from .keenable_catalog import LEADS, declared_leads, freeze_catalog, search_leads
+from .keenable_catalog import declared_leads, freeze_catalog
 from .keenable_ledger import Ledger, SlotIdentity, open_ledger, verify_lock
-from .keenable_planner import GuardedSearchPlanner, SearchOption, SearchSession
+from .keenable_planner import GuardedSearchPlanner, SearchSession
 from .keenable_policy import (
     COMMANDS,
     PAGE_CASES,
@@ -32,11 +30,10 @@ from .keenable_receipts import (
     CandidateReceipt,
     CaptureLock,
     CatalogReceipt,
-    Lead,
-    SearchEnvelope,
     VerifiedPage,
 )
-from .keenable_transport import DirectResponse, Request, request_direct, search_request
+from .keenable_search import DiscoverySearch
+from .keenable_transport import DirectResponse, Request, request_direct
 
 __all__ = ["KeenableCollection", "KeenableDeclaration", "KeenableError", "load_declaration"]
 
@@ -77,16 +74,17 @@ class KeenableCollection:
                 return catalog
             leads = declared_leads(declaration)
             searches: list[CallReceipt] = []
+            search = DiscoverySearch(ledger, declaration, api_key, request_direct)
             plan = None
             if declaration.search_plan is not None:
                 hits, receipts, plan = SearchSession(ledger, declaration, self.planner).run(
-                    lambda option: _search(ledger, declaration, option.case, api_key=api_key, option=option)
+                    lambda option: search(option.case, option)
                 )
                 leads.extend(hits)
                 searches.extend(receipts)
             else:
                 for case in declaration.search_cases:
-                    receipt, hits = _search(ledger, declaration, case, api_key=api_key)
+                    receipt, hits = search(case)
                     leads.extend(hits)
                     searches.append(receipt)
             declaration.check_current(datetime.now(UTC))
@@ -232,72 +230,6 @@ class KeenableCollection:
                 )
             )
         return tuple(adapters)
-
-
-def _search(
-    ledger: Ledger, declaration: Declaration, case: Case, *, api_key: str, option: SearchOption | None = None
-) -> tuple[CallReceipt, tuple[Lead, ...]]:
-    slot = f"search:{case if option is None else option.id}"
-    if (prior := ledger.call(slot)) is not None:
-        receipt, hits = prior
-        if hits is None or (
-            option is not None
-            and (
-                receipt.kind != "search"
-                or receipt.request_sha256 != digest(option.payload)
-                or receipt.state != "succeeded"
-            )
-        ):
-            raise KeenableError("search_receipt_integrity")
-        return receipt, LEADS.validate_json(hits)
-    scopes = (
-        ()
-        if option is not None
-        else tuple(
-            sorted(
-                source.url_prefix
-                for source in declaration.sources
-                if source.url_prefix is not None and source.allow_discovery and case in source.cases
-            )
-        )
-    )
-    request = search_request(
-        case, scopes, api_key=api_key, payload=option.payload if option is not None else None
-    )
-    assert request.payload is not None
-    receipt = ledger.reserve(
-        "search",
-        SlotIdentity(slot=slot, target=request.url, request_sha256=digest(request.payload)),
-    )
-    response: DirectResponse | None = None
-    try:
-        response = request_direct(request)
-        hits = search_leads(
-            declaration,
-            case,
-            SearchEnvelope.model_validate_json(response.body),
-            reviewed=option.urls if option is not None else None,
-        )
-        if option is not None:
-            hits = tuple(hit.model_copy(update={"search_slot": slot}) for hit in hits)
-    except (KeenableError, ValidationError, UnicodeError) as error:
-        failure = (
-            error if isinstance(error, KeenableError) else KeenableError("provider_response_invalid", 200)
-        )
-        ledger.finish(
-            receipt,
-            state="failed",
-            reason=failure.code,
-            status=failure.status,
-            peer=response.peer if response else None,
-            response=response.body if response else None,
-        )
-        raise failure from None
-    payload = LEADS.dump_json(hits)
-    saved = ledger.finish(
-        receipt, state="succeeded", status=200, peer=response.peer, response=response.body, payload=payload
-    )
-    return saved, hits
 
 
 _CODE_BLOCK = compile(

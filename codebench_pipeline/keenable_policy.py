@@ -388,6 +388,7 @@ class AdministrativeSearch(Record):
 
 class CurrentAdministrativeSearch(Record):
     mode: Literal["fixed", "adaptive"]
+    max_queries: int | None = Field(default=None, ge=1, le=MAX_SEARCH, exclude_if=lambda n: n is None)
     scopes: tuple[CurrentAdministrativeScope, ...] = Field(min_length=1, max_length=len(CASES))
 
 
@@ -613,6 +614,9 @@ def _validate_source_declaration(declaration: Declaration) -> None:
         raise ValueError("Search budget must cover each configured discovery case")
     if (plan := declaration.search_plan) is None:
         return
+    if isinstance(plan, CurrentAdministrativeSearch) and plan.max_queries is not None:
+        if not len(plan.scopes) <= plan.max_queries <= budget.search_calls:
+            raise ValueError("Query limit must cover all search scopes and fit the search call budget")
     if tuple(scope.case for scope in plan.scopes) != declaration.search_cases:
         raise ValueError("Expected one reviewed search scope per discovery case in case order")
     for scope in plan.scopes:
