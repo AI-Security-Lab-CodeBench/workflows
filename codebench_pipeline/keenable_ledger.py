@@ -27,7 +27,7 @@ from .keenable_policy import (
 from .keenable_receipts import CallReceipt, CaptureLock, CatalogReceipt, VerifiedPage
 from .keenable_transport import transient_request_failure
 
-PLAN_RESPONSE_BYTES = 16 * 1024
+PLAN_RESPONSE_BYTES = 64 * 1024
 
 
 def timestamp() -> str:

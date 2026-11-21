@@ -233,6 +233,8 @@ class AdaptivePlannerConfig(TypedConfig):
     api_key_env: str | None
     capacity: ScopedCapacityConfig | None
     backend_revision: str
+    max_output_tokens: int = Field(default=1024, gt=0)
+    timeout_seconds: float = Field(default=30, gt=0, allow_inf_nan=False)
 
 
 class DeclaredSourceStageConfig(TypedConfig, ConfigArtifact):

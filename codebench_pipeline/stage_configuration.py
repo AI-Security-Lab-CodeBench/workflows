@@ -295,7 +295,7 @@ def declared_source_config(spec: DatasetBuildSpec, branch: Branch) -> DeclaredSo
             model, batch = spec.annotation.model, spec.annotation.batch
             if model.provider != "openai_compatible" or model.base_url is None or batch is None:
                 raise IntegrityError(
-                    "Adaptive discovery requires a registered remote model and capacity settings"
+                    "Adaptive discovery requires a registered OpenAI-compatible model and batch settings"
                 )
             return DeclaredSourceStageConfig(
                 branch=branch,
@@ -310,6 +310,8 @@ def declared_source_config(spec: DatasetBuildSpec, branch: Branch) -> DeclaredSo
                         else None
                     ),
                     backend_revision=batch.backend_revision,
+                    max_output_tokens=model.max_output_tokens,
+                    timeout_seconds=model.timeout_seconds,
                 ),
             )
     return DeclaredSourceStageConfig(branch=branch, source=source)

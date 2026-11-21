@@ -98,6 +98,8 @@ def provider_collection(
                 plan_receipts,
                 key=model_key,
                 backend_revision=planner.backend_revision,
+                max_output_tokens=planner.max_output_tokens,
+                timeout_seconds=planner.timeout_seconds,
             ),
         )
     return KeenableCollection(

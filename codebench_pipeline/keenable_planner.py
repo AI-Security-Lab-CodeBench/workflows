@@ -12,7 +12,7 @@ from pydantic import ValidationError
 
 from .agent_events import InferenceError, parse_json
 from .inference_capacity import CapacityConfig, CapacityQuarantined, guarded_complete
-from .keenable_ledger import PLAN_RESPONSE_BYTES, Ledger, SlotIdentity
+from .keenable_ledger import Ledger, SlotIdentity
 from .keenable_policy import (
     MAX_SEARCH,
     QUERIES,
@@ -61,7 +61,6 @@ _FOCUSES: Final = (
     ("lifecycle", " Focus on lifecycle states and documented restart behavior."),
     ("retention", " Focus on documented data retention limits and defaults."),
 )
-_OUTPUT_TOKENS: Final = 1024
 
 
 @dataclass(frozen=True, slots=True)
@@ -72,6 +71,8 @@ class SearchPlanner:
     receipt_directory: Path
     key: str | None = field(default=None, repr=False)
     backend_revision: str = ""
+    max_output_tokens: int = 1024
+    timeout_seconds: float = 30
 
     @property
     def identity(self) -> str:
@@ -83,7 +84,8 @@ class SearchPlanner:
                     self.backend_revision,
                     self.capacity.model_dump_json() if self.capacity is not None else "plain",
                     _PROMPT,
-                    _OUTPUT_TOKENS,
+                    self.max_output_tokens,
+                    self.timeout_seconds,
                 ]
             ).encode()
         )
@@ -104,7 +106,7 @@ class SearchPlanner:
                     {"role": "user", "content": json.dumps(prompt, separators=(",", ":"))},
                 ],
                 "temperature": 0,
-                "max_completion_tokens": _OUTPUT_TOKENS,
+                "max_completion_tokens": self.max_output_tokens,
                 "response_format": {"type": "json_object"},
                 "stream": False,
             },
@@ -124,16 +126,20 @@ class SearchPlanner:
             ):
                 raise KeenableError("planner_receipt_integrity")
             return receipt, SearchDecision.model_validate_json(payload)
-        if len(body) > PLAN_RESPONSE_BYTES:
+        if len(body) > 16 * 1024:
             raise KeenableError("planner_request_budget")
         receipt = ledger.reserve("plan", identity)
         raw: bytes | None = None
         reason = "planner_call_failed"
         try:
             raw = (
-                guarded_complete(self.endpoint, body, self.key, 30, self.capacity, self.receipt_directory)
+                guarded_complete(
+                    self.endpoint, body, self.key, self.timeout_seconds, self.capacity, self.receipt_directory
+                )
                 if self.capacity is not None
-                else complete(self.endpoint.rstrip("/") + "/chat/completions", body, self.key, 30)
+                else complete(
+                    self.endpoint.rstrip("/") + "/chat/completions", body, self.key, self.timeout_seconds
+                )
             ).body
             if len(raw) > receipt.reserved_bytes:
                 raise KeenableError("planner_response_budget")

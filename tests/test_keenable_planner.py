@@ -188,7 +188,7 @@ class AdministrativeSearchTests(unittest.TestCase):
         cases = (
             (completion({"option": "nonexistent-option"}), "planner_option_not_available"),
             (completion({"option": None, "query": "unreviewed"}), "planner_response_invalid"),
-            (HTTPResponse(b"x" * 16_385, None), "planner_response_budget"),
+            (HTTPResponse(b"x" * 65_537, None), "planner_response_budget"),
             (CapacityUnavailable("stale_snapshot"), "planner_call_failed"),
         )
         for index, (response, reason) in enumerate(cases):
@@ -222,12 +222,12 @@ class AdministrativeSearchTests(unittest.TestCase):
         wire.assert_not_called()
 
     def test_plain_planner_completes_against_chat_only_endpoint(self) -> None:
-        requests: list[tuple[str, str]] = []
+        requests: list[tuple[str, str, int]] = []
 
         class ChatOnly(BaseHTTPRequestHandler):
             def do_POST(self) -> None:
                 request = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
-                requests.append((self.path, request["model"]))
+                requests.append((self.path, request["model"], request["max_completion_tokens"]))
                 self.send_response(200)
                 self.end_headers()
                 self.wfile.write(completion({"option": None}).body)
@@ -237,7 +237,10 @@ class AdministrativeSearchTests(unittest.TestCase):
             thread.start()
             try:
                 planner = replace(
-                    self.planner, endpoint=f"http://127.0.0.1:{server.server_port}/v1", capacity=None
+                    self.planner,
+                    endpoint=f"http://127.0.0.1:{server.server_port}/v1",
+                    capacity=None,
+                    max_output_tokens=1729,
                 )
                 catalog = KeenableCollection(self.root, self.adaptive, planner=planner).discover()
             finally:
@@ -245,7 +248,7 @@ class AdministrativeSearchTests(unittest.TestCase):
                 thread.join()
         assert catalog.plan is not None
         self.assertEqual(catalog.plan.stop, "planner_stop")
-        self.assertEqual(requests, [("/v1/chat/completions", self.planner.model)])
+        self.assertEqual(requests, [("/v1/chat/completions", self.planner.model, 1729)])
 
     def test_quarantined_guard_cannot_dispatch_search_or_retry(self) -> None:
         assert self.planner.capacity is not None
