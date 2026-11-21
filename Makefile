@@ -2,6 +2,10 @@
 remote-up:
 	bash scripts/remote-up.sh
 
+.PHONY: remote-prepare
+remote-prepare:
+	bash scripts/remote-up.sh prepare
+
 .PHONY: e2e
 e2e:
 	$(UV) run --no-project --with-requirements tests/e2e/requirements.txt python -m pytest -q -s --tb=line -p no:cacheprovider tests/compose_e2e.py

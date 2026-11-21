@@ -26,6 +26,8 @@
     "inference_mode": "plain"
   },
   "storage": {
-    "from_registration": true
+    "backend": "s3",
+    "bucket": "codebench-datasets",
+    "key_prefix": "cat3-dev"
   }
 }

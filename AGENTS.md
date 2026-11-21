@@ -92,6 +92,17 @@ artifacts before changing an existing dataset's storage registration.
 
 ## Publication scope
 
+The shared CAT-3 dataset currently operates in development mode. Its collected
+rows are disposable on an explicit reset; do not migrate old dev objects or
+reuse their rows to fill a fresh run. Keep other partitions, credentials,
+review decisions and shared service volumes intact. This is not permission
+to delete future production data. Recreating `webserver` and `daemon` is safe
+for this development rollout after checking for active work; preserve all
+existing Compose overrides and named volumes. From the operator checkout,
+`make remote-prepare` deploys the published HEAD, recreates those consumers,
+stops the build sensor and runs the native `prepare_dataset` job through
+`filtered_commands`. Leave the sensor stopped until labeling is requested.
+
 Publish pipelines, workflows, tests, the architecture guides and CAT-3
 configuration only. CAT-2 is a local example demonstrating multicategory support;
 exclude its configuration and collected records from the workflows repository.
