@@ -17,7 +17,7 @@ from codebench_pipeline.batch_labeling import (
     run_prepared_batches,
 )
 from codebench_pipeline.batch_labeling_config import BatchLabelingConfig
-from codebench_pipeline.batch_labeling_protocol import LiveSupport
+from codebench_pipeline.batch_labeling_protocol import LiveSupport, page_observation
 from codebench_pipeline.dataset_records import CandidateRecord
 from codebench_pipeline.grounding_tools import GroundingCredentials, LiveGroundingConfig
 from codebench_pipeline.inference_capacity import CapacityConfig, CapacityUnavailable, ContextBudgetExceeded
@@ -85,7 +85,7 @@ def tool_replies(*calls: tuple[str, dict | str], finish_reason: str = "tool_call
 
 
 def submitted(record: dict, evidence_ids: list[str], url: str = URL, *, quote: str = QUOTE) -> dict:
-    candidate = CandidateRecord.model_validate(record["candidate"])
+    candidate = CandidateRecord.model_validate({**record["candidate"], "transformations": []})
     label = make_label(candidate, make_rules()).model_copy(update={"documentation_urls": [url]})
     return {
         "candidate_id": candidate.candidate_id,
@@ -158,6 +158,64 @@ def shared_retrieval(body: bytes) -> HTTPResponse:
 
 
 class BatchLabelingTests(TestCase):
+    def test_long_page_shows_a_verbatim_window_containing_the_relevant_flag(self) -> None:
+        body = (
+            ("Navigation\n" * 200)
+            + "Use --namespace to choose which namespace to inspect."
+            + ("Footer\n" * 240)
+        )
+        window = page_observation(body, ["probe inspect --namespace fixture"])
+        self.assertIn("--namespace to choose which namespace", window)
+        self.assertIn(window, body)
+        self.assertLess(len(window), len(body))
+
+    def test_plain_reasoning_setting_can_produce_tools_without_exhausting_output(self) -> None:
+        for effort, template in (
+            ("low", {"reasoning_effort": "low"}),
+            ("none", {"enable_thinking": False}),
+        ):
+            with self.subTest(effort=effort), TemporaryDirectory() as directory:
+                out = Path(directory)
+
+                def reply(_url: str, body: bytes, *_):
+                    if json.loads(body).get("chat_template_kwargs") != template:
+                        return tool_replies(finish_reason="length")
+                    return shared_retrieval(body)
+
+                with live_mcp_fixture({URL: QUOTE}):
+                    attempts = self.run_batch(
+                        reply,
+                        [make_candidate("a")],
+                        out,
+                        inference_mode="plain",
+                        capacity=None,
+                        reasoning_effort=effort,
+                    )
+                self.assertEqual([row.status for row in attempts], ["success"])
+
+    def test_large_provenance_does_not_split_a_sixteen_row_model_batch(self) -> None:
+        out = Path(self.enterContext(TemporaryDirectory()))
+        candidates = [
+            make_candidate(f"row-{index:02}").model_copy(update={"transformations": ["f" * 10000]})
+            for index in range(16)
+        ]
+        config = batch_config(out).model_copy(update={"inference_mode": "plain", "capacity": None})
+        with (
+            live_mcp_fixture({URL: QUOTE}),
+            patch(
+                "codebench_pipeline.batch_labeling.plain_complete",
+                side_effect=lambda url, body, *_: shared_retrieval(body),
+            ),
+        ):
+            attempts = annotate_batches(
+                candidates, make_rules(), remote_model(), config, out, maximum_context_characters=32768
+            )
+        self.assertEqual([row.status for row in attempts], ["success"] * 16)
+        self.assertEqual(len(list((out / "batches").glob("*/transcript.json"))), 1)
+        self.assertEqual(
+            [row.transformations for row in attempts], [row.transformations for row in candidates]
+        )
+
     def run_batch(self, provider, candidates, out: Path, **settings):
         config = batch_config(out).model_copy(update=settings)
         endpoint = "plain_complete" if config.inference_mode == "plain" else "guarded_complete"

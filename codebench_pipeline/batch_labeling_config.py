@@ -15,7 +15,7 @@ InferenceMode = Literal["guarded", "plain"]
 class BatchPromptConfig(TypedConfig):
     instructions: str = Field(default="", max_length=16000)
     batch_size: int = Field(default=25, ge=1, le=50)
-    reasoning_effort: str | None = Field(default=None, pattern=r"^(low|high|max)$")
+    reasoning_effort: str | None = Field(default=None, pattern=r"^(none|low|high|max)$")
     maximum_model_turns: int = Field(default=4, ge=2, le=8)
     grounding_calls_per_command: float = Field(default=1.5, ge=0, allow_inf_nan=False)
 

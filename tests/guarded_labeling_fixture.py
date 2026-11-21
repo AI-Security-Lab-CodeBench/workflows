@@ -412,7 +412,7 @@ class LabelingFixture:
         page = results[1].get("page", {})
         outcomes = []
         for row in rows:
-            candidate = CandidateRecord.model_validate(row["candidate"])
+            candidate = CandidateRecord.model_validate({**row["candidate"], "transformations": []})
             evidence = page.get("evidence_ids", {}).get(candidate.candidate_id)
             quote = LIVE_QUOTES.get(candidate.command)
             if evidence and quote:

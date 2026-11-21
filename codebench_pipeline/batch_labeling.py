@@ -26,6 +26,7 @@ from codebench_pipeline.batch_labeling_protocol import (
     SubmittedOutcome,
     ToolCall,
     page_evidence_id,
+    page_observation,
     row_evidence,
     submitted_values,
     tool_schema,
@@ -134,14 +135,16 @@ class _Conversation:
             "only rejected rows. Final prose does not submit outcomes."
         )
         examples: dict[str, JsonValue] = {}
+        example_refs: dict[str, str] = {}
         records: list[JsonValue] = []
         for row in self.rows.values():
             _, payload = request(row.candidate, [], self.model.rules)
             payload.pop("documentation")
+            payload["candidate"] = row.candidate.model_dump(mode="json", exclude={"transformations"})
             raw_examples = payload.pop("examples", [])
             example_ids: list[JsonValue] = []
             for example in TypeAdapter(list[JsonValue]).validate_python(raw_examples):
-                identifier = fingerprint(example)
+                identifier = example_refs.setdefault(fingerprint(example), f"ex{len(example_refs) + 1}")
                 examples[identifier] = example
                 example_ids.append(identifier)
             payload.update(row_input_fingerprint=row.fingerprint, example_ids=example_ids)
@@ -187,11 +190,16 @@ class _Conversation:
         }
         if model.temperature is not None:
             body["temperature"] = model.temperature
-        if config.inference_mode == "guarded":
-            if config.reasoning_effort is not None:
-                body["chat_template_kwargs"] = {"reasoning_effort": config.reasoning_effort}
-            elif self.output_exhausted and config.backend_revision == "qwen38-27b-fp8":
-                body["chat_template_kwargs"] = {"enable_thinking": False}
+        if config.reasoning_effort == "none":
+            body["chat_template_kwargs"] = {"enable_thinking": False}
+        elif config.reasoning_effort is not None:
+            body["chat_template_kwargs"] = {"reasoning_effort": config.reasoning_effort}
+        elif (
+            config.inference_mode == "guarded"
+            and self.output_exhausted
+            and config.backend_revision == "qwen38-27b-fp8"
+        ):
+            body["chat_template_kwargs"] = {"enable_thinking": False}
         turn_path = self.out / f"turn-{turn - 1:02d}"
         raw = _encoded(body)
         try:
@@ -289,12 +297,14 @@ class _Conversation:
                 receipt = self.broker.execute("query", arguments, set(self.rows) - self.results.keys())
             case _:
                 receipt = self.broker.execute("page_fetch", arguments, set(self.rows) - self.results.keys())
-        result = receipt.model_dump(mode="json", exclude_none=True)
+        result = receipt.model_dump(mode="json", include={"tool", "error", "discovery"}, exclude_none=True)
         if receipt.page_id is not None:
             page = self.broker.pages[receipt.page_id]
             result["page"] = {
                 "url": page.url,
-                "content": page.content,
+                "content": page_observation(
+                    page.content, [self.rows[identity].candidate.command for identity in page.candidate_ids]
+                ),
                 "evidence_ids": {
                     identity: page_evidence_id(self.rows[identity].candidate, page)
                     for identity in page.candidate_ids

@@ -71,9 +71,14 @@ class _ConversationMessage(BaseModel):
     content: str | None = None
 
 
+class _PromptCandidate(BaseModel):
+    model_config = ConfigDict(strict=True, frozen=True)
+    candidate_id: str
+
+
 class _BatchInputRow(BaseModel):
     model_config = ConfigDict(strict=True, frozen=True)
-    candidate: CandidateRecord
+    candidate: _PromptCandidate
 
 
 class _BatchInput(BaseModel):

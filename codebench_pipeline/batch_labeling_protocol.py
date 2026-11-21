@@ -1,3 +1,4 @@
+import re
 from collections import Counter
 from dataclasses import dataclass
 from typing import Literal
@@ -125,6 +126,25 @@ def page_evidence_id(candidate: CandidateRecord, page: LivePage) -> str:
     return fingerprint(
         [candidate.model_dump(mode="json", include=set(CandidateRecord.model_fields)), page.identity]
     )
+
+
+def page_observation(content: str, commands: list[str]) -> str:
+    if len(content) <= 800:
+        return content
+    terms = {
+        match.group()
+        for command in commands
+        for match in re.finditer(r"--?[\w-]+|[\w-]{3,}", command.lower())
+    }
+    best = max(
+        range(0, len(content), 400),
+        key=lambda offset: sum(
+            (3 if term.startswith("-") else 1)
+            for term in terms
+            if term in content[offset : offset + 800].lower()
+        ),
+    )
+    return content[best : best + 800]
 
 
 class LiveSupport(_Strict):
