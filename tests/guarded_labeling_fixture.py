@@ -1,18 +1,22 @@
-import json
 import os
-from collections.abc import Sequence
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
 from unittest import TestCase
 from unittest.mock import patch
 
-import numpy as np
 from keenable_mcp_fixture import keenable_mcp_fixture
-from numpy.typing import NDArray
 from pandera.typing import DataFrame
 from pydantic import TypeAdapter
-from test_batch_labeling import batch_config, remote_model, submitted, tool_reply
+from test_batch_labeling import (
+    batch_config,
+    live_mcp_fixture,
+    remote_model,
+    request_parts,
+    submitted,
+    tool_reply,
+)
 from test_dataset_rules import make_rules
 from test_declared_dataset_graph import fixture_spec
 from test_keenable import BODY, PEER, PLAN, SOURCE_BODY, permission, result
@@ -20,6 +24,7 @@ from test_keenable import source_declaration as source_scope_declaration
 from test_repository import RepositoryFixture, repository_branch_fixture, repository_config_fixture
 
 from codebench_pipeline.batch_labeling import BatchExecution
+from codebench_pipeline.batch_labeling_rows import RowEvidence
 from codebench_pipeline.collection_config import (
     CAT3_DATASET_ID,
     CollectionMergeConfig,
@@ -36,9 +41,11 @@ from codebench_pipeline.dataset_config import AnnotationConfig, DatasetBuildSpec
 from codebench_pipeline.dataset_extract import filter_candidates
 from codebench_pipeline.dataset_finalization import merge_candidates
 from codebench_pipeline.dataset_records import CandidateRecord
+from codebench_pipeline.grounding import GuardedEvidence, OperationReceiptBuffer
 from codebench_pipeline.grounding_policy import OperationGrant, SourceVersion, VersionIndependent
 from codebench_pipeline.grounding_sources import persist_repository_origin_bindings
 from codebench_pipeline.grounding_tables import GuardedLabeling, LabelingEvidenceInputs
+from codebench_pipeline.grounding_tools import GroundingConfig, GroundingCredentials
 from codebench_pipeline.inference_capacity import CapacityConfig
 from codebench_pipeline.keenable import KeenableCollection
 from codebench_pipeline.keenable_policy import CASES, PROVIDER, KeenableDeclaration, KeenableSnippetSettings
@@ -49,7 +56,7 @@ from codebench_pipeline.keenable_tables import (
     provider_documents,
 )
 from codebench_pipeline.keenable_transport import DirectResponse, Request
-from codebench_pipeline.labeling_stage_settings import RiskRoute
+from codebench_pipeline.labeling_stage_settings import LabelingSources, RiskRoute
 from codebench_pipeline.openai_transport import HTTPResponse
 from codebench_pipeline.repository import (
     RepositoryRun,
@@ -59,7 +66,7 @@ from codebench_pipeline.repository import (
     repository_documents,
 )
 from codebench_pipeline.repository_config import RepositoryBranch
-from codebench_pipeline.repository_receipts import RECEIPT_ATTR, sha256
+from codebench_pipeline.repository_receipts import RECEIPT_ATTR, publish_bytes, sha256
 from codebench_pipeline.repository_tree import raw_url, tree_url
 from codebench_pipeline.stage_configuration import GuardedLabelingConfig
 
@@ -75,21 +82,55 @@ REVIEWED_SCOPE = (
 )
 
 
-def fixture_vectors(commands: Sequence[str], directory: Path | None = None) -> NDArray[np.float32]:
-    return np.ones((len(commands), 1), dtype=np.float32)
+LIVE_URL = "https://developer.hashicorp.com/fixture-reference"
+LIVE_QUOTES = {
+    "kubectl get pods": "Enumerates the pods for `kubectl get pods`.",
+    "kubectl get pods --all-namespaces": "`kubectl get pods --all-namespaces` lists pods across all namespaces.",
+    "docker compose ps": "`docker compose ps` displays current Compose service status.",
+    "docker ps --all": "`docker ps --all` lists all existing containers.",
+    "terraform plan": "`terraform plan` previews changes without applying them.",
+}
+
+
+@dataclass(frozen=True, slots=True)
+class FixtureLabeling(GuardedLabeling):
+    evidence_inputs: LabelingEvidenceInputs
+
+
+def historical_support(
+    inputs: LabelingEvidenceInputs,
+    commands: DataFrame[FilteredCommandsTable],
+    candidate: CandidateRecord,
+) -> tuple[GuardedEvidence, list[RowEvidence]]:
+    receipts = OperationReceiptBuffer()
+    guard = inputs.admission(commands, operation_receipts=receipts)
+    _, evidence = guard.source(candidate)
+    for key, body in receipts.receipts.items():
+        publish_bytes(guard.root / key, body)
+    return replace(guard, operation_receipts=None), evidence
 
 
 def guarded_labeling(
-    run: RepositoryRun, spec: DatasetBuildSpec, capture: DataFrame[SourceDocumentsTable]
-) -> GuardedLabeling:
+    run: RepositoryRun,
+    spec: DatasetBuildSpec,
+    capture: DataFrame[SourceDocumentsTable],
+    historical: GroundingConfig | None = None,
+) -> FixtureLabeling:
     mapped = GuardedLabelingConfig.from_spec(spec)
     settings = mapped.labeling_attempts.batch
     paths = require_declared_annotation(spec.annotation).require_capacity()
-    return GuardedLabeling(
+    collection = spec.declared_collection
+    assert collection is not None
+    return FixtureLabeling(
         mapped,
-        LabelingEvidenceInputs(run, mapped.collection, settings.grounding, capture),
         settings.bind_capacity(paths.state_directory, paths.expected_model_path),
-        BatchExecution(None, fixture_vectors),
+        BatchExecution(None, GroundingCredentials.from_environment(settings.grounding)),
+        LabelingEvidenceInputs(
+            run,
+            LabelingSources.from_collection(collection),
+            historical or GroundingConfig(**settings.grounding.model_dump()),
+            capture,
+        ),
     )
 
 
@@ -205,15 +246,16 @@ class LabelingFixture:
                 )
             )
         batch = batch_config(home)
-        self.grounding = batch.grounding.model_copy(
-            update={
-                "allowed_domains": ["developer.hashicorp.com", "raw.githubusercontent.com"],
-                "pinned_library_ids": [self.library] if self.library else [],
-                "maximum_provider_calls": 10,
-                "operation_grants_json": ""
-                if source_limited
-                else TypeAdapter(tuple[OperationGrant, ...]).dump_json((grant, *seed_grants)).decode(),
-            }
+        live = batch.grounding.model_copy(
+            update={"allowed_domains": ["developer.hashicorp.com", "raw.githubusercontent.com"]}
+        )
+        self.grounding = GroundingConfig(
+            allowed_domains=live.allowed_domains,
+            pinned_library_ids=[self.library] if self.library else [],
+            maximum_provider_calls=10,
+            operation_grants_json=""
+            if source_limited
+            else TypeAdapter(tuple[OperationGrant, ...]).dump_json((grant, *seed_grants)).decode(),
         )
         base_rules = make_rules("CAT-3")
         risk = base_rules.risks[0].model_copy(
@@ -235,7 +277,9 @@ class LabelingFixture:
                 "publication": spec.publication.model_copy(update={"limit_per_risk": limit_per_risk}),
                 "annotation": AnnotationConfig(
                     model=remote_model(),
-                    batch=batch.model_copy(update={"grounding": self.grounding, "batch_size": 3}),
+                    batch=batch.model_copy(
+                        update={"grounding": live, "batch_size": 3, "grounding_calls_per_command": 2}
+                    ),
                 ),
                 "declared_collection": DeclaredCollection(
                     existing_datasets=SourceDeclaration.from_declaration(dataset),
@@ -297,6 +341,7 @@ class LabelingFixture:
         self.inference = case.enterContext(
             patch("codebench_pipeline.batch_labeling.guarded_complete", side_effect=self.infer)
         )
+        self.live_calls = case.enterContext(live_mcp_fixture({LIVE_URL: "\n\n".join(LIVE_QUOTES.values())}))
 
     def repository_wire(self, url: str, limit: int) -> bytes:
         for fixture in self.repositories:
@@ -313,10 +358,10 @@ class LabelingFixture:
         filtered, _ = self.collect()
         return filtered
 
-    def labeling(self) -> tuple[DataFrame[FilteredCommandsTable], GuardedLabeling]:
+    def labeling(self) -> tuple[DataFrame[FilteredCommandsTable], FixtureLabeling]:
         filtered, capture = self.collect()
         run = RepositoryRun(self.home, self.spec.dataset_id, "synthetic-filter")
-        return filtered, guarded_labeling(run, self.spec, capture)
+        return filtered, guarded_labeling(run, self.spec, capture, self.grounding)
 
     def collect(self) -> tuple[DataFrame[FilteredCommandsTable], DataFrame[SourceDocumentsTable]]:
         run = RepositoryRun(self.home, self.spec.dataset_id, "synthetic-filter")
@@ -356,42 +401,24 @@ class LabelingFixture:
         _capacity: CapacityConfig | None = None,
         _path: Path | None = None,
     ) -> HTTPResponse:
-        messages = json.loads(body)["messages"]
-        packet = json.loads(messages[1]["content"])
-        rows = packet["records"]
-        if len(messages) == 2:
-            self.remote_rows.extend(row["candidate"]["candidate_id"] for row in rows)
-            missing = [row for row in rows if not row["evidence_ids"]]
-            if missing:
-                query = {
-                    "action": "context7_context" if self.library else "keenable_search",
-                    "query": "a model-supplied question that must never be sent",
-                    "candidate_ids": [row["candidate"]["candidate_id"] for row in missing],
-                }
-                if self.library:
-                    query["library_id"] = self.library
-                return tool_reply("request_documentation", {"queries": [query]})
+        rows, results = request_parts(body)
+        ids = [row["candidate"]["candidate_id"] for row in rows]
+        if not results:
+            self.remote_rows.extend(ids)
+            return tool_reply("query", {"query": "Official fixture CLI reference", "candidate_ids": ids})
+        if len(results) == 1:
+            (hit,) = results[0]["discovery"]
+            return tool_reply("page_fetch", {"url": hit["url"], "candidate_ids": ids})
+        page = results[1].get("page", {})
         outcomes = []
         for row in rows:
             candidate = CandidateRecord.model_validate(row["candidate"])
-            evidence = {name: packet["documentation"][name] for name in row["evidence_ids"]}
-            for message in messages[2:]:
-                if message["role"] == "tool":
-                    result = json.loads(message["content"])
-                    for entry in result.get("results", []):
-                        evidence.update(
-                            {
-                                item["evidence_id"]: item
-                                for item in entry.get("verified_evidence", {}).get(candidate.candidate_id, [])
-                            }
-                        )
-            if evidence:
-                name, document = next(iter(evidence.items()))
-                snippet = document["snippet"]
-                outcome = submitted(row, [name], snippet["url"])
+            evidence = page.get("evidence_ids", {}).get(candidate.candidate_id)
+            quote = LIVE_QUOTES.get(candidate.command)
+            if evidence and quote:
+                outcome = submitted(row, [evidence], page["url"], quote=quote)
                 outcome["label"]["category_id"] = candidate.risk_candidates[0].split(".", 1)[0]
                 outcome["label"]["category_confidence"] = self.category_confidence
-                outcome["grounding_quotes"] = {name: snippet["snippet"]}
             else:
                 outcome = {
                     "candidate_id": candidate.candidate_id,
@@ -404,4 +431,4 @@ class LabelingFixture:
                     "failure_detail": "Origin evidence is unavailable.",
                 }
             outcomes.append(outcome)
-        return tool_reply("submit_labels", {"outcomes": outcomes})
+        return tool_reply("finalize", {"outcomes": outcomes})

@@ -421,7 +421,7 @@ def configuration_assets(home: Path, *, authoring_root: Path | None = None) -> l
             "labeling_attempts",
             GuardedLabelingConfig,
             lambda registered, rules: GuardedLabelingConfig.project(
-                registered.scopes.labeling_attempts, rules
+                registered.scopes.labeling_attempts.labeling_attempts, rules
             ),
         ),
         mixed_mapping(

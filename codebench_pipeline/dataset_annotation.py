@@ -76,7 +76,6 @@ class PromptRisk(StrictModel):
 class PromptTaxonomy(StrictModel):
     category_id: str
     category_name: str
-    version: str
     risks: list[PromptRisk]
     classes: tuple[ClassRule, ...]
     severities: tuple[SeverityRule, ...]
@@ -96,7 +95,6 @@ def request(
             PromptTaxonomy(
                 category_id=rules.category_id,
                 category_name=rules.category_name,
-                version=rules.version,
                 risks=[PromptRisk.from_rule(rule) for rule in rules.risks],
                 classes=tuple(rules.classes),
                 severities=tuple(rules.severities),

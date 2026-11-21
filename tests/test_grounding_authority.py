@@ -1,4 +1,5 @@
 from dataclasses import replace
+from hashlib import sha256
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest import TestCase
@@ -14,6 +15,7 @@ from codebench_pipeline.dataset_records import CandidateRecord
 from codebench_pipeline.grounding import OperationReceiptBuffer
 from codebench_pipeline.keenable_policy import KeenableSnippetSettings, KeenableSourceAccess
 from codebench_pipeline.keenable_snippets import DiscoveryRun, provider_snippet_candidates
+from codebench_pipeline.labeling_stage_settings import KeenableSnippetEvidence
 from codebench_pipeline.storage import IntegrityError
 
 REFERENCE = b"Previews Terraform changes using `terraform plan`.\n"
@@ -42,7 +44,13 @@ class GroundingAuthorityTests(TestCase):
             filtered.attrs["branch_metadata"]["keenable"] = snippets.attrs
             evidence = replace(
                 inputs,
-                collection=inputs.collection.model_copy(update={"keenable_use_cases": settings}),
+                collection=inputs.collection.model_copy(
+                    update={
+                        "keenable_use_cases": KeenableSnippetEvidence(
+                            settings_sha256=sha256(settings.model_dump_json().encode()).hexdigest()
+                        )
+                    }
+                ),
             )
             guard = evidence.admission(filtered)
             self.assertEqual(guard.sources.resolve(row).body, text.encode())

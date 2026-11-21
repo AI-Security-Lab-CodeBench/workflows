@@ -5,10 +5,11 @@ import pandas as pd
 from pandera.typing import DataFrame
 from pydantic import JsonValue, TypeAdapter
 
-from codebench_pipeline.dataframe_schemas import LabelingAttemptsTable, SourceDocumentsTable, model_records
+from codebench_pipeline.dataframe_schemas import LabelingAttemptsTable, model_records
 from codebench_pipeline.dataset_finalization import normalized_command
 from codebench_pipeline.dataset_records import CandidateRecord
-from codebench_pipeline.grounding_tables import LabelingEvidenceInputs
+from codebench_pipeline.grounding_sources import CandidateEvidence
+from codebench_pipeline.grounding_tables import verify_live_support
 from codebench_pipeline.guarded_publication_selection import REQUIRED_CONTRIBUTIONS
 from codebench_pipeline.human_review import CompletionToken, HumanReviewError, ReviewDecision
 from codebench_pipeline.labeling_tables import failures_from_attempts
@@ -35,7 +36,6 @@ class ReleaseInputs:
             "labeling_attempts",
             "proposed_annotations",
             "deduplicated_annotations",
-            "documentation/capture_documentation",
         ],
     ) -> pd.DataFrame:
         return self.snapshots.frame(self.resolved.manifest, stage)
@@ -84,15 +84,12 @@ class ReleaseExecution:
             raise HumanReviewError("stale", "Release mapping differs from the authorized configuration")
         attempts = inputs.attempts()
         candidates = model_records(inputs.resolved.reviewed, CandidateRecord)
-        labeling = LabelingEvidenceInputs(
-            run,
-            settings.collection,
+        verify_live_support(
+            attempts,
             settings.grounding.verifier_config(),
-            SourceDocumentsTable.validate(inputs.frame("documentation/capture_documentation")),
+            selected=frozenset(candidate.candidate_id for candidate in candidates),
         )
-        sources = labeling.verify(
-            attempts, selected=frozenset(candidate.candidate_id for candidate in candidates)
-        ).sources
+        sources = CandidateEvidence.from_frame(attempts, run, settings.collection)
         captures: dict[str, ReleaseSource] = {}
         for candidate in candidates:
             source = sources.resolve(candidate)

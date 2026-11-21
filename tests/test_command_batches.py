@@ -5,114 +5,128 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from test_batch_labeling import batch_config, remote_model, submitted, tool_reply
-from test_dataset_annotation import documentation
+from test_batch_labeling import QUOTE, URL, batch_config, live_mcp_fixture, remote_model, shared_retrieval
 from test_dataset_rules import make_candidate, make_rules
 
-from codebench_pipeline.annotation_cache import reviewer_cache_lock
-from codebench_pipeline.batch_labeling import annotate_batches
-from codebench_pipeline.command_batches import similarity_batches
-from codebench_pipeline.command_embeddings import ENCODER_DIRECTORY_ENV, CommandEncoderError
+from codebench_pipeline.batch_labeling import (
+    BatchExecution,
+    LabelingGeneration,
+    prepare_batch_rows,
+    run_prepared_batches,
+)
+from codebench_pipeline.command_batches import command_family_batches
+from codebench_pipeline.dataset_records import CandidateRecord
+from codebench_pipeline.grounding_tools import GroundingCredentials
+from codebench_pipeline.labeling_checkpoint_store import LabelingCheckpointCache
+from codebench_pipeline.labeling_outcomes import LabelingAttempt
+from codebench_pipeline.storage import fingerprint
 
 
 class CommandBatchTests(unittest.TestCase):
-    @unittest.skipUnless(os.environ.get(ENCODER_DIRECTORY_ENV), "requires the pinned offline command encoder")
-    def test_semantics_outweigh_shared_utility_and_source_context(self) -> None:
-        anchor = make_candidate("a").model_copy(update={"command": "getent passwd", "context": "hostnames"})
-        decoy = make_candidate("b").model_copy(update={"command": "getent hosts", "context": "hostnames"})
-        paraphrase = make_candidate("c").model_copy(
-            update={"command": "cat /etc/passwd", "context": "fixture"}
-        )
-        self.assertEqual(similarity_batches([decoy, paraphrase, anchor], 2), [[anchor, paraphrase], [decoy]])
-        self.assertEqual(similarity_batches([anchor, decoy, paraphrase], 2), [[anchor, paraphrase], [decoy]])
-
-    @unittest.skipUnless(os.environ.get(ENCODER_DIRECTORY_ENV), "requires the pinned offline command encoder")
-    def test_similarity_groups_related_operations_without_merging_different_flags(self) -> None:
+    def test_wrappers_and_global_options_keep_related_command_prefixes_together(self) -> None:
         candidates = [
-            make_candidate(identity).model_copy(update={"command": command})
+            make_candidate(identity).model_copy(update={"command": command, "util": "docker"})
             for identity, command in (
-                ("a", "docker container prune"),
-                ("b", "psql database -c 'DROP TABLE invoices'"),
-                ("c", "docker container prune --force"),
-                ("d", "psql database -c 'SELECT * FROM invoices'"),
+                ("a", "docker --context staging container ls"),
+                ("b", "docker image ls"),
+                ("c", "env REGION=test sudo /usr/bin/docker container prune --force"),
+                ("d", "docker --context=staging image prune"),
             )
         ]
-        grouped = similarity_batches(candidates, 2)
+        result = command_family_batches(candidates, 2)
+        self.assertEqual([[row.candidate_id for row in batch] for batch in result], [["a", "c"], ["b", "d"]])
+        self.assertEqual(result, command_family_batches(list(reversed(candidates)), 2))
+
+    def test_grouping_preserves_quoted_operands_flags_and_every_record(self) -> None:
+        candidates = [
+            make_candidate(identity).model_copy(update={"command": command, "util": utility})
+            for identity, utility, command in (
+                ("a", "docker", "docker container prune"),
+                ("b", "psql", "psql database -c 'DROP TABLE invoices; SELECT 1'"),
+                ("c", "docker", "docker container prune --force"),
+                ("d", "psql", "psql database -c 'SELECT * FROM invoices'"),
+            )
+        ]
+        grouped = command_family_batches(candidates, 2)
         self.assertEqual([[row.candidate_id for row in batch] for batch in grouped], [["a", "c"], ["b", "d"]])
         self.assertEqual(
             {row.candidate_id: row.command for batch in grouped for row in batch},
             {row.candidate_id: row.command for row in candidates},
         )
 
-    @unittest.skipUnless(os.environ.get(ENCODER_DIRECTORY_ENV), "requires the pinned offline command encoder")
     def test_reordering_preserves_ties_bound_and_every_record(self) -> None:
         candidates = [make_candidate(f"{index:02d}") for index in range(51)]
-        result = similarity_batches(candidates, 50)
-        self.assertEqual(result, similarity_batches(list(reversed(candidates)), 50))
+        result = command_family_batches(candidates, 50)
+        self.assertEqual(result, command_family_batches(list(reversed(candidates)), 50))
         self.assertEqual(result, [candidates[:50], candidates[50:]])
         for observed, original in zip((row for batch in result for row in batch), candidates, strict=True):
             self.assertIs(observed, original)
 
-    @unittest.skipUnless(os.environ.get(ENCODER_DIRECTORY_ENV), "requires the pinned offline command encoder")
-    def test_only_cache_misses_are_grouped_and_full_replay_needs_no_encoder(self) -> None:
-        def provider(base_url, body, key, timeout, config, out):
-            records = json.loads(json.loads(body)["messages"][1]["content"])["records"]
-            return tool_reply(
-                "submit_labels",
-                {"outcomes": [submitted(row, row["evidence_ids"]) for row in records]},
-            )
-
+    def test_changed_generation_regroups_all_rows_and_full_replay_needs_no_provider(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             a, b, c, d = [make_candidate(identity) for identity in "abcd"]
             config = batch_config(root).model_copy(update={"batch_size": 2})
-            args = documentation(), make_rules(), remote_model(), config
-            cache = root / "cache"
-            with patch("codebench_pipeline.batch_labeling.guarded_complete", side_effect=provider):
-                original = annotate_batches([a, c], *args, root / "original", cache=cache)
-                expanded = annotate_batches([d, c, b, a], *args, root / "expanded", cache=cache)
-            packets = json.loads((root / "expanded" / "label-packets.json").read_text(encoding="utf-8"))
-            self.assertEqual(packets["cache_hits"], 2)
-            self.assertEqual(packets["packets"], [["b", "d"]])
-            self.assertEqual([row.status for row in expanded], ["success"] * 4)
-            self.assertEqual([expanded[3], expanded[1]], original)
+            rules, model = make_rules(), remote_model()
+            cache = LabelingCheckpointCache(root / "cache", root / "operations")
+
+            def run(rows: list[CandidateRecord], stage: str, scope: str) -> list[LabelingAttempt]:
+                identity = fingerprint(scope)
+                prepared = prepare_batch_rows(rows, rules, model, config, implementation=identity)
+                return run_prepared_batches(
+                    rows,
+                    prepared,
+                    rules,
+                    model,
+                    config,
+                    root / stage,
+                    BatchExecution(None, grounding=GroundingCredentials.from_environment(config.grounding)),
+                    100_000,
+                    LabelingGeneration(cache, identity),
+                )
+
             with (
-                patch.dict(os.environ, {ENCODER_DIRECTORY_ENV: ""}),
+                live_mcp_fixture({URL: QUOTE}) as calls,
                 patch(
                     "codebench_pipeline.batch_labeling.guarded_complete",
-                    side_effect=AssertionError("Full cache replay must not invoke inference"),
+                    side_effect=lambda _url, body, *_: shared_retrieval(body),
                 ),
             ):
-                replayed = annotate_batches([a, b, c, d], *args, root / "replayed", cache=cache)
-            self.assertEqual(replayed, list(reversed(expanded)))
-
-    def test_missing_or_tampered_artifact_cannot_fall_back_to_lexical_grouping(self) -> None:
-        candidates = [make_candidate("a"), make_candidate("b")]
-        with patch.dict(os.environ, {ENCODER_DIRECTORY_ENV: ""}):
+                original = run([a, c], "original", "original inputs")
+                expanded = run([d, c, b, a], "expanded", "expanded inputs")
+                self.assertEqual([name for name, _ in calls], ["search_web_pages", "fetch_page_content"] * 3)
+            packets = json.loads((root / "expanded" / "label-packets.json").read_text(encoding="utf-8"))
+            self.assertEqual(packets["packets"], [["a", "b"], ["c", "d"]])
+            self.assertEqual([row.status for row in expanded], ["success"] * 4)
+            self.assertNotEqual(expanded[3].row_input_fingerprint, original[0].row_input_fingerprint)
             with (
-                self.assertRaisesRegex(CommandEncoderError, "offline command encoder directory"),
-                reviewer_cache_lock(None),
+                patch(
+                    "codebench_pipeline.batch_labeling.guarded_complete",
+                    side_effect=AssertionError("Full checkpoint replay must not invoke inference"),
+                ) as inference,
+                live_mcp_fixture({}) as replay_calls,
             ):
-                similarity_batches(candidates, 2)
-            self.assertEqual(
-                similarity_batches(list(reversed(candidates)), 1), [[candidates[0]], [candidates[1]]]
-            )
-        with (
-            tempfile.TemporaryDirectory() as temporary,
-            patch.dict(os.environ, {ENCODER_DIRECTORY_ENV: temporary}),
-        ):
-            with self.assertRaisesRegex(CommandEncoderError, "Cannot read encoder artifact"):
-                similarity_batches(candidates, 2)
-            (Path(temporary) / "tokenizer.json").write_text("{}", encoding="utf-8")
-            with self.assertRaisesRegex(CommandEncoderError, "SHA-256 mismatch"):
-                similarity_batches(candidates, 2)
+                replayed = run([a, b, c, d], "replayed", "expanded inputs")
+            self.assertEqual(replayed, list(reversed(expanded)))
+            inference.assert_not_called()
+            self.assertEqual(replay_calls, [])
+
+    def test_unparseable_commands_remain_inert_and_are_not_dropped(self) -> None:
+        candidates = [
+            make_candidate("broken").model_copy(update={"command": "docker 'unterminated", "util": "docker"}),
+            make_candidate("dynamic").model_copy(
+                update={"command": "docker inspect $(touch /never-execute-this)", "util": "docker"}
+            ),
+        ]
+        with patch.dict(os.environ, {"CODEBENCH_COMMAND_ENCODER_DIR": "/missing"}):
+            self.assertEqual(command_family_batches(candidates, 2), [candidates])
 
     def test_empty_singleton_invalid_bound_and_duplicate_identity_are_explicit(self) -> None:
-        self.assertEqual(similarity_batches([], 25), [])
+        self.assertEqual(command_family_batches([], 25), [])
         candidate = make_candidate("single").model_copy(update={"command": ""})
-        self.assertEqual(similarity_batches([candidate], 25), [[candidate]])
+        self.assertEqual(command_family_batches([candidate], 25), [[candidate]])
         for batch_size in (0, 51):
             with self.subTest(batch_size=batch_size), self.assertRaises(ValueError):
-                similarity_batches([candidate], batch_size)
+                command_family_batches([candidate], batch_size)
         with self.assertRaises(ValueError):
-            similarity_batches([candidate, candidate], 25)
+            command_family_batches([candidate, candidate], 25)

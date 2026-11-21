@@ -151,6 +151,7 @@ class DatasetAnnotationTests(unittest.TestCase):
                         mode="json",
                         exclude={
                             "policy": True,
+                            "version": True,
                             "base_prompt": True,
                             "examples": True,
                             "risks": {"__all__": {"command_patterns", "shell_routes"}},

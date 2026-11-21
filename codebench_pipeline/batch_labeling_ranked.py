@@ -8,9 +8,9 @@ from typing import Final
 
 from pydantic import JsonValue, TypeAdapter
 
-from codebench_pipeline.batch_labeling import BatchExecution, EvidenceAdmission, annotate_batches_bound
+from codebench_pipeline.batch_labeling import BatchExecution, annotate_batches_bound
 from codebench_pipeline.batch_labeling_config import BatchLabelingConfig
-from codebench_pipeline.command_batches import similarity_batches
+from codebench_pipeline.command_batches import command_family_batches
 from codebench_pipeline.dataset_finalization import normalized_command
 from codebench_pipeline.dataset_records import CandidateRecord, index_records, routing
 from codebench_pipeline.labeling_outcomes import LabelingAttempt, failed_attempt, validate_attempts
@@ -32,11 +32,9 @@ class RankedLabeling:
     model: ModelConfig
     config: BatchLabelingConfig
     out: Path
-    cache: Path
     maximum_context_characters: int
-    admission: EvidenceAdmission
     workers: int = 1
-    execution: BatchExecution = BatchExecution(None, None)
+    execution: BatchExecution = BatchExecution(None)
 
     def _commit_packet_evidence(self, packet_path: Path) -> None:
         root = self.out.resolve()
@@ -77,14 +75,11 @@ class RankedLabeling:
         def run_packet(packet: list[CandidateRecord], path: Path) -> list[LabelingAttempt]:
             return annotate_batches_bound(
                 packet,
-                [],
                 self.rules,
                 self.model,
                 self.config,
                 path,
-                cache=self.cache,
                 maximum_context_characters=self.maximum_context_characters,
-                admission=self.admission,
                 execution=self.execution,
             )
 
@@ -179,11 +174,7 @@ class RankedLabeling:
                     for candidate in tier_rows
                     if any(len(credits[risk]) < SUBRISK_QUOTA for risk in routes[candidate.candidate_id])
                 ]
-                clustered = similarity_batches(
-                    schedulable,
-                    self.config.batch_size,
-                    encoder=self.execution.encoder,
-                )
+                clustered = command_family_batches(schedulable, self.config.batch_size)
                 clustered_ids = {candidate.candidate_id for group in clustered for candidate in group}
                 pending = deque(candidate for group in clustered for candidate in group)
                 pending.extend(

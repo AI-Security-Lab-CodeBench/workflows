@@ -10,6 +10,7 @@ from dagster import AssetKey, DagsterInvalidConfigError
 from keenable_mcp_fixture import keenable_mcp_fixture
 from pydantic import JsonValue, TypeAdapter, ValidationError
 
+from codebench_pipeline.business_config import LabelingExample
 from codebench_pipeline.collection_config import CollectionMergeConfig
 from codebench_pipeline.collection_stage_settings import COLLECTION_OPERATIONS, RepositoryCatalogSettings
 from codebench_pipeline.config_assets import (
@@ -27,7 +28,7 @@ from codebench_pipeline.dataset_dependencies import preparation_stages
 from codebench_pipeline.dataset_registry import DatasetRegistry
 from codebench_pipeline.declared_dataset_bundle import DeclaredDatasetBundle
 from codebench_pipeline.definitions import build_definitions
-from codebench_pipeline.labeling_stage_settings import ProposalRules
+from codebench_pipeline.labeling_stage_settings import LabelingRules, ProposalRules
 from codebench_pipeline.runtime_instance import dataset_instance
 from codebench_pipeline.stage_configuration import (
     CategoryEligibilityConfig,
@@ -40,6 +41,83 @@ from codebench_pipeline.storage import IntegrityError
 
 
 class RegisteredConfigMaterializationTests(TestCase):
+    def test_publication_changes_preserve_labeling_but_invalidate_review_authorization(self) -> None:
+        home = Path(self.enterContext(TemporaryDirectory()))
+        spec = declared_graph.fixture_spec(home)
+        changes = spec.model_copy(
+            update={
+                "rules": spec.rules.model_copy(update={"version": f"{spec.rules.version}-next"}),
+                "publication": spec.publication.model_copy(
+                    update={"limit_per_risk": spec.publication.limit_per_risk - 1}
+                ),
+            }
+        )
+
+        original = RegisteredConfig.from_spec(spec)
+        updated = RegisteredConfig.from_spec(changes)
+
+        self.assertEqual(updated.labeling_config(), original.labeling_config())
+        self.assertEqual(updated.review_queue_config().taxonomy, original.review_queue_config().taxonomy)
+        self.assertEqual(updated.review_queue_config().limit_per_risk, changes.publication.limit_per_risk)
+        self.assertNotEqual(updated.review_queue_config(), original.review_queue_config())
+        self.assertEqual(updated.release_config().taxonomy.version, changes.rules.version)
+        self.assertEqual(updated.release_config().limit_per_risk, changes.publication.limit_per_risk)
+        self.assertNotEqual(updated.release_config().digest, original.release_config().digest)
+
+    def test_demonstration_projection_ignores_capture_metadata_but_preserves_evidence(self) -> None:
+        home = Path(self.enterContext(TemporaryDirectory()))
+        rules = declared_graph.fixture_spec(home).rules
+        family, *_ = rules.examples
+        examples = TypeAdapter(list[LabelingExample])
+        example, *rest = examples.validate_json(family.examples_json)
+        first_doc, *other_docs = example.documentation
+
+        def project(first: LabelingExample) -> LabelingRules:
+            changed = family.model_copy(update={"examples_json": examples.dump_json([first, *rest]).decode()})
+            return LabelingRules.from_rules(rules.model_copy(update={"examples": [changed]}))
+
+        with_metadata_change = example.model_copy(
+            update={
+                "candidate": example.candidate.model_copy(update={"source_position": "fixture:999"}),
+                "documentation": [
+                    first_doc.model_copy(update={"retrieved_at": "2000-01-01T00:00:00Z"}),
+                    *other_docs,
+                ],
+            }
+        )
+        with_evidence_change = example.model_copy(
+            update={
+                "documentation": [first_doc.model_copy(update={"snippet": "New passage."}), *other_docs],
+            }
+        )
+
+        baseline = project(example)
+        self.assertEqual(project(with_metadata_change), baseline)
+        self.assertNotEqual(project(with_evidence_change), baseline)
+        self.assertEqual(baseline.examples[0].examples[0].candidate.command, example.candidate.command)
+        self.assertEqual(baseline.examples[0].examples[0].expected.class_, example.expected.class_)
+
+    def test_release_grounding_depends_on_trust_not_live_transport(self) -> None:
+        home = Path(self.enterContext(TemporaryDirectory()))
+        spec = declared_graph.fixture_spec(home)
+        registered = RegisteredConfig.from_spec(spec)
+        batch = spec.annotation.batch
+        assert batch is not None
+        original_release = registered.release_config()
+        for change, release_changed in (
+            ({"maximum_total_response_bytes": batch.grounding.maximum_total_response_bytes + 1}, False),
+            ({"trusted_url_prefixes": ["https://fixtures.example/reference"]}, True),
+        ):
+            with self.subTest(change=change):
+                grounding = batch.grounding.model_copy(update=change)
+                annotation = spec.annotation.model_copy(
+                    update={"batch": batch.model_copy(update={"grounding": grounding})}
+                )
+                updated = RegisteredConfig.from_spec(spec.model_copy(update={"annotation": annotation}))
+
+                self.assertNotEqual(updated.labeling_config(), registered.labeling_config())
+                self.assertEqual(updated.release_config() != original_release, release_changed)
+
     def test_named_build_uses_registered_directory_input_without_live_capture(self) -> None:
         for preapproved in (False, True):
             with self.subTest(preapproved=preapproved), TemporaryDirectory() as temporary:
@@ -137,9 +215,6 @@ class RegisteredConfigMaterializationTests(TestCase):
                 for child in value:
                     self.assert_no_local_paths(child, location)
             case str():
-                if location[-2:] == ("grounding", "pinned_library_ids"):
-                    self.assertRegex(value, r"^/[\w.-]+/[\w.-]+$")
-                    return
                 path = value.strip()
                 self.assertFalse(
                     path.lower().startswith("file:")
@@ -164,12 +239,16 @@ class RegisteredConfigMaterializationTests(TestCase):
         spec = self.enterContext(declared_graph.collection_fixture(declared_graph.fixture_spec(home, bundle)))
         batch = spec.annotation.batch
         assert batch is not None
-        provider_id = "/fixture/command-reference"
-        grounding = batch.grounding.model_copy(update={"pinned_library_ids": [provider_id]})
+        origin = "https://fixtures.example/reference"
+        grounding = batch.grounding.model_copy(update={"trusted_url_prefixes": [origin], "timeout": 12.5})
         spec = spec.model_copy(
             update={
                 "annotation": spec.annotation.model_copy(
-                    update={"batch": batch.model_copy(update={"grounding": grounding})}
+                    update={
+                        "batch": batch.model_copy(
+                            update={"grounding": grounding, "grounding_calls_per_command": 2.75}
+                        )
+                    }
                 ),
                 "filtering": FilteringConfig(maximum_command_characters=1),
                 "deduplication": DeduplicationPolicy(normalize_safe_whitespace=False),
@@ -270,11 +349,25 @@ class RegisteredConfigMaterializationTests(TestCase):
             self.assertEqual(registered.scopes.filtered_commands.filtered_commands, spec.filtering)
             self.assertEqual(registered.scopes.deduplicated_annotations.deduplication, spec.deduplication)
             self.assertEqual(registered.scopes.human_review_queue.human_review_queue, spec.publication)
+            labeling = GuardedLabelingConfig.model_validate_json(
+                artifact_root.joinpath(*mapping_key("labeling_attempts").path).read_bytes()
+            )
+            self.assertEqual(labeling.labeling_attempts.batch.grounding.trusted_url_prefixes, [origin])
+            self.assertEqual(labeling.labeling_attempts.batch.grounding.timeout, 12.5)
+            self.assertEqual(labeling.labeling_attempts.batch.grounding_calls_per_command, 2.75)
             self.assertEqual(
-                GuardedLabelingConfig.model_validate_json(
-                    artifact_root.joinpath(*mapping_key("labeling_attempts").path).read_bytes()
-                ).labeling_attempts.batch.grounding.pinned_library_ids,
-                [provider_id],
+                labeling.labeling_attempts.batch.bind_capacity(
+                    str(home / "capacity"), "/fixture/model"
+                ).grounding_calls_per_command,
+                2.75,
+            )
+            self.assertNotIn("collection", labeling.model_dump())
+            self.assertEqual(
+                registered.release_config().grounding.verifier_config().trusted_url_prefixes, [origin]
+            )
+            self.assertEqual(
+                registered.release_config().collection.documentation_crawl.receipt_config_digest,
+                registered.source_config("documentation").declaration_digest,
             )
             published = DatasetDataService(home, instance).read_current(dataset_id, "filtered_commands").value
             assert isinstance(published, pd.DataFrame)

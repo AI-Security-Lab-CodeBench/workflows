@@ -24,7 +24,6 @@ CACHE_INPUTS: dict[str, dict[str, str]] = {
     },
     "labeling_attempts": {
         "commands": "filtered_commands",
-        "documentation_capture": "documentation/capture_documentation",
     },
     "proposed_annotations": {"attempts": "labeling_attempts"},
     "labeling_failures": {"attempts": "labeling_attempts"},

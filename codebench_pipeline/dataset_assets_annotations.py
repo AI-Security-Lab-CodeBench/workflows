@@ -21,7 +21,6 @@ from codebench_pipeline.dataframe_schemas import (
     LabelingAttemptsTable,
     LabelingFailuresTable,
     ProposedAnnotationsTable,
-    SourceDocumentsTable,
 )
 from codebench_pipeline.dataset_asset_types import DATASET_PARTITIONS, TABLE_TYPES
 from codebench_pipeline.finalization_table_asset import (
@@ -33,7 +32,7 @@ from codebench_pipeline.finalization_table_asset import (
     projection_output,
 )
 from codebench_pipeline.finalization_table_io import retain_failed_finalization
-from codebench_pipeline.grounding_tables import GuardedLabeling, LabelingEvidenceInputs
+from codebench_pipeline.grounding_tables import GuardedLabeling, verify_live_support
 from codebench_pipeline.labeling_checkpoint_io import LABELING_ATTEMPTS, labeling_generation_identity
 from codebench_pipeline.labeling_checkpoint_store import LabelingCheckpointCache
 from codebench_pipeline.labeling_runtime import LabelingRuntime
@@ -60,11 +59,6 @@ def annotation_assets() -> list[AssetsDefinition]:
                 dagster_type=LABELING_INPUT,
                 input_manager_key=FINALIZATION_TABLE_IO,
             ),
-            "documentation_capture": AssetIn(
-                key=AssetKey(["datasets", "documentation", "capture_documentation"]),
-                dagster_type=TABLE_TYPES[SourceDocumentsTable],
-                input_manager_key=FINALIZATION_TABLE_IO,
-            ),
             "mapped_config": mapped_input(
                 "labeling_attempts", GuardedLabelingConfig, input_manager_key=FINALIZATION_TABLE_IO
             ),
@@ -73,7 +67,6 @@ def annotation_assets() -> list[AssetsDefinition]:
     def labeling_attempts(
         context: AssetExecutionContext,
         filtered_commands: LabelingInput,
-        documentation_capture: DataFrame[SourceDocumentsTable],
         mapped_config: GuardedLabelingConfig,
         dataset_io_manager: ResourceParam[DataFrameIOManager],
         labeling_runtime: ResourceParam[LabelingRuntime],
@@ -90,15 +83,8 @@ def annotation_assets() -> list[AssetsDefinition]:
         else:
             batch = settings.batch.bind_capacity()
             expected_model_path = None
-        evidence_inputs = LabelingEvidenceInputs(
-            dataset_io_manager.repository_run(context.partition_key, context.run_id),
-            mapped_config.collection,
-            settings.batch.grounding,
-            documentation_capture,
-        )
         labeling = GuardedLabeling(
             mapped_config,
-            evidence_inputs,
             batch,
             labeling_runtime.execution(settings.model.api_key_env, settings.batch.grounding),
         )
@@ -110,7 +96,7 @@ def annotation_assets() -> list[AssetsDefinition]:
             labeling.attempts_for_generation(commands, scratch, labeling_checkpoints, identity)
         )
         table.attrs = {**commands.attrs, **table.attrs}
-        evidence_inputs.verify(table)
+        verify_live_support(table, batch.grounding)
         metadata = TypeAdapter(dict[str, JsonValue])
         context.add_output_metadata(
             {

@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import re
 from collections.abc import Sequence
-from typing import Annotated, Self
+from hashlib import sha256
+from typing import Annotated, Literal, Self
 
-from pydantic import Field
+from pydantic import ConfigDict, Field, TypeAdapter
 
 from codebench_pipeline.category_rules import (
     CategoryRules,
@@ -18,7 +19,7 @@ from codebench_pipeline.category_rules import (
     Text,
 )
 from codebench_pipeline.collection_config import DeclaredCollection, KeenableSnippetDeclaration
-from codebench_pipeline.keenable_policy import KeenableSnippetSettings, KeenableSourceAccess
+from codebench_pipeline.keenable_policy import KeenableSourceAccess
 from codebench_pipeline.models import Digest
 from codebench_pipeline.repository_branch_config import RepositoryAcquisitionConfig
 from codebench_pipeline.repository_config import (
@@ -76,31 +77,123 @@ class LabelingRisk(RiskRoute):
         )
 
 
+class DemonstrationCommand(StrictModel):
+    command: Text
+    util: Text
+    context: str
+
+
+class DemonstrationPassage(StrictModel):
+    utility: Text
+    subcommands: tuple[str, ...]
+    url: Text
+    snippet: Text
+    version_limits: Text
+
+
+type DemonstrationConfidence = Literal["low", "medium", "high"]
+
+
+class DemonstrationJudgment(StrictModel):
+    model_config = ConfigDict(populate_by_name=True, serialize_by_alias=True)
+
+    decision: Literal["accept", "needs_review", "reject"]
+    risk_id: Text
+    severity: SeverityName
+    class_: ClassName = Field(alias="class")
+    description: Text
+    category_confidence: DemonstrationConfidence
+    risk_confidence: DemonstrationConfidence
+    severity_confidence: DemonstrationConfidence
+    class_confidence: DemonstrationConfidence
+    rationale: Text
+    documentation_urls: tuple[str, ...]
+
+
+class LabelingDemonstration(StrictModel):
+    candidate: DemonstrationCommand
+    documentation: tuple[DemonstrationPassage, ...]
+    expected: DemonstrationJudgment
+
+
+class LabelingExampleFamily(StrictModel):
+    risk_id: Text
+    operation_family: Text
+    examples: Annotated[tuple[LabelingDemonstration, ...], Field(min_length=1)]
+
+    @classmethod
+    def from_compiled(cls, family: CompiledExamples) -> Self:
+        from codebench_pipeline.business_config import LabelingExample
+
+        authored = TypeAdapter(tuple[LabelingExample, ...]).validate_json(family.examples_json)
+        return cls(
+            risk_id=family.risk_id,
+            operation_family=family.operation_family,
+            examples=tuple(
+                LabelingDemonstration(
+                    candidate=DemonstrationCommand(
+                        command=example.candidate.command,
+                        util=example.candidate.util,
+                        context=example.candidate.context,
+                    ),
+                    documentation=tuple(
+                        DemonstrationPassage(
+                            utility=doc.utility,
+                            subcommands=tuple(doc.subcommands),
+                            url=doc.url,
+                            snippet=doc.snippet,
+                            version_limits=doc.version_limits,
+                        )
+                        for doc in example.documentation
+                    ),
+                    expected=DemonstrationJudgment.model_validate(
+                        {
+                            "decision": example.expected.decision,
+                            "risk_id": example.expected.risk_id,
+                            "severity": example.expected.severity,
+                            "class": example.expected.class_,
+                            "description": example.expected.description,
+                            "category_confidence": example.expected.category_confidence,
+                            "risk_confidence": example.expected.risk_confidence,
+                            "severity_confidence": example.expected.severity_confidence,
+                            "class_confidence": example.expected.class_confidence,
+                            "rationale": example.expected.rationale,
+                            "documentation_urls": tuple(example.expected.documentation_urls),
+                        }
+                    ),
+                )
+                for example in authored
+            ),
+        )
+
+    @property
+    def examples_json(self) -> str:
+        return TypeAdapter(tuple[LabelingDemonstration, ...]).dump_json(self.examples, by_alias=True).decode()
+
+
 class LabelingRules(StrictModel):
     category_id: Annotated[str, Field(pattern=r"^CAT-[1-9]\d*$")]
     category_name: Text
-    version: Text
     risks: Annotated[tuple[LabelingRisk, ...], Field(min_length=1)]
     classes: Annotated[tuple[ClassRule, ...], Field(min_length=1)]
     severities: Annotated[tuple[SeverityRule, ...], Field(min_length=1)]
     description_language: Text
     policy: Text
     base_prompt: str
-    examples: tuple[CompiledExamples, ...]
+    examples: tuple[LabelingExampleFamily, ...]
 
     @classmethod
     def from_rules(cls, rules: CategoryRules) -> Self:
         return cls(
             category_id=rules.category_id,
             category_name=rules.category_name,
-            version=rules.version,
             risks=tuple(LabelingRisk.from_rule(risk) for risk in rules.risks),
             classes=tuple(rules.classes),
             severities=tuple(rules.severities),
             description_language=rules.description_language,
             policy=rules.policy,
             base_prompt=rules.base_prompt,
-            examples=tuple(rules.examples),
+            examples=tuple(LabelingExampleFamily.from_compiled(family) for family in rules.examples),
         )
 
 
@@ -142,10 +235,14 @@ class RepositoryEvidenceSettings(StrictModel):
         )
 
 
+class KeenableSnippetEvidence(ConfigArtifact):
+    settings_sha256: Digest
+
+
 class LabelingSources(ConfigArtifact):
     existing_datasets: RepositoryEvidenceSettings
     documentation_crawl: RepositoryEvidenceSettings
-    keenable_use_cases: KeenableSourceAccess | KeenableSnippetSettings
+    keenable_use_cases: KeenableSourceAccess | KeenableSnippetEvidence
 
     @classmethod
     def from_collection(cls, collection: DeclaredCollection) -> Self:
@@ -159,7 +256,9 @@ class LabelingSources(ConfigArtifact):
                 collection.repository_config("documentation"), "documentation"
             ),
             keenable_use_cases=(
-                declaration.search
+                KeenableSnippetEvidence(
+                    settings_sha256=sha256(declaration.search.model_dump_json().encode()).hexdigest()
+                )
                 if isinstance(declaration, KeenableSnippetDeclaration)
                 else KeenableSourceAccess.project(declaration)
             ),

@@ -81,7 +81,7 @@ class DiscoveryMappingTests(TestCase):
                 resources={
                     "keenable_credential": KeenableDiscovery(SNIPPET_KEY),
                     "labeling_runtime": LabelingRuntime(
-                        home, None, {"DISCOVERY_KEY": "separate-key", "LABELER_KEY": "labeler-key"}.get
+                        home, {"DISCOVERY_KEY": "separate-key", "LABELER_KEY": "labeler-key"}.get
                     ),
                     "dataset_io_manager": DataFrameIOManager.from_environment(independent.storage),
                 }

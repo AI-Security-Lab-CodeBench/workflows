@@ -112,7 +112,6 @@ class _FinalizationStep:
     ) = None
     registered: RegisteredConfig | None = None
     mapped_config: ConfigArtifact | None = None
-    documentation: pd.DataFrame | None = None
     cache: TableCache | None = None
     reused: ReusedTable[pa.DataFrameModel] | None = None
     attempt: str | None = None
@@ -199,10 +198,7 @@ class FinalizationTableIO(IOManager):
             if not isinstance(value, pd.DataFrame):
                 raise IntegrityError("Finalization annotations input must be a table")
             if step.stage == "labeling_attempts":
-                if context.name == "documentation_capture":
-                    result = step.documentation = SourceDocumentsTable.validate(value)
-                else:
-                    result = step.loaded = LabelingInput(FilteredCommandsTable.validate(value))
+                result = step.loaded = LabelingInput(FilteredCommandsTable.validate(value))
             elif step.stage == "filtered_commands":
                 producer = input_materialization(context)
                 if (
@@ -338,12 +334,12 @@ class FinalizationTableIO(IOManager):
                 config = mapped
                 inputs = {f"{branch}_candidates": frame for branch, frame in loaded.frames.items()}
             case LabelingInput():
-                if not isinstance(mapped, GuardedLabelingConfig) or step.documentation is None:
+                if not isinstance(mapped, GuardedLabelingConfig):
                     return
                 if mapped != registered.labeling_config():
                     raise IntegrityError("Mapped labeling settings differ from the run configuration")
                 config = mapped
-                inputs = {"commands": loaded.commands, "documentation_capture": step.documentation}
+                inputs = {"commands": loaded.commands}
             case ProjectionInput():
                 if step.stage == "proposed_annotations":
                     if not isinstance(mapped, ProposalRules):

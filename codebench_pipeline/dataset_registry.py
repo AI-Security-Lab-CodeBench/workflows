@@ -5,6 +5,7 @@ from pathlib import Path
 from pydantic import AliasChoices, AliasPath, BaseModel, Field, JsonValue, TypeAdapter
 
 from codebench_pipeline.dataset_config import DatasetBuildSpec
+from codebench_pipeline.grounding_tools import GroundingConfig, LiveGroundingConfig
 from codebench_pipeline.human_review_store import HumanReviewStore
 from codebench_pipeline.inference_capacity import CapacityPaths
 from codebench_pipeline.models import Digest, Identifier
@@ -16,12 +17,26 @@ from codebench_pipeline.storage import IntegrityError, exclusive, fingerprint
 def _validated_spec(payload: bytes) -> tuple[DatasetBuildSpec, str | None]:
     json_object = TypeAdapter(dict[str, JsonValue])
     snapshot = json_object.validate_json(payload)
+    original_checksum = fingerprint(json_object.dump_json(snapshot).decode())
+    match snapshot.get("annotation"):
+        case {"batch": dict() as batch} if "maximum_grounding_rounds" in batch:
+            rounds = batch.pop("maximum_grounding_rounds")
+            if type(rounds) is not int or not 0 <= rounds <= 4:
+                raise IntegrityError("Invalid historical labeling grounding-round limit")
+            grounding = GroundingConfig.model_validate_json(
+                TypeAdapter(JsonValue).dump_json(batch["grounding"])
+            )
+            batch["grounding"] = grounding.model_dump(
+                mode="json", include=set(LiveGroundingConfig.model_fields)
+            )
+        case _:
+            pass
     if "refresh_external_inputs" in snapshot:
-        spec = DatasetBuildSpec.model_validate_json(payload)
-        return spec, fingerprint(spec.model_dump_json())
+        spec = DatasetBuildSpec.model_validate_json(json_object.dump_json(snapshot))
+        return spec, original_checksum
 
     historical_collection = "collection_v2" in snapshot
-    checksum = fingerprint(json_object.dump_json(snapshot).decode()) if historical_collection else None
+    checksum = original_checksum if historical_collection else None
     marker = snapshot.pop("bundle_version", None)
     if marker is not None and (type(marker) is not int or marker not in (1, 2)):
         raise IntegrityError("Invalid historical dataset specification format")

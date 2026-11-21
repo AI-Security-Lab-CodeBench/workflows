@@ -3,7 +3,14 @@ from tempfile import TemporaryDirectory
 from unittest import TestCase
 from unittest.mock import patch
 
-from guarded_labeling_fixture import CORPUS, DOCS, REVIEWED_SCOPE, UNRELATED_SCOPE, LabelingFixture
+from guarded_labeling_fixture import (
+    CORPUS,
+    DOCS,
+    REVIEWED_SCOPE,
+    UNRELATED_SCOPE,
+    LabelingFixture,
+    historical_support,
+)
 
 from codebench_pipeline.dataframe_schemas import model_records
 from codebench_pipeline.dataset_records import CandidateRecord
@@ -68,7 +75,7 @@ class EvidenceAdmissionTests(TestCase):
             self.assertEqual(item.snippet.url, candidate.source_url)
             guard.verify(candidate, item, item.snippet.snippet)
 
-    def test_shared_capture_supports_no_grant_guarded_labeling_and_replay_without_network(self) -> None:
+    def test_historical_shared_capture_support_revalidates_without_network(self) -> None:
         home = Path(self.enterContext(TemporaryDirectory()))
         documentation = DOCS + b"\n`kubectl get pods` lists pods in the selected namespace.\n"
         fixture = LabelingFixture(
@@ -78,6 +85,7 @@ class EvidenceAdmissionTests(TestCase):
             documentation_corpus=documentation,
         )
         filtered, labeling = fixture.labeling()
+        candidates = {row.command: row for row in model_records(filtered, CandidateRecord)}
         with (
             patch("codebench_pipeline.keenable.request_direct", side_effect=AssertionError("recrawl")),
             patch(
@@ -85,62 +93,49 @@ class EvidenceAdmissionTests(TestCase):
                 side_effect=AssertionError("provider call"),
             ),
         ):
-            first = labeling.attempts(filtered, home / "first")
-            labeling.evidence_inputs.verify(first)
-            fixture.inference.reset_mock()
-            replay = labeling.attempts(filtered, home / "replay")
-            labeling.evidence_inputs.verify(replay)
-            fixture.inference.assert_not_called()
-        rows = {row.command: row for row in model_records(first, LabelingAttempt)}
-        self.assertEqual(rows["terraform plan"].status, "success")
-        self.assertTrue(
-            any("previews proposed changes" in doc.snippet for doc in rows["terraform plan"].documentation)
-        )
-        self.assertEqual(rows["kubectl get pods"].status, "success")
-        self.assertTrue(
-            any(
-                "lists pods in the selected namespace" in doc.snippet
-                for doc in rows["kubectl get pods"].documentation
+            guard, items = historical_support(
+                labeling.evidence_inputs, filtered, candidates["kubectl get pods"]
             )
-        )
-        self.assertEqual(rows[SCOPE_COMMAND].failure_code, "operation_unsupported")
+            (item,) = items
+            self.assertIn("lists pods in the selected namespace", item.snippet.snippet)
+            guard.verify(candidates["kubectl get pods"], item, item.snippet.snippet)
+            self.assertEqual(guard.source(candidates[SCOPE_COMMAND])[1], [])
+        fixture.inference.assert_not_called()
         (orig,) = [
             path for path in home.glob("repository-v2/*/blobs/*") if path.read_bytes() == documentation
         ]
         orig.write_bytes(b"changed")
         with self.assertRaisesRegex(IntegrityError, "capture digest mismatch"):
-            labeling.evidence_inputs.verify(first)
+            labeling.evidence_inputs.admission(filtered).verify(
+                candidates["kubectl get pods"], item, item.snippet.snippet
+            )
 
     def test_unrelated_adjacent_prose_does_not_admit_scope_changing_flag(self) -> None:
         home = Path(self.enterContext(TemporaryDirectory()))
         fixture = LabelingFixture(self, home, corpus=UNRELATED_SCOPE)
         filtered, labeling = fixture.labeling()
-        rows = {
-            row.command: row
-            for row in model_records(labeling.attempts(filtered, home / "attempts"), LabelingAttempt)
-        }
+        rows = {row.command: row for row in model_records(filtered, CandidateRecord)}
         row = rows[SCOPE_COMMAND]
         self.assertIn("This section uses a demo cluster.", row.context)
-        self.assertEqual(row.failure_code, "operation_unsupported")
+        self.assertEqual(labeling.evidence_inputs.admission(filtered).source(row)[1], [])
         self.assertNotIn(row.candidate_id, fixture.remote_rows)
-        self.assertEqual(rows["terraform plan"].status, "success")
 
     def test_exact_scope_passage_must_still_have_its_persisted_admission_receipt(self) -> None:
         home = Path(self.enterContext(TemporaryDirectory()))
         fixture = LabelingFixture(self, home, corpus=REVIEWED_SCOPE)
         filtered, labeling = fixture.labeling()
-        result = labeling.attempts(filtered, home / "first")
-        row = next(row for row in model_records(result, LabelingAttempt) if row.command == SCOPE_COMMAND)
-        self.assertEqual(row.status, "success")
-        self.assertTrue(any("lists pods across all namespaces" in doc.snippet for doc in row.documentation))
-        labeling.evidence_inputs.verify(result)
+        row = next(row for row in model_records(filtered, CandidateRecord) if row.command == SCOPE_COMMAND)
+        guard, items = historical_support(labeling.evidence_inputs, filtered, row)
+        (item,) = items
+        self.assertIn("lists pods across all namespaces", item.snippet.snippet)
+        guard.verify(row, item, item.snippet.snippet)
 
         for receipt in home.glob("label-grounding-v2/*/shared-operations/*.json"):
             receipt.unlink()
         with self.assertRaises(FileNotFoundError):
-            labeling.evidence_inputs.verify(result)
+            guard.verify(row, item, item.snippet.snippet)
 
-    def test_page_permission_declaration_requires_migration_without_relabeling(self) -> None:
+    def test_legacy_source_permissions_do_not_block_live_grounding(self) -> None:
         home = Path(self.enterContext(TemporaryDirectory()))
         fixture = LabelingFixture(self, home, source_limited=False)
         filtered, labeling = fixture.labeling()
@@ -151,8 +146,8 @@ class EvidenceAdmissionTests(TestCase):
             result = labeling.attempts(filtered, home / "attempts")
         rows = model_records(result, LabelingAttempt)
         self.assertEqual(len(rows), 4)
-        self.assertEqual({row.failure_code for row in rows}, {"grounding_migration_required"})
-        fixture.inference.assert_not_called()
+        self.assertEqual({row.status for row in rows}, {"success"})
+        self.assertCountEqual(fixture.remote_rows, [row.candidate_id for row in rows])
 
     def test_actual_capacity_guard_never_posts_without_telemetry(self) -> None:
         home = Path(self.enterContext(TemporaryDirectory()))

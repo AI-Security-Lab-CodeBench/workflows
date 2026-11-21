@@ -3,7 +3,7 @@ from typing import Annotated, Literal
 from pydantic import Field, model_validator
 from pydantic_core import PydanticCustomError
 
-from codebench_pipeline.grounding_tools import GroundingConfig
+from codebench_pipeline.grounding_tools import LiveGroundingConfig
 from codebench_pipeline.inference_capacity import CapacityConfig
 from codebench_pipeline.storage import IntegrityError
 from codebench_pipeline.typed_config import TypedConfig
@@ -17,14 +17,14 @@ class BatchPromptConfig(TypedConfig):
     batch_size: int = Field(default=25, ge=1, le=50)
     reasoning_effort: str | None = Field(default=None, pattern=r"^(low|high|max)$")
     maximum_model_turns: int = Field(default=4, ge=2, le=8)
-    maximum_grounding_rounds: int = Field(default=2, ge=0, le=4)
+    grounding_calls_per_command: float = Field(default=1.5, ge=0, allow_inf_nan=False)
 
 
 class BatchLabelingConfig(BatchPromptConfig):
     retry_revision: str = Field(default="1", min_length=1)
     backend_revision: BackendRevision
     inference_mode: InferenceMode = Field(default="guarded", exclude_if=lambda mode: mode == "guarded")
-    grounding: GroundingConfig
+    grounding: LiveGroundingConfig
     capacity: CapacityConfig | None = Field(default=None, exclude_if=lambda capacity: capacity is None)
 
     @model_validator(mode="after")
@@ -42,7 +42,7 @@ class BatchLabelingConfig(BatchPromptConfig):
 class DeclaredBatchLabelingConfig(BatchPromptConfig):
     backend_revision: BackendRevision
     inference_mode: InferenceMode = "guarded"
-    grounding: GroundingConfig
+    grounding: LiveGroundingConfig
     capacity: CapacityConfig | None = None
 
     def registered(self) -> BatchLabelingConfig:
@@ -51,7 +51,7 @@ class DeclaredBatchLabelingConfig(BatchPromptConfig):
             batch_size=self.batch_size,
             reasoning_effort=self.reasoning_effort,
             maximum_model_turns=self.maximum_model_turns,
-            maximum_grounding_rounds=self.maximum_grounding_rounds,
+            grounding_calls_per_command=self.grounding_calls_per_command,
             backend_revision=self.backend_revision,
             inference_mode=self.inference_mode,
             grounding=self.grounding,

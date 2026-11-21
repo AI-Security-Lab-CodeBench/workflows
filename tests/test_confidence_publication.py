@@ -60,7 +60,7 @@ def mixed_confidence_reply(
     message = TypeAdapter(dict[str, JsonValue]).validate_python(choice["message"])
     (call,) = TypeAdapter(list[dict[str, JsonValue]]).validate_python(message["tool_calls"])
     function = TypeAdapter(dict[str, str]).validate_python(call["function"])
-    if function["name"] != "submit_labels":
+    if function["name"] != "finalize":
         return response
     submitted = SubmittedLabels.model_validate_json(function["arguments"])
     outcomes = [
@@ -390,7 +390,7 @@ class ConfidencePublicationTests(unittest.TestCase):
                 TypeAdapter(str).validate_python(row.values["candidate_id"]) for row in labeled.page.rows
             ]
             self.assertEqual(
-                {path for path in receipts if path.endswith("/receipt.json")},
+                {path for path in receipts if path.startswith("label/") and path.endswith("/receipt.json")},
                 {f"label/{sha256(identity.encode()).hexdigest()}/receipt.json" for identity in identities},
             )
             store = ObjectStore(spec.storage)
@@ -399,7 +399,6 @@ class ConfidencePublicationTests(unittest.TestCase):
                 if path.startswith("ranked-packets/") and path.endswith("/label-packets.json"):
                     key = "/".join(uri.rsplit("/", 2)[-2:])
                     packet = TypeAdapter(dict[str, JsonValue]).validate_json(store.read(key))
-                    self.assertEqual(packet["cache_hits"], 0)
                     for batch_ids in TypeAdapter(list[list[str]]).validate_python(packet["packets"]):
                         scheduled.extend(batch_ids)
             self.assertCountEqual(scheduled, identities)

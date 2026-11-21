@@ -1,22 +1,18 @@
 import tempfile
 import unittest
-from collections.abc import Sequence
 from dataclasses import replace
 from pathlib import Path
 from typing import Literal
 from unittest.mock import patch
 
-import numpy as np
 import pandas as pd
 from configuration_fixture import example_config, seed_prepared_snapshot
 from dagster import DagsterInstance, build_sensor_context
-from guarded_labeling_fixture import DOCS, LabelingFixture
+from guarded_labeling_fixture import DOCS, LIVE_URL, LabelingFixture
 from native_dataset_cycle import NativeDatasetCycle
-from numpy.typing import NDArray
 from test_declared_dataset_graph import fixture_spec
 from test_repository import RepositoryFixture, repository_branch_fixture, repository_config_fixture
 
-from codebench_pipeline.batch_labeling import BatchExecution
 from codebench_pipeline.collection_config import SourceDeclaration
 from codebench_pipeline.data_view_models import DatasetQueryRequest, DatasetViewError, TableResponse
 from codebench_pipeline.data_views import DatasetDataService
@@ -35,12 +31,16 @@ from codebench_pipeline.dataset_finalization import (
     available_candidates,
     merge_candidates,
 )
+from codebench_pipeline.dataset_records import CandidateRecord
 from codebench_pipeline.dataset_registry import DatasetRegistry
 from codebench_pipeline.definitions import build_definitions
-from codebench_pipeline.grounding_tables import GuardedLabeling, LabelingEvidenceInputs
+from codebench_pipeline.grounding_sources import CandidateEvidence
+from codebench_pipeline.grounding_tables import GuardedLabeling, verify_live_support
 from codebench_pipeline.human_review import DecisionChange, HumanReviewError
 from codebench_pipeline.human_review_store import HumanReviewStore
 from codebench_pipeline.labeling_outcomes import LabelingAttempt
+from codebench_pipeline.labeling_runtime import LabelingRuntime
+from codebench_pipeline.labeling_stage_settings import LabelingSources
 from codebench_pipeline.object_store import ObjectStore
 from codebench_pipeline.release_runner import ReleaseRunner
 from codebench_pipeline.repository_branch_config import RepositoryBranchDeclaration
@@ -56,20 +56,10 @@ from codebench_pipeline.stage_configuration import DeclaredGlobalConfig, Guarded
 from codebench_pipeline.storage import IntegrityError
 
 
-def fixture_vectors(commands: Sequence[str], directory: Path | None = None) -> NDArray[np.float32]:
-    return np.ones((len(commands), 1), dtype=np.float32)
-
-
 class IndependentBranchDatasetTests(unittest.TestCase):
     def setUp(self) -> None:
         self.home = Path(self.enterContext(tempfile.TemporaryDirectory()))
         self.registry = DatasetRegistry(self.home)
-        self.enterContext(
-            patch(
-                "codebench_pipeline.labeling_runtime.encode_from_directory",
-                side_effect=fixture_vectors,
-            )
-        )
 
     def refresh(self, cycle: NativeDatasetCycle, instance: DagsterInstance, dataset_id: str) -> None:
         instance.add_dynamic_partitions("dataset_builds", [dataset_id])
@@ -233,7 +223,7 @@ class IndependentBranchDatasetTests(unittest.TestCase):
                 {identity.split(":")[0] for identity in merged["candidate_id"]}, {"dataset", "keenable"}
             )
 
-    def test_labeling_requires_the_matching_documentation_scope_receipt(self) -> None:
+    def test_labeling_without_documentation_capture_keeps_candidate_provenance(self) -> None:
         fixture = LabelingFixture(self, self.home, documentation_corpus=b"# Docker\n\nNo command examples.\n")
         spec = fixture.spec
         mapped = GuardedLabelingConfig.from_spec(spec)
@@ -241,20 +231,36 @@ class IndependentBranchDatasetTests(unittest.TestCase):
         paths = require_declared_annotation(spec.annotation).require_capacity()
         batch = settings.bind_capacity(paths.state_directory, paths.expected_model_path)
         run = RepositoryRun(self.home, spec.dataset_id, "synthetic-filter")
-        commands, capture = fixture.collect()
-        inputs = LabelingEvidenceInputs(run, mapped.collection, settings.grounding, capture)
-        unbound_capture = capture.copy()
-        del unbound_capture.attrs["documentation_scope_receipt_json"]
-        with self.assertRaisesRegex(IntegrityError, "Documentation capture lacks its scope receipt"):
-            replace(inputs, documentation_capture=unbound_capture).admission(commands)
-        labeling = GuardedLabeling(mapped, inputs, batch, BatchExecution(None, fixture_vectors))
+        commands = fixture.filtered()
+        execution = LabelingRuntime.for_home(self.home).execution(
+            mapped.labeling_attempts.model.api_key_env, settings.grounding
+        )
+        labeling = GuardedLabeling(mapped, batch, execution)
         attempts = labeling.attempts(commands, self.home / "attempts")
-        verified = inputs.verify(attempts)
-        self.assertEqual(set(verified.sources.repositories), {"dataset", "documentation"})
+        verify_live_support(attempts, settings.grounding)
+        labels = model_records(attempts, LabelingAttempt)
         self.assertEqual(
-            {row.command: row.status for row in model_records(attempts, LabelingAttempt)},
+            {row.command: row.status for row in labels},
             {"kubectl get pods": "success", "docker compose ps": "success", "terraform plan": "success"},
         )
+        self.assertEqual({doc.url for row in labels for doc in row.documentation}, {LIVE_URL})
+        self.assertEqual(
+            {request["url"] for name, request in fixture.live_calls if name == "fetch_page_content"},
+            {LIVE_URL},
+        )
+        collection = spec.declared_collection
+        assert collection is not None
+        provenance = CandidateEvidence.from_frame(attempts, run, LabelingSources.from_collection(collection))
+        self.assertEqual(set(provenance.repositories), {"dataset", "documentation"})
+        originals = {row.candidate_id: row for row in model_records(commands, CandidateRecord)}
+        for row in labels:
+            original = originals[row.candidate_id]
+            capture = provenance.resolve(original)
+            self.assertEqual(
+                (row.source_id, row.source_url, row.source_position),
+                (original.source_id, capture.url, original.source_position),
+            )
+            self.assertNotEqual(capture.url, LIVE_URL)
 
     def test_configured_waiting_branch_cannot_authorize_shared_processing(self) -> None:
         fixture = LabelingFixture(self, self.home, native=True)

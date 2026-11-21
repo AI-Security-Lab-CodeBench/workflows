@@ -49,7 +49,31 @@ def _url(value: str) -> str:
     return urlunsplit(("https", parts.hostname.lower(), parts.path or "/", parts.query, ""))
 
 
-class GroundingConfig(TypedConfig):
+class GroundingOrigins(TypedConfig):
+    allowed_domains: list[str] = Field(default_factory=list)
+    trusted_url_prefixes: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def explicit_trust(self) -> GroundingOrigins:
+        if not self.allowed_domains and not self.trusted_url_prefixes:
+            raise ValueError("Configure explicit trusted domains or URL prefixes")
+        for domain in self.allowed_domains:
+            if _url("https://" + domain) != "https://" + domain.lower() + "/":
+                raise ValueError("Allowed domains must be host names")
+        for prefix in self.trusted_url_prefixes:
+            if urlsplit(_url(prefix)).query or urlsplit(prefix).fragment:
+                raise ValueError("Trusted prefixes cannot contain queries or fragments")
+        return self
+
+
+class LiveGroundingConfig(GroundingOrigins):
+    keenable_api_key_env: str = Field(default="KEENABLE_API_KEY", min_length=1)
+    maximum_response_bytes: int = Field(default=262_144, ge=1)
+    maximum_total_response_bytes: int = Field(default=2_097_152, ge=1)
+    timeout: float = Field(default=30, gt=0, allow_inf_nan=False)
+
+
+class GroundingConfig(GroundingOrigins):
     keenable_api_key_env: str = Field(default="KEENABLE_API_KEY", min_length=1)
     context7_api_key_env: str = Field(default="CONTEXT7_API_KEY", min_length=1)
     maximum_response_bytes: int = Field(default=262_144, ge=1)
@@ -58,8 +82,6 @@ class GroundingConfig(TypedConfig):
     timeout: float = Field(default=30, gt=0, allow_inf_nan=False)
     maximum_provider_calls: int = Field(default=8, ge=0)
     revision: str = Field(default="1", min_length=1)
-    allowed_domains: list[str] = Field(default_factory=list)
-    trusted_url_prefixes: list[str] = Field(default_factory=list)
     pinned_library_ids: list[str] = Field(default_factory=list)
     operation_grants_json: str = Field(default="", exclude_if=lambda grants: not grants)
 
@@ -74,15 +96,7 @@ class GroundingConfig(TypedConfig):
         return TypeAdapter(tuple[OperationGrant, ...]).validate_json(self.operation_grants_json)
 
     @model_validator(mode="after")
-    def explicit_trust(self) -> GroundingConfig:
-        if not self.allowed_domains and not self.trusted_url_prefixes:
-            raise ValueError("Configure explicit trusted domains or URL prefixes")
-        for domain in self.allowed_domains:
-            if _url("https://" + domain) != "https://" + domain.lower() + "/":
-                raise ValueError("Allowed domains must be host names")
-        for prefix in self.trusted_url_prefixes:
-            if urlsplit(_url(prefix)).query or urlsplit(prefix).fragment:
-                raise ValueError("Trusted prefixes cannot contain queries or fragments")
+    def valid_grants(self) -> GroundingConfig:
         for grant in self.operation_grants:
             if grant.library_id is not None and grant.library_id not in self.pinned_library_ids:
                 raise ValueError("An operation grant must name a pinned Context7 library")
@@ -99,11 +113,14 @@ class GroundingCredentials:
     context7: str | None = field(default=None, repr=False)
 
     @classmethod
-    def bind(cls, config: GroundingConfig, lookup: Callable[[str], str | None]) -> GroundingCredentials:
-        return cls(lookup(config.keenable_api_key_env), lookup(config.context7_api_key_env))
+    def bind(
+        cls, config: GroundingConfig | LiveGroundingConfig, lookup: Callable[[str], str | None]
+    ) -> GroundingCredentials:
+        context7 = lookup(config.context7_api_key_env) if isinstance(config, GroundingConfig) else None
+        return cls(lookup(config.keenable_api_key_env), context7)
 
     @classmethod
-    def from_environment(cls, config: GroundingConfig) -> GroundingCredentials:
+    def from_environment(cls, config: GroundingConfig | LiveGroundingConfig) -> GroundingCredentials:
         return cls.bind(config, os.environ.get)
 
     def contains(self, text: str) -> bool:

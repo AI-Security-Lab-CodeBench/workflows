@@ -181,12 +181,13 @@ existing data before replacing it; never overwrite concurrent work.
   crawl and Keenable use-case branches own acquisition. The config declares
   corpus scopes, pins, parser trust, and search budgets; the assets persist
   enumerations, verified origin bytes, rights decisions and exclusion receipts.
-  Only the Keenable catalog may search for new origins. Never execute downloaded
+  Collection discovery belongs to the Keenable branch. Labeling independently
+  queries and fetches documentation through Keenable MCP. Never execute downloaded
   code or commands. Only explicitly reviewed, hash-pinned configuration-owned
   ETL modules may run. The declared Keenable branch acquires each authorized
-  source once; guarded labeling verifies applicable passages against the same
-  captures. It must not independently crawl Keenable or require per-operation
-  grants for a current source-scoped declaration.
+  source once. Labeling must not depend on crawled documentation or use collection
+  captures for grounding; preserve candidate provenance separately from fetched
+  labeling evidence.
   Schedule eligible rows by source trust: documentation above datasets above
   Keenable. Stop inference for a subrisk at 250 distinct eligible, all-high
   labels or when applicable input is exhausted. Report deferrals and deficits.
@@ -214,8 +215,11 @@ existing data before replacing it; never overwrite concurrent work.
   `command_candidates`. Preserve raw extraction and transformation/exclusion evidence.
 - Converge authorized, current branch candidates at `merged_command_candidates`
   before shared `filtered_commands` and `labeling_attempts`.
-  Enhanced labeling groups pending commands by vector similarity into bounded
-  multi-turn batches with Keenable/Context7 grounding. Preserve independent row
+  Enhanced labeling groups pending commands by parsed command prefixes without
+  embeddings. Each batch uses a LangGraph ReAct loop with `query`, `page_fetch`,
+  and `finalize`; query and fetch use Keenable MCP and share a total call budget
+  of floor(actual batch size * configured grounding_calls_per_command), default 1.5.
+  Only fetched documentation can support labels. Preserve independent row
   judgments and completed-batch checkpoints. Project successful outcomes to `proposed_annotations`
   and unsupported/invalid outcomes to `labeling_failures`, then apply conservative
   exact deduplication only to the supported annotations.

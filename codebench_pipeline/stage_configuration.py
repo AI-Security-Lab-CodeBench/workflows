@@ -31,7 +31,7 @@ from codebench_pipeline.dataset_config import (
     require_declared_annotation,
 )
 from codebench_pipeline.discovery_config import DiscoveryInference
-from codebench_pipeline.grounding_tools import GroundingConfig
+from codebench_pipeline.grounding_tools import LiveGroundingConfig
 from codebench_pipeline.inference_capacity import ScopedCapacityConfig
 from codebench_pipeline.labeling_stage_settings import (
     LabelingRules,
@@ -82,7 +82,7 @@ class DeduplicationConfig(ConfigArtifact):
 class ScopedBatchConfig(BatchPromptConfig, ConfigArtifact):
     backend_revision: BackendRevision
     inference_mode: InferenceMode = Field(default="guarded", exclude_if=lambda mode: mode == "guarded")
-    grounding: GroundingConfig
+    grounding: LiveGroundingConfig
     capacity: ScopedCapacityConfig | None = Field(default=None, exclude_if=lambda capacity: capacity is None)
 
     def bind_capacity(
@@ -116,7 +116,7 @@ def labeling_settings(config: AnnotationConfig) -> ScopedAnnotationConfig:
             batch_size=batch.batch_size,
             reasoning_effort=batch.reasoning_effort,
             maximum_model_turns=batch.maximum_model_turns,
-            maximum_grounding_rounds=batch.maximum_grounding_rounds,
+            grounding_calls_per_command=batch.grounding_calls_per_command,
             backend_revision=batch.backend_revision,
             inference_mode=batch.inference_mode,
             grounding=batch.grounding,
@@ -143,19 +143,17 @@ class GuardedLabelingSettings(ConfigArtifact):
 class GuardedLabelingConfig(ConfigArtifact):
     labeling_attempts: ScopedAnnotationConfig
     rules: LabelingRules
-    collection: LabelingSources
 
     @classmethod
-    def project(cls, settings: GuardedLabelingSettings, rules: CategoryRules) -> "GuardedLabelingConfig":
+    def project(cls, settings: ScopedAnnotationConfig, rules: CategoryRules) -> "GuardedLabelingConfig":
         return cls(
             rules=LabelingRules.from_rules(rules),
-            labeling_attempts=settings.labeling_attempts,
-            collection=LabelingSources.from_collection(settings.collection),
+            labeling_attempts=settings,
         )
 
     @classmethod
     def from_spec(cls, spec: DatasetBuildSpec) -> "GuardedLabelingConfig":
-        return cls.project(GuardedLabelingSettings.from_spec(spec), spec.rules)
+        return cls.project(labeling_settings(spec.annotation), spec.rules)
 
 
 class ReviewQueueSettings(ConfigArtifact):
@@ -206,7 +204,7 @@ class DeclaredGlobalConfig(ConfigArtifact):
         return FilterConfig.project(self, self.rules)
 
     def labeling_config(self) -> GuardedLabelingConfig:
-        return GuardedLabelingConfig.project(self.scopes.labeling_attempts, self.rules)
+        return GuardedLabelingConfig.project(self.scopes.labeling_attempts.labeling_attempts, self.rules)
 
     def proposal_config(self) -> ProposalRules:
         return ProposalRules.from_rules(self.rules)

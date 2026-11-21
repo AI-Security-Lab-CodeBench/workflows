@@ -99,14 +99,14 @@ class TableReviewSourceTests(unittest.TestCase):
 
     def test_review_queue_projection_ignores_prompt_but_versions_routing_and_review_columns(self) -> None:
         rules = example_config().rules
-        baseline = ReviewQueueConfig.from_rules(rules, ("command", "severity"), 4)
+        baseline = ReviewQueueConfig.from_rules(rules, ("command", "severity"), 250)
         prompt = rules.model_copy(update={"policy": "Modified model instructions."})
         risk = rules.risks[0].model_copy(update={"command_patterns": ["^git status --short$"]})
         routing = rules.model_copy(update={"risks": [risk]})
 
-        self.assertEqual(ReviewQueueConfig.from_rules(prompt, baseline.review_columns, 4), baseline)
-        self.assertNotEqual(ReviewQueueConfig.from_rules(routing, baseline.review_columns, 4), baseline)
-        self.assertNotEqual(ReviewQueueConfig.from_rules(rules, ("command", "class"), 4), baseline)
+        self.assertEqual(ReviewQueueConfig.from_rules(prompt, baseline.review_columns, 250), baseline)
+        self.assertNotEqual(ReviewQueueConfig.from_rules(routing, baseline.review_columns, 250), baseline)
+        self.assertNotEqual(ReviewQueueConfig.from_rules(rules, ("command", "class"), 250), baseline)
         self.assertNotEqual(ReviewQueueConfig.from_rules(rules, baseline.review_columns, 1), baseline)
         with self.assertRaises(ConfigValidationError) as rejected:
             ReviewQueueConfig.model_validate_json(

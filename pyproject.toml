@@ -20,8 +20,6 @@ dependencies = [
   "jsonschema>=4.26,<5",
   "langgraph>=1.0,<2",
   "numpy>=2.2,<3",
-  "onnxruntime==1.24.4",
-  "tokenizers==0.22.2",
 ]
 
 [dependency-groups]

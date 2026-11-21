@@ -44,12 +44,10 @@ def labeling_attempts_table(
     if config.batch is not None:
         attempts = annotate_batches(
             candidates,
-            docs,
             rules,
             config.model,
             config.batch,
             evidence,
-            cache=cache,
             maximum_context_characters=config.max_request_bytes,
         )
     else:

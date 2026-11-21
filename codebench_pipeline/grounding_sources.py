@@ -16,11 +16,11 @@ from codebench_pipeline.grounding_policy import (
     version_constraints,
 )
 from codebench_pipeline.keenable import KeenableCollection
-from codebench_pipeline.keenable_policy import KeenableSnippetSettings
 from codebench_pipeline.keenable_receipts import CandidateReceipt, CaptureLock
 from codebench_pipeline.keenable_snippets import SnippetCollectionReceipt
 from codebench_pipeline.keenable_tables import CANDIDATE_RECEIPTS, provider_source_id
 from codebench_pipeline.labeling_stage_settings import (
+    KeenableSnippetEvidence,
     LabelingSources,
     RepositoryEvidenceOrigin,
     RepositoryEvidenceSettings,
@@ -199,11 +199,11 @@ class CandidateEvidence:
             rows = REPOSITORY_CANDIDATES.validate_python(receipt.observations["candidates"])
             repositories[branch] = RepositoryBranchEvidence(config, receipt, rows)
         access = collection.keenable_use_cases
-        if isinstance(access, KeenableSnippetSettings):
+        if isinstance(access, KeenableSnippetEvidence):
             receipt = SnippetCollectionReceipt.model_validate_json(
                 str(attrs["keenable"]["keenable_receipt_json"])
             )
-            if receipt.settings_sha256 != sha256(access.model_dump_json().encode()).hexdigest():
+            if receipt.settings_sha256 != access.settings_sha256:
                 raise IntegrityError("Keenable snippets differ from the configured search settings")
             return cls(repositories, None, receipt, {}, True, run)
         provider = KeenableCollection(run.dataset_home, access)

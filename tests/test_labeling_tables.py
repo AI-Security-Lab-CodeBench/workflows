@@ -17,14 +17,18 @@ from dagster import (
     AssetRecordsFilter,
     DagsterEvent,
     DagsterInstance,
+    InputContext,
+    IOManager,
     JobDefinition,
     JobExecutionResult,
     OutputContext,
     ReexecutionOptions,
     RetryRequested,
+    asset,
     build_sensor_context,
     execute_job,
     in_process_executor,
+    materialize,
     reconstructable,
 )
 from dagster._core.storage.tags import PARTITION_NAME_TAG, RESUME_RETRY_TAG
@@ -38,41 +42,44 @@ from test_dataset_rules import make_candidate, make_label, make_rules
 from test_review_release import attest_fixture_release
 
 from codebench_pipeline.admitted_tables import resolve_labeling_completion
-from codebench_pipeline.batch_labeling import BatchExecution, SubmittedLabels
-from codebench_pipeline.command_embeddings import encode_commands
-from codebench_pipeline.config_assets import configured_selection
+from codebench_pipeline.batch_labeling import BatchExecution
+from codebench_pipeline.batch_labeling_protocol import SubmittedLabels
+from codebench_pipeline.config_assets import configured_selection, mapped_input
 from codebench_pipeline.data_view_models import DatasetQueryRequest, TableResponse
 from codebench_pipeline.data_views import DatasetDataService
 from codebench_pipeline.dataframe_io import DataFrameIOManager, StorageConfig, frame_bytes, read_frame
 from codebench_pipeline.dataframe_schemas import (
     FilteredCommandsTable,
     LabelingAttemptsTable,
-    SourceDocumentsTable,
     frame_records,
     model_records,
     validated_frame,
 )
+from codebench_pipeline.dataset_asset_types import DATASET_PARTITIONS
+from codebench_pipeline.dataset_assets_annotations import annotation_assets
 from codebench_pipeline.dataset_config import PublicationConfig, require_declared_annotation
 from codebench_pipeline.dataset_registry import DatasetRegistry
 from codebench_pipeline.dataset_tables import publication
 from codebench_pipeline.definitions import build_definitions, dataset_run_config
+from codebench_pipeline.finalization_table_asset import FINALIZATION_TABLE_IO, LabelingInput
 from codebench_pipeline.finalization_table_io import FinalizationTableIO
-from codebench_pipeline.grounding_tables import GuardedLabeling, LabelingEvidenceInputs
+from codebench_pipeline.grounding_tables import GuardedLabeling, verify_live_support
 from codebench_pipeline.grounding_tools import GroundingCredentials
 from codebench_pipeline.inference_capacity import CapacityConfig, CapacityUnavailable
+from codebench_pipeline.labeling_checkpoint_store import LabelingCheckpointCache
 from codebench_pipeline.labeling_outcomes import LabelingAttempt, failed_attempt, label_attempt
+from codebench_pipeline.labeling_runtime import LabelingRuntime
 from codebench_pipeline.labeling_stage_settings import ProposalRules
 from codebench_pipeline.labeling_tables import failures_from_attempts, proposed_from_attempts
 from codebench_pipeline.models import SemanticSnippet
 from codebench_pipeline.object_store import ObjectStore
 from codebench_pipeline.openai_transport import HTTPResponse
-from codebench_pipeline.repository_receipts import RepositoryRun
 from codebench_pipeline.runtime_instance import dataset_instance
 from codebench_pipeline.stage_configuration import GuardedLabelingConfig
 
 
 def unsupported_plan_reply(name: str, arguments: dict[str, JsonValue]) -> HTTPResponse:
-    if name == "submit_labels":
+    if name == "finalize":
         submitted = SubmittedLabels.model_validate(arguments)
         arguments = {
             "outcomes": [
@@ -103,6 +110,85 @@ def _labeling_job() -> JobDefinition:
 
 
 class LabelingTableTests(unittest.TestCase):
+    def test_native_labeling_materializes_without_any_documentation_capture(self) -> None:
+        home = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        fixture = LabelingFixture(self, home, native=True)
+        batch = require_declared_annotation(fixture.spec.annotation)
+        annotation = fixture.spec.annotation.model_copy(
+            update={"batch": batch.model_copy(update={"capacity": None, "inference_mode": "plain"})}
+        )
+        spec = fixture.spec.model_copy(update={"annotation": annotation})
+        mapped = GuardedLabelingConfig.from_spec(spec)
+        candidate = make_candidate("capture-free").model_copy(
+            update={"util": "terraform", "command": "terraform plan", "risk_candidates": ["CAT-3.1"]}
+        )
+        commands = validated_frame(
+            [
+                {
+                    **candidate.model_dump(mode="json"),
+                    "filter_decision": "eligible",
+                    "filter_reason": "",
+                    "source_weight": 0.75,
+                }
+            ],
+            FilteredCommandsTable,
+        )
+        attempt_key = AssetKey(["datasets", "labeling_attempts"])
+        filtered_key = AssetKey(["datasets", "filtered_commands"])
+        config_key = mapped_input(
+            "labeling_attempts", GuardedLabelingConfig, input_manager_key=FINALIZATION_TABLE_IO
+        ).key
+        assert config_key is not None
+
+        class BoundaryIO(IOManager):
+            def load_input(self, context: InputContext) -> object:
+                if context.asset_key == filtered_key:
+                    return LabelingInput(commands, ("a" * 64, home))
+                if context.asset_key == config_key:
+                    return mapped
+                raise AssertionError(f"Unexpected upstream load: {context.asset_key}")
+
+            def handle_output(self, context: OutputContext, obj: object) -> None:
+                self.output = obj
+
+        @asset(key=filtered_key, partitions_def=DATASET_PARTITIONS)
+        def candidates() -> None:
+            return
+
+        @asset(key=config_key, partitions_def=DATASET_PARTITIONS)
+        def configuration() -> None:
+            return
+
+        labeling = next(definition for definition in annotation_assets() if definition.key == attempt_key)
+        io = BoundaryIO()
+        with (
+            DagsterInstance.ephemeral() as instance,
+            patch("codebench_pipeline.batch_labeling.plain_complete", side_effect=fixture.infer),
+        ):
+            assert DATASET_PARTITIONS.name is not None
+            instance.add_dynamic_partitions(DATASET_PARTITIONS.name, [spec.dataset_id])
+            result = materialize(
+                [candidates, configuration, labeling],
+                selection=[attempt_key],
+                instance=instance,
+                partition_key=spec.dataset_id,
+                resources={
+                    FINALIZATION_TABLE_IO: io,
+                    "dataset_io_manager": object(),
+                    "labeling_runtime": LabelingRuntime.for_home(home),
+                    "labeling_checkpoints": LabelingCheckpointCache(
+                        home / "checkpoints", home / "operations"
+                    ),
+                },
+            )
+        self.assertTrue(result.success)
+        assert isinstance(io.output, pd.DataFrame)
+        attempts = LabelingAttemptsTable.validate(io.output)
+        (attempt,) = model_records(attempts, LabelingAttempt)
+        self.assertEqual(attempt.status, "success")
+        self.assertEqual([name for name, _ in fixture.live_calls], ["search_web_pages", "fetch_page_content"])
+        verify_live_support(attempts, mapped.labeling_attempts.batch.grounding)
+
     def refresh(self, cycle: NativeDatasetCycle, instance: DagsterInstance, dataset_id: str) -> None:
         instance.add_dynamic_partitions("dataset_builds", [dataset_id])
         result = cycle.definitions.resolve_job_def("refresh_dataset_configuration").execute_in_process(
@@ -273,7 +359,7 @@ class LabelingTableTests(unittest.TestCase):
         key = "synthetic-grounding-secret"
         selector = "FIXTURE_GROUNDING_SELECTOR"
         batch = require_declared_annotation(fixture.spec.annotation)
-        grounding = batch.grounding.model_copy(update={"context7_api_key_env": selector})
+        grounding = batch.grounding.model_copy(update={"keenable_api_key_env": selector})
         annotation = fixture.spec.annotation.model_copy(
             update={
                 "batch": batch.model_copy(
@@ -397,33 +483,21 @@ class LabelingTableTests(unittest.TestCase):
                         },
                         {(command, "false") for command in expected},
                     )
-                    capture_value = data.read_current(
-                        spec.dataset_id, "documentation/capture_documentation"
-                    ).value
                     attempts_value = data.read_current(spec.dataset_id, "labeling_attempts").value
                     commands_value = data.read_current(spec.dataset_id, "filtered_commands").value
-                    assert isinstance(capture_value, pd.DataFrame)
                     assert isinstance(attempts_value, pd.DataFrame)
                     assert isinstance(commands_value, pd.DataFrame)
-                    capture = SourceDocumentsTable.validate(capture_value)
                     attempts = LabelingAttemptsTable.validate(attempts_value)
                     self.assertCountEqual(fixture.remote_rows, attempts["candidate_id"].tolist())
                     commands = FilteredCommandsTable.validate(commands_value)
                     mapped = GuardedLabelingConfig.from_spec(spec)
                     scoped_batch = mapped.labeling_attempts.batch
                     capacity = require_declared_annotation(spec.annotation).require_capacity()
-                    evidence = LabelingEvidenceInputs(
-                        RepositoryRun(home, spec.dataset_id, "labeling-replay"),
-                        mapped.collection,
-                        scoped_batch.grounding,
-                        capture,
-                    )
-                    evidence.verify(attempts)
+                    verify_live_support(attempts, scoped_batch.grounding)
                     labeling = GuardedLabeling(
                         mapped,
-                        evidence,
                         scoped_batch.bind_capacity(capacity.state_directory, capacity.expected_model_path),
-                        BatchExecution(None, encode_commands),
+                        BatchExecution(None, GroundingCredentials("fixture-key")),
                     )
                     self.assertEqual(fixture.inference.call_count, inference_calls)
                     before_replay = len(fixture.remote_rows)
@@ -431,7 +505,7 @@ class LabelingTableTests(unittest.TestCase):
                         FilteredCommandsTable.validate(commands.loc[commands["command"].isin(expected)]),
                         home / "labeling-replay",
                     )
-                    evidence.verify(replay)
+                    verify_live_support(replay, scoped_batch.grounding)
                     original_rows = {
                         row.candidate_id: row
                         for row in model_records(
@@ -445,8 +519,8 @@ class LabelingTableTests(unittest.TestCase):
                         repeated = replay_rows[candidate_id]
                         self.assertNotEqual(repeated.row_input_fingerprint, original.row_input_fingerprint)
                         self.assertEqual(
-                            repeated.model_dump(exclude={"row_input_fingerprint"}),
-                            original.model_dump(exclude={"row_input_fingerprint"}),
+                            (repeated.candidate_id, repeated.status, repeated.label, repeated.failure_code),
+                            (original.candidate_id, original.status, original.label, original.failure_code),
                         )
                     inference_calls = fixture.inference.call_count
                 self.assertEqual(cycle.tick(instance), ())

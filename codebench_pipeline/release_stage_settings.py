@@ -2,12 +2,11 @@ from __future__ import annotations
 
 from typing import Annotated, Self
 
-from pydantic import Field, TypeAdapter
+from pydantic import Field
 
 from codebench_pipeline.category_rules import CategoryRules, ClassName, SeverityName, StrictModel, Text
 from codebench_pipeline.dataset_config import ReleaseCap
-from codebench_pipeline.grounding_policy import OperationGrant
-from codebench_pipeline.grounding_tools import GroundingConfig
+from codebench_pipeline.grounding_tools import GroundingOrigins
 from codebench_pipeline.labeling_stage_settings import LabelingSources, ProposalRules, RiskRoute
 from codebench_pipeline.models import Digest
 from codebench_pipeline.storage import fingerprint
@@ -82,28 +81,18 @@ class ReviewQueueConfig(ConfigArtifact):
 class ReleaseGroundingConfig(ConfigArtifact):
     allowed_domains: tuple[str, ...]
     trusted_url_prefixes: tuple[str, ...]
-    pinned_library_ids: tuple[str, ...]
-    operation_grants: tuple[OperationGrant, ...]
 
     @classmethod
-    def from_grounding(cls, config: GroundingConfig) -> Self:
+    def from_grounding(cls, config: GroundingOrigins) -> Self:
         return cls(
             allowed_domains=tuple(config.allowed_domains),
             trusted_url_prefixes=tuple(config.trusted_url_prefixes),
-            pinned_library_ids=tuple(config.pinned_library_ids),
-            operation_grants=config.operation_grants,
         )
 
-    def verifier_config(self) -> GroundingConfig:
-        return GroundingConfig(
+    def verifier_config(self) -> GroundingOrigins:
+        return GroundingOrigins(
             allowed_domains=list(self.allowed_domains),
             trusted_url_prefixes=list(self.trusted_url_prefixes),
-            pinned_library_ids=list(self.pinned_library_ids),
-            operation_grants_json=(
-                TypeAdapter(tuple[OperationGrant, ...]).dump_json(self.operation_grants).decode()
-                if self.operation_grants
-                else ""
-            ),
         )
 
 

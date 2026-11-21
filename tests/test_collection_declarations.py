@@ -16,7 +16,8 @@ from codebench_pipeline.collection_config import (
     SourceDeclaration,
 )
 from codebench_pipeline.dataset_branches import Branch
-from codebench_pipeline.dataset_registry import read_registered_spec
+from codebench_pipeline.dataset_config import DatasetBuildSpec
+from codebench_pipeline.dataset_registry import DatasetRegistry, read_registered_spec
 from codebench_pipeline.keenable_policy import KeenableDeclaration
 from codebench_pipeline.repository_branch_config import (
     DeclaredRepositoryOrigin,
@@ -30,6 +31,29 @@ from codebench_pipeline.storage import IntegrityError, fingerprint
 
 
 class CollectionDeclarationTests(TestCase):
+    def test_historical_labeling_budget_reads_without_changing_registered_bytes(self) -> None:
+        home = Path(self.enterContext(TemporaryDirectory()))
+        spec = fixture_spec(home)
+        payload = spec.model_dump(mode="json")
+        batch = payload["annotation"]["batch"]
+        batch.pop("grounding_calls_per_command")
+        batch["maximum_grounding_rounds"] = 2
+        wire = json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
+        revision = fingerprint(wire)
+        directory = home / "dataset-specifications" / spec.dataset_id
+        directory.mkdir(parents=True)
+        stored = directory / f"{revision}.json"
+        stored.write_text(wire, encoding="utf-8")
+        (directory / "current").write_text(revision, encoding="ascii")
+
+        restored = DatasetRegistry(home).get_snapshot(spec.dataset_id)
+
+        assert restored.annotation.batch is not None
+        self.assertEqual(restored.annotation.batch.grounding_calls_per_command, 1.5)
+        self.assertEqual(stored.read_text(encoding="utf-8"), wire)
+        with self.assertRaises(ValidationError):
+            DatasetBuildSpec.model_validate_json(wire)
+
     def test_registration_resolves_independent_path_free_repository_declarations(self) -> None:
         home = Path(self.enterContext(TemporaryDirectory()))
         spec = fixture_spec(home)

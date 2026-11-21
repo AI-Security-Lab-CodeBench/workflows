@@ -4,6 +4,7 @@ import os
 import re
 from contextlib import ExitStack
 from dataclasses import replace
+from hashlib import sha256
 from io import StringIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -11,7 +12,7 @@ from unittest import TestCase
 from unittest.mock import patch
 
 import pandas as pd
-from guarded_labeling_fixture import CORPUS, LabelingFixture, fixture_vectors
+from guarded_labeling_fixture import CORPUS, LIVE_URL, LabelingFixture
 from pydantic import ValidationError
 from test_declared_dataset_graph import fixture_spec, with_keenable_declaration
 
@@ -24,6 +25,7 @@ from codebench_pipeline.dataset_config import PublicationConfig
 from codebench_pipeline.dataset_records import CandidateRecord, LabelDecision
 from codebench_pipeline.dataset_registry import DatasetRegistry
 from codebench_pipeline.dataset_run import run_registered
+from codebench_pipeline.grounding_sources import CandidateEvidence
 from codebench_pipeline.grounding_tables import SUPPORT_ATTR
 from codebench_pipeline.guarded_publication import (
     ReleaseExecution,
@@ -43,6 +45,7 @@ from codebench_pipeline.guarded_publication_selection import Survivor, select_su
 from codebench_pipeline.human_review import HumanReviewError
 from codebench_pipeline.human_review_store import HumanReviewStore
 from codebench_pipeline.labeling_outcomes import LabelingAttempt, label_attempt
+from codebench_pipeline.labeling_stage_settings import KeenableSnippetEvidence
 from codebench_pipeline.models import SemanticSnippet
 from codebench_pipeline.object_store import ObjectStore
 from codebench_pipeline.release_admission import read_publication
@@ -69,7 +72,11 @@ class GuardedPublicationTests(TestCase):
         self.assertEqual(baseline.grounding.allowed_domains, tuple(grounding.allowed_domains))
         declaration = collection.keenable_declaration
         assert isinstance(declaration, KeenableSnippetDeclaration)
-        self.assertEqual(baseline.collection.keenable_use_cases, declaration.search)
+        assert isinstance(baseline.collection.keenable_use_cases, KeenableSnippetEvidence)
+        self.assertEqual(
+            baseline.collection.keenable_use_cases.settings_sha256,
+            sha256(declaration.search.model_dump_json().encode()).hexdigest(),
+        )
         changed_source = with_keenable_declaration(
             spec,
             declaration.model_copy(
@@ -81,7 +88,7 @@ class GuardedPublicationTests(TestCase):
             baseline.digest,
         )
         for settings, unchanged in (
-            ({"maximum_provider_calls": grounding.maximum_provider_calls + 1}, True),
+            ({"timeout": grounding.timeout + 1}, True),
             ({"allowed_domains": ["another.example"]}, False),
         ):
             with self.subTest(settings=settings):
@@ -116,14 +123,7 @@ class GuardedPublicationTests(TestCase):
         store = HumanReviewStore(home)
         with store.transaction(dataset_id=dataset_id) as tx:
             record_control(tx, dataset_id, "hold", actor=100)
-        with (
-            patch("codebench_pipeline.labeling_runtime.encode_from_directory", side_effect=fixture_vectors),
-            patch(
-                "codebench_pipeline.grounding_tools.GroundingBroker.execute",
-                side_effect=AssertionError("labeler attempted provider lookup"),
-            ),
-        ):
-            outcome = run_registered(dataset_id, home)
+        outcome = run_registered(dataset_id, home)
         self.assertEqual(outcome.status, "prepared")
         with store.reader() as tx:
             batch = tx.get_current_batch(dataset_id)
@@ -305,7 +305,7 @@ class GuardedPublicationTests(TestCase):
                 self.fail("The revoked publication must remain inspectable")
             self.assertEqual(revoked.publication_state, "stale")
 
-    def test_shared_command_capture_without_effect_evidence_cannot_produce_a_label(self) -> None:
+    def test_live_grounding_does_not_require_effect_evidence_in_the_candidate_capture(self) -> None:
         home = Path(self.enterContext(TemporaryDirectory()))
         fixture = LabelingFixture(
             self, home, shared_body=b"<pre>terraform plan</pre><p>Unrelated origin response.</p>"
@@ -313,10 +313,13 @@ class GuardedPublicationTests(TestCase):
         filtered, labeling = fixture.labeling()
         attempts = labeling.attempts(filtered, home / "attempts")
         rows = {row.command: row for row in model_records(attempts, LabelingAttempt)}
-        self.assertEqual(rows["terraform plan"].failure_code, "operation_unsupported")
+        self.assertEqual(rows["terraform plan"].status, "success")
+        label = rows["terraform plan"].label
+        assert label is not None
+        self.assertEqual(label.documentation_urls, [LIVE_URL])
         self.assertEqual(rows["kubectl get pods"].status, "success")
 
-    def test_mutating_one_repository_capture_cannot_restore_its_success(self) -> None:
+    def test_source_capture_tampering_remains_blocked_after_live_relabeling(self) -> None:
         home = Path(self.enterContext(TemporaryDirectory()))
         fixture = LabelingFixture(self, home, context7=True)
         filtered, labeling = fixture.labeling()
@@ -324,16 +327,22 @@ class GuardedPublicationTests(TestCase):
         self.assertEqual({row.status for row in model_records(attempts, LabelingAttempt)}, {"success"})
         (capture,) = [path for path in home.rglob("blobs/*") if path.read_bytes() == CORPUS]
         capture.write_bytes(CORPUS.replace(b"Enumerate", b"Overwrite"))
+        inputs = labeling.evidence_inputs
+        candidate = next(
+            row for row in model_records(attempts, CandidateRecord) if row.command == "kubectl get pods"
+        )
         with self.assertRaisesRegex(IntegrityError, "capture digest mismatch"):
-            labeling.evidence_inputs.verify(attempts)
+            CandidateEvidence.from_frame(attempts, inputs.run, inputs.collection).resolve(candidate)
         during = len(fixture.remote_rows)
         evidence = home / "relabel"
         evidence.mkdir()
         replay = labeling.attempts(filtered, evidence)
         rows = {row.command: row for row in model_records(replay, LabelingAttempt)}
-        self.assertEqual(rows["kubectl get pods"].failure_code, "candidate_capture_unverified")
+        self.assertEqual(rows["kubectl get pods"].status, "success")
         self.assertEqual(rows["docker compose ps"].status, "success")
-        self.assertEqual(fixture.remote_rows[during:], [])
+        self.assertCountEqual(fixture.remote_rows[during:], [row.candidate_id for row in rows.values()])
+        with self.assertRaisesRegex(IntegrityError, "capture digest mismatch"):
+            CandidateEvidence.from_frame(replay, inputs.run, inputs.collection).resolve(candidate)
 
 
 class ReleaseSelectionTests(TestCase):
