@@ -33,7 +33,7 @@ from codebench_pipeline.collection_stage_settings import (
 )
 from codebench_pipeline.config_directory import ConfigDirectorySnapshot
 from codebench_pipeline.dagster_table_metadata import MetadataSink
-from codebench_pipeline.dataset_asset_types import DATASET_PARTITIONS
+from codebench_pipeline.dataset_asset_types import DATASET_PARTITIONS, rules_input
 from codebench_pipeline.dataset_branches import (
     COLLECTION_BRANCHES,
     FINALIZATION_GROUPS,
@@ -59,6 +59,8 @@ from codebench_pipeline.stage_configuration import (
     FilterConfig,
     GuardedLabelingConfig,
     ReviewQueueConfig,
+    category_eligibility_settings,
+    dataset_release_settings,
 )
 from codebench_pipeline.storage import IntegrityError, fingerprint
 
@@ -318,32 +320,88 @@ def configuration_assets(home: Path, *, authoring_root: Path | None = None) -> l
     def mapping[Contract: ConfigArtifact](
         scope: str,
         contract: type[Contract],
-        projection: Callable[[RegisteredConfig], Contract],
+        project: Callable[..., Output[Contract]],
+        inputs: dict[str, AssetIn],
+        input_description: str,
         *,
         group_name: str | None = None,
     ) -> AssetsDefinition:
-        def project(registered: RegisteredConfig) -> Output[Contract]:
-            value = projection(registered)
-            effective = RootModel[JsonValue].model_validate_json(value.model_dump_json(by_alias=True))
-            return Output(value, data_version=DataVersion(fingerprint(effective.root)))
-
         return asset(
             key=mapping_key(scope),
             partitions_def=DATASET_PARTITIONS,
             group_name=FINALIZATION_GROUPS[scope] if group_name is None else group_name,
             io_manager_key="config_run_io_manager",
             dagster_type=_contract_type(contract),
-            ins={"registered": registered_input()},
+            ins=inputs,
             description=(
-                f"**How it works:** Project the registered settings for {scope} into "
+                f"**How it works:** Project {input_description} into "
                 f"`{contract.__name__}`. Its fields are "
                 + ", ".join(f"`{name}`" for name in contract.model_fields)
                 + ". The data version identifies the effective settings."
             ),
         )(project)
 
-    def declared_branch(operation: CollectionOperation) -> AssetsDefinition:
+    def scoped_output[Contract: ConfigArtifact](value: Contract) -> Output[Contract]:
+        effective = RootModel[JsonValue].model_validate_json(value.model_dump_json(by_alias=True))
+        return Output(value, data_version=DataVersion(fingerprint(effective.root)))
+
+    def global_mapping[Contract: ConfigArtifact](
+        scope: str,
+        contract: type[Contract],
+        projection: Callable[[RegisteredConfig], Contract],
+        *,
+        group_name: str | None = None,
+    ) -> AssetsDefinition:
+        def project(registered: RegisteredConfig) -> Output[Contract]:
+            return scoped_output(projection(registered))
+
         return mapping(
+            scope,
+            contract,
+            project,
+            {"registered": registered_input()},
+            f"the registered settings for {scope}",
+            group_name=group_name,
+        )
+
+    def taxonomy_mapping[Contract: ConfigArtifact](
+        scope: str,
+        contract: type[Contract],
+        projection: Callable[[CategoryRules], Contract],
+    ) -> AssetsDefinition:
+        def project(category_rules: CategoryRules) -> Output[Contract]:
+            return scoped_output(projection(category_rules))
+
+        return mapping(scope, contract, project, {"category_rules": rules_input()}, "the category rules")
+
+    def mixed_mapping[Contract: ConfigArtifact](
+        scope: str,
+        contract: type[Contract],
+        projection: Callable[[RegisteredConfig, CategoryRules], Contract],
+        *,
+        group_name: str | None = None,
+    ) -> AssetsDefinition:
+        def project(registered: RegisteredConfig, category_rules: CategoryRules) -> Output[Contract]:
+            return scoped_output(projection(registered, category_rules))
+
+        return mapping(
+            scope,
+            contract,
+            project,
+            {"registered": registered_input(), "category_rules": rules_input()},
+            f"the registered settings for {scope} and the category rules",
+            group_name=group_name,
+        )
+
+    def declared_branch(operation: CollectionOperation) -> AssetsDefinition:
+        if operation.branch == "keenable":
+            return mixed_mapping(
+                operation.mapping_scope,
+                operation.contract,
+                RegisteredConfig.project_keenable_candidates,
+                group_name=COLLECTION_SCOPES[operation.branch],
+            )
+        return global_mapping(
             operation.mapping_scope,
             operation.contract,
             lambda registered: registered.collection_operation_settings(operation),
@@ -354,44 +412,46 @@ def configuration_assets(home: Path, *, authoring_root: Path | None = None) -> l
         config_directory_asset(home, authoring_root),
         global_config,
         *(declared_branch(operation) for operation in COLLECTION_OPERATIONS),
-        mapping(
+        global_mapping(
             "merged_command_candidates",
             CollectionMergeConfig,
             lambda registered: registered.scopes.merged_command_candidates.merged_command_candidates,
         ),
-        mapping(
+        mixed_mapping(
             "labeling_attempts",
             GuardedLabelingConfig,
-            RegisteredConfig.labeling_config,
+            lambda registered, rules: GuardedLabelingConfig.project(
+                registered.scopes.labeling_attempts, rules
+            ),
         ),
-        mapping(
+        mixed_mapping(
             "filtered_commands",
             FilterConfig,
-            RegisteredConfig.filter_config,
+            FilterConfig.project,
         ),
-        mapping(
+        taxonomy_mapping(
             "proposed_annotations",
             ProposalRules,
-            RegisteredConfig.proposal_config,
+            ProposalRules.from_rules,
         ),
-        mapping(
+        global_mapping(
             "deduplicated_annotations",
             DeduplicationPolicy,
             lambda registered: registered.scopes.deduplicated_annotations.deduplication,
         ),
-        mapping(
+        taxonomy_mapping(
             "category_eligible_annotations",
             CategoryEligibilityConfig,
-            RegisteredConfig.eligibility_config,
+            category_eligibility_settings,
         ),
-        mapping(
+        mixed_mapping(
             "human_review_queue",
             ReviewQueueConfig,
-            RegisteredConfig.review_queue_config,
+            RegisteredConfig.project_review_queue,
         ),
-        mapping(
+        mixed_mapping(
             "dataset_release",
             DatasetReleaseConfig,
-            RegisteredConfig.release_config,
+            dataset_release_settings,
         ),
     ]

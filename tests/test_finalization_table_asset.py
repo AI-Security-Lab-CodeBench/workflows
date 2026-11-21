@@ -34,6 +34,7 @@ from codebench_pipeline.config_assets import (
 from codebench_pipeline.dataframe_io import DataFrameIOManager, frame_bytes
 from codebench_pipeline.dataframe_schemas import ProposedAnnotationsTable, validated_frame
 from codebench_pipeline.dataset_asset_types import DATASET_PARTITIONS, TABLE_TYPES
+from codebench_pipeline.dataset_assets_sources import category_rules
 from codebench_pipeline.dataset_collection_binding import FINALIZATION_BINDING
 from codebench_pipeline.dataset_config import DeduplicationPolicy
 from codebench_pipeline.dataset_engine import implementation_signature
@@ -187,6 +188,7 @@ class FinalizationTableAssetTests(unittest.TestCase):
             [
                 global_config,
                 proposed_annotations,
+                *((category_rules,) if eligibility else ()),
                 *(item for item in configuration_assets(self.home) if item.key in mapping_keys),
                 *tables,
             ],

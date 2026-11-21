@@ -1,7 +1,7 @@
 import logging
 from pathlib import Path
 
-from dagster import AssetSelection, AutomationConditionSensorDefinition, DagsterInstance, RunRequest
+from dagster import AssetKey, AssetSelection, AutomationConditionSensorDefinition, DagsterInstance, RunRequest
 from dagster._core.definitions.asset_daemon_cursor import AssetDaemonCursor
 from dagster._core.definitions.automation_tick_evaluation_context import AutomationTickEvaluationContext
 
@@ -38,7 +38,12 @@ class NativeDatasetCycle:
         return tuple(requests)
 
     def drain(
-        self, instance: DagsterInstance, *, prepare_only: bool = False, partition: str | None = None
+        self,
+        instance: DagsterInstance,
+        *,
+        prepare_only: bool = False,
+        partition: str | None = None,
+        requested_assets: set[AssetKey] | None = None,
     ) -> dict[str, bool]:
         job = self.definitions.get_implicit_global_asset_job_def()
         materialized: dict[str, bool] = {}
@@ -53,6 +58,9 @@ class NativeDatasetCycle:
                     raise AssertionError(
                         "Native processing should consume persisted inputs without launch config"
                     )
+                if requested_assets is not None:
+                    assert request.asset_selection is not None
+                    requested_assets.update(request.asset_selection)
                 result = job.execute_in_process(
                     instance=instance,
                     partition_key=request.partition_key,

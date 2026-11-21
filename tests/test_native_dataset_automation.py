@@ -5,6 +5,7 @@ from io import StringIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
+from dagster import AssetKey, AssetRecordsFilter
 from guarded_labeling_fixture import LabelingFixture
 from native_dataset_cycle import NativeDatasetCycle
 
@@ -22,6 +23,7 @@ class NativeDatasetAutomationTests(unittest.TestCase):
         partition = registry.register(spec)
         other = "unconfigured-peer"
         cycle = NativeDatasetCycle(home)
+        labeling = AssetKey(["datasets", "labeling_attempts"])
 
         def refresh() -> str:
             with redirect_stdout(output := StringIO()):
@@ -43,10 +45,15 @@ class NativeDatasetAutomationTests(unittest.TestCase):
             self.assertGreater(inference_count, 0)
             print(f"NATIVE before: partition={partition} inference={inference_count}; peer={other} absent")
 
+            record_filter = AssetRecordsFilter(asset_key=labeling, asset_partitions=[partition])
+            (first_labeling,) = instance.fetch_materializations(record_filter, limit=1).records
+            unchanged_requests: set[AssetKey] = set()
             refresh()
-            self.assertEqual(cycle.drain(instance, partition=partition), {})
-            self.assertEqual(len(fixture.remote_rows), inference_count)
-            print("NATIVE unchanged: no processing requests, zero new inference calls")
+            cycle.drain(instance, partition=partition, requested_assets=unchanged_requests)
+            self.assertNotIn(labeling, unchanged_requests)
+            (latest_labeling,) = instance.fetch_materializations(record_filter, limit=1).records
+            self.assertEqual(latest_labeling.storage_id, first_labeling.storage_id)
+            print("NATIVE unchanged: no labeling request or materialization")
 
             model = spec.annotation.model.model_copy(
                 update={"timeout_seconds": spec.annotation.model.timeout_seconds + 1}
@@ -55,7 +62,11 @@ class NativeDatasetAutomationTests(unittest.TestCase):
                 spec.model_copy(update={"annotation": spec.annotation.model_copy(update={"model": model})})
             )
             refresh()
-            self.assertIn("labeling_attempts", cycle.drain(instance, partition=partition))
+            changed_requests: set[AssetKey] = set()
+            cycle.drain(instance, partition=partition, requested_assets=changed_requests)
+            self.assertIn(labeling, changed_requests)
+            (changed_labeling,) = instance.fetch_materializations(record_filter, limit=1).records
+            self.assertGreater(changed_labeling.storage_id, first_labeling.storage_id)
             added = len(fixture.remote_rows) - inference_count
             self.assertEqual(added, inference_count)
             print(f"NATIVE changed labeler: relabeled partition={partition}; new inference={added}")

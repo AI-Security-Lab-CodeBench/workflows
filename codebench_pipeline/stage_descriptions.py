@@ -26,9 +26,10 @@ change eligibility, review or publication.
 """,
     "category_rules": """
 **How it works:** Registration combines the shared labeling policy with the selected
-category's taxonomy, instructions and examples. This asset reads that registered
-snapshot for the dataset partition. Each consumer receives the same resolved rules.
-Command patterns route records to risks; they do not assign labels.
+category's taxonomy, instructions and examples. This asset extracts the resolved rules
+from `global_config` for the dataset partition. Mappings that need taxonomy read this
+persisted value and project the fields their stages use. Command patterns route records
+to risks; they do not assign labels.
 
 **Input:** Registered shared instructions, class and severity definitions, output language,
 and the selected category's membership rules, routing, defaults and examples.

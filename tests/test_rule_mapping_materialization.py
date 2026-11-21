@@ -10,6 +10,7 @@ from dagster._core.definitions.data_version import extract_data_version_from_ent
 from test_declared_dataset_graph import fixture_spec
 
 from codebench_pipeline.config_assets import GLOBAL_CONFIG, ConfigRunIOManager, mapping_key
+from codebench_pipeline.dataset_assets_sources import category_rules
 from codebench_pipeline.dataset_config import DatasetBuildSpec
 from codebench_pipeline.dataset_registry import DatasetRegistry
 from codebench_pipeline.definitions import build_definitions, dataset_run_config
@@ -47,12 +48,12 @@ class RuleMappingMaterializationTests(TestCase):
             result = job.execute_in_process(
                 instance=instance,
                 partition_key=revision.dataset_id,
-                asset_selection=[GLOBAL_CONFIG, *RULE_MAPPINGS],
+                asset_selection=[GLOBAL_CONFIG, category_rules.key, *RULE_MAPPINGS],
                 run_config=dataset_run_config(revision),
             )
             self.assertEqual(
                 {event.asset_key for event in result.get_asset_materialization_events()},
-                {GLOBAL_CONFIG, *RULE_MAPPINGS},
+                {GLOBAL_CONFIG, category_rules.key, *RULE_MAPPINGS},
             )
             versions: dict[AssetKey, str] = {}
             for key in RULE_MAPPINGS:

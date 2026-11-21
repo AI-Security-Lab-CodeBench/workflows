@@ -121,7 +121,7 @@ class FinalizationOutputAdmissionTests(unittest.TestCase):
         ]
         mappings = [item for item in configuration_assets(home) if item.key == mapping_key(target)]
         assets = [global_config, *mappings, upstream_table, *(a for a in migrated if a.key == target_key)]
-        if target == "proposed_annotations":
+        if target in {"proposed_annotations", "category_eligible_annotations"}:
             assets.append(category_rules)
         handle_output = FinalizationTableIO.handle_output
         lookup_partitions = StaticPartitionsDefinition([spec.dataset_id])

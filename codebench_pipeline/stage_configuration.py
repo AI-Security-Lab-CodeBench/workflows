@@ -195,10 +195,12 @@ class DeclaredGlobalConfig(ConfigArtifact):
         }[branch].collection
 
     def collection_operation_settings(self, operation: CollectionOperation) -> CollectionOperationSettings:
-        source = self.source_config(operation.branch)
         if operation.branch != "keenable":
-            return operation.project(source)
-        return KeenableCandidateSettings.project(source, self.rules, self.scopes.discovery)
+            return operation.project(self.source_config(operation.branch))
+        return self.project_keenable_candidates(self.rules)
+
+    def project_keenable_candidates(self, rules: CategoryRules) -> KeenableCandidateSettings:
+        return KeenableCandidateSettings.project(self.source_config("keenable"), rules, self.scopes.discovery)
 
     def filter_config(self) -> FilterConfig:
         return FilterConfig.project(self, self.rules)
@@ -210,12 +212,15 @@ class DeclaredGlobalConfig(ConfigArtifact):
         return ProposalRules.from_rules(self.rules)
 
     def eligibility_config(self) -> CategoryEligibilityConfig:
-        return CategoryEligibilityConfig(category_id=self.rules.category_id)
+        return category_eligibility_settings(self.rules)
 
     def review_queue_config(self) -> ReviewQueueConfig:
+        return self.project_review_queue(self.rules)
+
+    def project_review_queue(self, rules: CategoryRules) -> ReviewQueueConfig:
         publication = self.scopes.human_review_queue.human_review_queue
         return ReviewQueueConfig.from_rules(
-            self.rules, tuple(publication.review_columns), publication.limit_per_risk
+            rules, tuple(publication.review_columns), publication.limit_per_risk
         )
 
     def release_config(self) -> DatasetReleaseConfig:
@@ -254,6 +259,10 @@ class DeclaredGlobalConfig(ConfigArtifact):
                 human_review_queue=ReviewQueueSettings(human_review_queue=spec.publication),
             ),
         )
+
+
+def category_eligibility_settings(rules: CategoryRules) -> CategoryEligibilityConfig:
+    return CategoryEligibilityConfig(category_id=rules.category_id)
 
 
 def dataset_release_settings(registered: DeclaredGlobalConfig, rules: CategoryRules) -> DatasetReleaseConfig:

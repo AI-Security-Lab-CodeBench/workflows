@@ -7,7 +7,7 @@ from threading import Barrier
 from unittest.mock import Mock, patch
 
 import pandas as pd
-from dagster import AssetKey, AssetRecordsFilter
+from dagster import AssetKey, AssetRecordsFilter, AssetSelection
 from dagster._core.run_coordinator.base import SubmitRunContext
 from dagster._core.workspace.context import BaseWorkspaceRequestContext
 from guarded_labeling_fixture import LabelingFixture
@@ -17,6 +17,7 @@ from pydantic import ValidationError
 from test_declared_dataset_graph import fixture_spec, with_keenable_declaration
 from test_keenable import source_declaration
 
+from codebench_pipeline.config_assets import mapping_key
 from codebench_pipeline.dataframe_io import AssetSnapshot, DataFrameIOManager
 from codebench_pipeline.dataframe_schemas import CommandsTable
 from codebench_pipeline.dataset_config import FilteringConfig
@@ -33,6 +34,31 @@ from codebench_pipeline.storage import IntegrityError
 
 
 class DatasetGraphTests(unittest.TestCase):
+    def test_selective_collection_and_policy_scopes_have_distinct_taxonomy_lineage(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            graph = build_definitions(Path(temporary)).resolve_asset_graph()
+        taxonomy = AssetKey(["datasets", "category_rules"])
+        for candidate in (
+            AssetKey(["datasets", "command_candidates"]),
+            AssetKey(["datasets", "documentation", "command_candidates"]),
+        ):
+            with self.subTest(candidate=candidate):
+                self.assertNotIn(taxonomy, AssetSelection.assets(candidate).upstream().resolve(graph))
+        for scope in ("filtered_commands", "labeling_attempts"):
+            with self.subTest(scope=scope):
+                self.assertIn(taxonomy, AssetSelection.assets(mapping_key(scope)).upstream().resolve(graph))
+
+    def test_configuration_assets_have_consumers(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            graph = build_definitions(Path(temporary)).resolve_asset_graph()
+        configuration = AssetSelection.groups("configuration").resolve(graph) | {
+            key
+            for key in graph.materializable_asset_keys
+            if graph.get(key).io_manager_key == "config_run_io_manager"
+        }
+        orphans = {key.to_user_string() for key in configuration if not graph.get(key).child_keys}
+        self.assertEqual(orphans, set())
+
     def test_verified_storage_inputs_preserve_stage_fingerprints(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             home = Path(temporary)

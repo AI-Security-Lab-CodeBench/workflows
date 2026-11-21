@@ -97,15 +97,33 @@ class ArtifactCurrentness:
             if GLOBAL_CONFIG not in provenance.input_storage_ids and mappings:
                 if len(mappings) != 1:
                     return None
-                mapped = self._configuration_input(record, partition, provenance, mappings[0])
+                mapped = self._configuration_input(
+                    record, partition, provenance, mappings[0], manager_key="config_run_io_manager"
+                )
                 if mapped is None:
                     return None
                 record = mapped
                 provenance = extract_data_provenance_from_entry(record.event_log_entry)
-                if provenance is None or GLOBAL_CONFIG not in provenance.input_storage_ids:
+                if provenance is None:
                     return None
+                if GLOBAL_CONFIG not in provenance.input_storage_ids:
+                    taxonomy = self._configuration_input(
+                        record,
+                        partition,
+                        provenance,
+                        AssetKey(["datasets", "category_rules"]),
+                        manager_key="dataset_io_manager",
+                    )
+                    if taxonomy is None:
+                        return None
+                    record = taxonomy
+                    provenance = extract_data_provenance_from_entry(record.event_log_entry)
+                    if provenance is None or GLOBAL_CONFIG not in provenance.input_storage_ids:
+                        return None
             if GLOBAL_CONFIG in provenance.input_storage_ids:
-                producer = self._configuration_input(record, partition, provenance, GLOBAL_CONFIG)
+                producer = self._configuration_input(
+                    record, partition, provenance, GLOBAL_CONFIG, manager_key="config_run_io_manager"
+                )
                 if producer is None:
                     return None
                 try:
@@ -133,7 +151,13 @@ class ArtifactCurrentness:
             return None
 
     def _configuration_input(
-        self, consumer: EventLogRecord, partition: str, provenance: DataProvenance, key: AssetKey
+        self,
+        consumer: EventLogRecord,
+        partition: str,
+        provenance: DataProvenance,
+        key: AssetKey,
+        *,
+        manager_key: str,
     ) -> EventLogRecord | None:
         storage_id = provenance.input_storage_ids.get(key)
         if storage_id is None or storage_id >= consumer.storage_id:
@@ -150,7 +174,7 @@ class ArtifactCurrentness:
             producer,
             output_name="result",
             retry_number="native",
-            manager_keys=frozenset({"config_run_io_manager"}),
+            manager_keys=frozenset({manager_key}),
         ):
             return None
         return producer
