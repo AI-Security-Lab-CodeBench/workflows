@@ -124,7 +124,7 @@ class DeclaredS3Storage(StrictStageConfig):
 
 class DeclaredDatasetBundle(StrictStageConfig):
     dataset_id: Identifier
-    category_id: Literal["CAT-3"]
+    category_id: Annotated[Identifier, Field(pattern=r"^CAT-[1-9][0-9]*$")]
     revision_label: str = Field(min_length=1)
     labeling: DeclaredLabeling | LabelingFromRegistration
     discovery: DiscoveryOptions = DiscoveryOptions()

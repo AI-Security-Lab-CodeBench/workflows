@@ -9,7 +9,7 @@ from pathlib import Path
 
 from configuration_fixture import example_config, seed_prepared_snapshot, source_bytes
 from dagster import validate_run_config
-from pydantic import ValidationError
+from pydantic import JsonValue, ValidationError
 from test_declared_dataset_graph import BUNDLE, declared_labeling_fixture
 
 from codebench_pipeline.dataset_catalog import build_catalog
@@ -175,16 +175,20 @@ class DatasetBundleTests(unittest.TestCase):
             root = Path(directory)
             path = write_declared_bundle(root / "business")
             original = json.loads(path.read_bytes())
-            for updates in (
+            invalid_fields: tuple[dict[str, JsonValue], ...] = (
                 {"version": 1},
                 {"version": 2},
                 {"documentation_crawl": {"snapshot": {"workers": "2"}}},
                 {"documentation_crawl": {"sources": {"manifest": "unused.json", "documents": []}}},
-                {"category_id": "CAT-98"},
-            ):
+                {"category_id": "CAT-0"},
+            )
+            for updates in invalid_fields:
                 with self.subTest(updates=updates), self.assertRaises(ValidationError):
                     path.write_text(json.dumps({**original, **updates}), encoding="utf-8")
                     load_build_config(path, root)
+            path.write_text(json.dumps({**original, "category_id": "CAT-98"}), encoding="utf-8")
+            with self.assertRaisesRegex(FileNotFoundError, "categories/cat98"):
+                load_build_config(path, root)
             path.write_text(json.dumps({**original, "dataset_id": "foreign_partition"}), encoding="utf-8")
             with self.assertRaisesRegex(IntegrityError, "different dataset partition"):
                 load_build_config(path, root)
