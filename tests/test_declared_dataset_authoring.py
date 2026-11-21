@@ -1,5 +1,7 @@
 import json
 import shutil
+import subprocess
+import sys
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest import TestCase
@@ -19,10 +21,11 @@ from codebench_pipeline.config_assets import (
     mapping_key,
 )
 from codebench_pipeline.config_directory import ConfigDirectorySnapshot
-from codebench_pipeline.dataset_config import DatasetBuildSpec, load_build_config
+from codebench_pipeline.dataset_config import DatasetBuildSpec, load_build_config, require_declared_annotation
 from codebench_pipeline.dataset_registry import DatasetRegistry
 from codebench_pipeline.declared_dataset_bundle import DeclaredDatasetBundle
 from codebench_pipeline.object_store import StorageConfig
+from codebench_pipeline.stage_configuration import labeling_settings
 from codebench_pipeline.storage import IntegrityError, fingerprint
 
 BUNDLE = Path("business-configs/datasets/cat3.json").resolve()
@@ -356,7 +359,7 @@ class DeclaredDatasetAuthoringTests(TestCase):
         ).resolve(BUNDLE.parent, home=self.home)
         write_snapshot(inherited.model_dump_json(), self.home, inherited.dataset_id)
 
-        both = load_build_config(BUNDLE, self.home)
+        both = authoring(labeling={"from_registration": True}).resolve(BUNDLE.parent, home=self.home)
         self.assertEqual((both.annotation, both.storage), (inherited.annotation, inherited.storage))
         only_labeling = authoring(storage={"backend": "s3", "bucket": "replacement-artifacts"}).resolve(
             BUNDLE.parent, home=self.home
@@ -367,6 +370,39 @@ class DeclaredDatasetAuthoringTests(TestCase):
         only_storage = authoring(labeling=explicit_labeling(self.home)).resolve(BUNDLE.parent, home=self.home)
         self.assertEqual(only_storage.annotation.max_request_bytes, 16384)
         self.assertEqual(only_storage.storage, inherited.storage)
+
+    def test_cat3_bundle_projects_a_capacity_free_plain_registration(self) -> None:
+        inherited = authoring(
+            labeling=explicit_labeling(self.home), storage={"backend": "s3", "bucket": "fixture-artifacts"}
+        ).resolve(BUNDLE.parent, home=self.home)
+        path, revision = write_snapshot(inherited.model_dump_json(), self.home, inherited.dataset_id)
+
+        subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "codebench_pipeline.dataset_cli",
+                "register",
+                "--config",
+                str(BUNDLE),
+                "--home",
+                str(self.home),
+            ],
+            check=True,
+            capture_output=True,
+        )
+        registry = DatasetRegistry(self.home)
+        restored = registry.get_snapshot(inherited.dataset_id)
+        batch = require_declared_annotation(restored.annotation)
+
+        self.assertEqual(restored.annotation.model, inherited.annotation.model)
+        self.assertEqual(restored.storage, inherited.storage)
+        self.assertEqual(batch.inference_mode, "plain")
+        self.assertNotIn("capacity", batch.model_dump())
+        self.assertEqual(labeling_settings(restored.annotation).batch.bind_capacity(), batch)
+        self.assertNotEqual(registry.current_revision(inherited.dataset_id), revision)
+        self.assertEqual(registry.get_snapshot(inherited.dataset_id, revision=revision), inherited)
+        self.assertEqual(path.read_text(), inherited.model_dump_json())
 
     def test_storage_only_inheritance_requires_its_own_registration(self) -> None:
         bundle = authoring(labeling=explicit_labeling(self.home))
@@ -397,7 +433,7 @@ class DeclaredDatasetAuthoringTests(TestCase):
         batch = labeling["batch"]
         assert isinstance(batch, dict)
         changes: tuple[tuple[str, JsonValue, str], ...] = (
-            ("labeling", {**labeling, "batch": {**batch, "inference_mode": "plain"}}, "literal_error"),
+            ("labeling", {**labeling, "batch": {**batch, "capacity": None}}, "guarded_capacity"),
             ("labeling", {**labeling, "batch": {**batch, "retry_revision": "2"}}, "extra_forbidden"),
             ("labeling", {**labeling, "maximum_context_characters": 8192}, "extra_forbidden"),
             ("labeling", {**labeling, "from_registration": True}, "extra_forbidden"),
@@ -427,7 +463,7 @@ class DeclaredDatasetAuthoringTests(TestCase):
             DeclaredDatasetBundle.model_validate(payload)
         self.assertTrue(all(error["loc"][0] == "storage" for error in raised.exception.errors()))
 
-    def test_legacy_snapshot_replays_but_plain_transport_cannot_be_inherited(self) -> None:
+    def test_legacy_plain_snapshot_replays_with_original_serialization(self) -> None:
         storage: dict[str, JsonValue] = {"backend": "s3", "bucket": "fixture-artifacts"}
         bundle = authoring(labeling=explicit_labeling(self.home), storage=storage)
         spec = bundle.resolve(BUNDLE.parent, home=self.home)
@@ -441,5 +477,3 @@ class DeclaredDatasetAuthoringTests(TestCase):
         assert replay.annotation.batch is not None
         self.assertEqual(replay.annotation.batch.retry_revision, "archived-retry")
         self.assertEqual(replay.annotation.batch.inference_mode, "plain")
-        with self.assertRaisesRegex(ValueError, "requires guarded inference transport"):
-            authoring(storage=storage).resolve(BUNDLE.parent, home=self.home)

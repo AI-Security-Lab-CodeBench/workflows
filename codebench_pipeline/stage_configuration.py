@@ -1,8 +1,11 @@
-from typing import Literal
-
 from pydantic import BaseModel, Field
 
-from codebench_pipeline.batch_labeling_config import BackendRevision, BatchLabelingConfig, BatchPromptConfig
+from codebench_pipeline.batch_labeling_config import (
+    BackendRevision,
+    BatchLabelingConfig,
+    BatchPromptConfig,
+    InferenceMode,
+)
 from codebench_pipeline.category_rules import CategoryRules
 from codebench_pipeline.collection_config import (
     AdaptivePlannerConfig,
@@ -21,7 +24,7 @@ from codebench_pipeline.dataset_config import (
     FilteringConfig,
     PublicationConfig,
     RequestBytes,
-    require_guarded_annotation,
+    require_declared_annotation,
 )
 from codebench_pipeline.grounding_tools import GroundingConfig
 from codebench_pipeline.inference_capacity import ScopedCapacityConfig
@@ -73,16 +76,20 @@ class DeduplicationConfig(ConfigArtifact):
 
 class ScopedBatchConfig(BatchPromptConfig, ConfigArtifact):
     backend_revision: BackendRevision
-    inference_mode: Literal["guarded"] = Field(default="guarded", exclude_if=lambda mode: mode == "guarded")
+    inference_mode: InferenceMode = Field(default="guarded", exclude_if=lambda mode: mode == "guarded")
     grounding: GroundingConfig
-    capacity: ScopedCapacityConfig
+    capacity: ScopedCapacityConfig | None = Field(default=None, exclude_if=lambda capacity: capacity is None)
 
-    def bind_capacity(self, state_directory: str, expected_model_path: str) -> BatchLabelingConfig:
+    def bind_capacity(
+        self, state_directory: str | None = None, expected_model_path: str | None = None
+    ) -> BatchLabelingConfig:
+        capacity = None
+        if self.inference_mode == "guarded":
+            if self.capacity is None or state_directory is None or expected_model_path is None:
+                raise IntegrityError("Guarded labeling requires scoped capacity settings and runtime paths")
+            capacity = self.capacity.bind(state_directory, expected_model_path)
         return BatchLabelingConfig.model_validate(
-            {
-                **self.model_dump(exclude={"capacity"}),
-                "capacity": self.capacity.bind(state_directory, expected_model_path),
-            }
+            {**self.model_dump(exclude={"capacity"}), "capacity": capacity}
         )
 
 
@@ -94,7 +101,7 @@ class ScopedAnnotationConfig(ConfigArtifact):
 
 
 def labeling_settings(config: AnnotationConfig) -> ScopedAnnotationConfig:
-    batch = require_guarded_annotation(config)
+    batch = require_declared_annotation(config)
     return ScopedAnnotationConfig(
         model=config.model,
         max_request_bytes=config.max_request_bytes,
@@ -106,8 +113,11 @@ def labeling_settings(config: AnnotationConfig) -> ScopedAnnotationConfig:
             maximum_model_turns=batch.maximum_model_turns,
             maximum_grounding_rounds=batch.maximum_grounding_rounds,
             backend_revision=batch.backend_revision,
+            inference_mode=batch.inference_mode,
             grounding=batch.grounding,
-            capacity=ScopedCapacityConfig.from_capacity(batch.capacity),
+            capacity=ScopedCapacityConfig.from_capacity(batch.require_capacity())
+            if batch.inference_mode == "guarded"
+            else None,
         ),
     )
 
@@ -294,7 +304,11 @@ def declared_source_config(spec: DatasetBuildSpec, branch: Branch) -> DeclaredSo
                     base_url=model.base_url,
                     model=model.model,
                     api_key_env=model.api_key_env,
-                    capacity=ScopedCapacityConfig.from_capacity(batch.capacity),
+                    capacity=(
+                        ScopedCapacityConfig.from_capacity(batch.require_capacity())
+                        if batch.inference_mode == "guarded"
+                        else None
+                    ),
                     backend_revision=batch.backend_revision,
                 ),
             )

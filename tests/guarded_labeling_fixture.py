@@ -30,7 +30,7 @@ from codebench_pipeline.dataframe_schemas import (
     FilteredCommandsTable,
     SourceDocumentsTable,
 )
-from codebench_pipeline.dataset_config import AnnotationConfig, DatasetBuildSpec, require_guarded_annotation
+from codebench_pipeline.dataset_config import AnnotationConfig, DatasetBuildSpec, require_declared_annotation
 from codebench_pipeline.dataset_extract import filter_candidates
 from codebench_pipeline.dataset_finalization import merge_candidates
 from codebench_pipeline.dataset_records import CandidateRecord
@@ -81,7 +81,7 @@ def guarded_labeling(
 ) -> GuardedLabeling:
     mapped = GuardedLabelingConfig.from_spec(spec)
     settings = mapped.labeling_attempts.batch
-    paths = require_guarded_annotation(spec.annotation).capacity
+    paths = require_declared_annotation(spec.annotation).require_capacity()
     return GuardedLabeling(
         mapped,
         LabelingEvidenceInputs(run, mapped.collection, settings.grounding, capture),
@@ -329,8 +329,8 @@ class LabelingFixture:
         body: bytes,
         _key: str | None,
         _timeout: float,
-        _capacity: CapacityConfig,
-        _path: Path,
+        _capacity: CapacityConfig | None = None,
+        _path: Path | None = None,
     ) -> HTTPResponse:
         messages = json.loads(body)["messages"]
         packet = json.loads(messages[1]["content"])

@@ -8,7 +8,7 @@ from .keenable_catalog import declared_leads, freeze_catalog
 from .keenable_client import KeenableClient
 from .keenable_ledger import open_ledger, verify_lock
 from .keenable_observed import licensed_shell_spans
-from .keenable_planner import GuardedSearchPlanner, SearchSession
+from .keenable_planner import SearchPlanner, SearchSession
 from .keenable_policy import (
     COMMANDS,
     PAGE_CASES,
@@ -45,7 +45,7 @@ class KeenableCollection:
         root: Path,
         declaration: Declaration | KeenableSourceAccess,
         *,
-        planner: GuardedSearchPlanner | None = None,
+        planner: SearchPlanner | None = None,
     ) -> None:
         self.root = root
         self.declaration = declaration

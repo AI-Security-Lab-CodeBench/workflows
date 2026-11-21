@@ -16,13 +16,15 @@ from codebench_pipeline.storage import IntegrityError, fingerprint
 LABELING_ATTEMPTS: Final = AssetKey(["datasets", "labeling_attempts"])
 
 
-def labeling_generation_identity(partition: str, stage_signature: str, expected_model_path: str) -> str:
+def labeling_generation_identity(
+    partition: str, stage_signature: str, expected_model_path: str | None
+) -> str:
     return fingerprint(
         {
             "asset": LABELING_ATTEMPTS.to_user_string(),
             "partition": partition,
             "input_output_signature": stage_signature,
-            "model_binding": fingerprint(expected_model_path),
+            "model_binding": fingerprint(expected_model_path) if expected_model_path is not None else None,
         }
     )
 

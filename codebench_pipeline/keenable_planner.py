@@ -25,7 +25,7 @@ from .keenable_policy import (
 )
 from .keenable_receipts import CallReceipt, Lead, SearchDecision, SearchFeedback, SearchPlanReceipt
 from .keenable_transport import search_payload
-from .openai_transport import parse_completion
+from .openai_transport import complete, parse_completion
 
 _PROMPT: Final = (
     "Choose one available option ID to find additional distinct pages matching the available topics, "
@@ -61,14 +61,14 @@ _FOCUSES: Final = (
     ("lifecycle", " Focus on lifecycle states and documented restart behavior."),
     ("retention", " Focus on documented data retention limits and defaults."),
 )
-_OUTPUT_TOKENS: Final = 96
+_OUTPUT_TOKENS: Final = 1024
 
 
 @dataclass(frozen=True, slots=True)
-class GuardedSearchPlanner:
+class SearchPlanner:
     endpoint: str
     model: str
-    capacity: CapacityConfig
+    capacity: CapacityConfig | None
     receipt_directory: Path
     key: str | None = field(default=None, repr=False)
     backend_revision: str = ""
@@ -81,7 +81,7 @@ class GuardedSearchPlanner:
                     self.endpoint,
                     self.model,
                     self.backend_revision,
-                    self.capacity.model_dump_json(),
+                    self.capacity.model_dump_json() if self.capacity is not None else "plain",
                     _PROMPT,
                     _OUTPUT_TOKENS,
                 ]
@@ -130,8 +130,10 @@ class GuardedSearchPlanner:
         raw: bytes | None = None
         reason = "planner_call_failed"
         try:
-            raw = guarded_complete(
-                self.endpoint, body, self.key, 30, self.capacity, self.receipt_directory
+            raw = (
+                guarded_complete(self.endpoint, body, self.key, 30, self.capacity, self.receipt_directory)
+                if self.capacity is not None
+                else complete(self.endpoint.rstrip("/") + "/chat/completions", body, self.key, 30)
             ).body
             if len(raw) > receipt.reserved_bytes:
                 raise KeenableError("planner_response_budget")
@@ -190,7 +192,7 @@ class _SearchState(TypedDict):
 class SearchSession:
     ledger: Ledger
     declaration: Declaration
-    planner: GuardedSearchPlanner | None
+    planner: SearchPlanner | None
 
     def run(
         self, search: Callable[[SearchOption], tuple[CallReceipt, tuple[Lead, ...]]]
@@ -199,7 +201,7 @@ class SearchSession:
         assert plan is not None
         planner = self.planner if plan.mode == "adaptive" else None
         if plan.mode == "adaptive" and planner is None:
-            raise KeenableError("guarded_planner_required")
+            raise KeenableError("adaptive_planner_required")
         options: list[SearchOption] = []
         case_urls: tuple[tuple[Case, frozenset[str] | None], ...]
         if isinstance(plan, UnrestrictedSearch):

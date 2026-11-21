@@ -22,7 +22,8 @@
     }
   },
   "labeling": {
-    "from_registration": true
+    "from_registration": true,
+    "inference_mode": "plain"
   },
   "storage": {
     "from_registration": true

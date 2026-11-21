@@ -3,7 +3,9 @@ import os
 import tempfile
 import unittest
 from dataclasses import replace
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
+from threading import Thread
 from unittest.mock import patch
 
 from pydantic import ValidationError
@@ -11,7 +13,7 @@ from test_keenable import DECLARATION, result
 
 from codebench_pipeline.inference_capacity import CapacityConfig, CapacityUnavailable
 from codebench_pipeline.keenable import KeenableCollection, KeenableError, load_declaration
-from codebench_pipeline.keenable_planner import GuardedSearchPlanner
+from codebench_pipeline.keenable_planner import SearchPlanner
 from codebench_pipeline.keenable_policy import CurrentAdministrativeSearch, digest, parse_declaration
 from codebench_pipeline.keenable_transport import DirectResponse, Request
 from codebench_pipeline.openai_transport import HTTPResponse
@@ -71,7 +73,7 @@ class AdministrativeSearchTests(unittest.TestCase):
         values["generation"] = "adaptive-fixture"
         values["search_plan"]["mode"] = "adaptive"
         self.adaptive = parse_declaration(json.dumps(values))
-        self.planner = GuardedSearchPlanner(
+        self.planner = SearchPlanner(
             endpoint="https://model.example:443/v1",
             model="test-model",
             capacity=CapacityConfig(
@@ -205,9 +207,9 @@ class AdministrativeSearchTests(unittest.TestCase):
                 model.assert_called_once()
                 wire.assert_not_called()
 
-    def test_adaptive_requires_guard_and_can_end_without_searching(self) -> None:
+    def test_adaptive_requires_planner_and_can_end_without_searching(self) -> None:
         with patch("codebench_pipeline.keenable.request_direct") as wire:
-            with self.assertRaisesRegex(KeenableError, "guarded_planner_required"):
+            with self.assertRaisesRegex(KeenableError, "adaptive_planner_required"):
                 KeenableCollection(self.root, self.adaptive).discover()
             with patch(
                 "codebench_pipeline.keenable_planner.guarded_complete",
@@ -219,7 +221,34 @@ class AdministrativeSearchTests(unittest.TestCase):
         self.assertEqual(catalog.searches, ())
         wire.assert_not_called()
 
+    def test_plain_planner_completes_against_chat_only_endpoint(self) -> None:
+        requests: list[tuple[str, str]] = []
+
+        class ChatOnly(BaseHTTPRequestHandler):
+            def do_POST(self) -> None:
+                request = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+                requests.append((self.path, request["model"]))
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(completion({"option": None}).body)
+
+        with HTTPServer(("127.0.0.1", 0), ChatOnly) as server:
+            thread = Thread(target=server.serve_forever)
+            thread.start()
+            try:
+                planner = replace(
+                    self.planner, endpoint=f"http://127.0.0.1:{server.server_port}/v1", capacity=None
+                )
+                catalog = KeenableCollection(self.root, self.adaptive, planner=planner).discover()
+            finally:
+                server.shutdown()
+                thread.join()
+        assert catalog.plan is not None
+        self.assertEqual(catalog.plan.stop, "planner_stop")
+        self.assertEqual(requests, [("/v1/chat/completions", self.planner.model)])
+
     def test_quarantined_guard_cannot_dispatch_search_or_retry(self) -> None:
+        assert self.planner.capacity is not None
         state = Path(self.planner.capacity.state_directory)
         state.mkdir()
         (state / (digest(self.planner.endpoint.encode()) + ".json")).write_text("{}")

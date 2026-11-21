@@ -231,7 +231,7 @@ class AdaptivePlannerConfig(TypedConfig):
     base_url: str
     model: str
     api_key_env: str | None
-    capacity: ScopedCapacityConfig
+    capacity: ScopedCapacityConfig | None
     backend_revision: str
 
 

@@ -52,7 +52,7 @@ from codebench_pipeline.dataframe_schemas import (
     model_records,
     validated_frame,
 )
-from codebench_pipeline.dataset_config import PublicationConfig, require_guarded_annotation
+from codebench_pipeline.dataset_config import PublicationConfig, require_declared_annotation
 from codebench_pipeline.dataset_registry import DatasetRegistry
 from codebench_pipeline.dataset_tables import publication
 from codebench_pipeline.definitions import build_definitions, dataset_run_config
@@ -114,7 +114,7 @@ class LabelingTableTests(unittest.TestCase):
         home = Path(self.enterContext(tempfile.TemporaryDirectory()))
         fixture = LabelingFixture(self, home)
         spec = fixture.spec
-        batch = require_guarded_annotation(spec.annotation).model_copy(update={"batch_size": 1})
+        batch = require_declared_annotation(spec.annotation).model_copy(update={"batch_size": 1})
         spec = spec.model_copy(
             update={"annotation": spec.annotation.model_copy(update={"batch": batch, "workers": 1})}
         )
@@ -267,15 +267,19 @@ class LabelingTableTests(unittest.TestCase):
             self.assertTrue(retried_in_place.success)
             self.assertEqual(requests, [first, later, *fresh_requests[1:]])
 
-    def test_pipeline_uses_bound_grounding_credentials_without_reload_or_retaining_echo(self) -> None:
+    def test_plain_labeling_uses_bound_grounding_without_capacity_or_credential_echo(self) -> None:
         home = Path(self.enterContext(tempfile.TemporaryDirectory()))
         fixture = LabelingFixture(self, home)
         key = "synthetic-grounding-secret"
         selector = "FIXTURE_GROUNDING_SELECTOR"
-        batch = require_guarded_annotation(fixture.spec.annotation)
+        batch = require_declared_annotation(fixture.spec.annotation)
         grounding = batch.grounding.model_copy(update={"context7_api_key_env": selector})
         annotation = fixture.spec.annotation.model_copy(
-            update={"batch": batch.model_copy(update={"grounding": grounding})}
+            update={
+                "batch": batch.model_copy(
+                    update={"grounding": grounding, "inference_mode": "plain", "capacity": None}
+                )
+            }
         )
         spec = fixture.spec.model_copy(update={"annotation": annotation})
         dataset_id = DatasetRegistry(home).register(spec)
@@ -286,8 +290,6 @@ class LabelingTableTests(unittest.TestCase):
             body: bytes,
             model_key: str | None,
             timeout: float,
-            capacity: CapacityConfig,
-            path: Path,
         ) -> HTTPResponse:
             nonlocal echoed
             self.assertNotIn(key.encode(), body, "Grounding credential reached the model request")
@@ -295,23 +297,33 @@ class LabelingTableTests(unittest.TestCase):
                 echoed = True
                 stack.enter_context(patch.dict("os.environ", {selector: ""}))
                 return tool_reply("unexpected_tool", {"echo": key})
-            return fixture.infer(url, body, model_key, timeout, capacity, path)
+            return fixture.infer(url, body, model_key, timeout)
 
         with (
             ExitStack() as stack,
             patch.dict("os.environ", {selector: key}),
-            patch("codebench_pipeline.batch_labeling.guarded_complete", side_effect=infer),
+            patch("codebench_pipeline.batch_labeling.plain_complete", side_effect=infer),
+            patch.object(
+                DatasetRegistry, "labeling_capacity_paths", side_effect=AssertionError("Capacity lookup")
+            ),
             patch.object(
                 GroundingCredentials, "from_environment", side_effect=AssertionError("Ambient fallback")
             ),
         ):
             cycle = NativeDatasetCycle(home)
-            with dataset_instance(home) as instance:
+            with dataset_instance(home) as instance, patch.dict(os.environ, {"CODEBENCH_HOME": str(home)}):
                 self.refresh(cycle, instance, dataset_id)
-                materialized = cycle.drain(instance, partition=dataset_id)
+                preparation = cycle.drain(instance, prepare_only=True, partition=dataset_id)
+                self.assertIn("filtered_commands", preparation)
+                result = _labeling_job().execute_in_process(
+                    instance=instance,
+                    partition_key=dataset_id,
+                    asset_selection=configured_selection([AssetKey(["datasets", "labeling_attempts"])]),
+                    run_config=dataset_run_config(spec),
+                )
+                self.assertTrue(result.success)
 
         self.assertTrue(echoed)
-        self.assertIn("labeling_attempts", materialized)
         with dataset_instance(home) as instance:
             attempts = DatasetDataService(home, instance).read_current(dataset_id, "labeling_attempts").value
         assert isinstance(attempts, pd.DataFrame)
@@ -399,7 +411,7 @@ class LabelingTableTests(unittest.TestCase):
                     commands = FilteredCommandsTable.validate(commands_value)
                     mapped = GuardedLabelingConfig.from_spec(spec)
                     scoped_batch = mapped.labeling_attempts.batch
-                    capacity = require_guarded_annotation(spec.annotation).capacity
+                    capacity = require_declared_annotation(spec.annotation).require_capacity()
                     evidence = LabelingEvidenceInputs(
                         RepositoryRun(home, spec.dataset_id, "labeling-replay"),
                         mapped.collection,

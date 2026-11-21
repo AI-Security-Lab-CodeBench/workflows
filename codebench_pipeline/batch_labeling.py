@@ -222,7 +222,7 @@ def _logical_input(
             "payload": payload,
             "model": model.model_dump(mode="json"),
             "backend_revision": config.backend_revision,
-            "expected_model_binding": fingerprint(config.capacity.expected_model_path)
+            "expected_model_binding": fingerprint(config.require_capacity().expected_model_path)
             if config.inference_mode == "guarded"
             else None,
             "grounding_policy": config.grounding.model_dump(mode="json", exclude={"revision"}),
@@ -464,7 +464,7 @@ def _run_batch(
                 "row_input_fingerprint": attempt.row_input_fingerprint,
                 "documentation_manifest_digest": attempt.documentation_manifest_digest,
                 "model": model.model,
-                "reported_model_path": config.capacity.expected_model_path
+                "reported_model_path": config.require_capacity().expected_model_path
                 if config.inference_mode == "guarded"
                 else None,
                 "inference_mode": config.inference_mode,
@@ -524,10 +524,11 @@ def _run_batch(
         }
         if model.temperature is not None:
             body["temperature"] = model.temperature
-        if config.reasoning_effort is not None:
-            body["chat_template_kwargs"] = {"reasoning_effort": config.reasoning_effort}
-        elif output_exhausted and config.backend_revision == "qwen38-27b-fp8":
-            body["chat_template_kwargs"] = {"enable_thinking": False}
+        if config.inference_mode == "guarded":
+            if config.reasoning_effort is not None:
+                body["chat_template_kwargs"] = {"reasoning_effort": config.reasoning_effort}
+            elif output_exhausted and config.backend_revision == "qwen38-27b-fp8":
+                body["chat_template_kwargs"] = {"enable_thinking": False}
         turn_path = out / f"turn-{turn - 1:02d}"
         _save(turn_path / "request.json", body)
         if model.base_url is None:
@@ -549,7 +550,7 @@ def _run_batch(
                     body_bytes,
                     model_api_key,
                     model.timeout_seconds,
-                    config.capacity,
+                    config.require_capacity(),
                     turn_path / "capacity",
                 )
         except ContextBudgetExceeded:

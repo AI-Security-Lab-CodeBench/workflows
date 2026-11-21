@@ -22,7 +22,7 @@ from codebench_pipeline.dataset_config import (
     ReleaseCap,
     RequestBytes,
     StrictStageConfig,
-    require_guarded_annotation,
+    require_declared_annotation,
 )
 from codebench_pipeline.model_config import ModelConfig
 from codebench_pipeline.models import Identifier
@@ -66,6 +66,10 @@ class FromRegistration(StrictStageConfig):
         return value
 
 
+class LabelingFromRegistration(FromRegistration):
+    inference_mode: Literal["plain"] | None = None
+
+
 class DeclaredLabeling(StrictStageConfig):
     model: ModelConfig
     max_request_bytes: RequestBytes = 131072
@@ -81,8 +85,8 @@ class DeclaredLabeling(StrictStageConfig):
         )
 
     @model_validator(mode="after")
-    def guarded_transport(self) -> "DeclaredLabeling":
-        require_guarded_annotation(self.registered())
+    def declared_transport(self) -> "DeclaredLabeling":
+        require_declared_annotation(self.registered())
         return self
 
 
@@ -116,7 +120,7 @@ class DeclaredDatasetBundle(StrictStageConfig):
     dataset_id: Identifier
     category_id: Literal["CAT-3"]
     revision_label: str = Field(min_length=1)
-    labeling: DeclaredLabeling | FromRegistration
+    labeling: DeclaredLabeling | LabelingFromRegistration
     storage: DeclaredS3Storage | FromRegistration
     filtering: FilteringConfig = FilteringConfig()
     deduplication: DeduplicationPolicy = DeduplicationPolicy()
@@ -137,7 +141,7 @@ class DeclaredDatasetBundle(StrictStageConfig):
         registry = DatasetRegistry(dataset_home)
         registered = None
         match self.labeling:
-            case FromRegistration():
+            case LabelingFromRegistration(inference_mode=mode):
                 try:
                     registered = registry.get_snapshot(self.dataset_id)
                 except FileNotFoundError as error:
@@ -145,7 +149,11 @@ class DeclaredDatasetBundle(StrictStageConfig):
                         "Declared collection requires existing registered annotation settings; select the canonical dataset --home"
                     ) from error
                 annotation = registered.annotation
-                require_guarded_annotation(annotation)
+                batch = require_declared_annotation(annotation)
+                if mode is not None:
+                    annotation = annotation.model_copy(
+                        update={"batch": batch.model_copy(update={"inference_mode": mode, "capacity": None})}
+                    )
             case DeclaredLabeling() as labeling:
                 annotation = labeling.registered()
         match self.storage:

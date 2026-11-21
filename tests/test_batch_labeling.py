@@ -120,9 +120,11 @@ class _DocOpener:
 
 class BatchLabelingTests(unittest.TestCase):
     def test_plain_inference_submits_directly_without_reserving_capacity(self) -> None:
-        def provider(url, body, key, timeout):
+        def provider(url: str, body: bytes, _key: str | None, _timeout: float) -> HTTPResponse:
             self.assertEqual(url, "http://fixture/v1/chat/completions")
-            records = json.loads(json.loads(body)["messages"][1]["content"])["records"]
+            request = json.loads(body)
+            self.assertNotIn("chat_template_kwargs", request)
+            records = json.loads(request["messages"][1]["content"])["records"]
             return tool_reply(
                 "submit_labels", {"outcomes": [submitted(r, r["evidence_ids"]) for r in records]}
             )
@@ -135,7 +137,9 @@ class BatchLabelingTests(unittest.TestCase):
                     documentation(),
                     make_rules(),
                     remote_model(),
-                    batch_config(root).model_copy(update={"inference_mode": "plain"}),
+                    batch_config(root).model_copy(
+                        update={"inference_mode": "plain", "reasoning_effort": "high", "capacity": None}
+                    ),
                     root / "run",
                 )
             self.assertEqual([row.status for row in outcomes], ["success"])

@@ -11,7 +11,7 @@ from pydantic import TypeAdapter
 
 from codebench_pipeline.batch_labeling_rows import RowEvidence
 from codebench_pipeline.dataframe_schemas import model_records
-from codebench_pipeline.dataset_config import require_guarded_annotation
+from codebench_pipeline.dataset_config import require_declared_annotation
 from codebench_pipeline.dataset_documentation_config import DocumentationConfig
 from codebench_pipeline.dataset_records import CandidateRecord
 from codebench_pipeline.dataset_registry import DatasetRegistry
@@ -259,7 +259,7 @@ class GroundingVersionTests(TestCase):
             registry.get(archived.dataset_id)
         filtered, runtime = fixture.labeling()
         evidence = replace(
-            runtime.evidence_inputs, grounding=require_guarded_annotation(snapshot.annotation).grounding
+            runtime.evidence_inputs, grounding=require_declared_annotation(snapshot.annotation).grounding
         )
         guard = evidence.admission(filtered)
         candidate = next(

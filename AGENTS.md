@@ -265,9 +265,11 @@ local skill does not install or authorize the Dagster Plus MCP server.
   configuration or recreate snapshots. Use per-dataset writer serialization,
   optimistic revisions and durable waiting, not a sleeping compute worker.
 - Bound complete batch context, output, model turns and documentation-provider calls.
-  Every remote inference turn uses a shared metrics-based admission guard capped
-  at 50% of measured request-slot and token capacity; side load pauses new calls.
-  Missing/stale metrics fail closed. This is not a GPU compute-isolation guarantee.
+  Select the transport in the model's business configuration. Plain OpenAI-compatible
+  inference calls chat completions without querying server telemetry. Guarded SGLang
+  inference uses shared admission capped at 50% of measured request-slot and token
+  capacity; side load pauses new calls and missing or stale metrics fail closed.
+  Never fall back from guarded to plain on an admission failure.
   During recovery, skip only completed batches from the interrupted materialization.
   Preserve original inference receipts and explicit human-decision carry-forward
   provenance. A new release snapshot with a nonempty uncertainty queue still

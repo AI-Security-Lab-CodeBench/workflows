@@ -11,7 +11,7 @@ from test_dataset_rules import make_label
 from codebench_pipeline.category_rules import CategoryRules
 from codebench_pipeline.data_view_models import DatasetQueryRequest, TableResponse
 from codebench_pipeline.data_views import DatasetDataService
-from codebench_pipeline.dataset_config import require_guarded_annotation
+from codebench_pipeline.dataset_config import require_declared_annotation
 from codebench_pipeline.dataset_records import CandidateRecord, LabelDecision
 from codebench_pipeline.dataset_registry import DatasetRegistry
 from codebench_pipeline.definitions import build_definitions, dataset_run_config
@@ -132,7 +132,7 @@ class ReviewRegistrationContractTests(unittest.TestCase):
                 return label.model_copy(update={"severity": "high"})
             return label
 
-        batch = require_guarded_annotation(self.spec.annotation).model_copy(
+        batch = require_declared_annotation(self.spec.annotation).model_copy(
             update={"backend_revision": "synthetic-new-label"}
         )
         updated = self.spec.model_copy(

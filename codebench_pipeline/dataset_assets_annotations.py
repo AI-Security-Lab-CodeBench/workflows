@@ -82,8 +82,14 @@ def annotation_assets() -> list[AssetsDefinition]:
         if filtered_commands.attempt is None:
             raise IntegrityError("Labeling input hooks did not prepare the attempt")
         signature, scratch_root = filtered_commands.attempt
-        capacity_paths = labeling_runtime.require_current(context.partition_key, dataset_io_manager)
         settings = mapped_config.labeling_attempts
+        if settings.batch.inference_mode == "guarded":
+            paths = labeling_runtime.require_current(context.partition_key, dataset_io_manager)
+            batch = settings.batch.bind_capacity(paths.state_directory, paths.expected_model_path)
+            expected_model_path = paths.expected_model_path
+        else:
+            batch = settings.batch.bind_capacity()
+            expected_model_path = None
         evidence_inputs = LabelingEvidenceInputs(
             dataset_io_manager.repository_run(context.partition_key, context.run_id),
             mapped_config.collection,
@@ -93,12 +99,10 @@ def annotation_assets() -> list[AssetsDefinition]:
         labeling = GuardedLabeling(
             mapped_config,
             evidence_inputs,
-            settings.batch.bind_capacity(capacity_paths.state_directory, capacity_paths.expected_model_path),
+            batch,
             labeling_runtime.execution(settings.model.api_key_env, settings.batch.grounding),
         )
-        identity = labeling_generation_identity(
-            context.partition_key, signature, capacity_paths.expected_model_path
-        )
+        identity = labeling_generation_identity(context.partition_key, signature, expected_model_path)
         commands = filtered_commands.commands
         scratch = Path(mkdtemp(prefix="dataset-inference-", dir=scratch_root))
         filtered_commands.scratch = scratch

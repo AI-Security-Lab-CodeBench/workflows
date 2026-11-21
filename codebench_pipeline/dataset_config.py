@@ -178,7 +178,7 @@ class DatasetBuildSpec(StrictStageConfig):
                 or (self.snapshots.documents or self.documentation_snapshots.documents)
             ):
                 raise ValueError("Declared collection cannot include prepared source inventories")
-            _declared_annotation_batch(self.annotation)
+            require_declared_annotation(self.annotation)
         elif self.documentation is None:
             raise ValueError("Prepared source inputs require labeling documentation")
         return self
@@ -218,24 +218,17 @@ def load_build_config(path: Path, home: Path | None = None) -> DatasetBuildSpec:
     return bundle.resolve(path.resolve().parent, home=home)
 
 
-def _declared_annotation_batch(annotation: AnnotationConfig) -> BatchLabelingConfig:
+def require_declared_annotation(annotation: AnnotationConfig) -> BatchLabelingConfig:
     batch = annotation.batch
     if annotation.model.provider != "openai_compatible" or batch is None:
         raise PydanticCustomError(
-            "declared_labeling", "Declared collection requires guarded OpenAI-compatible batch labeling"
+            "declared_labeling", "Declared collection requires OpenAI-compatible batch labeling"
         )
-    if not batch.backend_revision.strip() or not Path(batch.capacity.state_directory).is_absolute():
+    if not batch.backend_revision.strip() or (
+        batch.inference_mode == "guarded" and not Path(batch.require_capacity().state_directory).is_absolute()
+    ):
         raise PydanticCustomError(
             "declared_labeling_capacity",
-            "Guarded labeling requires a pinned backend revision and absolute shared capacity directory",
-        )
-    return batch
-
-
-def require_guarded_annotation(annotation: AnnotationConfig) -> BatchLabelingConfig:
-    batch = _declared_annotation_batch(annotation)
-    if batch.inference_mode != "guarded":
-        raise PydanticCustomError(
-            "declared_labeling_transport", "Declared collection requires guarded inference transport"
+            "Labeling requires a pinned backend revision; guarded mode requires an absolute capacity directory",
         )
     return batch

@@ -37,7 +37,7 @@ from codebench_pipeline.finalization_table_asset import (
 from codebench_pipeline.finalization_table_io import retain_failed_finalization
 from codebench_pipeline.inference_capacity import CapacityConfig
 from codebench_pipeline.keenable import KeenableCollection
-from codebench_pipeline.keenable_planner import GuardedSearchPlanner
+from codebench_pipeline.keenable_planner import SearchPlanner
 from codebench_pipeline.keenable_policy import KeenableSourceAccess
 from codebench_pipeline.keenable_tables import (
     provider_adapters,
@@ -86,12 +86,12 @@ def provider_collection(
         and declaration.search_plan.mode == "adaptive"
     ):
         planner = settings.planner
-        if planner is None or capacity is None:
-            raise IntegrityError("Adaptive discovery requires mapped planner settings and bound capacity")
+        if planner is None or (planner.capacity is None) != (capacity is None):
+            raise IntegrityError("Planner capacity binding does not match its mapped configuration")
         return KeenableCollection(
             run.dataset_home,
             declaration,
-            planner=GuardedSearchPlanner(
+            planner=SearchPlanner(
                 planner.base_url,
                 planner.model,
                 capacity,
@@ -120,7 +120,7 @@ class KeenableDiscovery:
         planner = config.planner
         key = os.environ.get(planner.api_key_env) if planner and planner.api_key_env else None
         capacity = None
-        if planner is not None:
+        if planner is not None and planner.capacity is not None:
             paths = runtime.capacity_paths(run.dataset_id)
             capacity = planner.capacity.bind(paths.state_directory, paths.expected_model_path)
         return provider_catalog(

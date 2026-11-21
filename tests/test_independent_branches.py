@@ -27,7 +27,7 @@ from codebench_pipeline.dataset_config import (
     CatalogConfig,
     DatasetBuildSpec,
     FilteringConfig,
-    require_guarded_annotation,
+    require_declared_annotation,
 )
 from codebench_pipeline.dataset_finalization import (
     FINALIZATION_BINDING,
@@ -235,7 +235,7 @@ class IndependentBranchDatasetTests(unittest.TestCase):
         spec = fixture.spec
         mapped = GuardedLabelingConfig.from_spec(spec)
         settings = mapped.labeling_attempts.batch
-        paths = require_guarded_annotation(spec.annotation).capacity
+        paths = require_declared_annotation(spec.annotation).require_capacity()
         batch = settings.bind_capacity(paths.state_directory, paths.expected_model_path)
         run = RepositoryRun(self.home, spec.dataset_id, "synthetic-filter")
         commands, capture = fixture.collect()
