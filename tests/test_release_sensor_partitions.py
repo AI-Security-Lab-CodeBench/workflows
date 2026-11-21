@@ -18,23 +18,25 @@ from test_declared_dataset_graph import with_keenable_declaration
 from test_review_release import attest_fixture_release
 
 from codebench_pipeline.category_rules import CategoryRules
+from codebench_pipeline.collection_config import KeenableSnippetDeclaration
 from codebench_pipeline.data_view_models import DatasetViewError
 from codebench_pipeline.dataframe_io import DataFrameIOManager
 from codebench_pipeline.dataset_asset_types import DATASET_PARTITIONS, RULES_TYPE
 from codebench_pipeline.dataset_registry import DatasetRegistry
 from codebench_pipeline.definitions import build_definitions
-from codebench_pipeline.keenable_policy import KeenableDeclaration
 from codebench_pipeline.runtime_instance import dataset_instance
 
 
 class ReleaseSensorPartitionTests(unittest.TestCase):
     def test_stale_preparation_does_not_discard_another_partitions_release_request(self) -> None:
         home = Path(self.enterContext(TemporaryDirectory()))
-        fixture = LabelingFixture(self, home, limit_per_risk=4)
+        fixture = LabelingFixture(self, home, native=True, limit_per_risk=4)
         healthy = fixture.spec
         stale_id = "zz_stale_preparation"
-        declaration = fixture.declaration
-        assert isinstance(declaration, KeenableDeclaration)
+        collection = healthy.declared_collection
+        assert collection is not None
+        declaration = collection.keenable_declaration
+        assert isinstance(declaration, KeenableSnippetDeclaration)
         stale = with_keenable_declaration(
             healthy.model_copy(
                 update={
@@ -42,7 +44,7 @@ class ReleaseSensorPartitionTests(unittest.TestCase):
                     "storage": healthy.storage.model_copy(update={"local_root": str(home / "stale-tables")}),
                 }
             ),
-            declaration.model_copy(update={"dataset": stale_id}),
+            declaration.model_copy(update={"dataset_id": stale_id}),
         )
         grounding = home / "label-grounding-v2"
         copytree(grounding / healthy.dataset_id / "rights", grounding / stale_id / "rights")

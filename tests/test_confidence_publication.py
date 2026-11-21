@@ -174,7 +174,7 @@ class ConfidencePublicationTests(unittest.TestCase):
     def test_only_uncertain_rows_wait_for_human_review_and_retraction_stales_release(self) -> None:
         with ExitStack() as stack:
             home = Path(stack.enter_context(tempfile.TemporaryDirectory()))
-            fixture = LabelingFixture(self, home, limit_per_risk=4)
+            fixture = LabelingFixture(self, home, native=True, limit_per_risk=4)
             spec = fixture.spec
             DatasetRegistry(home).register(spec)
             fixture.inference.side_effect = partial(mixed_confidence_reply, fixture)
@@ -284,7 +284,7 @@ class ConfidencePublicationTests(unittest.TestCase):
     def test_native_build_and_release_sensor_publish_empty_queue_without_cli(self) -> None:
         with ExitStack() as stack:
             home = Path(stack.enter_context(tempfile.TemporaryDirectory()))
-            spec = LabelingFixture(self, home, limit_per_risk=4).spec
+            spec = LabelingFixture(self, home, native=True, limit_per_risk=4).spec
             DatasetRegistry(home).register(spec)
             instance = stack.enter_context(dataset_instance(home))
             instance.add_dynamic_partitions("dataset_builds", [spec.dataset_id])
@@ -319,7 +319,7 @@ class ConfidencePublicationTests(unittest.TestCase):
     def test_all_high_confidence_build_publishes_without_human_decisions_and_reuses_release(self) -> None:
         with ExitStack() as stack:
             home = Path(stack.enter_context(tempfile.TemporaryDirectory()))
-            spec = LabelingFixture(self, home, limit_per_risk=4).spec
+            spec = LabelingFixture(self, home, native=True, limit_per_risk=4).spec
             DatasetRegistry(home).register(spec)
             built = run_registered(spec.dataset_id, home).materialized_stages
             self.assertNotIn("dataset_release", built)

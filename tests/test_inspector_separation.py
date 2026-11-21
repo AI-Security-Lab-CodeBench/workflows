@@ -8,11 +8,12 @@ from guarded_labeling_fixture import LabelingFixture
 from native_dataset_cycle import NativeDatasetCycle
 from pydantic import JsonValue, TypeAdapter
 from test_dataframe_io import s3_fixture
-from test_declared_dataset_graph import BUNDLE, fixture_spec
+from test_declared_dataset_graph import BUNDLE, fixture_spec, with_keenable_declaration
 from test_review_release import attest_fixture_release
 
 from codebench_pipeline.artifact_views import ArtifactJSON, ArtifactQuery, ArtifactTable
 from codebench_pipeline.category_rules import CategoryRules
+from codebench_pipeline.collection_config import KeenableSnippetDeclaration
 from codebench_pipeline.config_assets import CONFIG_DIRECTORY, GLOBAL_CONFIG, mapping_key
 from codebench_pipeline.data_view_models import DatasetQueryRequest, DatasetViewError, TableResponse
 from codebench_pipeline.data_views import DatasetDataService
@@ -23,7 +24,6 @@ from codebench_pipeline.dataset_run import refresh_registered_configuration, run
 from codebench_pipeline.definitions import build_definitions, dataset_run_config
 from codebench_pipeline.human_review import HumanReviewError
 from codebench_pipeline.human_review_store import HumanReviewStore
-from codebench_pipeline.keenable_policy import KeenableError
 from codebench_pipeline.release_runner import ReleaseRunner
 from codebench_pipeline.runtime_instance import dataset_instance
 
@@ -32,7 +32,7 @@ class InspectorSeparationTests(unittest.TestCase):
     def test_s3_data_readers_check_current_pointer_only_for_evidenced_outputs(self) -> None:
         home = Path(self.enterContext(TemporaryDirectory()))
         storage, s3 = self.enterContext(s3_fixture())
-        spec = LabelingFixture(self, home).spec.model_copy(update={"storage": storage})
+        spec = LabelingFixture(self, home, native=True).spec.model_copy(update={"storage": storage})
         registry = DatasetRegistry(home)
         dataset = registry.register(spec)
         stage = "filtered_commands"
@@ -101,7 +101,7 @@ class InspectorSeparationTests(unittest.TestCase):
 
     def test_processing_data_currentness_uses_effective_approval(self) -> None:
         home = Path(self.enterContext(TemporaryDirectory()))
-        spec = LabelingFixture(self, home, category_confidence="medium").spec
+        spec = LabelingFixture(self, home, native=True, category_confidence="medium").spec
         registry = DatasetRegistry(home)
         dataset = registry.register(spec)
         run_registered(dataset, home)
@@ -215,9 +215,9 @@ class InspectorSeparationTests(unittest.TestCase):
             self.assertEqual(response.data_schema.source, "declared")
             self.assertIsNone(response.publication_state)
 
-    def test_release_browsing_does_not_plan_and_displays_expired_and_stale_evidence(self) -> None:
+    def test_release_browsing_does_not_plan_and_displays_stale_evidence(self) -> None:
         home = Path(self.enterContext(TemporaryDirectory()))
-        fixture = LabelingFixture(self, home, limit_per_risk=4)
+        fixture = LabelingFixture(self, home, native=True, limit_per_risk=4)
         spec = fixture.spec
         registry = DatasetRegistry(home)
         dataset = registry.register(spec)
@@ -266,13 +266,6 @@ class InspectorSeparationTests(unittest.TestCase):
             self.assertNotIn("category_rules", effective)
             self.assertEqual(grounding["allowed_domains"], fixture.grounding.allowed_domains)
             self.assertNotIn("keenable_api_key_env", grounding)
-            with patch(
-                "codebench_pipeline.keenable_policy.KeenableDeclaration.check_current",
-                side_effect=KeenableError("authorization_expired", 200),
-            ):
-                inspect("stale")
-                with self.assertRaises((HumanReviewError, DatasetViewError)):
-                    runner(token)
             self.assertEqual(len(instance.get_runs()), run_count)
 
             @asset(
@@ -300,6 +293,19 @@ class InspectorSeparationTests(unittest.TestCase):
                 asset_selection=[GLOBAL_CONFIG, changed_rules.key],
             )
             inspect("published")
+            collection = spec.declared_collection
+            assert collection is not None
+            declaration = collection.keenable_declaration
+            assert isinstance(declaration, KeenableSnippetDeclaration)
+            revised = declaration.model_copy(
+                update={"search": declaration.search.model_copy(update={"queries": ("Different examples",)})}
+            )
+            run_count = len(instance.get_runs())
+            registry.register(with_keenable_declaration(spec, revised))
+            inspect("stale")
+            with self.assertRaises((HumanReviewError, DatasetViewError)):
+                runner(token)
+            self.assertEqual(len(instance.get_runs()), run_count)
             registry.register(
                 spec.model_copy(
                     update={"publication": spec.publication.model_copy(update={"limit_per_risk": 1})}

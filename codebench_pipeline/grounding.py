@@ -21,6 +21,7 @@ from codebench_pipeline.grounding_tools import (
     GroundingConfig,
 )
 from codebench_pipeline.keenable_policy import RESPONSE_BYTES, canonical_url
+from codebench_pipeline.keenable_snippets import SnippetCollectionReceipt
 from codebench_pipeline.models import Digest, SemanticSnippet
 from codebench_pipeline.repository_receipts import canonical, read_evidence_bytes
 from codebench_pipeline.storage import IntegrityError, digest, fingerprint
@@ -194,7 +195,11 @@ class GuardedEvidence:
         if operations is None:
             raise IntegrityError("Source-level grounding requires a verified shared operation index")
         branch, _, original_id = candidate.candidate_id.partition(":")
-        if branch == "keenable":
+        if branch == "keenable" and isinstance(self.sources.lock, SnippetCollectionReceipt):
+            snippet = self.sources.lock.candidates[original_id]
+            start, end = snippet.start, snippet.end
+            own_approved = False
+        elif branch == "keenable":
             origin = self.sources.provider_rows[original_id]
             start, end = origin.start, origin.end
             page = operations.approved_pages.get(capture.url)
@@ -205,7 +210,8 @@ class GuardedEvidence:
             own_approved = True
         if Applicability(capture.body).overlaps(start, end):
             return []
-        self.sources.provider.declaration.check_current(datetime.now(UTC))
+        if self.sources.provider is not None:
+            self.sources.provider.declaration.check_current(datetime.now(UTC))
         selected = None
         if own_approved:
             own = shared_passages(capture.url, capture.source_binding, capture.body)

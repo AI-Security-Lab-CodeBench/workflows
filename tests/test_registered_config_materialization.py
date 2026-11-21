@@ -7,8 +7,8 @@ from unittest.mock import patch
 import pandas as pd
 import test_declared_dataset_graph as declared_graph
 from dagster import AssetKey, DagsterInvalidConfigError
+from keenable_mcp_fixture import keenable_mcp_fixture
 from pydantic import JsonValue, TypeAdapter, ValidationError
-from test_keenable import PEER, PLAN, SOURCE_BODY, result
 
 from codebench_pipeline.collection_config import CollectionMergeConfig
 from codebench_pipeline.collection_stage_settings import COLLECTION_OPERATIONS, RepositoryCatalogSettings
@@ -27,7 +27,6 @@ from codebench_pipeline.dataset_dependencies import preparation_stages
 from codebench_pipeline.dataset_registry import DatasetRegistry
 from codebench_pipeline.declared_dataset_bundle import DeclaredDatasetBundle
 from codebench_pipeline.definitions import build_definitions
-from codebench_pipeline.keenable_transport import DirectResponse
 from codebench_pipeline.labeling_stage_settings import ProposalRules
 from codebench_pipeline.runtime_instance import dataset_instance
 from codebench_pipeline.stage_configuration import (
@@ -86,10 +85,7 @@ class RegisteredConfigMaterializationTests(TestCase):
                         "os.environ",
                         {"CODEBENCH_CONFIG_ROOT": str(authored), "KEENABLE_API_KEY": "fixture-key"},
                     ),
-                    patch(
-                        "codebench_pipeline.keenable.request_direct",
-                        side_effect=(result(PLAN), DirectResponse(SOURCE_BODY, PEER)),
-                    ),
+                    keenable_mcp_fixture(),
                 ):
                     instance.add_dynamic_partitions("dataset_builds", [dataset_id])
                     if preapproved:
@@ -212,13 +208,7 @@ class RegisteredConfigMaterializationTests(TestCase):
 
         with dataset_instance(home) as instance:
             instance.add_dynamic_partitions("dataset_builds", [dataset_id])
-            with (
-                patch.dict("os.environ", {"KEENABLE_API_KEY": "fixture-key"}),
-                patch(
-                    "codebench_pipeline.keenable.request_direct",
-                    side_effect=(result(PLAN), DirectResponse(SOURCE_BODY, PEER)),
-                ),
-            ):
+            with keenable_mcp_fixture():
                 run = job.execute_in_process(
                     instance=instance, partition_key=dataset_id, asset_selection=selection
                 )

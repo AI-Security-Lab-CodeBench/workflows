@@ -23,10 +23,9 @@ from dagster import (
 from dagster._core.definitions.data_version import get_input_data_version_tag, get_input_event_pointer_tag
 from dagster._core.events import StepMaterializationData
 from dagster._core.events.log import EventLogEntry
+from keenable_mcp_fixture import ASYNC_CLIENT, keenable_mcp_fixture
 from native_dataset_cycle import NativeDatasetCycle
 from pydantic import ValidationError
-from test_keenable import PEER, PLAN, SOURCE_BODY, result
-from test_keenable import source_declaration as source_scope_declaration
 from test_repository import (
     DOCKER,
     TLDR,
@@ -36,8 +35,13 @@ from test_repository import (
 )
 
 from codebench_pipeline.artifact_views import ArtifactJSON, ArtifactQuery, ArtifactTable
-from codebench_pipeline.collection_config import CAT3_DATASET_ID, SourceDeclaration
-from codebench_pipeline.collection_stage_settings import KeenableDiscoverySettings, RepositoryCatalogSettings
+from codebench_pipeline.collection_config import (
+    CAT3_DATASET_ID,
+    KeenableCollectionDeclaration,
+    KeenableSnippetDeclaration,
+    SourceDeclaration,
+)
+from codebench_pipeline.collection_stage_settings import RepositoryCatalogSettings
 from codebench_pipeline.config_assets import collection_mapping_key
 from codebench_pipeline.data_views import DatasetDataService
 from codebench_pipeline.dataframe_io import DataFrameIOManager, asset_storage_key
@@ -54,8 +58,7 @@ from codebench_pipeline.declared_dataset_bundle import (
 )
 from codebench_pipeline.definitions import build_definitions
 from codebench_pipeline.keenable import KeenableCollection
-from codebench_pipeline.keenable_policy import CASES, Declaration, KeenableDeclaration, KeenableSourceAccess
-from codebench_pipeline.keenable_transport import DirectResponse
+from codebench_pipeline.keenable_policy import CASES, KeenableDeclaration, KeenableSnippetSettings
 from codebench_pipeline.object_store import ObjectStore, StorageConfig
 from codebench_pipeline.repository_branch_config import RepositoryBranchDeclaration
 from codebench_pipeline.repository_receipts import RepositoryReceipt
@@ -99,7 +102,9 @@ def fixture_spec(home: Path, bundle_path: Path = BUNDLE) -> DatasetBuildSpec:
     return resolved.model_copy(update={"storage": StorageConfig(local_root=str(home / "dataframes"))})
 
 
-def with_keenable_declaration(spec: DatasetBuildSpec, declaration: Declaration) -> DatasetBuildSpec:
+def with_keenable_declaration(
+    spec: DatasetBuildSpec, declaration: KeenableCollectionDeclaration
+) -> DatasetBuildSpec:
     collection = spec.declared_collection
     assert collection is not None
     source = SourceDeclaration.from_declaration(declaration)
@@ -112,48 +117,6 @@ def with_keenable_declaration(spec: DatasetBuildSpec, declaration: Declaration) 
 
 
 class DeclaredDatasetGraphTests(unittest.TestCase):
-    def test_adaptive_catalog_constructs_planner_from_mapped_config_without_registry(self) -> None:
-        from codebench_pipeline.declared_source_assets import provider_collection
-        from codebench_pipeline.repository import RepositoryRun
-
-        with tempfile.TemporaryDirectory() as directory:
-            home = Path(directory)
-            spec = fixture_spec(home)
-            collection = spec.declared_collection
-            assert collection is not None
-            declaration = collection.keenable_declaration
-            assert declaration.search_plan is not None
-            adaptive = with_keenable_declaration(
-                spec,
-                declaration.model_copy(
-                    update={"search_plan": declaration.search_plan.model_copy(update={"mode": "adaptive"})}
-                ),
-            )
-            configs = stage_configs(adaptive)
-            config = KeenableDiscoverySettings.model_validate_json(
-                configs["keenable/discover_use_cases"].model_dump_json(), strict=True
-            )
-            access = KeenableSourceAccess.model_validate_json(
-                configs["keenable/capture_origin_pages"].model_dump_json(), strict=True
-            )
-            batch = adaptive.annotation.batch
-            assert batch is not None
-            run = RepositoryRun(home, spec.dataset_id, "offline")
-            with (
-                patch.object(DatasetRegistry, "get", side_effect=AssertionError("Registry read")),
-                patch.object(DatasetRegistry, "get_snapshot", side_effect=AssertionError("Snapshot read")),
-            ):
-                provider = provider_collection(config, run, plan_receipts=home, capacity=batch.capacity)
-                planner = provider.planner
-                assert planner is not None
-                self.assertEqual(planner.endpoint, adaptive.annotation.model.base_url)
-                self.assertEqual(planner.model, adaptive.annotation.model.model)
-                self.assertEqual(planner.capacity, batch.capacity)
-                self.assertEqual(planner.backend_revision, batch.backend_revision)
-                self.assertEqual(planner.receipt_directory, home)
-                self.assertIsNone(provider_collection(access, run).planner)
-                self.assertEqual(access.declaration_sha256, config.declaration.declaration_sha256)
-
     def test_declared_collection_requires_guarded_batch_and_rejects_local_documentation(self) -> None:
         payload = json.loads(BUNDLE.read_bytes())
         forbidden = json.loads(BUNDLE.read_bytes())
@@ -213,13 +176,7 @@ class DeclaredDatasetGraphTests(unittest.TestCase):
             instance.add_dynamic_partitions("dataset_builds", [spec.dataset_id])
             definitions = build_definitions(home)
             job = definitions.resolve_job_def("prepare_dataset")
-            with (
-                patch.dict("os.environ", {"KEENABLE_API_KEY": "fixture-key"}),
-                patch(
-                    "codebench_pipeline.keenable.request_direct",
-                    side_effect=(result(PLAN), DirectResponse(SOURCE_BODY, PEER)),
-                ),
-            ):
+            with keenable_mcp_fixture():
                 run = job.execute_in_process(instance=instance, partition_key=spec.dataset_id)
             self.assertTrue(run.success)
             data = DatasetDataService(home, instance)
@@ -251,8 +208,6 @@ class DeclaredDatasetGraphTests(unittest.TestCase):
                 "datasets__command_candidates",
                 "datasets__documentation__capture_documentation",
                 "datasets__documentation__command_candidates",
-                "datasets__keenable__discover_use_cases",
-                "datasets__keenable__capture_origin_pages",
                 "datasets__keenable__command_candidates",
             )
             with (
@@ -261,7 +216,7 @@ class DeclaredDatasetGraphTests(unittest.TestCase):
                     side_effect=AssertionError("Cache hit reacquired repository bytes"),
                 ),
                 patch(
-                    "codebench_pipeline.keenable.request_direct",
+                    ASYNC_CLIENT,
                     side_effect=AssertionError("Cache hit called the provider"),
                 ),
             ):
@@ -307,8 +262,6 @@ class DeclaredDatasetGraphTests(unittest.TestCase):
             siblings = (
                 AssetKey(["datasets", "documentation", "capture_documentation"]),
                 AssetKey(["datasets", "documentation", "command_candidates"]),
-                AssetKey(["datasets", "keenable", "discover_use_cases"]),
-                AssetKey(["datasets", "keenable", "capture_origin_pages"]),
                 AssetKey(["datasets", "keenable", "command_candidates"]),
             )
 
@@ -452,6 +405,7 @@ class DeclaredDatasetGraphTests(unittest.TestCase):
             copytree(BUNDLE.parent.parent, business)
             declaration = business / "datasets" / BUNDLE.name
             payload = json.loads(declaration.read_bytes())
+            payload["labeling"] = {"from_registration": True}
             payload["storage"] = {"backend": "s3", "bucket": "fixture-artifacts"}
             declaration.write_text(json.dumps(payload), encoding="utf-8")
             declared = load_build_config(declaration, home)
@@ -560,4 +514,11 @@ def collection_fixture(spec: DatasetBuildSpec) -> Iterator[DatasetBuildSpec]:
         }
     )
     with patch("codebench_pipeline.repository_acquisition.fetch_repository_bytes", side_effect=fetch):
-        yield with_keenable_declaration(spec, source_scope_declaration())
+        yield with_keenable_declaration(
+            spec,
+            KeenableSnippetDeclaration(
+                schema_version="4",
+                dataset_id=spec.dataset_id,
+                search=KeenableSnippetSettings(queries=("Terraform plan examples",)),
+            ),
+        )

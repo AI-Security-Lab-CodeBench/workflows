@@ -25,7 +25,7 @@ from codebench_pipeline.typed_config import ConfigArtifact
 class NativeConfigConsumptionTests(TestCase):
     def test_filter_requires_valid_mapping_from_its_dagster_producer(self) -> None:
         home = Path(self.enterContext(TemporaryDirectory()))
-        spec = LabelingFixture(self, home).spec
+        spec = LabelingFixture(self, home, native=True).spec
         dataset_id = DatasetRegistry(home).register(spec)
         cycle = NativeDatasetCycle(home)
         job = cycle.definitions.get_implicit_global_asset_job_def()
@@ -117,7 +117,7 @@ class NativeConfigConsumptionTests(TestCase):
 
     def test_scoped_policy_consumer_rejects_routes_from_another_registration(self) -> None:
         home = Path(self.enterContext(TemporaryDirectory()))
-        spec = LabelingFixture(self, home).spec
+        spec = LabelingFixture(self, home, native=True).spec
         dataset_id = DatasetRegistry(home).register(spec)
         risk, *rest = spec.rules.risks
         other_risk = risk.model_copy(update={"command_patterns": ["^fixture-different-route$"]})

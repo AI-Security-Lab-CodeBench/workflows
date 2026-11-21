@@ -8,6 +8,7 @@ from unittest import TestCase
 from unittest.mock import patch
 
 import numpy as np
+from keenable_mcp_fixture import keenable_mcp_fixture
 from numpy.typing import NDArray
 from pandera.typing import DataFrame
 from pydantic import TypeAdapter
@@ -23,6 +24,7 @@ from codebench_pipeline.collection_config import (
     CAT3_DATASET_ID,
     CollectionMergeConfig,
     DeclaredCollection,
+    KeenableSnippetDeclaration,
     SourceDeclaration,
 )
 from codebench_pipeline.dataframe_schemas import (
@@ -39,7 +41,7 @@ from codebench_pipeline.grounding_sources import persist_repository_origin_bindi
 from codebench_pipeline.grounding_tables import GuardedLabeling, LabelingEvidenceInputs
 from codebench_pipeline.inference_capacity import CapacityConfig
 from codebench_pipeline.keenable import KeenableCollection
-from codebench_pipeline.keenable_policy import CASES, PROVIDER, KeenableDeclaration
+from codebench_pipeline.keenable_policy import CASES, PROVIDER, KeenableDeclaration, KeenableSnippetSettings
 from codebench_pipeline.keenable_tables import (
     provider_adapters,
     provider_candidates,
@@ -66,6 +68,7 @@ RIGHTS = b'{"synthetic":"Fixture authorization to retain and quote the operation
 CORPUS = b"Enumerate the pods in the selected namespace:\n```bash\nkubectl get pods\n```\n"
 COMPOSE = b"Display the current Compose service status:\n```bash\ndocker compose ps\n```\n"
 DOCS = b"# Docker\n\n- List all existing containers:\n\n`docker ps --all`\n"
+PLAN_REFERENCE = b"Previews Terraform changes using `terraform plan`.\n"
 UNRELATED_SCOPE = b"This section uses a demo cluster.\n```bash\nkubectl get pods --all-namespaces\n```\n"
 REVIEWED_SCOPE = (
     b"`--all-namespaces` lists pods across all namespaces.\n```bash\nkubectl get pods --all-namespaces\n```\n"
@@ -96,6 +99,7 @@ class LabelingFixture:
         case: TestCase,
         home: Path,
         *,
+        native: bool = False,
         context7: bool = False,
         corpus: bytes = CORPUS,
         source_limited: bool = True,
@@ -117,6 +121,8 @@ class LabelingFixture:
         compose.file("sample/README.md", COMPOSE)
         compose.file("sample/compose.yml", b"services: {}")
         tldr.file("pages/common/docker.md", documentation_corpus)
+        if native:
+            tldr.file("pages/common/terraform.md", PLAN_REFERENCE)
         self.repositories = (kube, compose, tldr)
         dataset = repository_branch_fixture("dataset", (kube, compose))
         documentation = repository_branch_fixture("documentation", (tldr,))
@@ -234,7 +240,15 @@ class LabelingFixture:
                 "declared_collection": DeclaredCollection(
                     existing_datasets=SourceDeclaration.from_declaration(dataset),
                     documentation_crawl=SourceDeclaration.from_declaration(documentation),
-                    keenable_use_cases=SourceDeclaration.from_declaration(self.declaration),
+                    keenable_use_cases=SourceDeclaration.from_declaration(
+                        KeenableSnippetDeclaration(
+                            schema_version="4",
+                            dataset_id=spec.dataset_id,
+                            search=KeenableSnippetSettings(queries=("Terraform plan examples",)),
+                        )
+                        if native
+                        else self.declaration
+                    ),
                     merge=CollectionMergeConfig(
                         repository_origin_weights={
                             kube.origin.origin_id: 0.8,
@@ -245,7 +259,6 @@ class LabelingFixture:
                 ),
             }
         )
-        case.enterContext(patch.dict(os.environ, {"KEENABLE_API_KEY": "fixture-key-long"}))
         case.enterContext(
             patch(
                 "codebench_pipeline.repository_acquisition.fetch_repository_bytes",
@@ -260,16 +273,27 @@ class LabelingFixture:
                 return DirectResponse(shared_body, PEER)
             raise AssertionError(f"Unexpected synthetic Keenable request: {request.url}")
 
-        case.enterContext(
-            patch(
-                "codebench_pipeline.keenable.request_direct",
-                side_effect=(
-                    current_wire
-                    if source_limited
-                    else [result(PLAN), result(), result(), result(), result(), DirectResponse(BODY, PEER)]
-                ),
+        if native:
+            case.enterContext(keenable_mcp_fixture())
+        else:
+            case.enterContext(patch.dict(os.environ, {"KEENABLE_API_KEY": "fixture-key-long"}))
+            case.enterContext(
+                patch(
+                    "codebench_pipeline.keenable.request_direct",
+                    side_effect=(
+                        current_wire
+                        if source_limited
+                        else [
+                            result(PLAN),
+                            result(),
+                            result(),
+                            result(),
+                            result(),
+                            DirectResponse(BODY, PEER),
+                        ]
+                    ),
+                )
             )
-        )
         self.inference = case.enterContext(
             patch("codebench_pipeline.batch_labeling.guarded_complete", side_effect=self.infer)
         )

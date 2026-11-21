@@ -1,4 +1,4 @@
-from typing import Final, Self, assert_never
+from typing import Final, Literal, Self, assert_never
 
 from pydantic import (
     BaseModel,
@@ -19,11 +19,12 @@ from codebench_pipeline.keenable_policy import (
     CurrentKeenableDeclaration,
     Declaration,
     KeenableDeclaration,
+    KeenableSnippetSettings,
     parse_declaration,
 )
 from codebench_pipeline.merge_config import CollectionMergeConfig as CollectionMergeConfig
 from codebench_pipeline.merge_config import SourceWeight
-from codebench_pipeline.models import Digest
+from codebench_pipeline.models import Digest, Identifier
 from codebench_pipeline.repository_branch_config import (
     HistoricalWeightedRepositoryBranch,
     RepositoryAcquisitionConfig,
@@ -34,12 +35,33 @@ from codebench_pipeline.repository_config import RepositoryBranch, RepositoryCon
 from codebench_pipeline.storage import IntegrityError, fingerprint
 from codebench_pipeline.typed_config import ConfigArtifact, TypedConfig
 
+
+class KeenableSnippetDeclaration(ConfigArtifact):
+    schema_version: Literal["4"]
+    dataset_id: Identifier
+    search: KeenableSnippetSettings
+
+    @property
+    def dataset(self) -> str:
+        return self.dataset_id
+
+
+type KeenableCollectionDeclaration = Declaration | KeenableSnippetDeclaration
+
+
+def parse_collection_keenable(raw: str | bytes) -> KeenableCollectionDeclaration:
+    value = _JSON_OBJECT.validate_json(raw)
+    if value.get("schema_version") == "4":
+        return KeenableSnippetDeclaration.model_validate_json(raw)
+    return parse_declaration(raw)
+
+
 type DeclaredSource = (
     RepositoryBranchDeclaration
     | HistoricalWeightedRepositoryBranch
     | RepositoryBranchConfig
     | RepositoryConfig
-    | Declaration
+    | KeenableCollectionDeclaration
 )
 _JSON_OBJECT: Final = TypeAdapter(dict[str, JsonValue])
 
@@ -95,7 +117,7 @@ class SourceDeclaration(BaseModel):
         elif "dataset" in raw and "documentation" in raw:
             declaration = RepositoryConfig.model_validate_json(wire)
         else:
-            declaration = parse_declaration(wire)
+            declaration = parse_collection_keenable(wire)
         source = handler({**data, "declaration": declaration})
         if wire != declaration.model_dump_json().encode():
             source._original_wire = wire
@@ -118,14 +140,14 @@ class SourceDeclaration(BaseModel):
                 return declaration.runtime(branch)
             case RepositoryConfig():
                 return declaration
-            case CurrentKeenableDeclaration() | KeenableDeclaration():
+            case CurrentKeenableDeclaration() | KeenableDeclaration() | KeenableSnippetDeclaration():
                 raise IntegrityError("Keenable does not have repository acquisition configuration")
         assert_never(declaration)
 
-    def keenable_config(self) -> Declaration:
+    def keenable_config(self) -> KeenableCollectionDeclaration:
         declaration = self.declaration
         match declaration:
-            case CurrentKeenableDeclaration() | KeenableDeclaration():
+            case CurrentKeenableDeclaration() | KeenableDeclaration() | KeenableSnippetDeclaration():
                 return declaration
             case (
                 RepositoryBranchDeclaration()
@@ -135,6 +157,12 @@ class SourceDeclaration(BaseModel):
             ):
                 raise IntegrityError("Repository sources do not have Keenable acquisition configuration")
         assert_never(declaration)
+
+    def keenable_search(self) -> KeenableSnippetSettings:
+        declaration = self.keenable_config()
+        if isinstance(declaration, KeenableSnippetDeclaration):
+            return declaration.search
+        raise IntegrityError("Keenable snippet acquisition requires an explicit snippet search declaration")
 
     def require_current(self, branch: Branch) -> None:
         if isinstance(self.declaration, HistoricalWeightedRepositoryBranch):
@@ -223,7 +251,7 @@ class DeclaredCollection(TypedConfig):
         return self.for_branch(branch).repository_config(branch)
 
     @property
-    def keenable_declaration(self) -> Declaration:
+    def keenable_declaration(self) -> KeenableCollectionDeclaration:
         return self.keenable_use_cases.keenable_config()
 
 
@@ -246,12 +274,16 @@ class DeclaredSourceStageConfig(TypedConfig, ConfigArtifact):
     def require_current_source(self) -> Self:
         self.source.require_current(self.branch)
         if self.branch == "keenable":
-            plan = self.source.keenable_config().search_plan
-            adaptive = plan is not None and plan.mode == "adaptive"
+            declaration = self.source.keenable_config()
+            adaptive = (
+                not isinstance(declaration, KeenableSnippetDeclaration)
+                and declaration.search_plan is not None
+                and declaration.search_plan.mode == "adaptive"
+            )
         else:
             adaptive = False
-        if (self.planner is not None) != adaptive:
-            raise IntegrityError("Mapped planner settings are required only for adaptive Keenable discovery")
+        if self.planner is not None and not adaptive:
+            raise IntegrityError("Historical planner settings require an adaptive Keenable declaration")
         return self
 
     @property

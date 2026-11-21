@@ -13,7 +13,7 @@ from codebench_pipeline.grounding_sources import (
     origin_binding_payload,
 )
 from codebench_pipeline.keenable_policy import RESPONSE_BYTES, canonical_url, record_digest
-from codebench_pipeline.keenable_receipts import VerifiedPage
+from codebench_pipeline.keenable_receipts import CaptureLock, VerifiedPage
 from codebench_pipeline.repository_acquisition import CAPTURED_SOURCES, CATALOG_SOURCES
 from codebench_pipeline.repository_receipts import RepositoryReceipt, RepositoryRun, canonical, read_receipt
 from codebench_pipeline.repository_tree import git_blob_sha1, raw_url
@@ -68,6 +68,8 @@ class SharedOperations:
 
     @cached_property
     def approved_pages(self) -> dict[str, VerifiedPage]:
+        if not isinstance(self.sources.lock, CaptureLock) or self.sources.provider is None:
+            return {}
         declaration = self.sources.provider.declaration
         return {
             page.url: page
@@ -79,6 +81,7 @@ class SharedOperations:
 
     def _passages(self) -> Iterable[SharedPassage]:
         for page in self.approved_pages.values():
+            assert isinstance(self.sources.lock, CaptureLock)
             binding = fingerprint(
                 {"declaration": self.sources.lock.declaration_sha256, "page": record_digest(page)}
             )

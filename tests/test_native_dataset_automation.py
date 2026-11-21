@@ -16,7 +16,7 @@ from codebench_pipeline.runtime_instance import dataset_instance
 class NativeDatasetAutomationTests(unittest.TestCase):
     def test_refresh_drives_native_partition_requests_and_effective_changes_relabel(self) -> None:
         home = Path(self.enterContext(TemporaryDirectory()))
-        fixture = LabelingFixture(self, home, category_confidence="medium")
+        fixture = LabelingFixture(self, home, native=True, category_confidence="medium")
         spec = fixture.spec
         registry = DatasetRegistry(home)
         partition = registry.register(spec)

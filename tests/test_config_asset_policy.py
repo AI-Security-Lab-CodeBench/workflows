@@ -23,7 +23,7 @@ class ConfigAssetPolicyTests(unittest.TestCase):
     def test_selective_documentation_capture_uses_verified_pinned_mapping_across_runs(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             home = Path(temporary)
-            original = LabelingFixture(self, home).spec
+            original = LabelingFixture(self, home, native=True).spec
             pinned = original.model_copy(
                 update={"rules": original.rules.model_copy(update={"category_name": "Pinned fixture policy"})}
             )

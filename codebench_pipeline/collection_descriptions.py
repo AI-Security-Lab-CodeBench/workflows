@@ -26,23 +26,13 @@ DECLARED_COLLECTION_DESCRIPTIONS: Final = {
         "nearby context. CommandCandidatesTable links each example to its original file and position. "
         "A changed capture or unapproved parser fails extraction."
     ),
-    "keenable/discover_use_cases": (
-        "Search for examples by use case. Open discovery can select public URLs beyond the approved "
-        "grounding sources; declared references remain available separately. SourceCatalogTable "
-        "exposes selections and exclusions before any selected page is captured. Transient search failures "
-        "back off and retry within the call budget; saved successes are reused. A permanent failure, "
-        "ambiguous dispatch or exhausted retry allowance stops discovery."
-    ),
-    "keenable/capture_origin_pages": (
-        "Fetch selected pages from their origins and verify usage rights before retaining text. "
-        "A newly discovered page needs its own license evidence. "
-        "SourceDocumentsTable stores the verified text and the capture lock. Withheld pages add no "
-        "rows; an uncertain or failed mandatory request blocks the generation."
-    ),
     "keenable/command_candidates": (
-        "Resolve the permitted parser and byte spans against the capture lock, then read the literal "
-        "administrative examples. CommandCandidatesTable retains exact positions and capture evidence. "
-        "A healthy empty generation is valid; an invalid lock or span binding blocks extraction."
+        "Search Keenable for the configured use cases and extract literal shell examples backed by "
+        "the returned snippets. CommandCandidatesTable and its receipts preserve the returned page URL "
+        "and snippet evidence. The source type is web_page and keenable is a provider label, without "
+        "a claim about the origin's license. The branch does not load origin pages, execute commands, "
+        "or make labeling or review decisions. A successful empty search is valid; a failed search "
+        "prevents the branch from publishing candidates."
     ),
 }
 
@@ -56,8 +46,8 @@ FINALIZATION_DESCRIPTIONS: Final = {
     ),
     "labeling_attempts": (
         "Consider eligible commands from the highest-trust sources first. Ground operations in "
-        "approved captured sources without a second Keenable crawl. Discovery alone does not make "
-        "a page a grounding source. Stop spending inference "
+        "approved documentation. Keenable collection receipts establish where the candidate text came "
+        "from; they do not establish what the command does. Stop spending inference "
         "on a subrisk once its quota of distinct, eligible, high-confidence commands is full. "
         "LabelingAttemptsTable records support, failures and quota deferrals separately; inference "
         "requires verified available capacity."

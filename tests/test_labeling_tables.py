@@ -112,7 +112,7 @@ class LabelingTableTests(unittest.TestCase):
 
     def test_native_labeling_retry_resumes_but_explicit_rematerialization_reinfers_all_rows(self) -> None:
         home = Path(self.enterContext(tempfile.TemporaryDirectory()))
-        fixture = LabelingFixture(self, home)
+        fixture = LabelingFixture(self, home, native=True)
         spec = fixture.spec
         batch = require_declared_annotation(spec.annotation).model_copy(update={"batch_size": 1})
         spec = spec.model_copy(
@@ -269,7 +269,7 @@ class LabelingTableTests(unittest.TestCase):
 
     def test_plain_labeling_uses_bound_grounding_without_capacity_or_credential_echo(self) -> None:
         home = Path(self.enterContext(tempfile.TemporaryDirectory()))
-        fixture = LabelingFixture(self, home)
+        fixture = LabelingFixture(self, home, native=True)
         key = "synthetic-grounding-secret"
         selector = "FIXTURE_GROUNDING_SELECTOR"
         batch = require_declared_annotation(fixture.spec.annotation)
@@ -337,7 +337,7 @@ class LabelingTableTests(unittest.TestCase):
     def test_materialized_failure_is_persisted_but_excluded_from_proposals_and_release(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             home = Path(temporary)
-            fixture = LabelingFixture(self, home, limit_per_risk=4)
+            fixture = LabelingFixture(self, home, native=True, limit_per_risk=4)
             spec = fixture.spec
             DatasetRegistry(home).register(spec)
             with (

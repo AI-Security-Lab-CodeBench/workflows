@@ -6,19 +6,15 @@ from codebench_pipeline.dataset_branches import (
 
 CACHE_INPUTS: dict[str, dict[str, str]] = {
     **{
-        stage_name(stage, branch.namespace): dependencies
-        for branch in COLLECTION_BRANCHES
-        for stage, dependencies in (
-            (
-                (
-                    (branch.index, {}),
-                    (branch.capture, {"source_catalog": stage_name(branch.index, branch.namespace)}),
-                )
-                if branch.index is not None
-                else ((branch.capture, {}),)
-            )
-            + (("command_candidates", {"source_documents": stage_name(branch.capture, branch.namespace)}),)
+        stage_name(stage, branch.namespace): (
+            {"source_catalog": stage_name(branch.index, branch.namespace)}
+            if stage == branch.capture and branch.index is not None
+            else {"source_documents": stage_name(branch.capture, branch.namespace)}
+            if stage == "command_candidates" and branch.capture is not None
+            else {}
         )
+        for branch in COLLECTION_BRANCHES
+        for stage in branch.declared_stages
     },
     "merged_command_candidates": {
         f"{branch.namespace}_candidates": branch.terminal for branch in COLLECTION_BRANCHES

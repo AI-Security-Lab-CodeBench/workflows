@@ -2,11 +2,11 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Self
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
-from codebench_pipeline.collection_config import AdaptivePlannerConfig, DeclaredSourceStageConfig
+from codebench_pipeline.collection_config import DeclaredSourceStageConfig
 from codebench_pipeline.dataset_branches import Branch, stage_name
-from codebench_pipeline.keenable_policy import Declaration, KeenableSourceAccess
+from codebench_pipeline.keenable_policy import KeenableSnippetSettings
 from codebench_pipeline.models import Digest
 from codebench_pipeline.repository_branch_config import RepositoryAcquisitionConfig
 from codebench_pipeline.repository_config import (
@@ -122,13 +122,16 @@ class DocumentationCaptureSettings(RepositoryCatalogSettings):
         )
 
 
-class KeenableDiscoverySettings(ConfigArtifact):
-    declaration: Declaration
-    planner: AdaptivePlannerConfig | None = Field(exclude_if=lambda planner: planner is None, default=None)
+class KeenableCandidateSettings(ConfigArtifact):
+    declaration_digest: Digest
+    search: KeenableSnippetSettings
 
     @classmethod
     def project(cls, source: DeclaredSourceStageConfig) -> Self:
-        return cls(declaration=source.source.keenable_config(), planner=source.planner)
+        return cls(
+            declaration_digest=source.declaration_digest,
+            search=source.source.keenable_search(),
+        )
 
 
 type CollectionOperationSettings = (
@@ -136,8 +139,7 @@ type CollectionOperationSettings = (
     | RepositoryCaptureSettings
     | RepositoryExtractionSettings
     | DocumentationCaptureSettings
-    | KeenableDiscoverySettings
-    | KeenableSourceAccess
+    | KeenableCandidateSettings
 )
 
 
@@ -169,10 +171,6 @@ def _repository_operation[
     )
 
 
-def _keenable_access(source: DeclaredSourceStageConfig) -> KeenableSourceAccess:
-    return KeenableSourceAccess.project(source.source.keenable_config())
-
-
 COLLECTION_OPERATIONS = (
     _repository_operation("dataset", "enumerate_corpus_files", RepositoryCatalogSettings),
     _repository_operation("dataset", "capture_corpus_files", RepositoryCaptureSettings),
@@ -188,10 +186,8 @@ COLLECTION_OPERATIONS = (
         RepositoryExtractionSettings,
     ),
     CollectionOperation(
-        "keenable", "discover_use_cases", KeenableDiscoverySettings, KeenableDiscoverySettings.project
+        "keenable", "command_candidates", KeenableCandidateSettings, KeenableCandidateSettings.project
     ),
-    CollectionOperation("keenable", "capture_origin_pages", KeenableSourceAccess, _keenable_access),
-    CollectionOperation("keenable", "command_candidates", KeenableSourceAccess, _keenable_access),
 )
 _COLLECTION_OPERATIONS = {
     (operation.branch, operation.stage): operation for operation in COLLECTION_OPERATIONS
@@ -205,6 +201,6 @@ def collection_operation(branch: Branch, stage: str) -> CollectionOperation:
 def collection_settings_branch(settings: BaseModel) -> Branch | None:
     if isinstance(settings, RepositoryStageBinding):
         return settings.branch
-    if isinstance(settings, KeenableDiscoverySettings | KeenableSourceAccess):
+    if isinstance(settings, KeenableCandidateSettings):
         return "keenable"
     return None

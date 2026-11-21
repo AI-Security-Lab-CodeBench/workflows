@@ -277,7 +277,7 @@ def build_definitions(home: Path) -> Definitions:
             "bashguard_analyzer": ResourceDefinition(
                 resource_fn=BashGuardAnalyzer.from_environment, config_schema={}
             ),
-            "keenable_discovery": ResourceDefinition(
+            "keenable_credential": ResourceDefinition(
                 resource_fn=KeenableDiscovery.from_environment, config_schema={}
             ),
             "prepared_capture_cache": ResourceDefinition(

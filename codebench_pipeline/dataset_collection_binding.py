@@ -92,27 +92,29 @@ def current_candidates(
     if not isinstance(stored, pd.DataFrame):
         raise HumanReviewError("conflict", "Command candidates must be a table")
     validate_source_receipt(stored, config, manager)
-    if frame_inventory_authorization(stored, branch) != inventory_materialization(
-        manager, instance, registered, branch
-    ):
-        raise HumanReviewError("stale", "Branch candidates belong to an earlier inventory")
-    capture_key = AssetKey(asset_path(descriptor.capture, branch))
-    capture_record = current_materialization(instance, capture_key, dataset_id)
-    if capture_record is None:
-        raise HumanReviewError("pending", f"Materialize {descriptor.capture} before merging")
-    capture_ref = materialized_reference(instance, capture_record)
-    if manager.reference_at(capture_key.path, dataset_id) != capture_ref:
-        raise HumanReviewError("stale", "Source capture differs from its recorded output")
-    capture = manager.read_version(capture_ref)
+    inputs: dict[str, AssetSnapshot] = {}
+    if descriptor.capture is not None:
+        if frame_inventory_authorization(stored, branch) != inventory_materialization(
+            manager, instance, registered, branch
+        ):
+            raise HumanReviewError("stale", "Branch candidates belong to an earlier inventory")
+        capture_key = AssetKey(asset_path(descriptor.capture, branch))
+        capture_record = current_materialization(instance, capture_key, dataset_id)
+        if capture_record is None:
+            raise HumanReviewError("pending", f"Materialize {descriptor.capture} before merging")
+        capture_ref = materialized_reference(instance, capture_record)
+        if manager.reference_at(capture_key.path, dataset_id) != capture_ref:
+            raise HumanReviewError("stale", "Source capture differs from its recorded output")
+        inputs["source_documents"] = AssetSnapshot(capture_ref, manager.read_version(capture_ref))
     expected = manager.stage_signature(
         "command_candidates",
         collection_operation(branch, "command_candidates").project(config),
-        {"source_documents": AssetSnapshot(capture_ref, capture)},
+        inputs,
     )
     materialization = record.asset_materialization
     assert materialization is not None
     if materialization.metadata.get("input_fingerprint") != TextMetadataValue(expected):
-        raise HumanReviewError("stale", "Branch candidates belong to an earlier source capture")
+        raise HumanReviewError("stale", "Branch candidate inputs or implementation changed")
     return reference, CommandCandidatesTable.validate(stored)
 
 

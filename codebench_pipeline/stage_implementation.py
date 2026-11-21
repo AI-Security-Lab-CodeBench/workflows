@@ -21,8 +21,6 @@ STAGE_ROOTS: Final = {
     "command_candidates": ("declared_source_assets", "command_candidates"),
     "documentation/capture_documentation": ("declared_source_assets", "capture_documentation"),
     "documentation/command_candidates": ("declared_source_assets", "command_candidates"),
-    "keenable/discover_use_cases": ("declared_source_assets", "discover_use_cases"),
-    "keenable/capture_origin_pages": ("declared_source_assets", "capture_use_case_pages"),
     "keenable/command_candidates": ("declared_source_assets", "keenable_command_candidates"),
     "filtered_commands": ("dataset_assets_sources", "filtered_commands"),
     "labeling_attempts": ("dataset_assets_annotations", "labeling_attempts"),

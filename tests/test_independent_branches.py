@@ -90,7 +90,7 @@ class IndependentBranchDatasetTests(unittest.TestCase):
             build_catalog(configured, fixture.rules, self.home / "attempt", branch="documentation")
 
     def test_review_snapshot_rejects_disagreement_in_verified_source_bindings(self) -> None:
-        spec = LabelingFixture(self, self.home, category_confidence="medium").spec
+        spec = LabelingFixture(self, self.home, native=True, category_confidence="medium").spec
         self.registry.register(spec)
         cycle = NativeDatasetCycle(self.home)
         with dataset_instance(self.home) as instance:
@@ -130,7 +130,7 @@ class IndependentBranchDatasetTests(unittest.TestCase):
             self.assertEqual(snapshots.current(spec.dataset_id).snapshot, original.snapshot)
 
     def test_documentation_job_needs_no_dataset_discovery_or_source_approval(self) -> None:
-        fixture = LabelingFixture(self, self.home)
+        fixture = LabelingFixture(self, self.home, native=True)
         spec = fixture.spec
         self.registry.register(spec)
         with dataset_instance(self.home) as instance:
@@ -146,7 +146,7 @@ class IndependentBranchDatasetTests(unittest.TestCase):
             reviewed = data.query("documentation/command_candidates", query)
             assert isinstance(reviewed, TableResponse)
             self.assertEqual([row.values["command"] for row in reviewed.page.rows], ["docker ps --all"])
-            for stage in ("enumerate_corpus_files", "keenable/discover_use_cases", "labeling_attempts"):
+            for stage in ("enumerate_corpus_files", "keenable/command_candidates", "labeling_attempts"):
                 with self.assertRaises(DatasetViewError) as missing:
                     data.query(stage, query)
                 self.assertEqual(missing.exception.code, "not_materialized")
@@ -157,7 +157,9 @@ class IndependentBranchDatasetTests(unittest.TestCase):
             self.assertEqual(missing.exception.code, "not_found")
 
     def test_declared_branches_prepare_without_source_human_completion(self) -> None:
-        fixture = LabelingFixture(self, self.home, limit_per_risk=4, category_confidence="medium")
+        fixture = LabelingFixture(
+            self, self.home, native=True, limit_per_risk=4, category_confidence="medium"
+        )
         spec = fixture.spec
         self.registry.register(spec)
         cycle = NativeDatasetCycle(self.home)
@@ -207,6 +209,7 @@ class IndependentBranchDatasetTests(unittest.TestCase):
         fixture = LabelingFixture(
             self,
             self.home,
+            native=True,
             documentation_corpus=b"# Docker\n\nNo command examples.\n",
             category_confidence="medium",
         )
@@ -254,7 +257,7 @@ class IndependentBranchDatasetTests(unittest.TestCase):
         )
 
     def test_configured_waiting_branch_cannot_authorize_shared_processing(self) -> None:
-        fixture = LabelingFixture(self, self.home)
+        fixture = LabelingFixture(self, self.home, native=True)
         spec = fixture.spec
         self.registry.register(spec)
         with dataset_instance(self.home) as instance:
@@ -296,7 +299,7 @@ class IndependentBranchDatasetTests(unittest.TestCase):
         fixture.inference.assert_not_called()
 
     def test_declared_build_finalizes_empty_eligible_input_without_inference(self) -> None:
-        fixture = LabelingFixture(self, self.home)
+        fixture = LabelingFixture(self, self.home, native=True)
         spec = fixture.spec.model_copy(update={"filtering": FilteringConfig(maximum_command_characters=1)})
         self.registry.register(spec)
         cycle = NativeDatasetCycle(self.home)
@@ -320,7 +323,9 @@ class IndependentBranchDatasetTests(unittest.TestCase):
             self.assertIsNone(transaction.last_publication(spec.dataset_id))
 
     def test_added_documentation_source_reinfers_all_rows_and_preserves_human_decision(self) -> None:
-        fixture = LabelingFixture(self, self.home, limit_per_risk=6, category_confidence="medium")
+        fixture = LabelingFixture(
+            self, self.home, native=True, limit_per_risk=6, category_confidence="medium"
+        )
         spec = fixture.spec
         self.registry.register(spec)
         cycle = NativeDatasetCycle(self.home)
@@ -425,7 +430,7 @@ class IndependentBranchDatasetTests(unittest.TestCase):
             self.assertIsNone(current.batch.completion)
 
     def test_waiting_branch_never_substitutes_its_historical_reviewed_output(self) -> None:
-        fixture = LabelingFixture(self, self.home, category_confidence="medium")
+        fixture = LabelingFixture(self, self.home, native=True, category_confidence="medium")
         spec = fixture.spec
         self.registry.register(spec)
         cycle = NativeDatasetCycle(self.home)
@@ -487,6 +492,7 @@ class IndependentBranchDatasetTests(unittest.TestCase):
         fixture = LabelingFixture(
             self,
             self.home,
+            native=True,
             category_confidence="medium",
             documentation_corpus=b"# Docker\n\n" + (padding + example + b"\n" + padding) * 2,
         )

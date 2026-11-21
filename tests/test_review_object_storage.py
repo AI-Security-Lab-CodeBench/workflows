@@ -106,7 +106,7 @@ class ReviewObjectStorageTests(TestCase):
     def test_native_annotation_snapshot_replays_from_configured_store(self) -> None:
         home = Path(self.enterContext(tempfile.TemporaryDirectory()))
         config = self.enterContext(storage_fixture("annotation-review"))
-        fixture = LabelingFixture(self, home)
+        fixture = LabelingFixture(self, home, native=True)
         dataset_id = DatasetRegistry(home).register(fixture.spec.model_copy(update={"storage": config}))
         queue_key = AssetKey(["datasets", "human_review_queue"])
         manager = DataFrameIOManager.from_environment(config)

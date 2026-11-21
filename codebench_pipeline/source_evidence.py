@@ -4,7 +4,7 @@ from typing import Final
 
 import pandas as pd
 
-from codebench_pipeline.collection_config import DeclaredSourceStageConfig
+from codebench_pipeline.collection_config import DeclaredSourceStageConfig, KeenableSnippetDeclaration
 from codebench_pipeline.dataframe_io import DataFrameIOManager
 from codebench_pipeline.human_review import HumanReviewError
 from codebench_pipeline.keenable_policy import KeenableError
@@ -17,6 +17,8 @@ _HISTORICAL_SOURCE_RECEIPT: Final = "codebench_v2_source_receipt"
 def require_source_rights(config: DeclaredSourceStageConfig) -> None:
     if config.branch == "keenable":
         declaration = config.source.keenable_config()
+        if isinstance(declaration, KeenableSnippetDeclaration):
+            return
         try:
             declaration.check_current(datetime.now(UTC))
         except KeenableError as error:

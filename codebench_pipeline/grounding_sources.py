@@ -16,7 +16,9 @@ from codebench_pipeline.grounding_policy import (
     version_constraints,
 )
 from codebench_pipeline.keenable import KeenableCollection
+from codebench_pipeline.keenable_policy import KeenableSnippetSettings
 from codebench_pipeline.keenable_receipts import CandidateReceipt, CaptureLock
+from codebench_pipeline.keenable_snippets import SnippetCollectionReceipt
 from codebench_pipeline.keenable_tables import CANDIDATE_RECEIPTS, provider_source_id
 from codebench_pipeline.labeling_stage_settings import (
     LabelingSources,
@@ -168,8 +170,8 @@ class RepositoryBranchEvidence:
 @dataclass(frozen=True, slots=True)
 class CandidateEvidence:
     repositories: dict[str, RepositoryBranchEvidence]
-    provider: KeenableCollection
-    lock: CaptureLock
+    provider: KeenableCollection | None
+    lock: CaptureLock | SnippetCollectionReceipt
     provider_rows: dict[str, CandidateReceipt]
     source_scoped: bool
     run: RepositoryRun
@@ -197,6 +199,13 @@ class CandidateEvidence:
             rows = REPOSITORY_CANDIDATES.validate_python(receipt.observations["candidates"])
             repositories[branch] = RepositoryBranchEvidence(config, receipt, rows)
         access = collection.keenable_use_cases
+        if isinstance(access, KeenableSnippetSettings):
+            receipt = SnippetCollectionReceipt.model_validate_json(
+                str(attrs["keenable"]["keenable_receipt_json"])
+            )
+            if receipt.settings_sha256 != sha256(access.model_dump_json().encode()).hexdigest():
+                raise IntegrityError("Keenable snippets differ from the configured search settings")
+            return cls(repositories, None, receipt, {}, True, run)
         provider = KeenableCollection(run.dataset_home, access)
         lock = CaptureLock.model_validate_json(str(attrs["keenable"]["keenable_capture_lock"]))
         provider.adapters(lock)
@@ -216,6 +225,35 @@ class CandidateEvidence:
         branch, _, original_id = candidate.candidate_id.partition(":")
         if branch != "keenable":
             return self.repositories[branch].candidate(candidate, original_id, self.run)
+        if isinstance(self.lock, SnippetCollectionReceipt):
+            snippet = self.lock.candidates[original_id]
+            if (
+                candidate.source_id,
+                candidate.source_url,
+                candidate.source_position,
+                candidate.command,
+                candidate.context,
+            ) != (
+                f"keenable:{snippet.source_id}",
+                snippet.url,
+                f"bytes:{snippet.start}:{snippet.end}",
+                snippet.command,
+                snippet.description,
+            ):
+                raise IntegrityError("Keenable candidate differs from its indexed snippet")
+            body = self.lock.read_body(snippet.body_sha256)
+            return CandidateCapture(
+                snippet.source_id,
+                fingerprint(
+                    {"source": snippet.model_dump(mode="json"), "settings": self.lock.settings_sha256}
+                ),
+                snippet.url,
+                body,
+                snippet.body_sha256,
+                self.lock.settings_sha256,
+                source_versions(body, snippet.start),
+            )
+        assert self.provider is not None
         source = self.provider_rows[original_id]
         body = self.provider.read_body(self.lock, source.url)
         literal = body[source.start : source.end]

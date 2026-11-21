@@ -31,7 +31,7 @@ from codebench_pipeline.keenable_receipts import CallReceipt
 from codebench_pipeline.keenable_tables import provider_catalog, provider_documents
 from codebench_pipeline.keenable_transport import DirectResponse, Request
 
-DECLARATION = Path("business-configs/categories/cat3/keenable/declaration.json")
+DECLARATION = Path(__file__).with_name("fixtures") / "keenable_origin_declaration.json"
 PLAN = "https://developer.hashicorp.com/terraform/cli/commands/plan"
 VALIDATE = "https://developer.hashicorp.com/terraform/cli/commands/validate"
 DOCKER = "https://docs.docker.com/reference/cli/docker/container/ls/"

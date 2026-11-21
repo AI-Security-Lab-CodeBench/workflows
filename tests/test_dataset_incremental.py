@@ -15,7 +15,7 @@ from native_dataset_cycle import NativeDatasetCycle
 from pydantic import BaseModel
 from test_review_release import attest_fixture_release
 
-from codebench_pipeline.collection_config import SourceDeclaration
+from codebench_pipeline.collection_config import KeenableSnippetDeclaration, SourceDeclaration
 from codebench_pipeline.data_views import DatasetDataService
 from codebench_pipeline.dataframe_io import REVIEW_PREPARATION
 from codebench_pipeline.dataset_cli import execute_registered_build
@@ -25,7 +25,6 @@ from codebench_pipeline.dataset_registry import DatasetRegistry
 from codebench_pipeline.dataset_source_models import SourceSelection
 from codebench_pipeline.human_review import DecisionChange, HumanReviewError
 from codebench_pipeline.human_review_store import HumanReviewStore
-from codebench_pipeline.keenable_policy import KeenableDeclaration
 from codebench_pipeline.model_config import ModelConfig
 from codebench_pipeline.object_store import ObjectStore
 from codebench_pipeline.release_runner import ReleaseRunner
@@ -80,7 +79,7 @@ def provider_response(
 class IncrementalDatasetTests(unittest.TestCase):
     def setUp(self) -> None:
         self.home = Path(self.enterContext(tempfile.TemporaryDirectory()))
-        self.fixture = LabelingFixture(self, self.home, category_confidence="medium")
+        self.fixture = LabelingFixture(self, self.home, native=True, category_confidence="medium")
         self.spec: DatasetBuildSpec = self.fixture.spec
         self.cycle = NativeDatasetCycle(self.home)
         self.first = self.build()
@@ -362,9 +361,9 @@ class IncrementalDatasetTests(unittest.TestCase):
         collection = original.declared_collection
         assert collection is not None
         keenable = collection.keenable_declaration
-        assert isinstance(keenable, KeenableDeclaration)
+        assert isinstance(keenable, KeenableSnippetDeclaration)
         dataset_id = "another_category"
-        revised = SourceDeclaration.from_declaration(keenable.model_copy(update={"dataset": dataset_id}))
+        revised = SourceDeclaration.from_declaration(keenable.model_copy(update={"dataset_id": dataset_id}))
         rules = original.rules.model_copy(
             update={
                 "category_id": "CAT-9",

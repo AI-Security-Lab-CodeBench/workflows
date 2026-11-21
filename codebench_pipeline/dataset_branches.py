@@ -10,7 +10,7 @@ class CollectionBranch:
     namespace: Branch
     group: str
     job: str
-    capture: str
+    capture: str | None = None
     index: str | None = None
 
     @property
@@ -19,8 +19,7 @@ class CollectionBranch:
 
     @property
     def declared_stages(self) -> tuple[str, ...]:
-        names = (self.capture, "command_candidates")
-        return (self.index, *names) if self.index is not None else names
+        return tuple(name for name in (self.index, self.capture, "command_candidates") if name is not None)
 
 
 COLLECTION_BRANCHES: Final = (
@@ -41,8 +40,6 @@ COLLECTION_BRANCHES: Final = (
         "keenable",
         "keenable_use_cases",
         "build_keenable",
-        "capture_origin_pages",
-        "discover_use_cases",
     ),
 )
 
@@ -62,6 +59,8 @@ HISTORICAL_PROCESSING_STAGES = (
     "keenable/source_catalog",
     "keenable/source_documents",
     "keenable/document_adapters",
+    "keenable/discover_use_cases",
+    "keenable/capture_origin_pages",
     "labeling_documentation",
     "semantic_evidence",
     "human_review_snapshot",

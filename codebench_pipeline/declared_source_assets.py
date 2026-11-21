@@ -12,10 +12,9 @@ from dagster import (
 )
 from pandera.typing import DataFrame
 
-from codebench_pipeline.collection_config import DeclaredSourceStageConfig
 from codebench_pipeline.collection_stage_settings import (
     DocumentationCaptureSettings,
-    KeenableDiscoverySettings,
+    KeenableCandidateSettings,
     RepositoryCaptureSettings,
     RepositoryCatalogSettings,
     RepositoryExtractionSettings,
@@ -35,17 +34,7 @@ from codebench_pipeline.finalization_table_asset import (
     CollectionInput,
 )
 from codebench_pipeline.finalization_table_io import retain_failed_finalization
-from codebench_pipeline.inference_capacity import CapacityConfig
-from codebench_pipeline.keenable import KeenableCollection
-from codebench_pipeline.keenable_planner import SearchPlanner
-from codebench_pipeline.keenable_policy import KeenableSourceAccess
-from codebench_pipeline.keenable_tables import (
-    provider_adapters,
-    provider_candidates,
-    provider_catalog,
-    provider_documents,
-)
-from codebench_pipeline.labeling_runtime import LabelingRuntime
+from codebench_pipeline.keenable_snippets import provider_snippet_candidates
 from codebench_pipeline.repository import (
     RepositoryRun,
     repository_adapters,
@@ -55,57 +44,10 @@ from codebench_pipeline.repository import (
 )
 from codebench_pipeline.repository_legacy import PreparedCaptureCache
 from codebench_pipeline.repository_receipts import RECEIPT_ATTR
-from codebench_pipeline.storage import IntegrityError
 
 
 def source_run(context: AssetExecutionContext, storage: DataFrameIOManager) -> RepositoryRun:
     return storage.repository_run(context.partition_key, context.run_id)
-
-
-def provider_collection(
-    config: KeenableDiscoverySettings | KeenableSourceAccess | DeclaredSourceStageConfig,
-    run: RepositoryRun,
-    *,
-    plan_receipts: Path | None = None,
-    model_key: str | None = None,
-    capacity: CapacityConfig | None = None,
-) -> KeenableCollection:
-    if isinstance(config, KeenableSourceAccess):
-        if config.dataset != run.dataset_id:
-            raise IntegrityError("Keenable declaration belongs to another partition")
-        return KeenableCollection(run.dataset_home, config)
-    settings = (
-        KeenableDiscoverySettings.project(config) if isinstance(config, DeclaredSourceStageConfig) else config
-    )
-    declaration = settings.declaration
-    if declaration.dataset != run.dataset_id:
-        raise IntegrityError("Keenable declaration belongs to another partition")
-    if (
-        plan_receipts is not None
-        and declaration.search_plan is not None
-        and declaration.search_plan.mode == "adaptive"
-    ):
-        planner = settings.planner
-        if planner is None or (planner.capacity is None) != (capacity is None):
-            raise IntegrityError("Planner capacity binding does not match its mapped configuration")
-        return KeenableCollection(
-            run.dataset_home,
-            declaration,
-            planner=SearchPlanner(
-                planner.base_url,
-                planner.model,
-                capacity,
-                plan_receipts,
-                key=model_key,
-                backend_revision=planner.backend_revision,
-                max_output_tokens=planner.max_output_tokens,
-                timeout_seconds=planner.timeout_seconds,
-            ),
-        )
-    return KeenableCollection(
-        run.dataset_home,
-        declaration if plan_receipts is not None else KeenableSourceAccess.project(declaration),
-    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -116,23 +58,9 @@ class KeenableDiscovery:
     def from_environment(cls) -> "KeenableDiscovery":
         return cls(os.getenv("KEENABLE_API_KEY", ""))
 
-    def catalog(
-        self, config: KeenableDiscoverySettings, run: RepositoryRun, evidence: Path, runtime: LabelingRuntime
-    ) -> DataFrame[SourceCatalogTable]:
-        planner = config.planner
-        key = os.environ.get(planner.api_key_env) if planner and planner.api_key_env else None
-        capacity = None
-        if planner is not None and planner.capacity is not None:
-            paths = runtime.capacity_paths(run.dataset_id)
-            capacity = planner.capacity.bind(paths.state_directory, paths.expected_model_path)
-        return provider_catalog(
-            provider_collection(config, run, plan_receipts=evidence, model_key=key, capacity=capacity),
-            self.api_key,
-        )
-
 
 def declared_source_assets(branch: CollectionBranch) -> list[AssetsDefinition]:
-    prefix = asset_path(branch.capture, branch.namespace)[:-1]
+    prefix = asset_path("command_candidates", branch.namespace)[:-1]
     assets: list[AssetsDefinition] = []
 
     def mapped_edge(stage: str) -> AssetIn:
@@ -141,6 +69,30 @@ def declared_source_assets(branch: CollectionBranch) -> list[AssetsDefinition]:
             dagster_type=COLLECTION_INPUT,
             input_manager_key=FINALIZATION_TABLE_IO,
         )
+
+    if branch.capture is None:
+
+        @asset(
+            name="command_candidates",
+            key_prefix=prefix,
+            group_name=branch.group,
+            partitions_def=DATASET_PARTITIONS,
+            io_manager_key=FINALIZATION_TABLE_IO,
+            hooks={retain_failed_finalization},
+            dagster_type=TABLE_TYPES[CommandCandidatesTable],
+            ins={"mapped_config": mapped_edge("command_candidates")},
+        )
+        def keenable_command_candidates(
+            mapped_config: CollectionInput,
+            keenable_credential: ResourceParam[KeenableDiscovery],
+        ) -> Output[DataFrame[CommandCandidatesTable]]:
+            settings = mapped_config.for_operation(KeenableCandidateSettings)
+            return mapped_config.output(
+                CommandCandidatesTable,
+                lambda _evidence: provider_snippet_candidates(settings.search, keenable_credential.api_key),
+            )
+
+        return [keenable_command_candidates]
 
     def index_sources(
         context: AssetExecutionContext,
@@ -170,22 +122,6 @@ def declared_source_assets(branch: CollectionBranch) -> list[AssetsDefinition]:
 
         return mapped_config.output(SourceDocumentsTable, compute)
 
-    def capture_use_case_pages(
-        context: AssetExecutionContext,
-        source_catalog: DataFrame[SourceCatalogTable],
-        mapped_config: CollectionInput,
-        dataset_io_manager: ResourceParam[DataFrameIOManager],
-        keenable_discovery: ResourceParam[KeenableDiscovery],
-    ) -> Output[DataFrame[SourceDocumentsTable]]:
-        run = source_run(context, dataset_io_manager)
-        settings = mapped_config.for_operation(KeenableSourceAccess)
-        return mapped_config.output(
-            SourceDocumentsTable,
-            lambda evidence: provider_documents(
-                provider_collection(settings, run), source_catalog, keenable_discovery.api_key
-            ),
-        )
-
     def capture_documentation(
         context: AssetExecutionContext,
         mapped_config: CollectionInput,
@@ -207,20 +143,6 @@ def declared_source_assets(branch: CollectionBranch) -> list[AssetsDefinition]:
 
         return mapped_config.output(SourceDocumentsTable, compute)
 
-    def discover_use_cases(
-        context: AssetExecutionContext,
-        mapped_config: CollectionInput,
-        dataset_io_manager: ResourceParam[DataFrameIOManager],
-        keenable_discovery: ResourceParam[KeenableDiscovery],
-        labeling_runtime: ResourceParam[LabelingRuntime],
-    ) -> Output[DataFrame[SourceCatalogTable]]:
-        run = source_run(context, dataset_io_manager)
-        settings = mapped_config.for_operation(KeenableDiscoverySettings)
-        return mapped_config.output(
-            SourceCatalogTable,
-            lambda evidence: keenable_discovery.catalog(settings, run, evidence, labeling_runtime),
-        )
-
     if branch.index is not None:
         assets.append(
             asset(
@@ -232,7 +154,7 @@ def declared_source_assets(branch: CollectionBranch) -> list[AssetsDefinition]:
                 hooks={retain_failed_finalization},
                 dagster_type=TABLE_TYPES[SourceCatalogTable],
                 ins={"mapped_config": mapped_edge(branch.index)},
-            )(discover_use_cases if branch.namespace == "keenable" else index_sources)
+            )(index_sources)
         )
     assets.append(
         asset(
@@ -251,31 +173,8 @@ def declared_source_assets(branch: CollectionBranch) -> list[AssetsDefinition]:
                     else {}
                 ),
             },
-        )(
-            capture_use_case_pages
-            if branch.namespace == "keenable"
-            else capture_indexed_sources
-            if branch.index is not None
-            else capture_documentation
-        )
+        )(capture_indexed_sources if branch.index is not None else capture_documentation)
     )
-
-    def keenable_command_candidates(
-        context: AssetExecutionContext,
-        source_documents: DataFrame[SourceDocumentsTable],
-        mapped_config: CollectionInput,
-        dataset_io_manager: ResourceParam[DataFrameIOManager],
-    ) -> Output[DataFrame[CommandCandidatesTable]]:
-        run = source_run(context, dataset_io_manager)
-        settings = mapped_config.for_operation(KeenableSourceAccess)
-
-        def compute(evidence: Path) -> DataFrame[CommandCandidatesTable]:
-            collection = provider_collection(settings, run)
-            return provider_candidates(
-                collection, source_documents, provider_adapters(collection, source_documents)
-            )
-
-        return mapped_config.output(CommandCandidatesTable, compute)
 
     def command_candidates(
         context: AssetExecutionContext,
@@ -311,6 +210,6 @@ def declared_source_assets(branch: CollectionBranch) -> list[AssetsDefinition]:
                 "source_documents": table_input(branch.capture, SourceDocumentsTable, branch.namespace),
                 "mapped_config": mapped_edge("command_candidates"),
             },
-        )(keenable_command_candidates if branch.namespace == "keenable" else command_candidates)
+        )(command_candidates)
     )
     return assets

@@ -46,7 +46,9 @@ class ReviewReleaseTests(unittest.TestCase):
         self.stack = ExitStack()
         self.addCleanup(self.stack.close)
         self.home = Path(self.stack.enter_context(tempfile.TemporaryDirectory()))
-        fixture = LabelingFixture(self, self.home, limit_per_risk=1, category_confidence="medium")
+        fixture = LabelingFixture(
+            self, self.home, native=True, limit_per_risk=1, category_confidence="medium"
+        )
         self.spec = fixture.spec
         DatasetRegistry(self.home).register(self.spec)
         refresh_registered_configuration(self.spec.dataset_id, self.home)

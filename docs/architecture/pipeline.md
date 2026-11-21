@@ -5,7 +5,7 @@ CodeBench builds a labeled dataset of shell commands from source material. A rel
 ```text
 Pinned datasets ─────┐
 Pinned documentation ├─→ merge candidates → filter → label against evidence
-Keenable web search ─┘                                   ├─ unsupported → audit
+Keenable snippets ───┘                                   ├─ unsupported → audit
                                                         └─ supported → exact deduplication
                                                                         ↓
                                                                 category eligibility
@@ -20,6 +20,8 @@ Keenable web search ─┘                                   ├─ unsupported 
 
 Each collection operation has a typed mapping. Repository capture receives pinned locations and download limits; extraction receives parser pins and preserves each candidate's origin. Only the merge mapping supplies the weights that rank candidates from datasets, documentation and Keenable. Filtering gets routing patterns, while labeling also needs prompt text and evidence policy. Human decisions take their dataset identity from the partition and their authorization from the completed review snapshot, so they have no configuration mapping.
 
-**Keenable collection.** The declaration can keep searches within reviewed URL scopes or name administrative cases to search across public domains. The catalog records ranked provider hits and applies the origin budget after reserving calls for pinned license files and prioritizing declared sources. Capture uses the existing public HTTPS transport in both modes. An unlisted page is retained only if its head explicitly links to the CC BY 4.0 license and it has one identifiable main region. Capture retains the exact main-region bytes and the license notice separately from declared source permissions. Candidate receipts bind literal shell examples to the retained bytes, the source URL and the license evidence; the retained fragment's start plus a candidate's byte position locates the example in the original response. A candidate from an unlisted page does not give that page approval as a declared grounding source.
+**Keenable collection.** The `keenable/command_candidates` asset uses its scoped settings to request snippets for the configured use cases and extracts literal command examples from the returned text. It keeps the returned page URL, snippet and candidate position as evidence. The source type is `web_page` and the value `keenable` in the license field identifies the provider of the snippet; it does not establish any license or usage rights for the origin. The branch does not fetch origin pages or create labeling or review decisions. An empty successful search can merge with the other branches. A failed search blocks the current merge rather than substituting candidates from an earlier configuration. Labeling still needs separate applicable documentation.
+
+CAT-3 allocates one query to each of five use cases. Its cloud storage and SQL disclosure query asks for individually quoted actor commands or audited operations, with adjacent attribution. Reported outcomes can add context but are not required. If a disclosure contains only audit or prose evidence, collection does not invent a shell command.
 
 The labeling, review and release decisions are explained in [How commands become release rows](algorithms.md).

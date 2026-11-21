@@ -21,7 +21,7 @@ from codebench_pipeline.config_assets import (
     mapping_key,
 )
 from codebench_pipeline.config_directory import ConfigDirectorySnapshot
-from codebench_pipeline.dataset_config import DatasetBuildSpec, load_build_config, require_declared_annotation
+from codebench_pipeline.dataset_config import DatasetBuildSpec, require_declared_annotation
 from codebench_pipeline.dataset_registry import DatasetRegistry
 from codebench_pipeline.declared_dataset_bundle import DeclaredDatasetBundle
 from codebench_pipeline.object_store import StorageConfig
@@ -359,15 +359,20 @@ class DeclaredDatasetAuthoringTests(TestCase):
         ).resolve(BUNDLE.parent, home=self.home)
         write_snapshot(inherited.model_dump_json(), self.home, inherited.dataset_id)
 
-        both = authoring(labeling={"from_registration": True}).resolve(BUNDLE.parent, home=self.home)
-        self.assertEqual((both.annotation, both.storage), (inherited.annotation, inherited.storage))
-        only_labeling = authoring(storage={"backend": "s3", "bucket": "replacement-artifacts"}).resolve(
+        both = authoring(labeling={"from_registration": True}, storage={"from_registration": True}).resolve(
             BUNDLE.parent, home=self.home
         )
+        self.assertEqual((both.annotation, both.storage), (inherited.annotation, inherited.storage))
+        only_labeling = authoring(
+            labeling={"from_registration": True},
+            storage={"backend": "s3", "bucket": "replacement-artifacts"},
+        ).resolve(BUNDLE.parent, home=self.home)
         self.assertEqual(only_labeling.annotation.max_request_bytes, 8192)
         self.assertEqual(only_labeling.storage.bucket, "replacement-artifacts")
         self.assertIsNone(only_labeling.storage.endpoint_url)
-        only_storage = authoring(labeling=explicit_labeling(self.home)).resolve(BUNDLE.parent, home=self.home)
+        only_storage = authoring(
+            labeling=explicit_labeling(self.home), storage={"from_registration": True}
+        ).resolve(BUNDLE.parent, home=self.home)
         self.assertEqual(only_storage.annotation.max_request_bytes, 16384)
         self.assertEqual(only_storage.storage, inherited.storage)
 
@@ -396,7 +401,10 @@ class DeclaredDatasetAuthoringTests(TestCase):
         batch = require_declared_annotation(restored.annotation)
 
         self.assertEqual(restored.annotation.model, inherited.annotation.model)
-        self.assertEqual(restored.storage, inherited.storage)
+        self.assertEqual(
+            restored.storage,
+            StorageConfig(backend="s3", bucket="codebench-datasets", prefix="cat3-dev"),
+        )
         self.assertEqual(batch.inference_mode, "plain")
         self.assertNotIn("capacity", batch.model_dump())
         self.assertEqual(labeling_settings(restored.annotation).batch.bind_capacity(), batch)
@@ -405,7 +413,7 @@ class DeclaredDatasetAuthoringTests(TestCase):
         self.assertEqual(path.read_text(), inherited.model_dump_json())
 
     def test_storage_only_inheritance_requires_its_own_registration(self) -> None:
-        bundle = authoring(labeling=explicit_labeling(self.home))
+        bundle = authoring(labeling=explicit_labeling(self.home), storage={"from_registration": True})
         with self.assertRaisesRegex(IntegrityError, "requires existing registered storage"):
             bundle.resolve(BUNDLE.parent, home=self.home)
 
@@ -420,9 +428,13 @@ class DeclaredDatasetAuthoringTests(TestCase):
         registry = DatasetRegistry(self.home)
 
         with self.assertRaisesRegex(IntegrityError, "Registered storage is local"):
-            load_build_config(BUNDLE, self.home)
+            authoring(labeling={"from_registration": True}, storage={"from_registration": True}).resolve(
+                BUNDLE.parent, home=self.home
+            )
         with self.assertRaisesRegex(IntegrityError, "Registered storage is local"):
-            authoring(labeling=explicit_labeling(self.home)).resolve(BUNDLE.parent, home=self.home)
+            authoring(labeling=explicit_labeling(self.home), storage={"from_registration": True}).resolve(
+                BUNDLE.parent, home=self.home
+            )
         self.assertEqual(bundle.resolve(BUNDLE.parent, home=self.home).storage, spec.storage)
         self.assertEqual(registry.get_snapshot(legacy.dataset_id, revision=revision), legacy)
         self.assertEqual(registry.storage(legacy.dataset_id, revision=revision), legacy.storage)

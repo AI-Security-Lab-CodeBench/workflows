@@ -16,6 +16,7 @@ from pydantic import ValidationError
 from test_declared_dataset_graph import fixture_spec, with_keenable_declaration
 
 from codebench_pipeline import guarded_publication_sampling
+from codebench_pipeline.collection_config import KeenableSnippetDeclaration
 from codebench_pipeline.data_views import DatasetDataService
 from codebench_pipeline.dataframe_io import read_frame
 from codebench_pipeline.dataframe_schemas import model_records
@@ -66,11 +67,14 @@ class GuardedPublicationTests(TestCase):
         assert collection is not None and batch is not None
         grounding = batch.grounding
         self.assertEqual(baseline.grounding.allowed_domains, tuple(grounding.allowed_domains))
-        self.assertEqual(
-            baseline.collection.keenable_use_cases.generation, collection.keenable_declaration.generation
-        )
+        declaration = collection.keenable_declaration
+        assert isinstance(declaration, KeenableSnippetDeclaration)
+        self.assertEqual(baseline.collection.keenable_use_cases, declaration.search)
         changed_source = with_keenable_declaration(
-            spec, collection.keenable_declaration.model_copy(update={"generation": "updated-source"})
+            spec,
+            declaration.model_copy(
+                update={"search": declaration.search.model_copy(update={"queries": ("Updated examples",)})}
+            ),
         )
         self.assertNotEqual(
             dataset_release_settings(DeclaredGlobalConfig.from_spec(changed_source), spec.rules).digest,
@@ -107,7 +111,7 @@ class GuardedPublicationTests(TestCase):
 
     def test_exact_release_requires_attestation_and_hold_clearance_and_rechecks_cached_output(self) -> None:
         home = Path(self.enterContext(TemporaryDirectory()))
-        fixture = LabelingFixture(self, home, limit_per_risk=4)
+        fixture = LabelingFixture(self, home, native=True, limit_per_risk=4)
         dataset_id = DatasetRegistry(home).register(fixture.spec)
         store = HumanReviewStore(home)
         with store.transaction(dataset_id=dataset_id) as tx:

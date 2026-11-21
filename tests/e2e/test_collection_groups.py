@@ -1,23 +1,30 @@
 from pathlib import Path
 from typing import Final
-from unittest.mock import patch
 
 import pandas as pd
 import pytest
 from dagster import AssetKey, AssetRecordsFilter, DagsterInstance, Definitions, ExecuteInProcessResult
-from test_declared_dataset_graph import collection_fixture, fixture_spec, with_keenable_declaration
-from test_keenable import PEER, PLAN, SOURCE_BODY, permission, result
+from keenable_mcp_fixture import SNIPPET, keenable_mcp_fixture
+from test_declared_dataset_graph import (
+    collection_fixture,
+    fixture_spec,
+    with_keenable_declaration,
+)
+from test_keenable import PLAN
 
+from codebench_pipeline.collection_config import KeenableSnippetDeclaration
 from codebench_pipeline.config_assets import CONFIG_DIRECTORY
 from codebench_pipeline.data_views import DatasetDataService
+from codebench_pipeline.dataframe_io import DataFrameIOManager
 from codebench_pipeline.dataframe_schemas import frame_records
 from codebench_pipeline.dataset_collection_binding import FINALIZATION_BINDING
 from codebench_pipeline.dataset_registry import DatasetRegistry
 from codebench_pipeline.definitions import build_definitions
 from codebench_pipeline.human_review import HumanReviewError
-from codebench_pipeline.keenable_policy import CASES, KeenableDeclaration
-from codebench_pipeline.keenable_transport import DirectResponse
+from codebench_pipeline.keenable_snippets import SnippetCollectionReceipt
+from codebench_pipeline.keenable_tables import PROVIDER_RECEIPT
 from codebench_pipeline.runtime_instance import dataset_instance
+from codebench_pipeline.source_evidence import SOURCE_RECEIPT
 
 MERGE_KEY: Final = AssetKey(["datasets", "merged_command_candidates"])
 
@@ -37,17 +44,14 @@ def test_merge_consumes_all_three_collection_group_outputs(tmp_path: Path) -> No
     with (
         collection_fixture(fixture_spec(tmp_path)) as spec,
         dataset_instance(tmp_path) as instance,
-        patch.dict("os.environ", {"KEENABLE_API_KEY": "fixture-key"}),
-        patch(
-            "codebench_pipeline.keenable.request_direct",
-            side_effect=(result(PLAN), DirectResponse(SOURCE_BODY, PEER)),
-        ),
+        keenable_mcp_fixture() as queries,
     ):
         DatasetRegistry(tmp_path).register(spec)
         instance.add_dynamic_partitions("dataset_builds", [spec.dataset_id])
         definitions = build_definitions(tmp_path)
         run = materialize_collection_outputs(definitions, instance, spec.dataset_id)
         assert run.success
+        assert queries == ["Terraform plan examples"]
 
         data = DatasetDataService(tmp_path, instance)
         merged = data.read_current(spec.dataset_id, "merged_command_candidates")
@@ -65,6 +69,23 @@ def test_merge_consumes_all_three_collection_group_outputs(tmp_path: Path) -> No
             assert isinstance(output.value, pd.DataFrame)
             (original,) = frame_records(output.value)
             assert original["command"] == command
+            if branch == "keenable":
+                assert original["source_url"] == PLAN
+                assert original["context"] == "Preview the changes:"
+                raw = output.value.attrs[PROVIDER_RECEIPT]
+                receipt = SnippetCollectionReceipt.model_validate_json(raw)
+                evidence = receipt.candidates[str(original["candidate_id"])]
+                assert (evidence.source_type, evidence.url, evidence.license) == (
+                    "web_page",
+                    PLAN,
+                    "keenable",
+                )
+                assert receipt.read_body(evidence.body_sha256) == SNIPPET.encode()
+                branch_evidence = merged.value.attrs["branch_metadata"][branch]
+                assert branch_evidence[PROVIDER_RECEIPT] == raw
+                assert branch_evidence[SOURCE_RECEIPT] == output.value.attrs[SOURCE_RECEIPT]
+                storage = DataFrameIOManager.from_environment(spec.storage)
+                assert storage.read_evidence(branch_evidence[SOURCE_RECEIPT]["key"]) == raw.encode()
             identifier = f"{branch}:{original['candidate_id']}"
             assert rows_by_id[identifier] == {
                 **original,
@@ -85,12 +106,9 @@ def test_configured_empty_keenable_merges_but_failed_replacement_cannot_reuse_it
         instance.add_dynamic_partitions("dataset_builds", [spec.dataset_id])
         definitions = build_definitions(tmp_path)
 
-        with (
-            patch.dict("os.environ", {"KEENABLE_API_KEY": "fixture-key"}),
-            patch("codebench_pipeline.keenable.request_direct", side_effect=(result(),)) as search,
-        ):
+        with keenable_mcp_fixture(empty=True) as queries:
             healthy = materialize_collection_outputs(definitions, instance, spec.dataset_id)
-        assert search.called
+        assert queries == ["Terraform plan examples"]
         assert healthy.success
         data = DatasetDataService(tmp_path, instance)
         output = data.read_current(spec.dataset_id, "keenable/command_candidates")
@@ -111,31 +129,24 @@ def test_configured_empty_keenable_merges_but_failed_replacement_cannot_reuse_it
         listing = AssetRecordsFilter(asset_key=MERGE_KEY, asset_partitions=[spec.dataset_id])
         (previous_merge,) = instance.fetch_materializations(listing, limit=1).records
 
-        broken = KeenableDeclaration(
-            dataset=spec.dataset_id,
-            generation="fixture-failed",
-            generation_review="fixture-review",
-            cases=CASES,
-            permissions=(permission(),),
+        assert spec.declared_collection is not None
+        declaration = spec.declared_collection.keenable_declaration
+        assert isinstance(declaration, KeenableSnippetDeclaration)
+        broken = declaration.model_copy(
+            update={"search": declaration.search.model_copy(update={"queries": ("Replacement example",)})}
         )
         registry.register(with_keenable_declaration(spec, broken))
-        with (
-            patch.dict("os.environ", {"KEENABLE_API_KEY": "fixture-key"}),
-            patch(
-                "codebench_pipeline.keenable.request_direct",
-                side_effect=(result(PLAN), *(result() for _ in CASES[1:]), DirectResponse(SOURCE_BODY, PEER)),
-            ),
-        ):
+        with keenable_mcp_fixture(failed=True):
             failed = definitions.resolve_job_def("build_keenable").execute_in_process(
                 instance=instance, partition_key=spec.dataset_id, raise_on_error=False
             )
         assert not failed.success
         (failure,) = failed.get_step_failure_events()
-        assert failure.step_key == "datasets__keenable__capture_origin_pages"
+        assert failure.step_key == "datasets__keenable__command_candidates"
         assert failure.step_failure_data is not None
         error = failure.step_failure_data.error
         assert error is not None
-        assert "origin_pin_mismatch (200)" in error.to_string()
+        assert "provider_search_failed" in error.to_string()
 
         merge_job = definitions.get_implicit_global_asset_job_def()
         with pytest.raises(HumanReviewError, match="keenable acquisition receipt binding changed"):

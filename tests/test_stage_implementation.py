@@ -259,7 +259,7 @@ class StageImplementationTests(unittest.TestCase):
         source = "codebench_pipeline/declared_source_assets.py"
         original = ImplementationSource.read
         home = Path(self.enterContext(tempfile.TemporaryDirectory()))
-        spec = LabelingFixture(self, home).spec
+        spec = LabelingFixture(self, home, native=True).spec
         dataset_id = DatasetRegistry(home).register(spec)
         manager = DataFrameIOManager(storage=spec.storage)
         job = build_definitions(home).resolve_job_def("build_documentation")

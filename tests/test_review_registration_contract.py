@@ -29,7 +29,9 @@ from codebench_pipeline.runtime_instance import dataset_instance
 class ReviewRegistrationContractTests(unittest.TestCase):
     def setUp(self) -> None:
         self.home = Path(self.enterContext(tempfile.TemporaryDirectory()))
-        fixture = LabelingFixture(self, self.home, limit_per_risk=1, category_confidence="medium")
+        fixture = LabelingFixture(
+            self, self.home, native=True, limit_per_risk=1, category_confidence="medium"
+        )
         self.spec = fixture.spec
         self.registry = DatasetRegistry(self.home)
         self.registry.register(self.spec)

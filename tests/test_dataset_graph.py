@@ -26,8 +26,10 @@ from codebench_pipeline.dataset_run import refresh_registered_configuration
 from codebench_pipeline.definitions import build_definitions, dataset_run_config
 from codebench_pipeline.human_review import HumanReviewError
 from codebench_pipeline.runtime_instance import dataset_instance
-from codebench_pipeline.stage_configuration import stage_configs
+from codebench_pipeline.source_evidence import require_source_rights
+from codebench_pipeline.stage_configuration import DeclaredGlobalConfig, stage_configs
 from codebench_pipeline.stage_implementation import ImplementationSource
+from codebench_pipeline.storage import IntegrityError
 
 
 class DatasetGraphTests(unittest.TestCase):
@@ -97,7 +99,7 @@ class DatasetGraphTests(unittest.TestCase):
             self.assertEqual(len(requests), 1)
             self.assertEqual(requests[0].partition_key, spec.dataset_id)
 
-    def test_expired_source_rights_prevent_branch_and_finalization_materializations(self) -> None:
+    def test_historical_expired_source_rights_do_not_enable_native_snippet_search(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             home = Path(temporary)
             declaration = source_declaration()
@@ -110,13 +112,16 @@ class DatasetGraphTests(unittest.TestCase):
                 }
             )
             spec = with_keenable_declaration(LabelingFixture(self, home).spec, expired)
+            with self.assertRaisesRegex(HumanReviewError, "Keenable source authorization has expired"):
+                require_source_rights(DeclaredGlobalConfig.from_spec(spec).source_config("keenable"))
             DatasetRegistry(home).register(spec)
             refresh_registered_configuration(spec.dataset_id, home)
             with dataset_instance(home) as instance:
-                with self.assertRaisesRegex(HumanReviewError, "Keenable source authorization has expired"):
+                with self.assertRaisesRegex(
+                    IntegrityError, "requires an explicit snippet search declaration"
+                ):
                     NativeDatasetCycle(home).drain(instance, partition=spec.dataset_id)
                 for stage in (
-                    "keenable/discover_use_cases",
                     "keenable/command_candidates",
                     "filtered_commands",
                     "labeling_attempts",

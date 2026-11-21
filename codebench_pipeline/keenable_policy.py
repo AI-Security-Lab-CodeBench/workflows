@@ -30,6 +30,15 @@ MAX_BYTES: Final = 10 * 1024 * 1024
 MAX_RESULTS: Final = 5
 PROVIDER: Final = "https://api.keenable.ai/v1/search"
 
+
+class KeenableSnippetSettings(ConfigArtifact):
+    queries: tuple[
+        Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=4000)], ...
+    ] = Field(max_length=MAX_SEARCH)
+    max_results: int = Field(default=5, ge=1, le=50)
+    snippet_max_length: int = Field(default=4000, ge=180, le=10000)
+
+
 QUERIES: Final[dict[Case, str]] = {
     "plan": "Official Terraform CLI documentation for terraform plan and validate: preview scope and validation",
     "workloads": "Official Kubernetes kubectl get documentation for workload inventory and status scope",

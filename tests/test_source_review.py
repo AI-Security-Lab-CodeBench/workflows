@@ -92,7 +92,7 @@ def update_dataset_declaration(
 class SourceReviewTests(unittest.TestCase):
     def setUp(self) -> None:
         self.home = Path(self.enterContext(tempfile.TemporaryDirectory()))
-        self.fixture = LabelingFixture(self, self.home)
+        self.fixture = LabelingFixture(self, self.home, native=True)
         self.spec: DatasetBuildSpec = self.fixture.spec
         self.registry = DatasetRegistry(self.home)
         self.registry.register(self.spec)
@@ -277,7 +277,7 @@ class SourceReviewTests(unittest.TestCase):
 class CollectionAdmissionTests(unittest.TestCase):
     def setUp(self) -> None:
         self.home = Path(self.enterContext(tempfile.TemporaryDirectory()))
-        self.spec: DatasetBuildSpec = LabelingFixture(self, self.home).spec
+        self.spec: DatasetBuildSpec = LabelingFixture(self, self.home, native=True).spec
         self.registry = DatasetRegistry(self.home)
         self.registry.register(self.spec)
         self.instance = self.enterContext(dataset_instance(self.home))

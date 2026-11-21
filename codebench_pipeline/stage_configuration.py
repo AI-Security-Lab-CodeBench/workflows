@@ -8,7 +8,6 @@ from codebench_pipeline.batch_labeling_config import (
 )
 from codebench_pipeline.category_rules import CategoryRules
 from codebench_pipeline.collection_config import (
-    AdaptivePlannerConfig,
     CollectionMergeConfig,
     DeclaredCollection,
     DeclaredSourceStageConfig,
@@ -288,30 +287,4 @@ def stage_configs(settings: DatasetBuildSpec | DeclaredGlobalConfig) -> dict[str
 def declared_source_config(spec: DatasetBuildSpec, branch: Branch) -> DeclaredSourceStageConfig:
     if spec.declared_collection is None:
         raise IntegrityError("Registered dataset has no collection declarations")
-    source = spec.declared_collection.for_branch(branch)
-    if branch == "keenable":
-        declaration = source.keenable_config()
-        if declaration.search_plan is not None and declaration.search_plan.mode == "adaptive":
-            model, batch = spec.annotation.model, spec.annotation.batch
-            if model.provider != "openai_compatible" or model.base_url is None or batch is None:
-                raise IntegrityError(
-                    "Adaptive discovery requires a registered OpenAI-compatible model and batch settings"
-                )
-            return DeclaredSourceStageConfig(
-                branch=branch,
-                source=source,
-                planner=AdaptivePlannerConfig(
-                    base_url=model.base_url,
-                    model=model.model,
-                    api_key_env=model.api_key_env,
-                    capacity=(
-                        ScopedCapacityConfig.from_capacity(batch.require_capacity())
-                        if batch.inference_mode == "guarded"
-                        else None
-                    ),
-                    backend_revision=batch.backend_revision,
-                    max_output_tokens=model.max_output_tokens,
-                    timeout_seconds=model.timeout_seconds,
-                ),
-            )
-    return DeclaredSourceStageConfig(branch=branch, source=source)
+    return DeclaredSourceStageConfig(branch=branch, source=spec.declared_collection.for_branch(branch))

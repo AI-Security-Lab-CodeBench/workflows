@@ -11,6 +11,8 @@ from codebench_pipeline.dataframe_schemas import frame_records, model_records
 from codebench_pipeline.dataset_branches import COLLECTION_BRANCHES, stage_name
 from codebench_pipeline.dataset_records import CandidateRecord, routing
 from codebench_pipeline.human_review import HumanReviewError, ReviewSnapshot
+from codebench_pipeline.keenable_snippets import SnippetCollectionReceipt
+from codebench_pipeline.keenable_tables import PROVIDER_RECEIPT
 from codebench_pipeline.object_store import ObjectStore
 from codebench_pipeline.review_api_models import EvidenceResponse
 from codebench_pipeline.review_snapshots import ReviewManifest, ReviewSnapshots
@@ -66,8 +68,38 @@ def evidence_capture_stage(manifest: ReviewManifest, branch: JsonValue) -> str:
     descriptor = next(
         (item for item in COLLECTION_BRANCHES if item.namespace == branch), COLLECTION_BRANCHES[0]
     )
-    current = stage_name(descriptor.capture, descriptor.namespace)
-    return current if current in manifest.references else stage_name("source_documents", descriptor.namespace)
+    current = stage_name(descriptor.capture or "capture_origin_pages", descriptor.namespace)
+    historical = stage_name("source_documents", descriptor.namespace)
+    return next(
+        (stage for stage in (current, historical) if stage in manifest.references),
+        descriptor.terminal if descriptor.capture is None else historical,
+    )
+
+
+def _source_document(
+    snapshots: ReviewSnapshots,
+    manifest: ReviewManifest,
+    origin: dict[str, JsonValue],
+) -> dict[str, JsonValue]:
+    stage = evidence_capture_stage(manifest, origin.get("branch"))
+    frame = snapshots.frame(manifest, stage)
+    if stage == "keenable/command_candidates":
+        retained = SnippetCollectionReceipt.model_validate_json(frame.attrs[PROVIDER_RECEIPT])
+        candidate = retained.candidates.get(str(origin["candidate_id"]))
+        if candidate is None or candidate.source_id != origin["source_id"]:
+            raise HumanReviewError("conflict", "Immutable review evidence lacks a matching Keenable snippet")
+        return {
+            "source_id": candidate.source_id,
+            "source_url": candidate.url,
+            "source_type": candidate.source_type,
+            "license": candidate.license,
+            "sha256": candidate.body_sha256,
+            "content": retained.read_body(candidate.body_sha256).decode(),
+        }
+    sources = [source for source in frame_records(frame) if source["source_id"] == origin["source_id"]]
+    if len(sources) != 1:
+        raise HumanReviewError("conflict", "Immutable review evidence lacks a unique source")
+    return sources[0]
 
 
 def review_evidence(
@@ -91,15 +123,7 @@ def review_evidence(
     )
     shared_processing = "merged_command_candidates" in manifest.references
     branch_prefix = "documentation/" if origin.get("branch") == "documentation" else ""
-    sources = [
-        source
-        for source in frame_records(
-            snapshots.frame(manifest, evidence_capture_stage(manifest, origin.get("branch")))
-        )
-        if source["source_id"] == origin.get("source_id", row["source_id"])
-    ]
-    if len(sources) != 1:
-        raise HumanReviewError("conflict", "Immutable review evidence lacks a unique source")
+    source = _source_document(snapshots, manifest, {"source_id": row["source_id"], **origin})
     documentation: list[JsonValue]
     if "labeling_attempts" in manifest.references:
         documentation = TypeAdapter(list[JsonValue]).validate_python(
@@ -145,14 +169,8 @@ def review_evidence(
                 {
                     "reviewed_annotation": duplicate,
                     "origin": {key: value for key, value in duplicate_origin.items()},
-                    "source_document": next(
-                        source
-                        for source in frame_records(
-                            snapshots.frame(
-                                manifest, evidence_capture_stage(manifest, duplicate_origin.get("branch"))
-                            )
-                        )
-                        if source["source_id"] == duplicate_origin["source_id"]
+                    "source_document": _source_document(
+                        snapshots, manifest, dict[str, JsonValue](duplicate_origin)
                     ),
                     "inference": _inference(manifest, duplicate_origin["candidate_id"], prefix, identifier),
                 }
@@ -174,7 +192,7 @@ def review_evidence(
     return EvidenceResponse(
         fields={
             "reviewed_annotation": row,
-            "source_document": sources[0],
+            "source_document": source,
             "documentation": documentation,
             "taxonomy": rules,
             "label_correction_risk_ids": TypeAdapter(list[JsonValue]).validate_python(correction_risks),

@@ -34,7 +34,7 @@ from codebench_pipeline.storage import IntegrityError
 def compile_directory(
     directory: ConfigDirectorySnapshot, dataset_id: Identifier, merge: CollectionMergeConfig
 ) -> tuple[CategoryRules, DeclaredCollection]:
-    from codebench_pipeline.keenable_policy import parse_declaration
+    from codebench_pipeline.collection_config import parse_collection_keenable
 
     category = directory.category_directory
     rules = compile_business_rules(category / "category.json", directory.category_id, directory.read)
@@ -44,7 +44,7 @@ def compile_directory(
     documentation = RepositoryBranchDeclaration.model_validate_json(
         directory.read(category / "collection/documentation-crawl.json")
     )
-    keenable = parse_declaration(directory.read(category / "keenable/declaration.json"))
+    keenable = parse_collection_keenable(directory.read(category / "keenable/declaration.json"))
     if keenable.dataset != dataset_id:
         raise IntegrityError("Keenable source list belongs to a different dataset partition")
     return rules, DeclaredCollection(

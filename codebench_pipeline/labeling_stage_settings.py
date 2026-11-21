@@ -17,8 +17,8 @@ from codebench_pipeline.category_rules import (
     StrictModel,
     Text,
 )
-from codebench_pipeline.collection_config import DeclaredCollection
-from codebench_pipeline.keenable_policy import KeenableSourceAccess
+from codebench_pipeline.collection_config import DeclaredCollection, KeenableSnippetDeclaration
+from codebench_pipeline.keenable_policy import KeenableSnippetSettings, KeenableSourceAccess
 from codebench_pipeline.models import Digest
 from codebench_pipeline.repository_branch_config import RepositoryAcquisitionConfig
 from codebench_pipeline.repository_config import (
@@ -145,11 +145,12 @@ class RepositoryEvidenceSettings(StrictModel):
 class LabelingSources(ConfigArtifact):
     existing_datasets: RepositoryEvidenceSettings
     documentation_crawl: RepositoryEvidenceSettings
-    keenable_use_cases: KeenableSourceAccess
+    keenable_use_cases: KeenableSourceAccess | KeenableSnippetSettings
 
     @classmethod
     def from_collection(cls, collection: DeclaredCollection) -> Self:
         collection.require_current_declarations()
+        declaration = collection.keenable_declaration
         return cls(
             existing_datasets=RepositoryEvidenceSettings.project(
                 collection.repository_config("dataset"), "dataset"
@@ -157,7 +158,11 @@ class LabelingSources(ConfigArtifact):
             documentation_crawl=RepositoryEvidenceSettings.project(
                 collection.repository_config("documentation"), "documentation"
             ),
-            keenable_use_cases=KeenableSourceAccess.project(collection.keenable_declaration),
+            keenable_use_cases=(
+                declaration.search
+                if isinstance(declaration, KeenableSnippetDeclaration)
+                else KeenableSourceAccess.project(declaration)
+            ),
         )
 
 

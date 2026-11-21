@@ -27,7 +27,7 @@ class GuardedReleaseViewsTests(TestCase):
         self,
     ) -> None:
         home = Path(self.enterContext(TemporaryDirectory()))
-        fixture = LabelingFixture(self, home)
+        fixture = LabelingFixture(self, home, native=True)
         dataset_id = DatasetRegistry(home).register(fixture.spec)
         store = HumanReviewStore(home)
 

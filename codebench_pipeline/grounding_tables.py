@@ -29,6 +29,7 @@ from codebench_pipeline.grounding_inventory import SharedOperations, documentati
 from codebench_pipeline.grounding_sources import CandidateEvidence
 from codebench_pipeline.grounding_tools import GroundingConfig
 from codebench_pipeline.keenable_policy import KeenableError
+from codebench_pipeline.keenable_receipts import CaptureLock
 from codebench_pipeline.labeling_checkpoint_store import LabelingCheckpointCache
 from codebench_pipeline.labeling_outcomes import LabelingAttempt, failed_attempt, validate_attempts
 from codebench_pipeline.labeling_stage_settings import LabelingSources
@@ -68,7 +69,9 @@ class LabelingEvidenceInputs:
             run.dataset_home / "label-grounding-v2" / run.dataset_id,
             SharedOperations(
                 sources,
-                sources.provider.read_bodies(sources.lock),
+                sources.provider.read_bodies(sources.lock)
+                if sources.provider is not None and isinstance(sources.lock, CaptureLock)
+                else {},
                 documentation_captures(
                     sources.repositories["documentation"], self.documentation_capture, run
                 ),
