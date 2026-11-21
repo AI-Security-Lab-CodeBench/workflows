@@ -18,6 +18,7 @@ from dagster import (
     InitResourceContext,
     InputContext,
     IOManager,
+    JsonMetadataValue,
     MetadataValue,
     OutputContext,
     failure_hook,
@@ -30,7 +31,7 @@ from codebench_pipeline.category_rules import CategoryRules
 from codebench_pipeline.collection_config import CollectionMergeConfig, DeclaredSourceStageConfig
 from codebench_pipeline.collection_stage_settings import collection_operation
 from codebench_pipeline.config_assets import ConfigRunIOManager, RegisteredConfig
-from codebench_pipeline.dataframe_io import AssetSnapshot, UpstreamTableReference
+from codebench_pipeline.dataframe_io import AssetSnapshot, UpstreamTableReference, materialized_reference
 from codebench_pipeline.dataframe_schemas import (
     CommandCandidatesTable,
     FilteredCommandsTable,
@@ -74,6 +75,8 @@ from codebench_pipeline.finalization_table_asset import (
     MergeInput,
     ProjectionInput,
 )
+from codebench_pipeline.human_review import HumanReviewError
+from codebench_pipeline.input_provenance import input_materialization
 from codebench_pipeline.labeling_stage_settings import ProposalRules
 from codebench_pipeline.object_store import safe_key
 from codebench_pipeline.source_evidence import (
@@ -201,6 +204,25 @@ class FinalizationTableIO(IOManager):
                 else:
                     result = step.loaded = LabelingInput(FilteredCommandsTable.validate(value))
             elif step.stage == "filtered_commands":
+                producer = input_materialization(context)
+                if (
+                    producer is None
+                    or materialized_reference(context.instance, producer) != snapshot.reference
+                ):
+                    raise IntegrityError("Merge producer does not identify the loaded candidates")
+                materialization = producer.asset_materialization
+                assert materialization is not None
+                evidence = materialization.metadata.get("evidence")
+                registered = self.tables.run_configuration(run.run_id, step.partition)
+                current = registered.scopes.merged_command_candidates.merged_command_candidates
+                if (
+                    not isinstance(evidence, JsonMetadataValue)
+                    or not isinstance(evidence.value, dict)
+                    or evidence.value.get("config") != current.model_dump(mode="json")
+                ):
+                    raise HumanReviewError(
+                        "stale", "Merge settings changed; materialize merged candidates first"
+                    )
                 result = step.loaded = FilteringInput(CommandCandidatesTable.validate(value))
             elif step.stage in PROJECTION_SCHEMAS:
                 result = step.loaded = ProjectionInput(LabelingAttemptsTable.validate(value))

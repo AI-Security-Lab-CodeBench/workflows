@@ -10,6 +10,8 @@ from dagster import (
     AssetsDefinition,
     DagsterInstance,
     IOManagerDefinition,
+    MetadataValue,
+    Output,
     OutputContext,
     asset,
     build_input_context,
@@ -205,8 +207,12 @@ class NativeConfigEdgesTests(TestCase):
             io_manager_key="dataset_io_manager",
             dagster_type=TABLE_TYPES[CommandCandidatesTable],
         )
-        def merged_command_candidates() -> DataFrame[CommandCandidatesTable]:
-            return candidates
+        def merged_command_candidates() -> Output[DataFrame[CommandCandidatesTable]]:
+            settings = registered.scopes.merged_command_candidates.merged_command_candidates
+            return Output(
+                candidates,
+                metadata={"evidence": MetadataValue.json({"config": settings.model_dump(mode="json")})},
+            )
 
         mapped = next(
             item for item in configuration_assets(home) if item.key == mapping_key("filtered_commands")

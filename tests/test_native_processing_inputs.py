@@ -6,7 +6,8 @@ import pandas as pd
 from dagster import AssetKey
 from dagster._core.events import LoadedInputData
 from guarded_labeling_fixture import LabelingFixture
-from test_declared_dataset_graph import with_keenable_declaration
+from keenable_mcp_fixture import keenable_mcp_fixture
+from test_declared_dataset_graph import collection_fixture, fixture_spec, with_keenable_declaration
 
 from codebench_pipeline.collection_config import KeenableSnippetDeclaration
 from codebench_pipeline.config_assets import mapping_key
@@ -20,6 +21,79 @@ from codebench_pipeline.runtime_instance import dataset_instance
 
 
 class NativeProcessingInputTests(TestCase):
+    def test_filter_only_rejects_obsolete_merge_weights_until_prepare_rebuilds(self) -> None:
+        home = Path(self.enterContext(TemporaryDirectory()))
+        spec = self.enterContext(collection_fixture(fixture_spec(home)))
+        instance = self.enterContext(dataset_instance(home))
+        registry = DatasetRegistry(home)
+        partition = registry.register(spec)
+        instance.add_dynamic_partitions("dataset_builds", [partition])
+        definitions = build_definitions(home)
+        prepare = definitions.resolve_job_def("prepare_dataset")
+        refresh = definitions.resolve_job_def("refresh_dataset_configuration")
+        select = definitions.get_implicit_global_asset_job_def()
+        filtered = AssetKey(["datasets", "filtered_commands"])
+        merged = AssetKey(["datasets", "merged_command_candidates"])
+        storage = DataFrameIOManager.from_environment(spec.storage)
+
+        def origin_weight(key: AssetKey) -> float:
+            value = storage.read_version(storage.reference_at(key.path, partition))
+            assert isinstance(value, pd.DataFrame)
+            (weight,) = value.loc[value["command"] == "docker compose ps --all", "source_weight"]
+            return float(weight)
+
+        with keenable_mcp_fixture(empty=True):
+            self.assertTrue(prepare.execute_in_process(instance=instance, partition_key=partition).success)
+        self.assertEqual(origin_weight(filtered), 0.62)
+        original_merge = instance.get_latest_materialization_event(merged)
+
+        revised = spec.model_copy(
+            update={
+                "deduplication": spec.deduplication.model_copy(
+                    update={"normalize_safe_whitespace": not spec.deduplication.normalize_safe_whitespace}
+                ),
+            }
+        )
+        registry.register(revised)
+        self.assertTrue(refresh.execute_in_process(instance=instance, partition_key=partition).success)
+        reused = select.execute_in_process(
+            instance=instance, partition_key=partition, asset_selection=[filtered]
+        )
+        self.assertTrue(reused.success)
+        self.assertEqual(instance.get_latest_materialization_event(merged), original_merge)
+        self.assertEqual(origin_weight(filtered), 0.62)
+        last_filter = instance.get_latest_materialization_event(filtered)
+        last_reference = storage.reference_at(filtered.path, partition)
+
+        collection = spec.declared_collection
+        assert collection is not None
+        merge_settings = collection.merge_config.model_copy(
+            update={"repository_origin_weights": {"docker-awesome-compose": 0.73}}
+        )
+        registry.register(
+            revised.model_copy(
+                update={"declared_collection": collection.model_copy(update={"merge": merge_settings})}
+            )
+        )
+        self.assertTrue(refresh.execute_in_process(instance=instance, partition_key=partition).success)
+        rejected = select.execute_in_process(
+            instance=instance, partition_key=partition, asset_selection=[filtered], raise_on_error=False
+        )
+        self.assertFalse(rejected.success)
+        (failure,) = rejected.get_step_failure_events()
+        self.assertEqual(failure.step_key, filtered.to_python_identifier())
+        assert failure.step_failure_data is not None
+        error = failure.step_failure_data.error
+        assert error is not None
+        self.assertIn("Merge settings changed", error.to_string())
+        self.assertEqual(instance.get_latest_materialization_event(filtered), last_filter)
+        self.assertEqual(storage.reference_at(filtered.path, partition), last_reference)
+
+        with keenable_mcp_fixture(empty=True):
+            self.assertTrue(prepare.execute_in_process(instance=instance, partition_key=partition).success)
+        self.assertEqual(origin_weight(merged), 0.73)
+        self.assertEqual(origin_weight(filtered), 0.73)
+
     def test_selected_merge_consumes_only_dagster_inputs_and_keeps_history(self) -> None:
         home = Path(self.enterContext(TemporaryDirectory()))
         spec = LabelingFixture(self, home).spec
