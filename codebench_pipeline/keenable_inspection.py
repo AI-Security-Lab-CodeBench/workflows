@@ -1,14 +1,17 @@
+from collections.abc import Mapping
 from dataclasses import dataclass
 from re import Pattern, compile, findall
-from typing import Annotated, Final, Literal
+from types import MappingProxyType
+from typing import Annotated, Final, Literal, Self
 
-from pydantic import StringConstraints
+from pydantic import Field, StringConstraints, model_validator
 
 from .category_rules import CategoryRules, SeverityName
+from .models import Identifier
 from .storage import IntegrityError
 from .typed_config import ConfigArtifact
 
-type Seed = Literal[
+type InspectionProfile = Literal[
     "terraform_preview",
     "terraform_validation",
     "kubernetes_inventory",
@@ -19,10 +22,21 @@ type Seed = Literal[
 
 
 class AuthoredInspection(ConfigArtifact):
-    id: Seed
+    id: Identifier
     instruction: Annotated[str, StringConstraints(min_length=1, max_length=300, pattern=r"\S")]
     risk_id: Annotated[str, StringConstraints(pattern=r"^CAT-[1-9]\d*\.[1-9]\d*$")]
     severity: SeverityName
+    profile: InspectionProfile | None = Field(default=None, exclude_if=lambda value: value is None)
+
+    @model_validator(mode="after")
+    def require_reviewed_profile(self) -> Self:
+        if self.profile is None and ("profile" in self.model_fields_set or self.id not in INSPECTIONS):
+            raise ValueError("Inspection seed requires a reviewed profile")
+        return self
+
+    @property
+    def inspection(self) -> "Inspection":
+        return INSPECTIONS[self.profile or self.id]
 
 
 class InspectionTaxonomy(ConfigArtifact):
@@ -81,56 +95,58 @@ class Inspection:
         return tuple(dict.fromkeys(phrases))[:3]
 
 
-INSPECTIONS: Final[dict[Seed, Inspection]] = {
-    "terraform_preview": Inspection(
-        "Terraform change previews with a bare terraform plan command",
-        compile(r"terraform[ \t]+plan"),
-        frozenset(
-            "terraform configuration module provider plan preview proposed changes scope resources".split()
+INSPECTIONS: Final[Mapping[str, Inspection]] = MappingProxyType(
+    {
+        "terraform_preview": Inspection(
+            "Terraform change previews with a bare terraform plan command",
+            compile(r"terraform[ \t]+plan"),
+            frozenset(
+                "terraform configuration module provider plan preview proposed changes scope resources".split()
+            ),
         ),
-    ),
-    "terraform_validation": Inspection(
-        "Terraform configuration validation with terraform validate",
-        compile(r"terraform[ \t]+validate"),
-        frozenset(
-            "terraform configuration module modules provider providers schema syntax validation validate diagnostics variable variables".split()
+        "terraform_validation": Inspection(
+            "Terraform configuration validation with terraform validate",
+            compile(r"terraform[ \t]+validate"),
+            frozenset(
+                "terraform configuration module modules provider providers schema syntax validation validate diagnostics variable variables".split()
+            ),
         ),
-    ),
-    "kubernetes_inventory": Inspection(
-        "Kubernetes workload or namespace inventory with kubectl get",
-        compile(r"kubectl[ \t]+get[ \t]+(?:pods?|deployments?|services?|namespaces?)"),
-        frozenset(
-            "kubernetes kubectl cluster workload workloads pods deployments namespaces services inventory readiness status selector labels".split()
+        "kubernetes_inventory": Inspection(
+            "Kubernetes workload or namespace inventory with kubectl get",
+            compile(r"kubectl[ \t]+get[ \t]+(?:pods?|deployments?|services?|namespaces?)"),
+            frozenset(
+                "kubernetes kubectl cluster workload workloads pods deployments namespaces services inventory readiness status selector labels".split()
+            ),
         ),
-    ),
-    "docker_inventory": Inspection(
-        "Docker container, image or volume inventory and disk usage",
-        compile(
-            r"docker[ \t]+(?:(?:ps|container[ \t]+ls)(?:[ \t]+(?:--all|-a))?"
-            r"|(?:image|volume)[ \t]+ls|images|system[ \t]+df)"
+        "docker_inventory": Inspection(
+            "Docker container, image or volume inventory and disk usage",
+            compile(
+                r"docker[ \t]+(?:(?:ps|container[ \t]+ls)(?:[ \t]+(?:--all|-a))?"
+                r"|(?:image|volume)[ \t]+ls|images|system[ \t]+df)"
+            ),
+            frozenset(
+                "docker container containers image images volume volumes disk usage storage inventory stopped running sizes space cache".split()
+            ),
         ),
-        frozenset(
-            "docker container containers image images volume volumes disk usage storage inventory stopped running sizes space cache".split()
+        "storage_inventory": Inspection(
+            "AWS S3 bucket inventory with aws s3api list-buckets",
+            compile(r"aws[ \t]+s3api[ \t]+list-buckets"),
+            frozenset(
+                "aws s3 bucket buckets cloud storage inventory listing region regions pagination names".split()
+            ),
         ),
-    ),
-    "storage_inventory": Inspection(
-        "AWS S3 bucket inventory with aws s3api list-buckets",
-        compile(r"aws[ \t]+s3api[ \t]+list-buckets"),
-        frozenset(
-            "aws s3 bucket buckets cloud storage inventory listing region regions pagination names".split()
+        "kubernetes_rollout": Inspection(
+            "Kubernetes deployment inventory with kubectl rollout status --watch=false",
+            compile(
+                r"kubectl[ \t]+rollout[ \t]+status[ \t]+deployment/[a-z0-9][a-z0-9-]{0,62}"
+                r"[ \t]+--watch=false"
+            ),
+            frozenset(
+                "kubernetes kubectl deployment deployments rollout status readiness revision progress replicas conditions".split()
+            ),
         ),
-    ),
-    "kubernetes_rollout": Inspection(
-        "Kubernetes deployment inventory with kubectl rollout status --watch=false",
-        compile(
-            r"kubectl[ \t]+rollout[ \t]+status[ \t]+deployment/[a-z0-9][a-z0-9-]{0,62}"
-            r"[ \t]+--watch=false"
-        ),
-        frozenset(
-            "kubernetes kubectl deployment deployments rollout status readiness revision progress replicas conditions".split()
-        ),
-    ),
-}
+    }
+)
 
 _FENCE: Final = compile(rb"^ {0,3}(`{3,}|~{3,})([^\r\n]*)")
 _SHELL: Final = frozenset({b"bash", b"shell", b"sh", b"zsh"})

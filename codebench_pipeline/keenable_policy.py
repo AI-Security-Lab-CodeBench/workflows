@@ -15,7 +15,7 @@ from pydantic import (
     model_validator,
 )
 
-from codebench_pipeline.keenable_inspection import AuthoredInspection, Seed
+from codebench_pipeline.keenable_inspection import AuthoredInspection, InspectionProfile
 from codebench_pipeline.typed_config import ConfigArtifact
 
 type Case = Literal["plan", "workloads", "containers", "storage_sql", "rollout"]
@@ -37,7 +37,7 @@ class KeenableSnippetSettings(ConfigArtifact):
         tuple[Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=4000)], ...]
         | None
     ) = Field(default=None, max_length=MAX_SEARCH, exclude_if=lambda value: value is None)
-    seeds: tuple[Seed | AuthoredInspection, ...] | None = Field(
+    seeds: tuple[InspectionProfile | AuthoredInspection, ...] | None = Field(
         default=None, max_length=MAX_SEARCH, exclude_if=lambda value: value is None
     )
     max_search_calls: int | None = Field(

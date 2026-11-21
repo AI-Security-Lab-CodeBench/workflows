@@ -17,7 +17,7 @@ from .keenable_decisions import (
     DiscoveryModel,
     DiscoveryTurn,
 )
-from .keenable_inspection import INSPECTIONS, AuthoredInspection, Seed, shell_spans
+from .keenable_inspection import INSPECTIONS, AuthoredInspection, shell_spans
 from .keenable_mcp import search_session, search_snippets
 from .keenable_policy import (
     Digest,
@@ -115,9 +115,11 @@ async def _collect(
     snippets: dict[str, str] = {}
     searches: list[_SearchReceipt] = []
     feedback: list[DiscoveryFeedback] = []
-    seeds: tuple[Seed, ...] = tuple(
-        seed.id if isinstance(seed, AuthoredInspection) else seed for seed in settings.seeds or ()
+    inspections = dict(
+        (seed.id, seed.inspection) if isinstance(seed, AuthoredInspection) else (seed, INSPECTIONS[seed])
+        for seed in settings.seeds or ()
     )
+    seeds = tuple(inspections)
     model = access.model
     if settings.authored_seeds and model is None:
         raise KeenableError("discovery_model_required")
@@ -148,7 +150,7 @@ async def _collect(
                 finalize = choice
                 decision_path.write_text(choice.model_dump_json(), encoding="utf-8")
                 break
-            inspection = INSPECTIONS[seed]
+            inspection = inspections[seed]
             context = choice.decision.context
             query = inspection.query if context is None else f"{inspection.query} Focus: {context}."
             query_id = digest(query.encode())

@@ -8,20 +8,21 @@ from pydantic import Field, ValidationError
 
 from .agent_events import InferenceError, parse_json
 from .inference_capacity import CapacityConfig, CapacityUnavailable, guarded_complete
-from .keenable_inspection import INSPECTIONS, InspectionTaxonomy, Seed
+from .keenable_inspection import InspectionTaxonomy
 from .keenable_policy import Digest, KeenableError, Record, digest
 from .model_config import ModelConfig
+from .models import Identifier
 from .openai_transport import complete, parse_completion, strict_schema
 
 
 class DiscoveryDecision(Record):
     action: Literal["query", "finalize"]
-    seed: Seed | None
+    seed: Identifier | None
     context: str | None = Field(default=None, exclude_if=lambda value: value is None)
 
 
 class DiscoveryFeedback(Record):
-    seed: Seed
+    seed: Identifier
     results: int = Field(ge=0)
     accepted: int = Field(ge=0)
     new_candidates: int = Field(ge=0)
@@ -32,7 +33,7 @@ class DiscoveryFeedback(Record):
 
 
 class DiscoveryTurn(Record):
-    available: tuple[Seed, ...]
+    available: tuple[Identifier, ...]
     previous: tuple[DiscoveryFeedback, ...]
     remaining_searches: int = Field(gt=0)
 
@@ -58,10 +59,11 @@ class DiscoveryModel:
             raise KeenableError("discovery_model_credential_unavailable")
         if config.base_url is None:
             raise KeenableError("discovery_model_endpoint_unavailable")
+        inspections = {item.seed.id: item.seed.inspection for item in self.taxonomy}
         available = [
             {
                 **item.model_dump(mode="json"),
-                "context_words": sorted(INSPECTIONS[item.seed.id].context_words),
+                "context_words": sorted(inspections[item.seed.id].context_words),
             }
             for item in self.taxonomy
         ]
@@ -133,7 +135,7 @@ class DiscoveryModel:
                 context is None
                 or len(context) > 100
                 or not fullmatch(r"[a-zA-Z0-9]+(?: [a-zA-Z0-9]+){1,7}", context)
-                or not set(context.lower().split()) <= INSPECTIONS[seed].context_words
+                or not set(context.lower().split()) <= inspections[seed].context_words
             ):
                 raise KeenableError("discovery_context_outside_inspection")
             decision = decision.model_copy(update={"context": context.lower()})

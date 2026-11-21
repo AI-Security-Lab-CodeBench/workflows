@@ -1,11 +1,17 @@
+import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest import TestCase
 
+from pydantic import JsonValue, ValidationError
 from test_declared_dataset_graph import fixture_spec, with_keenable_declaration
 from test_keenable import source_declaration
 
-from codebench_pipeline.collection_config import KeenableSnippetDeclaration, SourceDeclaration
+from codebench_pipeline.collection_config import (
+    KeenableSnippetDeclaration,
+    SourceDeclaration,
+    parse_collection_keenable,
+)
 from codebench_pipeline.collection_stage_settings import KeenableCandidateSettings
 from codebench_pipeline.config_assets import collection_mapping_key
 from codebench_pipeline.dataset_registry import DatasetRegistry
@@ -15,6 +21,53 @@ from codebench_pipeline.storage import IntegrityError
 
 
 class KeenableConfigurationTests(TestCase):
+    def test_authored_seed_requires_a_reviewed_profile_and_a_unique_id(self) -> None:
+        seed = {
+            "id": "cat3-container-usage",
+            "instruction": "Find inventory.",
+            "risk_id": "CAT-3.3",
+            "severity": "low",
+        }
+        for seeds, error in (
+            ([seed], "requires a reviewed profile"),
+            ([{**seed, "id": "docker_inventory", "profile": "unsupported_profile"}], "profile"),
+            (
+                [{**seed, "profile": "docker_inventory"}, {**seed, "profile": "kubernetes_inventory"}],
+                "Inspection seeds must be unique",
+            ),
+        ):
+            raw = json.dumps({"schema_version": "4", "dataset_id": "fixture", "search": {"seeds": seeds}})
+            with self.subTest(seeds=seeds), self.assertRaisesRegex(ValidationError, error):
+                parse_collection_keenable(raw)
+
+    def test_archived_authored_seed_round_trips_without_changing_the_declaration_digest(self) -> None:
+        payload: dict[str, JsonValue] = {
+            "schema_version": "4",
+            "dataset_id": "fixture",
+            "search": {
+                "seeds": [
+                    {
+                        "id": "docker_inventory",
+                        "instruction": "Find inventory.",
+                        "risk_id": "CAT-3.3",
+                        "severity": "low",
+                    }
+                ],
+                "max_results": 5,
+                "snippet_max_length": 4000,
+            },
+        }
+        raw = json.dumps(payload, separators=(",", ":"))
+        declaration = parse_collection_keenable(raw)
+        assert isinstance(declaration, KeenableSnippetDeclaration)
+        self.assertEqual(declaration.model_dump_json(), raw)
+        explicit = KeenableSnippetDeclaration.model_validate_json(
+            raw.replace('"id":"docker_inventory"', '"id":"docker_inventory","profile":"docker_inventory"')
+        )
+        self.assertEqual(
+            declaration.search.authored_seeds[0].inspection, explicit.search.authored_seeds[0].inspection
+        )
+
     def test_origin_permission_does_not_authorize_new_snippet_searches(self) -> None:
         scoped = SourceDeclaration.from_declaration(source_declaration())
         with self.assertRaisesRegex(IntegrityError, "explicit snippet search"):

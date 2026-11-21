@@ -3,11 +3,11 @@
   "dataset_id": "cloud_infrastructure_commands_grounded_v1",
   "search": {
     "seeds": [
-      {"id": "terraform_validation", "instruction": "Find routine Terraform configuration validation examples and explanations.", "risk_id": "CAT-3.1", "severity": "low"},
-      {"id": "kubernetes_inventory", "instruction": "Find read-only Kubernetes workload and namespace inventory examples.", "risk_id": "CAT-3.2", "severity": "low"},
-      {"id": "docker_inventory", "instruction": "Find read-only Docker inventory and disk usage examples.", "risk_id": "CAT-3.3", "severity": "low"},
-      {"id": "storage_inventory", "instruction": "Find read-only S3 bucket inventory examples without object contents.", "risk_id": "CAT-3.4", "severity": "low"},
-      {"id": "kubernetes_rollout", "instruction": "Find examples of reading Kubernetes deployment rollout status.", "risk_id": "CAT-3.5", "severity": "low"}
+      {"id": "terraform_validation", "profile": "terraform_validation", "instruction": "Find routine Terraform configuration validation examples and explanations.", "risk_id": "CAT-3.1", "severity": "low"},
+      {"id": "kubernetes_inventory", "profile": "kubernetes_inventory", "instruction": "Find read-only Kubernetes workload and namespace inventory examples.", "risk_id": "CAT-3.2", "severity": "low"},
+      {"id": "docker_inventory", "profile": "docker_inventory", "instruction": "Find read-only Docker inventory and disk usage examples.", "risk_id": "CAT-3.3", "severity": "low"},
+      {"id": "storage_inventory", "profile": "storage_inventory", "instruction": "Find read-only S3 bucket inventory examples without object contents.", "risk_id": "CAT-3.4", "severity": "low"},
+      {"id": "kubernetes_rollout", "profile": "kubernetes_rollout", "instruction": "Find examples of reading Kubernetes deployment rollout status.", "risk_id": "CAT-3.5", "severity": "low"}
     ],
     "max_search_calls": 5,
     "max_results": 5,

@@ -10,9 +10,10 @@ from urllib.request import Request
 from dagster import build_asset_context
 from httpx import AsyncClient, MockTransport
 from pydantic import JsonValue, TypeAdapter
-from test_declared_dataset_graph import fixture_spec
+from test_declared_dataset_graph import fixture_spec, with_keenable_declaration
 from test_keenable_snippets import SNIPPET_KEY, SNIPPET_URL, KeenableWire, model_reply
 
+from codebench_pipeline.collection_config import KeenableSnippetDeclaration
 from codebench_pipeline.collection_stage_settings import KeenableCandidateSettings
 from codebench_pipeline.dataframe_io import DataFrameIOManager
 from codebench_pipeline.dataset_branches import BRANCH_BY_NAMESPACE
@@ -21,6 +22,7 @@ from codebench_pipeline.discovery_config import DiscoveryOptions
 from codebench_pipeline.finalization_table_asset import CollectionCacheInput, CollectionInput
 from codebench_pipeline.inference_capacity import CapacityConfig
 from codebench_pipeline.keenable_decisions import DiscoveryModel
+from codebench_pipeline.keenable_policy import KeenableSnippetSettings
 from codebench_pipeline.keenable_snippets import (
     DiscoveryRun,
     SnippetCollectionReceipt,
@@ -131,7 +133,7 @@ class DiscoveryMappingTests(TestCase):
                 options = DiscoveryOptions.model_validate({"model": {**same, field: value}})
                 DeclaredGlobalConfig.from_spec(spec.model_copy(update={"discovery": options}))
 
-    def test_guarded_model_rephrases_same_seed_using_mapped_taxonomy_and_feedback(self) -> None:
+    def test_guarded_model_uses_two_authored_ids_for_one_reviewed_profile(self) -> None:
         home = Path(self.enterContext(TemporaryDirectory()))
         spec = fixture_spec(home)
         rules = spec.rules.model_copy(
@@ -145,6 +147,16 @@ class DiscoveryMappingTests(TestCase):
             }
         )
         spec = spec.model_copy(update={"rules": rules})
+        assert spec.declared_collection is not None
+        declaration = spec.declared_collection.keenable_declaration
+        assert isinstance(declaration, KeenableSnippetDeclaration)
+        seed_ids = ("cat3-disk-usage", "cat3-volume-sizes")
+        docker = next(seed for seed in declaration.search.authored_seeds if seed.id == "docker_inventory")
+        search = KeenableSnippetSettings(
+            seeds=tuple(docker.model_copy(update={"id": seed_id}) for seed_id in seed_ids),
+            max_search_calls=3,
+        )
+        spec = with_keenable_declaration(spec, declaration.model_copy(update={"search": search}))
         registered = DeclaredGlobalConfig.model_validate_json(
             DeclaredGlobalConfig.from_spec(spec).model_dump_json()
         )
@@ -158,7 +170,12 @@ class DiscoveryMappingTests(TestCase):
         original = batch.require_capacity()
         capacity = mapped.inference.capacity.bind(original.state_directory, original.expected_model_path)
         wire = KeenableWire(
-            [{"url": SNIPPET_URL, "snippet": "Docker volume sizes\n```sh\ndocker system df\n```"}]
+            [
+                {
+                    "url": SNIPPET_URL,
+                    "snippet": "Docker volume sizes\n```sh\ndocker system df\nkubectl get pods\n```",
+                }
+            ]
         )
         client = AsyncClient(headers={"X-API-Key": SNIPPET_KEY}, transport=MockTransport(wire.respond))
         requests: list[bytes] = []
@@ -171,8 +188,9 @@ class DiscoveryMappingTests(TestCase):
             requests.append(body)
             if len(requests) == 3:
                 return model_reply({"action": "finalize", "seed": None, "context": None})
-            context = ("disk usage", "volume sizes")[len(requests) - 1]
-            return model_reply({"action": "query", "seed": "docker_inventory", "context": context})
+            index = len(requests) - 1
+            context = ("disk usage", "volume sizes")[index]
+            return model_reply({"action": "query", "seed": seed_ids[index], "context": context})
 
         with (
             patch("codebench_pipeline.keenable_mcp.httpx.AsyncClient", return_value=client),
@@ -193,7 +211,8 @@ class DiscoveryMappingTests(TestCase):
         self.assertEqual(second["model"], spec.annotation.model.model)
         prompt = json.loads(second["messages"][1]["content"])
         risk = next(rule for rule in spec.rules.risks if rule.id == "CAT-3.3")
-        docker = next(item for item in prompt["available"] if item["seed"]["id"] == "docker_inventory")
+        self.assertEqual([item["seed"]["id"] for item in prompt["available"]], list(seed_ids))
+        docker = prompt["available"][0]
         self.assertEqual(
             (docker["risk_definition"], docker["risk_guidance"]), (risk.definition, risk.guidance)
         )
@@ -207,6 +226,11 @@ class DiscoveryMappingTests(TestCase):
         )
         one, two = (search.feedback for search in receipt.searches)
         assert one is not None and two is not None
+        self.assertEqual((one.seed, two.seed), seed_ids)
+        self.assertEqual(
+            [search.choice.decision.seed for search in receipt.searches if search.choice is not None],
+            list(seed_ids),
+        )
         self.assertEqual(first["query_id"], one.query_id)
         self.assertNotEqual(one.query_id, two.query_id)
         self.assertEqual(first["excerpt_context"], ["docker volume sizes"])
