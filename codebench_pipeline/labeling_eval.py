@@ -16,6 +16,7 @@ from codebench_pipeline.dataset_config import AnnotationConfig
 from codebench_pipeline.dataset_records import CandidateRecord, LabelDecision
 from codebench_pipeline.dataset_registry import read_registered_spec
 from codebench_pipeline.labeling_outcomes import LabelingAttempt, validate_attempts
+from codebench_pipeline.labeling_stage_settings import LabelingRules
 from codebench_pipeline.live_grounding import LiveReceipt
 from codebench_pipeline.model_config import ModelConfig
 from codebench_pipeline.models import SemanticSnippet
@@ -290,7 +291,7 @@ def run_evaluation(
         batch = batch.model_copy(update={"batch_size": batch_size})
         config = config.model_copy(update={"batch": batch})
     spec = read_registered_spec((cohort_path.parent / "spec.json").read_bytes())
-    rules = spec.rules
+    rules = LabelingRules.from_rules(spec.rules)
     if any(record.seed_documentation for record in cohort.records):
         raise ValueError("Live-grounding evaluation cannot use seed documentation")
     records = [record for record in cohort.records if split == "all" or record.split == split]

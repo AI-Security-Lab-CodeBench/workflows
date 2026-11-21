@@ -20,6 +20,7 @@ from codebench_pipeline.dataset_registry import DatasetRegistry
 from codebench_pipeline.grounding_tools import LiveGroundingConfig
 from codebench_pipeline.labeling_eval import CohortRecord, EvaluationCohort, run_evaluation
 from codebench_pipeline.labeling_outcomes import failed_attempt, label_attempt
+from codebench_pipeline.labeling_stage_settings import LabelingRules
 from codebench_pipeline.model_config import ModelConfig
 from codebench_pipeline.openai_transport import HTTPResponse
 
@@ -95,9 +96,10 @@ class RegisteredEvaluationTests(unittest.TestCase):
         self.assertEqual(summary["outcomes"], {"failure": 1})
         batches.assert_called_once()
         self.assertEqual(batches.call_args.args[0], [self.candidate])
-        self.assertEqual(batches.call_args.args[1], self.archived.rules)
+        scoped = LabelingRules.from_rules(self.archived.rules)
+        self.assertEqual(batches.call_args.args[1], scoped)
         receipt = TypeAdapter(dict[str, JsonValue]).validate_json((self.out / "run-input.json").read_bytes())
-        self.assertEqual(receipt["rules"], self.spec.rules.model_dump(mode="json"))
+        self.assertEqual(receipt["rules"], scoped.model_dump(mode="json"))
 
     def test_incomplete_or_duplicate_outcomes_fail_with_attempt_evidence_retained(self) -> None:
         self.write_cohort(self.record)
