@@ -1,5 +1,6 @@
 from pathlib import Path
 from typing import Final
+from unittest.mock import patch
 
 import pandas as pd
 import pytest
@@ -11,21 +12,24 @@ from test_declared_dataset_graph import (
     with_keenable_declaration,
 )
 from test_keenable import PLAN
+from test_keenable_snippets import model_reply
 
 from codebench_pipeline.collection_config import KeenableSnippetDeclaration
 from codebench_pipeline.config_assets import CONFIG_DIRECTORY
 from codebench_pipeline.data_views import DatasetDataService
 from codebench_pipeline.dataframe_io import DataFrameIOManager
 from codebench_pipeline.dataframe_schemas import frame_records
-from codebench_pipeline.dataset_collection_binding import FINALIZATION_BINDING
+from codebench_pipeline.dataset_collection_binding import FINALIZATION_BINDING, authorize_finalization_output
 from codebench_pipeline.dataset_registry import DatasetRegistry
 from codebench_pipeline.definitions import build_definitions
 from codebench_pipeline.human_review import HumanReviewError
-from codebench_pipeline.keenable_inspection import INSPECTIONS
+from codebench_pipeline.keenable_inspection import INSPECTIONS, AuthoredInspection
+from codebench_pipeline.keenable_policy import KeenableSnippetSettings
 from codebench_pipeline.keenable_snippets import SnippetCollectionReceipt
 from codebench_pipeline.keenable_tables import PROVIDER_RECEIPT
 from codebench_pipeline.runtime_instance import dataset_instance
 from codebench_pipeline.source_evidence import SOURCE_RECEIPT
+from codebench_pipeline.stage_configuration import DeclaredGlobalConfig
 
 MERGE_KEY: Final = AssetKey(["datasets", "merged_command_candidates"])
 
@@ -41,18 +45,34 @@ def materialize_collection_outputs(
     )
 
 
-def test_merge_consumes_all_three_collection_group_outputs(tmp_path: Path) -> None:
+def test_merge_consumes_and_authorizes_all_three_collection_group_outputs(tmp_path: Path) -> None:
+    seed = AuthoredInspection(
+        id="terraform_preview",
+        instruction="Find a bare Terraform preview.",
+        risk_id="CAT-3.1",
+        severity="low",
+    )
     with (
         collection_fixture(fixture_spec(tmp_path)) as spec,
         dataset_instance(tmp_path) as instance,
         keenable_mcp_fixture() as queries,
+        patch(
+            "codebench_pipeline.keenable_decisions.guarded_complete",
+            return_value=model_reply({"action": "query", "seed": seed.id, "context": "proposed changes"}),
+        ),
     ):
+        spec = with_keenable_declaration(
+            spec,
+            KeenableSnippetDeclaration(
+                schema_version="4", dataset_id=spec.dataset_id, search=KeenableSnippetSettings(seeds=(seed,))
+            ),
+        )
         DatasetRegistry(tmp_path).register(spec)
         instance.add_dynamic_partitions("dataset_builds", [spec.dataset_id])
         definitions = build_definitions(tmp_path)
         run = materialize_collection_outputs(definitions, instance, spec.dataset_id)
         assert run.success
-        assert queries == [INSPECTIONS["terraform_preview"].query]
+        assert queries == [f"{seed.inspection.query} Focus: proposed changes."]
 
         data = DatasetDataService(tmp_path, instance)
         merged = data.read_current(spec.dataset_id, "merged_command_candidates")
@@ -98,6 +118,14 @@ def test_merge_consumes_all_three_collection_group_outputs(tmp_path: Path) -> No
                 "state": "configured",
                 "digest": output.reference.digest,
             }
+
+        authorize_finalization_output(
+            DataFrameIOManager.from_environment(spec.storage, review_home=str(tmp_path)),
+            instance,
+            DeclaredGlobalConfig.from_spec(data.specification(spec.dataset_id)),
+            merged.value,
+            complete=True,
+        )
 
 
 def test_configured_empty_keenable_merges_but_failed_replacement_cannot_reuse_it(tmp_path: Path) -> None:

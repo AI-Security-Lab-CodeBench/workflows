@@ -108,7 +108,7 @@ def current_candidates(
         inputs["source_documents"] = AssetSnapshot(capture_ref, manager.read_version(capture_ref))
     expected = manager.stage_signature(
         "command_candidates",
-        collection_operation(branch, "command_candidates").project(config),
+        registered.collection_operation_settings(collection_operation(branch, "command_candidates")),
         inputs,
     )
     materialization = record.asset_materialization
