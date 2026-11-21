@@ -36,7 +36,11 @@ class Prompt(StrictModel):
     candidates_per_call: int = Field(gt=0, le=2)
 
 
+BackendMode = Literal["plain", "sglang_guarded"]
+
+
 class Backend(StrictModel):
+    mode: BackendMode
     provider: Literal["openai_compatible"] = "openai_compatible"
     base_url: Text | None = None
     model: Text | None = None

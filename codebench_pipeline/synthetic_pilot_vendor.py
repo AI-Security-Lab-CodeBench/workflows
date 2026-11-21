@@ -13,9 +13,10 @@ from pydantic import JsonValue
 
 from codebench_pipeline.agent_events import InferenceError, parse_json
 from codebench_pipeline.inference_capacity import CapacityConfig, guarded_complete
-from codebench_pipeline.openai_transport import parse_completion
+from codebench_pipeline.openai_transport import complete, parse_completion
 from codebench_pipeline.synthetic_pilot_policy import (
     OPERATIONS,
+    BackendMode,
     Candidates,
     PilotError,
     Seed,
@@ -29,27 +30,32 @@ ENV_PREFIX: Final = "CODEBENCH_SYNTHETIC_PILOT_"
 class Runtime:
     endpoint: str
     model: str
-    capacity: CapacityConfig
     vendor_dir: Path
     output_dir: Path
+    capacity: CapacityConfig | None = None
     api_key: str | None = field(default=None, repr=False)
 
     def child_environment(self) -> dict[str, str]:
         values = {
             "ENDPOINT": self.endpoint,
             "MODEL": self.model,
-            "MODEL_PATH": self.capacity.expected_model_path,
-            "LEDGER_DIR": self.capacity.state_directory,
             "VENDOR_DIR": str(self.vendor_dir),
             "OUTPUT_DIR": str(self.output_dir),
         }
+        if self.capacity is not None:
+            values.update(
+                MODEL_PATH=self.capacity.expected_model_path,
+                LEDGER_DIR=self.capacity.state_directory,
+            )
         if self.api_key is not None:
             values["API_KEY"] = self.api_key
         return {ENV_PREFIX + name: value for name, value in values.items()}
 
     @classmethod
-    def from_environment(cls) -> "Runtime":
-        settings = ("ENDPOINT", "MODEL", "MODEL_PATH", "LEDGER_DIR", "VENDOR_DIR", "OUTPUT_DIR")
+    def from_environment(cls, mode: BackendMode) -> "Runtime":
+        settings = ("ENDPOINT", "MODEL", "VENDOR_DIR", "OUTPUT_DIR")
+        if mode == "sglang_guarded":
+            settings += ("MODEL_PATH", "LEDGER_DIR")
         values = {name: os.environ.get(ENV_PREFIX + name, "").strip() for name in settings}
         missing = [ENV_PREFIX + name for name, value in values.items() if not value]
         if missing:
@@ -74,21 +80,29 @@ class Runtime:
             raise PilotError(
                 "Pilot endpoint must be an HTTP(S) OpenAI base URL ending in /v1 without credentials"
             )
-        for name in ("LEDGER_DIR", "VENDOR_DIR", "OUTPUT_DIR"):
+        match mode:
+            case "plain":
+                capacity = None
+            case "sglang_guarded":
+                ledger_dir = Path(values["LEDGER_DIR"])
+                if not ledger_dir.is_absolute():
+                    raise PilotError(f"{ENV_PREFIX}LEDGER_DIR must be absolute")
+                ledger_dir = ledger_dir.resolve()
+                if not ledger_dir.is_dir():
+                    raise PilotError("The shared inference ledger directory must already exist")
+                capacity = CapacityConfig(
+                    state_directory=str(ledger_dir), expected_model_path=values["MODEL_PATH"]
+                )
+        for name in ("VENDOR_DIR", "OUTPUT_DIR"):
             if not Path(values[name]).is_absolute():
                 raise PilotError(f"{ENV_PREFIX + name} must be absolute")
-        ledger_dir = Path(values["LEDGER_DIR"]).resolve()
         vendor_dir = Path(values["VENDOR_DIR"]).resolve()
-        if not ledger_dir.is_dir():
-            raise PilotError("The shared inference ledger directory must already exist")
         if not all((vendor_dir / "cgen" / name).is_file() for name in ("__main__.py", "generate.py")):
             raise PilotError("The vendor directory does not contain the cgen CLI")
         return cls(
             endpoint=endpoint,
             model=values["MODEL"],
-            capacity=CapacityConfig(
-                state_directory=str(ledger_dir), expected_model_path=values["MODEL_PATH"]
-            ),
+            capacity=capacity,
             vendor_dir=vendor_dir,
             output_dir=Path(values["OUTPUT_DIR"]).resolve(),
             api_key=os.environ.get(ENV_PREFIX + "API_KEY") or None,
@@ -107,37 +121,50 @@ class ScopedMessages(list[Message]):
 
 
 @dataclass(frozen=True, slots=True)
-class GuardedBackend:
+class PilotBackend:
     runtime: Runtime
     config: VendorConfig
     receipts: Path
 
     def complete(self, messages: ScopedMessages, call_seed: int) -> tuple[str, dict[str, JsonValue]]:
-        """Perform a single guarded turn, then allow only reviewed command forms onto disk."""
+        """Perform one turn and only return candidates that match reviewed command forms."""
         settings = self.config.sampling
+        mode = self.config.backend.mode
         body = {
             "model": self.runtime.model,
             "messages": messages,
             "temperature": settings.temperature,
             "top_p": settings.top_p,
             "seed": call_seed,
-            "max_completion_tokens": settings.max_tokens,
+            ("max_tokens" if mode == "plain" else "max_completion_tokens"): settings.max_tokens,
             "response_format": {"type": "json_object"},
             "stream": False,
         }
+        payload = json.dumps(body, ensure_ascii=False).encode("utf-8")
+        timeout = self.config.backend.timeout
         try:
-            response = guarded_complete(
-                self.runtime.endpoint,
-                json.dumps(body, ensure_ascii=False).encode("utf-8"),
-                self.runtime.api_key,
-                self.config.backend.timeout,
-                self.runtime.capacity,
-                self.receipts,
-            )
-            content = parse_completion(response.body.decode("utf-8")).text()
+            match mode:
+                case "plain":
+                    response = complete(
+                        self.runtime.endpoint.rstrip("/") + "/chat/completions",
+                        payload,
+                        self.runtime.api_key,
+                        timeout,
+                    )
+                case "sglang_guarded":
+                    capacity = self.runtime.capacity
+                    if capacity is None:
+                        raise PilotError("Guarded pilot inference requires shared capacity configuration")
+                    response = guarded_complete(
+                        self.runtime.endpoint, payload, self.runtime.api_key, timeout, capacity, self.receipts
+                    )
+            completion = parse_completion(response.body.decode("utf-8"))
+            if completion.model != self.runtime.model:
+                raise InferenceError("Pilot response model differs from the configured model")
+            content = completion.text()
             selected = Candidates.model_validate(parse_json(content))
         except (InferenceError, OSError, ValueError) as error:
-            raise SystemExit(f"Pilot stopped: guarded turn failed ({type(error).__name__})") from None
+            raise SystemExit(f"Pilot stopped: {mode} turn failed ({type(error).__name__})") from None
         for candidate in selected.candidates:
             if (
                 candidate.command not in messages.commands
@@ -149,9 +176,9 @@ class GuardedBackend:
 
 def run_vendor(config_path: Path) -> None:
     """Run the unchanged CLI with its generation backend replaced inside this process."""
-    runtime = Runtime.from_environment()
     config = VendorConfig.model_validate_json(config_path.read_bytes())
-    backend = GuardedBackend(runtime, config, config_path.parent / "capacity")
+    runtime = Runtime.from_environment(config.backend.mode)
+    backend = PilotBackend(runtime, config, config_path.parent / "capacity")
     sys.path.append(str(runtime.vendor_dir))
     generator = import_module("cgen.generate")
     if Path(generator.__file__ or "").resolve() != runtime.vendor_dir / "cgen" / "generate.py":
@@ -164,7 +191,7 @@ def run_vendor(config_path: Path) -> None:
         seed = Seed.model_validate(seed_row)
         return ScopedMessages(build_messages(template, seed_row, *settings), seed)
 
-    def make_backend(_config: dict[str, JsonValue]) -> GuardedBackend:
+    def make_backend(_config: dict[str, JsonValue]) -> PilotBackend:
         return backend
 
     setattr(generator, "build_messages", scoped_messages)

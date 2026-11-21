@@ -1,6 +1,7 @@
 import json
 import subprocess
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from tempfile import mkdtemp
@@ -13,7 +14,7 @@ from pydantic import ConfigDict, Field
 
 from codebench_pipeline.business_config import DEFAULT_BUSINESS_CONFIG, load_business_rules
 from codebench_pipeline.category_rules import StrictModel
-from codebench_pipeline.synthetic_pilot_policy import OPERATIONS, PilotError, Seed, VendorConfig
+from codebench_pipeline.synthetic_pilot_policy import OPERATIONS, BackendMode, PilotError, Seed, VendorConfig
 from codebench_pipeline.synthetic_pilot_vendor import Runtime
 
 _ROOT: Final = Path(__file__).resolve().parents[1]
@@ -91,14 +92,14 @@ def cat3_synthetic_pilot_config() -> PilotConfiguration:
 
 
 @resource
-def pilot_runtime() -> Runtime:
-    return Runtime.from_environment()
+def pilot_runtime() -> Callable[[BackendMode], Runtime]:
+    return Runtime.from_environment
 
 
 def run_pilot(config_dir: Path = _CONFIG) -> PilotResult:
     """Run the isolated CAT-3 pilot from a standalone authored configuration directory."""
-    runtime = Runtime.from_environment()
-    return execute_pilot(load_pilot_configuration(config_dir), runtime)
+    configuration = load_pilot_configuration(config_dir)
+    return execute_pilot(configuration, Runtime.from_environment(configuration.vendor.backend.mode))
 
 
 def execute_pilot(configuration: PilotConfiguration, runtime: Runtime) -> PilotResult:
@@ -150,20 +151,24 @@ def execute_pilot(configuration: PilotConfiguration, runtime: Runtime) -> PilotR
     group_name="synthetic_pilot",
     description=(
         "How it works: The pilot renders authored CAT-3 inspection seeds with the host taxonomy, "
-        "then runs the vendor CLI. Every model call uses the shared capacity ledger. "
+        "then runs the vendor CLI. Guarded SGLang calls use the shared capacity ledger; "
+        "plain calls use the configured OpenAI-compatible endpoint without querying metrics. "
         "Only approved read-only command forms reach vendor validation; the asset exposes paths "
         "to the local artifacts and row counts after success. The pilot does not publish a dataset release."
     ),
 )
 def cat3_synthetic_pilot(
-    cat3_synthetic_pilot_config: PilotConfiguration, pilot_runtime: ResourceParam[Runtime]
+    cat3_synthetic_pilot_config: PilotConfiguration,
+    pilot_runtime: ResourceParam[Callable[[BackendMode], Runtime]],
 ) -> MaterializeResult[type[NoValueSentinel]]:
-    result = execute_pilot(cat3_synthetic_pilot_config, pilot_runtime)
+    mode = cat3_synthetic_pilot_config.vendor.backend.mode
+    result = execute_pilot(cat3_synthetic_pilot_config, pilot_runtime(mode))
     return MaterializeResult(
         metadata={
             "run_dir": str(result.run_dir),
             "rows": result.vendor_report.final_rows,
-            "guarded_calls": result.vendor_report.calls["ok"],
+            "backend_mode": mode,
+            "model_calls": result.vendor_report.calls["ok"],
         }
     )
 

@@ -4,15 +4,19 @@ import os
 import subprocess
 import tempfile
 import unittest
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
+from threading import Thread
 from typing import Final
 from unittest.mock import patch
+
+from pydantic import ValidationError
 
 from codebench_pipeline.inference_capacity import CapacityConfig, CapacityUnavailable
 from codebench_pipeline.openai_transport import HTTPResponse
 from codebench_pipeline.synthetic_pilot import PilotConfiguration, execute_pilot, run_pilot
 from codebench_pipeline.synthetic_pilot_policy import PilotError, Seed, VendorConfig
-from codebench_pipeline.synthetic_pilot_vendor import ENV_PREFIX, GuardedBackend, Runtime, ScopedMessages
+from codebench_pipeline.synthetic_pilot_vendor import ENV_PREFIX, PilotBackend, Runtime, ScopedMessages
 
 _ENDPOINT: Final = "http://127.0.0.1:1/v1"
 _SEED: Final = Seed(
@@ -29,7 +33,7 @@ _CONFIG: Final = VendorConfig.model_validate(
     {
         "split": "train",
         "prompt": {"version": "fixture", "candidates_per_call": 2},
-        "backend": {"timeout": 1},
+        "backend": {"mode": "sglang_guarded", "timeout": 1},
         "sampling": {"temperature": 0, "top_p": 1, "max_tokens": 256, "seed": 6},
     }
 )
@@ -71,7 +75,7 @@ class SyntheticPilotTests(unittest.TestCase):
             vendor_dir=self.root / "vendor",
             output_dir=self.root / "output",
         )
-        self.backend = GuardedBackend(self.runtime, _CONFIG, self.root / "receipts")
+        self.backend = PilotBackend(self.runtime, _CONFIG, self.root / "receipts")
         self.messages = ScopedMessages([{"role": "user", "content": "Choose an inspection form."}], _SEED)
 
     def test_guarded_candidate_preserves_model_description_without_prompting_with_answers(self) -> None:
@@ -114,9 +118,7 @@ class SyntheticPilotTests(unittest.TestCase):
             ):
                 self.backend.complete(self.messages, 111)
 
-    def test_vendor_subprocess_stops_on_shared_ledger_quarantine(self) -> None:
-        ledger_name = hashlib.sha256(_ENDPOINT.encode()).hexdigest() + ".json"
-        (self.ledger / ledger_name).write_text("malformed ledger", encoding="utf-8")
+    def prepare_vendor(self, config: VendorConfig) -> Path:
         package = self.runtime.vendor_dir / "cgen"
         package.mkdir(parents=True)
         (package / "__init__.py").touch()
@@ -136,25 +138,25 @@ class SyntheticPilotTests(unittest.TestCase):
             "config = json.loads(path.read_bytes())\n"
             "seed = json.loads((path.parent / config['seeds_path']).read_bytes())\n"
             "messages = generate.build_messages({}, seed, config, {})\n"
-            "generate.make_backend(config).complete(messages, 111)\n"
-            "raise AssertionError('a quarantined request completed')\n",
+            "content, _ = generate.make_backend(config).complete(messages, 111)\n"
+            "run = path.parent / config['run_name']\n"
+            "run.mkdir()\n"
+            "(run / 'report.json').write_text(json.dumps({'calls': {'ok': 1}, 'final_rows': 1}))\n"
+            "(run / 'dataset.csv').write_text(json.loads(content)['candidates'][0]['command'])\n",
             encoding="utf-8",
         )
         config_dir = self.root / "config"
         config_dir.mkdir()
-        (config_dir / "vendor.json").write_text(_CONFIG.model_dump_json(), encoding="utf-8")
+        (config_dir / "vendor.json").write_text(config.model_dump_json(), encoding="utf-8")
         (config_dir / "seeds.jsonl").write_text(_SEED.model_dump_json() + "\n", encoding="utf-8")
         (config_dir / "prompt.md").write_text("<<<SYSTEM>>>\nInspect\n<<<USER>>>\n{{seed_prompt}}\n")
-        variables = {
-            "ENDPOINT": _ENDPOINT,
-            "MODEL": self.runtime.model,
-            "MODEL_PATH": self.runtime.capacity.expected_model_path,
-            "LEDGER_DIR": str(self.ledger),
-            "VENDOR_DIR": str(self.runtime.vendor_dir),
-            "OUTPUT_DIR": str(self.runtime.output_dir),
-        }
+        return config_dir
 
-        with patch.dict(os.environ, {ENV_PREFIX + key: value for key, value in variables.items()}):
+    def test_vendor_subprocess_stops_on_shared_ledger_quarantine(self) -> None:
+        ledger_name = hashlib.sha256(_ENDPOINT.encode()).hexdigest() + ".json"
+        (self.ledger / ledger_name).write_text("malformed ledger", encoding="utf-8")
+        config_dir = self.prepare_vendor(_CONFIG)
+        with patch.dict(os.environ, self.runtime.child_environment(), clear=True):
             with self.assertRaises(PilotError):
                 run_pilot(config_dir)
 
@@ -162,12 +164,71 @@ class SyntheticPilotTests(unittest.TestCase):
         self.assertIn("CapacityQuarantined", log.read_text(encoding="utf-8"))
         self.assertEqual(list(self.runtime.output_dir.rglob("dataset.csv")), [])
 
-    def test_missing_configuration_stops_before_preparing_a_run(self) -> None:
-        with patch.dict(os.environ, {}, clear=True):
+    def test_guarded_mode_requires_ledger_before_preparing_a_run(self) -> None:
+        config_dir = self.prepare_vendor(_CONFIG)
+        variables = self.runtime.child_environment()
+        del variables[ENV_PREFIX + "LEDGER_DIR"]
+        with patch.dict(os.environ, variables, clear=True):
             with self.assertRaisesRegex(PilotError, "SYNTHETIC_PILOT_LEDGER_DIR"):
-                run_pilot(self.root)
+                run_pilot(config_dir)
 
         self.assertFalse(self.runtime.output_dir.exists())
+
+    def test_plain_mode_calls_openai_endpoint_without_a_capacity_ledger(self) -> None:
+        plain = VendorConfig.model_validate(
+            {**_CONFIG.model_dump(), "backend": {"mode": "plain", "timeout": 1}}
+        )
+        config_dir = self.prepare_vendor(plain)
+
+        class ChatEndpoint(BaseHTTPRequestHandler):
+            def do_POST(self) -> None:
+                body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+                if (
+                    self.path != "/v1/chat/completions"
+                    or self.headers.get("Authorization") != "Bearer local-test"
+                    or body.get("max_tokens") != 256
+                    or "max_completion_tokens" in body
+                    or "rid" in body
+                ):
+                    self.send_error(400)
+                    return
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(completion("terraform validate").body)
+
+        with HTTPServer(("127.0.0.1", 0), ChatEndpoint) as server:
+            worker = Thread(target=server.serve_forever)
+            worker.start()
+            try:
+                variables = {
+                    ENV_PREFIX + "ENDPOINT": f"http://127.0.0.1:{server.server_port}/v1/",
+                    ENV_PREFIX + "MODEL": self.runtime.model,
+                    ENV_PREFIX + "VENDOR_DIR": str(self.runtime.vendor_dir),
+                    ENV_PREFIX + "OUTPUT_DIR": str(self.runtime.output_dir),
+                    ENV_PREFIX + "API_KEY": "local-test",
+                }
+                with patch.dict(os.environ, variables, clear=True):
+                    result = run_pilot(config_dir)
+            finally:
+                server.shutdown()
+                worker.join()
+
+        self.assertEqual((result.run_dir / "dataset.csv").read_text(), "terraform validate")
+        self.assertEqual(list(self.runtime.output_dir.rglob("capacity")), [])
+
+    def test_undeclared_backend_mode_cannot_disable_capacity_guard(self) -> None:
+        for backend in ({"timeout": 1}, {"timeout": 1, "mode": "other"}):
+            with self.subTest(backend=backend), self.assertRaises(ValidationError):
+                VendorConfig.model_validate({**_CONFIG.model_dump(), "backend": backend})
+
+    def test_plain_mode_accepts_configured_remote_endpoint_without_capacity(self) -> None:
+        self.prepare_vendor(_CONFIG)
+        variables = self.runtime.child_environment()
+        variables[ENV_PREFIX + "ENDPOINT"] = "https://model.example/v1"
+        with patch.dict(os.environ, variables, clear=True):
+            runtime = Runtime.from_environment("plain")
+        self.assertEqual(runtime.endpoint, "https://model.example/v1")
+        self.assertIsNone(runtime.capacity)
 
     def test_vendor_report_cannot_be_read_from_outside_the_work_directory(self) -> None:
         external_report = self.root / "report.json"

@@ -8,6 +8,7 @@
     "candidates_per_call": 2
   },
   "backend": {
+    "mode": "plain",
     "provider": "openai_compatible",
     "timeout": 120,
     "retries": 0,
