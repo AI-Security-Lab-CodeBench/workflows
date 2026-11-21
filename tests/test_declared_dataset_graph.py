@@ -519,6 +519,6 @@ def collection_fixture(spec: DatasetBuildSpec) -> Iterator[DatasetBuildSpec]:
             KeenableSnippetDeclaration(
                 schema_version="4",
                 dataset_id=spec.dataset_id,
-                search=KeenableSnippetSettings(queries=("Terraform plan examples",)),
+                search=KeenableSnippetSettings(seeds=("terraform_preview",)),
             ),
         )

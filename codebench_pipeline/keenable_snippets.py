@@ -1,17 +1,25 @@
-from dataclasses import dataclass
-from re import compile
+from contextlib import AsyncExitStack
+from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Final, Literal, Self
 
-from anyio import run
+from anyio import run, to_thread
 from pandera.typing import DataFrame
 from pydantic import Field, model_validator
 
 from scripts.dataset_schema import SECRET_PATTERNS
 
 from .dataframe_schemas import CommandCandidatesTable, validated_frame
+from .keenable_decisions import (
+    DiscoveryChoice,
+    DiscoveryDecision,
+    DiscoveryFeedback,
+    DiscoveryModel,
+    DiscoveryTurn,
+)
+from .keenable_inspection import INSPECTIONS, AuthoredInspection, Seed, shell_spans
 from .keenable_mcp import search_session, search_snippets
 from .keenable_policy import (
-    COMMANDS,
     Digest,
     KeenableError,
     KeenableSnippetSettings,
@@ -21,14 +29,7 @@ from .keenable_policy import (
 )
 from .keenable_tables import PROVIDER_RECEIPT, provider_source_id
 
-_UTILITIES: Final = frozenset(
-    command.split()[0].encode() for commands in COMMANDS.values() for command in commands
-)
-_FENCE: Final = compile(rb"^ {0,3}(`{3,}|~{3,})([^\r\n]*)")
-_SHELL: Final = frozenset({b"bash", b"shell", b"sh", b"zsh"})
-_CONSOLE: Final = frozenset({b"console", b"shell-session", b"terminal"})
-_WORD: Final = compile(rb"(?:[a-zA-Z0-9_./+-]+|\\(?:dt|dn))(?=[ \t]|$)")
-_PARSER: Final = "keenable-snippet-shell-block-v1"
+_PARSER: Final = "keenable-inspection-shell-block-v1"
 
 
 class SnippetCandidateReceipt(Record):
@@ -48,13 +49,15 @@ class SnippetCandidateReceipt(Record):
 class _SearchObservation(Record):
     rank: int
     url_sha256: Digest
-    outcome: Literal["extracted", "no_commands", "invalid_url", "sensitive"]
+    outcome: Literal["extracted", "no_commands", "outside_inspection", "invalid_url", "sensitive"]
     candidate_ids: tuple[Digest, ...] = ()
 
 
 class _SearchReceipt(Record):
     query: str
     hits: tuple[_SearchObservation, ...]
+    choice: DiscoveryChoice | None = Field(default=None, exclude_if=lambda value: value is None)
+    feedback: DiscoveryFeedback | None = Field(default=None, exclude_if=lambda value: value is None)
 
 
 class SnippetCollectionReceipt(Record):
@@ -63,6 +66,10 @@ class SnippetCollectionReceipt(Record):
     candidates: dict[Digest, SnippetCandidateReceipt]
     snippets: dict[Digest, str]
     searches: tuple[_SearchReceipt, ...]
+    stop: Literal["budget", "seeds_exhausted", "finalized"] | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    finalize: DiscoveryChoice | None = Field(default=None, exclude_if=lambda value: value is None)
 
     def read_body(self, body_sha256: str) -> bytes:
         """Read exact snippet bytes by content hash without network or page lookup."""
@@ -88,132 +95,157 @@ class SnippetCollectionReceipt(Record):
         return self
 
 
-@dataclass(frozen=True, slots=True)
-class _Span:
-    start: int
-    end: int
-    util: str
-    description: str
-
-
-def _shell_spans(body: bytes) -> tuple[_Span, ...]:
-    """Extract complete shell fences while preserving the command bytes and offsets."""
-    spans: list[_Span] = []
-    pending: list[_Span] = []
-    fence = b""
-    language = b""
-    description = ""
-    preceding_prose = ""
-    offset = 0
-    continued = False
-    for line in body.splitlines(keepends=True):
-        start, offset = offset, offset + len(line)
-        if delimiter := _FENCE.fullmatch(line.rstrip(b"\r\n")):
-            marker, info = delimiter.groups()
-            if not fence:
-                fence, language = marker, info.strip().split(b" ", 1)[0].lower()
-                description = preceding_prose
-                preceding_prose = ""
-                continued = False
-            elif marker.startswith(fence) and not info.strip():
-                spans.extend(pending)
-                pending.clear()
-                fence = b""
-            continue
-        if not fence:
-            if line.strip():
-                preceding_prose = line.strip().decode()
-            continue
-        if language not in _SHELL | _CONSOLE | {b""}:
-            continue
-        raw = line.strip(b" \t\r\n")
-        if continued or raw.endswith(b"\\"):
-            continued = raw.endswith(b"\\")
-            continue
-        if raw.startswith(b"# "):
-            description = raw[2:].decode()
-            continue
-        command = raw.removeprefix(b"$ ")
-        if command == raw and language in _CONSOLE:
-            continue
-        utility = _WORD.match(command)
-        if (
-            utility is None
-            or utility[0].endswith(b"/")
-            or (command == raw and not language and utility[0] not in _UTILITIES)
-        ):
-            continue
-        command_start = start + line.index(command)
-        pending.append(_Span(command_start, command_start + len(command), utility[0].decode(), description))
-    return tuple(spans)
-
-
 def _candidate_id(url: str, body_sha256: str, start: int, end: int) -> str:
     return digest(f"{url}\n{body_sha256}\n{start}:{end}".encode())
 
 
-async def _collect(settings: KeenableSnippetSettings, api_key: str) -> DataFrame[CommandCandidatesTable]:
+@dataclass(frozen=True, slots=True)
+class DiscoveryRun:
+    evidence: Path
+    api_key: str = field(repr=False)
+    model: DiscoveryModel | None = field(default=None, repr=False)
+
+
+async def _collect(
+    settings: KeenableSnippetSettings, access: DiscoveryRun
+) -> DataFrame[CommandCandidatesTable]:
+    if settings.queries:
+        raise KeenableError("raw_discovery_queries_unsupported")
     candidates: dict[str, SnippetCandidateReceipt] = {}
     snippets: dict[str, str] = {}
-    utilities: dict[str, str] = {}
     searches: list[_SearchReceipt] = []
-    if settings.queries:
-        async with search_session(api_key) as session:
-            for query in settings.queries:
-                result = await search_snippets(
-                    session, query, (settings.max_results, settings.snippet_max_length)
-                )
-                hits: list[_SearchObservation] = []
-                for rank, hit in enumerate(result.results, 1):
-                    url_sha256 = digest(hit.url.encode())
-                    if canonical_url(hit.url) is None:
-                        hits.append(
-                            _SearchObservation(rank=rank, url_sha256=url_sha256, outcome="invalid_url")
-                        )
+    feedback: list[DiscoveryFeedback] = []
+    seeds: tuple[Seed, ...] = tuple(
+        seed.id if isinstance(seed, AuthoredInspection) else seed for seed in settings.seeds or ()
+    )
+    model = access.model
+    if settings.authored_seeds and model is None:
+        raise KeenableError("discovery_model_required")
+    if model is not None and tuple(item.seed for item in model.taxonomy) != settings.authored_seeds:
+        raise KeenableError("discovery_taxonomy_binding_mismatch")
+    budget = settings.max_search_calls or len(seeds)
+    limit = budget if model is not None else min(budget, len(seeds))
+    finalize = None
+    settings_sha256 = digest(settings.model_dump_json().encode())
+    seen_queries: set[Digest] = set()
+    seen_sources: set[str] = set()
+    model_key = model.key if model is not None else None
+    async with AsyncExitStack() as stack:
+        session = None
+        while len(searches) < limit:
+            turn = DiscoveryTurn(
+                available=seeds, previous=tuple(feedback), remaining_searches=limit - len(searches)
+            )
+            choice = (
+                await to_thread.run_sync(model.choose, turn, access.evidence)
+                if model is not None
+                else DiscoveryChoice(decision=DiscoveryDecision(action="query", seed=seeds[len(searches)]))
+            )
+            turn_number = len(searches) + 1
+            decision_path = access.evidence / f"discovery-{turn_number:02}-decision.json"
+            seed = choice.decision.seed
+            if seed is None:
+                finalize = choice
+                decision_path.write_text(choice.model_dump_json(), encoding="utf-8")
+                break
+            inspection = INSPECTIONS[seed]
+            context = choice.decision.context
+            query = inspection.query if context is None else f"{inspection.query} Focus: {context}."
+            query_id = digest(query.encode())
+            if query_id in seen_queries:
+                raise KeenableError("discovery_query_already_used")
+            seen_queries.add(query_id)
+            choice = choice.model_copy(update={"query_id": query_id})
+            decision_path.write_text(choice.model_dump_json(), encoding="utf-8")
+            if session is None:
+                session = await stack.enter_async_context(search_session(access.api_key))
+            result = await search_snippets(
+                session, query, (settings.max_results, settings.snippet_max_length)
+            )
+            hits: list[_SearchObservation] = []
+            candidate_count = len(candidates)
+            accepted: set[str] = set()
+            observed_sources: set[str] = set()
+            excerpt_context: dict[str, None] = {}
+            for rank, hit in enumerate(result.results, 1):
+                url_sha256 = digest(hit.url.encode())
+                if (canonical := canonical_url(hit.url)) is None:
+                    hits.append(_SearchObservation(rank=rank, url_sha256=url_sha256, outcome="invalid_url"))
+                    continue
+                if any(
+                    access.api_key in value
+                    or (model_key and model_key in value)
+                    or any(pattern.search(value) for pattern in SECRET_PATTERNS)
+                    for value in (hit.url, hit.snippet, hit.description)
+                ):
+                    hits.append(_SearchObservation(rank=rank, url_sha256=url_sha256, outcome="sensitive"))
+                    continue
+                observed_sources.add(canonical)
+                for phrase in inspection.excerpt_context(f"{hit.description}\n{hit.snippet}"):
+                    if len(excerpt_context) < 4:
+                        excerpt_context[phrase] = None
+                body = hit.snippet.encode()
+                body_sha256 = digest(body)
+                spans = shell_spans(body)
+                ids: list[Digest] = []
+                for span in spans:
+                    literal = body[span.start : span.end]
+                    command = literal.decode()
+                    if not inspection.command.fullmatch(command):
                         continue
-                    if any(
-                        api_key in value or any(pattern.search(value) for pattern in SECRET_PATTERNS)
-                        for value in (hit.url, hit.snippet, hit.description)
-                    ):
-                        hits.append(_SearchObservation(rank=rank, url_sha256=url_sha256, outcome="sensitive"))
-                        continue
-                    body = hit.snippet.encode()
-                    body_sha256 = digest(body)
-                    ids: list[str] = []
-                    for span in _shell_spans(body):
-                        key = _candidate_id(hit.url, body_sha256, span.start, span.end)
-                        ids.append(key)
-                        if key not in candidates:
-                            literal = body[span.start : span.end]
-                            candidates[key] = SnippetCandidateReceipt(
-                                candidate_id=key,
-                                source_id=provider_source_id(hit.url),
-                                url=hit.url,
-                                body_sha256=body_sha256,
-                                start=span.start,
-                                end=span.end,
-                                span_sha256=digest(literal),
-                                command=literal.decode(),
-                                description=hit.description or span.description,
-                            )
-                            utilities[key] = span.util
-                    if ids:
-                        snippets[body_sha256] = hit.snippet
-                    hits.append(
-                        _SearchObservation(
-                            rank=rank,
-                            url_sha256=url_sha256,
-                            outcome="extracted" if ids else "no_commands",
-                            candidate_ids=tuple(ids),
+                    key = _candidate_id(hit.url, body_sha256, span.start, span.end)
+                    ids.append(key)
+                    if key not in candidates:
+                        candidates[key] = SnippetCandidateReceipt(
+                            candidate_id=key,
+                            source_id=provider_source_id(hit.url),
+                            url=hit.url,
+                            body_sha256=body_sha256,
+                            start=span.start,
+                            end=span.end,
+                            span_sha256=digest(literal),
+                            command=command,
+                            description=hit.description or span.description,
                         )
+                if ids:
+                    snippets[body_sha256] = hit.snippet
+                    accepted.update(ids)
+                hits.append(
+                    _SearchObservation(
+                        rank=rank,
+                        url_sha256=url_sha256,
+                        outcome="extracted" if ids else "outside_inspection" if spans else "no_commands",
+                        candidate_ids=tuple(ids),
                     )
-                searches.append(_SearchReceipt(query=query, hits=tuple(hits)))
+                )
+            observed = DiscoveryFeedback(
+                seed=seed,
+                results=len(hits),
+                accepted=len(accepted),
+                new_candidates=len(candidates) - candidate_count,
+                query_id=query_id,
+                query_context=context,
+                new_sources=len(observed_sources - seen_sources),
+                excerpt_context=tuple(excerpt_context),
+            )
+            seen_sources.update(observed_sources)
+            feedback.append(observed)
+            searches.append(_SearchReceipt(query=query, hits=tuple(hits), choice=choice, feedback=observed))
+            (access.evidence / f"discovery-{turn_number:02}-result.json").write_text(
+                SnippetCollectionReceipt(
+                    settings_sha256=settings_sha256,
+                    candidates=candidates,
+                    snippets=snippets,
+                    searches=tuple(searches),
+                ).model_dump_json(),
+                encoding="utf-8",
+            )
     frame = validated_frame(
         [
             {
                 "candidate_id": candidate.candidate_id,
                 "command": candidate.command,
-                "util": utilities[candidate.candidate_id],
+                "util": candidate.command.split()[0],
                 "context": candidate.description,
                 "source_id": candidate.source_id,
                 "source_url": candidate.url,
@@ -226,20 +258,26 @@ async def _collect(settings: KeenableSnippetSettings, api_key: str) -> DataFrame
         CommandCandidatesTable,
     )
     frame.attrs[PROVIDER_RECEIPT] = SnippetCollectionReceipt(
-        settings_sha256=digest(settings.model_dump_json().encode()),
+        settings_sha256=settings_sha256,
         candidates=candidates,
         snippets=snippets,
         searches=tuple(searches),
+        stop="finalized"
+        if finalize is not None
+        else "budget"
+        if limit == budget and budget
+        else "seeds_exhausted",
+        finalize=finalize,
     ).model_dump_json()
     return frame
 
 
 def provider_snippet_candidates(
-    settings: KeenableSnippetSettings, api_key: str
+    settings: KeenableSnippetSettings, access: DiscoveryRun
 ) -> DataFrame[CommandCandidatesTable]:
     """Build canonical candidates from indexed Keenable excerpts with offline-verifiable evidence."""
     try:
-        return run(_collect, settings, api_key)
+        return run(_collect, settings, access)
     except ExceptionGroup as errors:
         cause: BaseException = errors
         while isinstance(cause, BaseExceptionGroup) and len(cause.exceptions) == 1:

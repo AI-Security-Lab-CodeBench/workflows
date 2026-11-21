@@ -177,7 +177,7 @@ class DatasetConfigurationTests(unittest.TestCase):
             bundle = write_declared_bundle(root / "business")
             declaration = bundle.parent.parent / "categories/cat3/keenable/declaration.json"
             settings = json.loads(declaration.read_bytes())
-            settings["search"]["queries"] = ["Container inventory examples"]
+            settings["search"]["seeds"] = ["docker_inventory"]
             declaration.write_text(json.dumps(settings))
             first = load_build_config(bundle, root)
             payload = json.loads(bundle.read_bytes())

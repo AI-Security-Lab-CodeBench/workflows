@@ -298,7 +298,7 @@ class InspectorSeparationTests(unittest.TestCase):
             declaration = collection.keenable_declaration
             assert isinstance(declaration, KeenableSnippetDeclaration)
             revised = declaration.model_copy(
-                update={"search": declaration.search.model_copy(update={"queries": ("Different examples",)})}
+                update={"search": declaration.search.model_copy(update={"seeds": ("docker_inventory",)})}
             )
             run_count = len(instance.get_runs())
             registry.register(with_keenable_declaration(spec, revised))

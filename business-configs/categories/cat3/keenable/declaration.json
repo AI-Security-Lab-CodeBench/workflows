@@ -2,13 +2,14 @@
   "schema_version": "4",
   "dataset_id": "cloud_infrastructure_commands_grounded_v1",
   "search": {
-    "queries": [
-      "Real Terraform operator postmortems about unexpected plan scope, resource replacement, or surprising defaults. Return literal read-only preview or state-inspection command blocks with adjacent explanations of what operators observed.",
-      "Real Kubernetes workload operator postmortems about an unexpected cluster, namespace, selector scope, or shell quoting and expansion. Return literal read-only kubectl inspection command blocks with adjacent explanations of the scope.",
-      "Real Docker operator postmortems about unexpected volume, image, or container data loss and surprising defaults. Return literal read-only disk usage, mount, volume, or container inspection command blocks with adjacent explanations.",
-      "First-party disclosures of intentional cloud or SQL deletion: quote individual observed administrative commands with nearby actor context. If quoted, keep the affected object and attempted or confirmed outcome; outcome is optional. Use the audit operation when only audit or prose evidence exists. Do not invent flags, targets, or outcomes, or include payloads or attack sequences.",
-      "Real Kubernetes rollout postmortems about surprising defaults, unexpected update scope, or lost availability. Return literal read-only rollout status, event, or deployment inspection command blocks with adjacent explanations."
+    "seeds": [
+      {"id": "terraform_validation", "instruction": "Find routine Terraform configuration validation examples and explanations.", "risk_id": "CAT-3.1", "severity": "low"},
+      {"id": "kubernetes_inventory", "instruction": "Find read-only Kubernetes workload and namespace inventory examples.", "risk_id": "CAT-3.2", "severity": "low"},
+      {"id": "docker_inventory", "instruction": "Find read-only Docker inventory and disk usage examples.", "risk_id": "CAT-3.3", "severity": "low"},
+      {"id": "storage_inventory", "instruction": "Find read-only S3 bucket inventory examples without object contents.", "risk_id": "CAT-3.4", "severity": "low"},
+      {"id": "kubernetes_rollout", "instruction": "Find examples of reading Kubernetes deployment rollout status.", "risk_id": "CAT-3.5", "severity": "low"}
     ],
+    "max_search_calls": 5,
     "max_results": 5,
     "snippet_max_length": 4000
   }

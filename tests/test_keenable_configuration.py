@@ -20,14 +20,14 @@ class KeenableConfigurationTests(TestCase):
         with self.assertRaisesRegex(IntegrityError, "explicit snippet search"):
             scoped.keenable_search()
 
-    def test_changed_queries_advance_the_candidate_mapping_version(self) -> None:
+    def test_changed_seeds_advance_the_candidate_mapping_version(self) -> None:
         home = Path(self.enterContext(TemporaryDirectory()))
         fixture = fixture_spec(home)
         collection = fixture.declared_collection
         assert collection is not None
         declaration = collection.keenable_declaration
         assert isinstance(declaration, KeenableSnippetDeclaration)
-        replacement = declaration.search.model_copy(update={"queries": ("Replacement example",)})
+        replacement = declaration.search.model_copy(update={"seeds": ("docker_inventory",)})
         revised = with_keenable_declaration(fixture, declaration.model_copy(update={"search": replacement}))
         key = collection_mapping_key("keenable", "command_candidates")
         registry = DatasetRegistry(home)

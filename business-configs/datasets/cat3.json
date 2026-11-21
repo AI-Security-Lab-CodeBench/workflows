@@ -25,6 +25,10 @@
     "from_registration": true,
     "inference_mode": "plain"
   },
+  "discovery": {
+    "max_output_tokens": 1024,
+    "timeout_seconds": 30.0
+  },
   "storage": {
     "backend": "s3",
     "bucket": "codebench-datasets",

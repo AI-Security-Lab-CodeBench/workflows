@@ -15,6 +15,7 @@ from pydantic import (
     model_validator,
 )
 
+from codebench_pipeline.keenable_inspection import AuthoredInspection, Seed
 from codebench_pipeline.typed_config import ConfigArtifact
 
 type Case = Literal["plan", "workloads", "containers", "storage_sql", "rollout"]
@@ -32,11 +33,33 @@ PROVIDER: Final = "https://api.keenable.ai/v1/search"
 
 
 class KeenableSnippetSettings(ConfigArtifact):
-    queries: tuple[
-        Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=4000)], ...
-    ] = Field(max_length=MAX_SEARCH)
+    queries: (
+        tuple[Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=4000)], ...]
+        | None
+    ) = Field(default=None, max_length=MAX_SEARCH, exclude_if=lambda value: value is None)
+    seeds: tuple[Seed | AuthoredInspection, ...] | None = Field(
+        default=None, max_length=MAX_SEARCH, exclude_if=lambda value: value is None
+    )
+    max_search_calls: int | None = Field(
+        default=None, ge=1, le=MAX_SEARCH, exclude_if=lambda value: value is None
+    )
     max_results: int = Field(default=5, ge=1, le=50)
     snippet_max_length: int = Field(default=4000, ge=180, le=10000)
+
+    @model_validator(mode="after")
+    def validate_discovery(self) -> Self:
+        if self.queries is not None and (self.seeds is not None or self.max_search_calls):
+            raise ValueError("Historical queries cannot be combined with inspection discovery")
+        ids = tuple(seed.id if isinstance(seed, AuthoredInspection) else seed for seed in self.seeds or ())
+        if len(set(ids)) != len(ids):
+            raise ValueError("Inspection seeds must be unique")
+        if self.authored_seeds and len(self.authored_seeds) != len(ids):
+            raise ValueError("Do not mix authored seeds and historical inspection IDs")
+        return self
+
+    @property
+    def authored_seeds(self) -> tuple[AuthoredInspection, ...]:
+        return tuple(seed for seed in self.seeds or () if isinstance(seed, AuthoredInspection))
 
 
 QUERIES: Final[dict[Case, str]] = {

@@ -7,13 +7,13 @@ from unittest.mock import patch
 from guarded_labeling_fixture import LabelingFixture
 from httpx import AsyncClient, MockTransport
 from test_keenable import PLAN
-from test_keenable_snippets import SNIPPET_KEY, SNIPPET_SETTINGS, SNIPPET_URL, KeenableWire
+from test_keenable_snippets import SNIPPET_KEY, SNIPPET_URL, KeenableWire
 
 from codebench_pipeline.dataframe_schemas import model_records
 from codebench_pipeline.dataset_records import CandidateRecord
 from codebench_pipeline.grounding import OperationReceiptBuffer
-from codebench_pipeline.keenable_policy import KeenableSourceAccess
-from codebench_pipeline.keenable_snippets import provider_snippet_candidates
+from codebench_pipeline.keenable_policy import KeenableSnippetSettings, KeenableSourceAccess
+from codebench_pipeline.keenable_snippets import DiscoveryRun, provider_snippet_candidates
 from codebench_pipeline.storage import IntegrityError
 
 REFERENCE = b"Previews Terraform changes using `terraform plan`.\n"
@@ -21,11 +21,13 @@ REFERENCE = b"Previews Terraform changes using `terraform plan`.\n"
 
 class GroundingAuthorityTests(TestCase):
     def test_snippet_is_candidate_evidence_but_cannot_be_its_own_documentation(self) -> None:
-        text = "Previews Terraform changes using `terraform plan`.\n```bash\nterraform plan\n```"
+        text = "Checks Terraform configuration using `terraform validate`.\n```bash\nterraform validate\n```"
+        settings = KeenableSnippetSettings(seeds=("terraform_validation",))
+        scratch = Path(self.enterContext(TemporaryDirectory()))
         wire = KeenableWire([{"url": SNIPPET_URL, "snippet": text}])
         client = AsyncClient(headers={"X-API-Key": SNIPPET_KEY}, transport=MockTransport(wire.respond))
         with patch("codebench_pipeline.keenable_mcp.httpx.AsyncClient", return_value=client):
-            snippets = provider_snippet_candidates(SNIPPET_SETTINGS, SNIPPET_KEY)
+            snippets = provider_snippet_candidates(settings, DiscoveryRun(scratch, SNIPPET_KEY))
         (original,) = model_records(snippets, CandidateRecord)
         row = original.model_copy(
             update={
@@ -40,7 +42,7 @@ class GroundingAuthorityTests(TestCase):
             filtered.attrs["branch_metadata"]["keenable"] = snippets.attrs
             evidence = replace(
                 inputs,
-                collection=inputs.collection.model_copy(update={"keenable_use_cases": SNIPPET_SETTINGS}),
+                collection=inputs.collection.model_copy(update={"keenable_use_cases": settings}),
             )
             guard = evidence.admission(filtered)
             self.assertEqual(guard.sources.resolve(row).body, text.encode())

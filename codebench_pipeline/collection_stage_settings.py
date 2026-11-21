@@ -4,8 +4,11 @@ from typing import Self
 
 from pydantic import BaseModel
 
+from codebench_pipeline.category_rules import CategoryRules
 from codebench_pipeline.collection_config import DeclaredSourceStageConfig
 from codebench_pipeline.dataset_branches import Branch, stage_name
+from codebench_pipeline.discovery_config import DiscoveryInference
+from codebench_pipeline.keenable_inspection import InspectionTaxonomy
 from codebench_pipeline.keenable_policy import KeenableSnippetSettings
 from codebench_pipeline.models import Digest
 from codebench_pipeline.repository_branch_config import RepositoryAcquisitionConfig
@@ -125,12 +128,29 @@ class DocumentationCaptureSettings(RepositoryCatalogSettings):
 class KeenableCandidateSettings(ConfigArtifact):
     declaration_digest: Digest
     search: KeenableSnippetSettings
+    taxonomy: tuple[InspectionTaxonomy, ...] = ()
+    inference: DiscoveryInference | None = None
 
     @classmethod
-    def project(cls, source: DeclaredSourceStageConfig) -> Self:
+    def project(
+        cls,
+        source: DeclaredSourceStageConfig,
+        rules: CategoryRules | None = None,
+        inference: DiscoveryInference | None = None,
+    ) -> Self:
+        search = source.source.keenable_search()
+        taxonomy: tuple[InspectionTaxonomy, ...] = ()
+        if search.authored_seeds:
+            if rules is None or inference is None:
+                raise IntegrityError(
+                    "Authored inspection seeds require taxonomy and mapped discovery inference"
+                )
+            taxonomy = InspectionTaxonomy.project(search.authored_seeds, rules)
         return cls(
             declaration_digest=source.declaration_digest,
-            search=source.source.keenable_search(),
+            search=search,
+            taxonomy=taxonomy,
+            inference=inference if taxonomy else None,
         )
 
 

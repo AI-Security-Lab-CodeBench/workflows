@@ -27,9 +27,11 @@ DECLARED_COLLECTION_DESCRIPTIONS: Final = {
         "A changed capture or unapproved parser fails extraction."
     ),
     "keenable/command_candidates": (
-        "Search Keenable for the configured use cases and extract literal shell examples backed by "
-        "the returned snippets. CommandCandidatesTable and its receipts preserve the returned page URL "
-        "and snippet evidence. The source type is web_page and keenable is a provider label, without "
+        "Choose a configured read-only inspection seed, add a validated model-written phrase to its search "
+        "topic, and keep literal commands that match the seed's allowed syntax. Prior query evidence and "
+        "the remaining budget inform a rephrased search or stop. CommandCandidatesTable and its receipts "
+        "preserve the returned page URL and exact snippet evidence. The source type is web_page and "
+        "keenable is a provider label, without "
         "a claim about the origin's license. The branch does not load origin pages, execute commands, "
         "or make labeling or review decisions. A successful empty search is valid; a failed search "
         "prevents the branch from publishing candidates."

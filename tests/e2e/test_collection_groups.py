@@ -21,6 +21,7 @@ from codebench_pipeline.dataset_collection_binding import FINALIZATION_BINDING
 from codebench_pipeline.dataset_registry import DatasetRegistry
 from codebench_pipeline.definitions import build_definitions
 from codebench_pipeline.human_review import HumanReviewError
+from codebench_pipeline.keenable_inspection import INSPECTIONS
 from codebench_pipeline.keenable_snippets import SnippetCollectionReceipt
 from codebench_pipeline.keenable_tables import PROVIDER_RECEIPT
 from codebench_pipeline.runtime_instance import dataset_instance
@@ -51,7 +52,7 @@ def test_merge_consumes_all_three_collection_group_outputs(tmp_path: Path) -> No
         definitions = build_definitions(tmp_path)
         run = materialize_collection_outputs(definitions, instance, spec.dataset_id)
         assert run.success
-        assert queries == ["Terraform plan examples"]
+        assert queries == [INSPECTIONS["terraform_preview"].query]
 
         data = DatasetDataService(tmp_path, instance)
         merged = data.read_current(spec.dataset_id, "merged_command_candidates")
@@ -108,7 +109,7 @@ def test_configured_empty_keenable_merges_but_failed_replacement_cannot_reuse_it
 
         with keenable_mcp_fixture(empty=True) as queries:
             healthy = materialize_collection_outputs(definitions, instance, spec.dataset_id)
-        assert queries == ["Terraform plan examples"]
+        assert queries == [INSPECTIONS["terraform_preview"].query]
         assert healthy.success
         data = DatasetDataService(tmp_path, instance)
         output = data.read_current(spec.dataset_id, "keenable/command_candidates")
@@ -133,7 +134,7 @@ def test_configured_empty_keenable_merges_but_failed_replacement_cannot_reuse_it
         declaration = spec.declared_collection.keenable_declaration
         assert isinstance(declaration, KeenableSnippetDeclaration)
         broken = declaration.model_copy(
-            update={"search": declaration.search.model_copy(update={"queries": ("Replacement example",)})}
+            update={"search": declaration.search.model_copy(update={"seeds": ("docker_inventory",)})}
         )
         registry.register(with_keenable_declaration(spec, broken))
         with keenable_mcp_fixture(failed=True):

@@ -346,7 +346,7 @@ def configuration_assets(home: Path, *, authoring_root: Path | None = None) -> l
         return mapping(
             operation.mapping_scope,
             operation.contract,
-            lambda registered: operation.project(registered.source_config(operation.branch)),
+            lambda registered: registered.collection_operation_settings(operation),
             group_name=COLLECTION_SCOPES[operation.branch],
         )
 

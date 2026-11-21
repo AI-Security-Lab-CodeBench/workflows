@@ -24,6 +24,8 @@ from codebench_pipeline.dataset_config import (
     StrictStageConfig,
     require_declared_annotation,
 )
+from codebench_pipeline.discovery_config import DiscoveryOptions
+from codebench_pipeline.keenable_inspection import InspectionTaxonomy
 from codebench_pipeline.model_config import ModelConfig
 from codebench_pipeline.models import Identifier
 from codebench_pipeline.object_store import StorageConfig
@@ -34,7 +36,7 @@ from codebench_pipeline.storage import IntegrityError
 def compile_directory(
     directory: ConfigDirectorySnapshot, dataset_id: Identifier, merge: CollectionMergeConfig
 ) -> tuple[CategoryRules, DeclaredCollection]:
-    from codebench_pipeline.collection_config import parse_collection_keenable
+    from codebench_pipeline.collection_config import KeenableSnippetDeclaration, parse_collection_keenable
 
     category = directory.category_directory
     rules = compile_business_rules(category / "category.json", directory.category_id, directory.read)
@@ -47,6 +49,10 @@ def compile_directory(
     keenable = parse_collection_keenable(directory.read(category / "keenable/declaration.json"))
     if keenable.dataset != dataset_id:
         raise IntegrityError("Keenable source list belongs to a different dataset partition")
+    if isinstance(keenable, KeenableSnippetDeclaration):
+        if keenable.search.queries:
+            raise IntegrityError("Keenable discovery requires inspection seeds instead of raw queries")
+        InspectionTaxonomy.project(keenable.search.authored_seeds, rules)
     return rules, DeclaredCollection(
         existing_datasets=SourceDeclaration.from_declaration(dataset),
         documentation_crawl=SourceDeclaration.from_declaration(documentation),
@@ -121,6 +127,7 @@ class DeclaredDatasetBundle(StrictStageConfig):
     category_id: Literal["CAT-3"]
     revision_label: str = Field(min_length=1)
     labeling: DeclaredLabeling | LabelingFromRegistration
+    discovery: DiscoveryOptions = DiscoveryOptions()
     storage: DeclaredS3Storage | FromRegistration
     filtering: FilteringConfig = FilteringConfig()
     deduplication: DeduplicationPolicy = DeduplicationPolicy()
@@ -199,6 +206,7 @@ class DeclaredDatasetBundle(StrictStageConfig):
             filtering=self.filtering,
             deduplication=self.deduplication,
             annotation=annotation,
+            discovery=self.discovery,
             publication=PublicationConfig(
                 limit_per_risk=self.release.release_cap_per_risk,
                 review_columns=self.review.review_columns,

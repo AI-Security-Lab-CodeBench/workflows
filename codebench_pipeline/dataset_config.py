@@ -15,6 +15,7 @@ from codebench_pipeline.dataset_seed_config import (
     SourceSeed,
     unique_sources,
 )
+from codebench_pipeline.discovery_config import DiscoveryOptions
 from codebench_pipeline.model_config import ModelConfig
 from codebench_pipeline.models import Identifier
 from codebench_pipeline.object_store import StorageConfig
@@ -155,6 +156,9 @@ class DatasetBuildSpec(StrictStageConfig):
         default=None, exclude_if=lambda value: value is None
     )
     annotation: AnnotationConfig
+    discovery: DiscoveryOptions = Field(
+        default=DiscoveryOptions(), exclude_if=lambda options: options == DiscoveryOptions()
+    )
     review: ReviewConfig | None = None
     publication: PublicationConfig
     storage: StorageConfig

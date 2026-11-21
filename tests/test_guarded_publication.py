@@ -73,7 +73,7 @@ class GuardedPublicationTests(TestCase):
         changed_source = with_keenable_declaration(
             spec,
             declaration.model_copy(
-                update={"search": declaration.search.model_copy(update={"queries": ("Updated examples",)})}
+                update={"search": declaration.search.model_copy(update={"seeds": ("docker_inventory",)})}
             ),
         )
         self.assertNotEqual(

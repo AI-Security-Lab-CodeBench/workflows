@@ -28,7 +28,7 @@ class NativeProcessingInputTests(TestCase):
             KeenableSnippetDeclaration(
                 schema_version="4",
                 dataset_id=spec.dataset_id,
-                search=KeenableSnippetSettings(queries=()),
+                search=KeenableSnippetSettings(seeds=()),
             ),
         )
         partition = DatasetRegistry(home).register(spec)

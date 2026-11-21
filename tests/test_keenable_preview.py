@@ -13,14 +13,14 @@ from codebench_pipeline.runtime_instance import dataset_instance
 
 
 class KeenableMappingTests(TestCase):
-    def test_candidate_mapping_keeps_declared_queries_and_receipt_identity(self) -> None:
+    def test_candidate_mapping_keeps_declared_seeds_and_receipt_identity(self) -> None:
         home = Path(self.enterContext(TemporaryDirectory()))
         shipped = fixture_spec(home)
         assert shipped.declared_collection is not None
         declaration = shipped.declared_collection.keenable_declaration
         assert isinstance(declaration, KeenableSnippetDeclaration)
-        queries = ("Find workload inspection examples", "Find container inspection examples")
-        search = declaration.search.model_copy(update={"queries": queries})
+        seeds = ("kubernetes_inventory", "docker_inventory")
+        search = declaration.search.model_copy(update={"seeds": seeds})
         spec = with_keenable_declaration(shipped, declaration.model_copy(update={"search": search}))
         dataset_id = DatasetRegistry(home).register(spec)
         definitions = build_definitions(home)
@@ -45,6 +45,6 @@ class KeenableMappingTests(TestCase):
         root = home.joinpath("configuration-runs", result.run_id)
         raw = root.joinpath(*candidates.path).read_bytes()
         artifact = KeenableCandidateSettings.model_validate_json(raw, strict=True)
-        self.assertEqual(artifact.search.queries, queries)
+        self.assertEqual(artifact.search.seeds, seeds)
         assert spec.declared_collection is not None
         self.assertEqual(artifact.declaration_digest, spec.declared_collection.keenable_use_cases.digest)

@@ -242,7 +242,7 @@ class FinalizationTableIO(IOManager):
         step.registered = registered
         declaration = registered.source_config(branch)
         require_source_rights(declaration)
-        if mapped.settings != operation.project(declaration):
+        if mapped.settings != registered.collection_operation_settings(operation):
             raise IntegrityError("Mapped collection differs from the run configuration")
         inputs: dict[str, AssetSnapshot] = {}
         if isinstance(step.loaded, pd.DataFrame):

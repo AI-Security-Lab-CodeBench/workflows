@@ -12,7 +12,12 @@ from codebench_pipeline.collection_config import (
     DeclaredCollection,
     DeclaredSourceStageConfig,
 )
-from codebench_pipeline.collection_stage_settings import COLLECTION_OPERATIONS, CollectionOperationSettings
+from codebench_pipeline.collection_stage_settings import (
+    COLLECTION_OPERATIONS,
+    CollectionOperation,
+    CollectionOperationSettings,
+    KeenableCandidateSettings,
+)
 from codebench_pipeline.config_directory import ConfigDirectorySnapshot
 from codebench_pipeline.dataset_branches import COLLECTION_BRANCHES, Branch
 from codebench_pipeline.dataset_config import (
@@ -25,6 +30,7 @@ from codebench_pipeline.dataset_config import (
     RequestBytes,
     require_declared_annotation,
 )
+from codebench_pipeline.discovery_config import DiscoveryInference
 from codebench_pipeline.grounding_tools import GroundingConfig
 from codebench_pipeline.inference_capacity import ScopedCapacityConfig
 from codebench_pipeline.labeling_stage_settings import (
@@ -160,6 +166,7 @@ class DeclaredScopes(ConfigArtifact):
     existing_datasets: CollectionSettings
     documentation_crawl: CollectionSettings
     keenable_use_cases: CollectionSettings
+    discovery: DiscoveryInference | None = Field(default=None, exclude_if=lambda value: value is None)
     merged_command_candidates: DeclaredMergeConfig
     filtered_commands: FilterSettings
     labeling_attempts: GuardedLabelingSettings
@@ -186,6 +193,12 @@ class DeclaredGlobalConfig(ConfigArtifact):
             "documentation": self.scopes.documentation_crawl,
             "keenable": self.scopes.keenable_use_cases,
         }[branch].collection
+
+    def collection_operation_settings(self, operation: CollectionOperation) -> CollectionOperationSettings:
+        source = self.source_config(operation.branch)
+        if operation.branch != "keenable":
+            return operation.project(source)
+        return KeenableCandidateSettings.project(source, self.rules, self.scopes.discovery)
 
     def filter_config(self) -> FilterConfig:
         return FilterConfig.project(self, self.rules)
@@ -214,6 +227,8 @@ class DeclaredGlobalConfig(ConfigArtifact):
     ) -> "DeclaredGlobalConfig":
         if spec.declared_collection is None:
             raise IntegrityError("Registered dataset has no collection declarations")
+        labeling = GuardedLabelingSettings.from_spec(spec)
+        transport = labeling.labeling_attempts
         return cls(
             dataset_id=spec.dataset_id,
             revision=spec.revision,
@@ -224,11 +239,17 @@ class DeclaredGlobalConfig(ConfigArtifact):
                 existing_datasets=collection_asset_settings(spec, "dataset"),
                 documentation_crawl=collection_asset_settings(spec, "documentation"),
                 keenable_use_cases=collection_asset_settings(spec, "keenable"),
+                discovery=DiscoveryInference(
+                    model=spec.discovery.resolve_model(transport.model, transport.batch.inference_mode),
+                    backend_revision=transport.batch.backend_revision,
+                    inference_mode=transport.batch.inference_mode,
+                    capacity=transport.batch.capacity,
+                ),
                 merged_command_candidates=DeclaredMergeConfig(
                     merged_command_candidates=spec.declared_collection.merge_config
                 ),
                 filtered_commands=FilterSettings(filtered_commands=spec.filtering),
-                labeling_attempts=GuardedLabelingSettings.from_spec(spec),
+                labeling_attempts=labeling,
                 deduplicated_annotations=DeduplicationConfig(deduplication=spec.deduplication),
                 human_review_queue=ReviewQueueSettings(human_review_queue=spec.publication),
             ),
@@ -248,9 +269,8 @@ def dataset_release_settings(registered: DeclaredGlobalConfig, rules: CategoryRu
 def collection_stage_configs(
     registered: DeclaredGlobalConfig, branch: Branch
 ) -> dict[str, CollectionOperationSettings]:
-    config = registered.source_config(branch)
     return {
-        operation.name: operation.project(config)
+        operation.name: registered.collection_operation_settings(operation)
         for operation in COLLECTION_OPERATIONS
         if operation.branch == branch
     }

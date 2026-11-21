@@ -34,7 +34,9 @@ from codebench_pipeline.finalization_table_asset import (
     CollectionInput,
 )
 from codebench_pipeline.finalization_table_io import retain_failed_finalization
-from codebench_pipeline.keenable_snippets import provider_snippet_candidates
+from codebench_pipeline.keenable_decisions import DiscoveryModel
+from codebench_pipeline.keenable_snippets import DiscoveryRun, provider_snippet_candidates
+from codebench_pipeline.labeling_runtime import LabelingRuntime
 from codebench_pipeline.repository import (
     RepositoryRun,
     repository_adapters,
@@ -44,6 +46,7 @@ from codebench_pipeline.repository import (
 )
 from codebench_pipeline.repository_legacy import PreparedCaptureCache
 from codebench_pipeline.repository_receipts import RECEIPT_ATTR
+from codebench_pipeline.storage import IntegrityError
 
 
 def source_run(context: AssetExecutionContext, storage: DataFrameIOManager) -> RepositoryRun:
@@ -83,14 +86,36 @@ def declared_source_assets(branch: CollectionBranch) -> list[AssetsDefinition]:
             ins={"mapped_config": mapped_edge("command_candidates")},
         )
         def keenable_command_candidates(
+            context: AssetExecutionContext,
             mapped_config: CollectionInput,
             keenable_credential: ResourceParam[KeenableDiscovery],
+            labeling_runtime: ResourceParam[LabelingRuntime],
+            dataset_io_manager: ResourceParam[DataFrameIOManager],
         ) -> Output[DataFrame[CommandCandidatesTable]]:
             settings = mapped_config.for_operation(KeenableCandidateSettings)
-            return mapped_config.output(
-                CommandCandidatesTable,
-                lambda _evidence: provider_snippet_candidates(settings.search, keenable_credential.api_key),
-            )
+
+            def compute(evidence: Path) -> DataFrame[CommandCandidatesTable]:
+                inference = settings.inference
+                discovery = None
+                if inference is not None:
+                    capacity = None
+                    if inference.inference_mode == "guarded":
+                        if inference.capacity is None:
+                            raise IntegrityError("Guarded discovery requires scoped capacity")
+                        paths = labeling_runtime.require_current(context.partition_key, dataset_io_manager)
+                        capacity = inference.capacity.bind(paths.state_directory, paths.expected_model_path)
+                    key_env = inference.model.api_key_env
+                    discovery = DiscoveryModel(
+                        inference.model,
+                        labeling_runtime.credential(key_env) if key_env is not None else None,
+                        settings.taxonomy,
+                        capacity,
+                    )
+                return provider_snippet_candidates(
+                    settings.search, DiscoveryRun(evidence, keenable_credential.api_key, discovery)
+                )
+
+            return mapped_config.output(CommandCandidatesTable, compute)
 
         return [keenable_command_candidates]
 
