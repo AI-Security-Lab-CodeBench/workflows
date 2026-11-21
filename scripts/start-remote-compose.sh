@@ -2,7 +2,11 @@
 set -euo pipefail
 
 cd -- "$1"
-compose=(docker compose -p codebench -f compose.yaml -f .codebench-local/labeler-grounding.compose.yaml)
+overlay=$(mktemp .codebench-local/minio.compose.XXXXXXXX)
+trap 'rm -f -- "$overlay"' EXIT
+printf '%s\n' "${2:?Missing MinIO Compose overlay}" > "$overlay"
+mv -f -- "$overlay" .codebench-local/minio.compose.yaml
+compose=(docker compose -p codebench -f compose.yaml -f .codebench-local/labeler-grounding.compose.yaml -f .codebench-local/minio.compose.yaml)
 grounding_env=.codebench-runtime/grounding.env
 
 if [[ -f $grounding_env ]]; then
@@ -22,4 +26,4 @@ elif [[ -z ${CONTEXT7_API_KEY:-} || -z ${KEENABLE_API_KEY:-} ]]; then
     unset grounding_values value
 fi
 
-exec "${compose[@]}" up --no-recreate --wait --wait-timeout 120 review-db webserver daemon
+exec "${compose[@]}" up --no-recreate --wait --wait-timeout 120 review-db minio webserver daemon

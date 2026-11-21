@@ -16,11 +16,11 @@ done < .env
 
 : "${remote_compose_dir:?Set REMOTE_COMPOSE_DIR in .env}"
 if [[ -z ${remote_ssh:-} ]]; then
-    bash scripts/start-remote-compose.sh "$remote_compose_dir"
+    bash scripts/start-remote-compose.sh "$remote_compose_dir" "$(cat compose.minio.yaml)"
 else
     ssh_options=(-p "${remote_ssh_port:-22}" -o BatchMode=yes -o StrictHostKeyChecking=yes -o ConnectTimeout=5)
     socket="$HOME/.ssh/codebench-3041-%C"
-    { printf 'set -- %q\n' "$remote_compose_dir"; cat scripts/start-remote-compose.sh; } |
+    { printf 'set -- %q %q\n' "$remote_compose_dir" "$(cat compose.minio.yaml)"; cat scripts/start-remote-compose.sh; } |
         ssh "${ssh_options[@]}" -- "$remote_ssh" 'bash -s'
     if ! ssh "${ssh_options[@]}" -S "$socket" -O check -- "$remote_ssh" >/dev/null 2>&1; then
         ssh "${ssh_options[@]}" -S "$socket" -MfN \

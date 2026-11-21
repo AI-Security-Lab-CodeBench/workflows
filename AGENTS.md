@@ -72,6 +72,24 @@ On a host without an existing CodeBench webserver container, provision
 `.codebench-runtime/grounding.env` under the remote Compose directory before
 running the target. Keep that file on the server and outside version control.
 
+The `codebench` Compose project owns its `minio` service, `minio-data` volume
+and private `codebench-datasets` bucket. Do not use another project's MinIO.
+`make remote-up` includes `compose.minio.yaml` in the normal Compose startup.
+Compose builds the community server and `mc` from pinned upstream
+`github.com/minio/minio` and `github.com/minio/mc` revisions on Docker
+Official Images. The `minio-init` service creates the bucket and grants a
+dedicated pipeline identity access only to that bucket. The API listens on
+`127.0.0.1:19002` for the host-network pipeline services; the console is not
+published. Use region `us-east-1`. The SDK reads `AWS_ENDPOINT_URL_S3` and
+`AWS_SHARED_CREDENTIALS_FILE` from the Compose environment. Only MinIO and its
+initializer mount the admin volume; pipeline consumers mount only the client
+credentials, read-only. Back up `minio-data`, `minio-admin`, and `minio-client`
+together. Never put credentials in Git or run logs.
+Existing containers do not acquire new mounts or environment on restart or on
+`make remote-up`; activating it requires an intentional consumer rollout
+with the existing runtime and QA overrides preserved. Verify historical
+artifacts before changing an existing dataset's storage registration.
+
 ## Publication scope
 
 Publish pipelines, workflows, tests, the architecture guides and CAT-3
