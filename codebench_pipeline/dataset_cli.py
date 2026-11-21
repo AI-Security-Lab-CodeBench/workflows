@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 from typing import Literal, TypedDict, overload
 
+from dagster import AssetKey
 from pydantic import TypeAdapter
 
 from codebench_pipeline.dataset_branches import HISTORICAL_PROCESSING_STAGES
@@ -10,7 +11,7 @@ from codebench_pipeline.dataset_config import load_build_config
 from codebench_pipeline.dataset_dependencies import KNOWN_STAGES
 from codebench_pipeline.dataset_registry import DatasetRegistry
 from codebench_pipeline.dataset_run import refresh_registered_configuration, run_registered
-from codebench_pipeline.definitions import DEFAULT_HOME
+from codebench_pipeline.definitions import DEFAULT_HOME, build_definitions, dataset_run_config
 from codebench_pipeline.guarded_publication_controls import Action
 from codebench_pipeline.guarded_publication_runtime import preview_proposal, update_publication_control
 from codebench_pipeline.models import Digest
@@ -74,6 +75,12 @@ def main() -> None:
         description="Build category-configured datasets as typed DataFrame assets."
     )
     subcommands = parser.add_subparsers(dest="action", required=True)
+    for name in ("stages", "through"):
+        command = subcommands.add_parser(name)
+        command.add_argument("--home", type=Path, default=DEFAULT_HOME)
+        if name == "through":
+            command.add_argument("--dataset", required=True)
+            command.add_argument("--stage", required=True)
     for action in ("build", "register", "validate", "inspect-config"):
         sub = subcommands.add_parser(
             action,
@@ -117,6 +124,31 @@ def main() -> None:
         if name in {"attest-release", "revoke-release"}:
             control.add_argument("--proposal", required=True)
     args = parser.parse_args()
+    if args.action in {"stages", "through"}:
+        home = args.home
+        definitions = build_definitions(home)
+        job = definitions.resolve_job_def("build_dataset")
+        available = set(job.asset_layer.executable_asset_keys)
+        if args.action == "stages":
+            for key in sorted(key.to_user_string() for key in available):
+                print(key)
+            return
+        target = AssetKey.from_user_string(args.stage)
+        if target not in available:
+            parser.error("Unknown build stage; use the full key printed by make stages")
+        selected = (
+            {target} | set(definitions.resolve_asset_graph().get_ancestor_asset_keys(target))
+        ) & available
+        spec = DatasetRegistry(home).get(args.dataset)
+        with dataset_instance(home) as instance:
+            result = job.execute_in_process(
+                instance=instance,
+                partition_key=args.dataset,
+                asset_selection=list(selected),
+                run_config=dataset_run_config(spec),
+            )
+        print(json.dumps({"run_id": result.run_id, "through": args.stage}))
+        return
     if args.action == "build" and args.prepare_only and not args.force:
         parser.error("--prepare-only requires --force")
     home = Path(args.home).resolve()

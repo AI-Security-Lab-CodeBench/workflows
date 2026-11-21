@@ -26,9 +26,28 @@ elif [[ -z ${CONTEXT7_API_KEY:-} || -z ${KEENABLE_API_KEY:-} ]]; then
     unset grounding_values value
 fi
 
-if [[ -z ${3:-} ]]; then
-    exec "${compose[@]}" up --no-recreate --wait --wait-timeout 120 review-db minio webserver daemon
-fi
+case ${4:-up} in
+    stages|through|unsynced)
+        dataset=${5:?Missing DATASET partition}
+        "${compose[@]}" up --no-recreate --wait --wait-timeout 120 review-db minio webserver daemon
+        run=("${compose[@]}" exec -T webserver)
+        cli=(python -m codebench_pipeline.dataset_cli)
+        sensor=(dagster sensor)
+        workspace=(-w "$PWD/.codebench-runtime/compose/workspace.yaml" dataset_build_requests)
+        case $4 in
+            stages) exec "${run[@]}" "${cli[@]}" stages ;;
+            through)
+                stage=${6:?Set STAGE to a key printed by make stages}
+                "${run[@]}" "${sensor[@]}" stop "${workspace[@]}"
+                exec "${run[@]}" "${cli[@]}" through --dataset "$dataset" --stage "$stage" ;;
+            unsynced)
+                "${run[@]}" "${cli[@]}" build --dataset "$dataset"
+                exec "${run[@]}" "${sensor[@]}" start "${workspace[@]}" ;;
+        esac ;;
+    up) exec "${compose[@]}" up --no-recreate --wait --wait-timeout 120 review-db minio webserver daemon ;;
+    prepare) test -n "$3" ;;
+    *) printf 'Unknown operator action: %s\n' "$4" >&2; exit 2 ;;
+esac
 
 revision=$3
 files=$(docker inspect --format '{{index .Config.Labels "com.docker.compose.project.config_files"}}' codebench-webserver-1)

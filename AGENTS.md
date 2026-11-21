@@ -103,6 +103,19 @@ existing Compose overrides and named volumes. From the operator checkout,
 stops the build sensor and runs the native `prepare_dataset` job through
 `filtered_commands`. Leave the sensor stopped until labeling is requested.
 
+Daily commands from the operator checkout, using the already deployed code:
+
+| Command | Behavior |
+| --- | --- |
+| `make stages` | List exact asset keys from the deployed build job. |
+| `make materialize-through STAGE=datasets/filtered_commands` | Stop the build sensor and synchronously materialize this stage and its build-job ancestors for CAT-3. No downstream stage is selected. Substitute any key from `make stages`; selecting a labeling stage explicitly runs labeling. |
+| `make materialize-unsynced` | Refresh the registered partition's configuration and enable `dataset_build_requests`. The daemon evaluates native automation conditions asynchronously. It can select labeling and stays enabled, including for other registered partitions. Do **not** run while a no-labeling hold is in effect. |
+
+Set `DATASET=<registered partition>` to override CAT-3 for the materialization
+commands. Use `make remote-prepare` when shipping a published code change;
+the daily commands neither deploy nor reset storage. The unsynced command's
+exit status confirms the handoff to Dagster, not completion of its runs.
+
 Publish pipelines, workflows, tests, the architecture guides and CAT-3
 configuration only. CAT-2 is a local example demonstrating multicategory support;
 exclude its configuration and collected records from the workflows repository.
