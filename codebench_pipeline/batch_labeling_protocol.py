@@ -5,7 +5,7 @@ from typing import Final, Literal
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, TypeAdapter
 
 from codebench_pipeline.batch_labeling_rows import RowEvidence
-from codebench_pipeline.dataset_records import CandidateRecord, LabelDecision
+from codebench_pipeline.dataset_records import CandidateRecord, LabelDecision, LabelPolicy, routing
 from codebench_pipeline.grounding_tools import GroundingOrigins
 from codebench_pipeline.labeling_outcomes import LabelingAttempt
 from codebench_pipeline.live_grounding import LivePage, trusted_live_url
@@ -73,19 +73,9 @@ _OBJECT = TypeAdapter(dict[str, JsonValue])
 _OUTCOMES = TypeAdapter(list[JsonValue])
 
 
-def tool_schema(name: str, description: str, schema: type[BaseModel]) -> dict[str, JsonValue]:
-    raw = _OBJECT.validate_python(schema.model_json_schema())
+def tool_schema(name: str, description: str, schema: dict[str, JsonValue]) -> dict[str, JsonValue]:
+    raw = dict(schema)
     definitions = _OBJECT.validate_python(raw.pop("$defs", {}))
-    if schema is SubmittedLabel:
-        label = _OBJECT.validate_python(definitions[LabelDecision.__name__])
-        properties = _OBJECT.validate_python(label["properties"])
-        for field in ("candidate_id", "util"):
-            del properties[field]
-        label["properties"] = properties
-        label["required"] = [
-            field for field in _OUTCOMES.validate_python(label["required"]) if field in properties
-        ]
-        definitions[LabelDecision.__name__] = label
 
     def inline(value: JsonValue) -> JsonValue:
         if isinstance(value, list):
@@ -119,23 +109,26 @@ def page_evidence_id(candidate: CandidateRecord, page: LivePage) -> str:
     )
 
 
-def page_observation(content: str, commands: list[str]) -> str:
-    if len(content) <= 800:
-        return content
-    terms = {
-        match.group()
-        for command in commands
-        for match in re.finditer(r"--?[\w-]+|[\w-]{3,}", command.lower())
-    }
-    best = max(
-        range(0, len(content), 400),
-        key=lambda offset: sum(
-            (3 if term.startswith("-") else 1)
-            for term in terms
-            if term in content[offset : offset + 800].lower()
-        ),
+def page_observation(content: str, command: str) -> tuple[str, ...]:
+    tokens = re.compile(r"--?[\w-]+|[\w-]{2,}")
+    terms = set(tokens.findall(command.lower()))
+    passages = dict.fromkeys(
+        span.group().rstrip()
+        for line in re.split(r"\n+|(?<=[.!?])\s+", content)
+        for span in re.finditer(r"\S.{0,259}(?=\s|$)|\S{260}", line.strip())
     )
-    return content[best : best + 800]
+
+    def relevance(passage: str) -> int:
+        matched = terms.intersection(tokens.findall(passage.lower()))
+        return sum((3 if term.startswith("-") else 1) for term in matched)
+
+    return tuple(sorted(passages, key=relevance, reverse=True)[:6])
+
+
+@dataclass(frozen=True, slots=True)
+class OfferedPassages:
+    url: str
+    quotes: tuple[str, ...]
 
 
 class LiveSupport(_Strict):
@@ -160,7 +153,7 @@ class LiveSupport(_Strict):
                 or quote not in page.content
             ):
                 raise IntegrityError(
-                    "Citation must be an exact passage from a trusted page fetched for this row"
+                    f"Citation for {page.url} must exactly match a verbatim passage from that fetched page."
                 )
             docs.append(
                 SemanticSnippet(
@@ -192,6 +185,53 @@ class RowInput:
     candidate: CandidateRecord
     fingerprint: str
 
+    def finalize_tool(self, rules: LabelPolicy, evidence: dict[str, OfferedPassages]) -> dict[str, JsonValue]:
+        schema = _OBJECT.validate_python(SubmittedLabel.model_json_schema())
+        definitions = _OBJECT.validate_python(schema["$defs"])
+        label = _OBJECT.validate_python(definitions[LabelDecision.__name__])
+        properties = _OBJECT.validate_python(label["properties"])
+        for field in ("candidate_id", "util"):
+            del properties[field]
+        for field in ("description", "rationale"):
+            prose = _OBJECT.validate_python(properties[field])
+            prose.pop("pattern", None)
+            properties[field] = prose
+        properties["category_id"] = {"type": "string", "enum": [rules.category_id]}
+        properties["risk_id"] = {"type": "string", "enum": list[JsonValue](routing(self.candidate, rules))}
+        urls = sorted({page.url for page in evidence.values()})
+        properties["documentation_urls"] = (
+            {"type": "array", "items": {"type": "string", "enum": list[JsonValue](urls)}}
+            if urls
+            else {"type": "array", "items": {"type": "string"}, "maxItems": 0}
+        )
+        label["properties"] = properties
+        label["required"] = [
+            field for field in _OUTCOMES.validate_python(label["required"]) if field in properties
+        ]
+        definitions[LabelDecision.__name__] = label
+
+        outcome = _OBJECT.validate_python(definitions[SubmittedOutcome.__name__])
+        fields = _OBJECT.validate_python(outcome["properties"])
+        fields["candidate_id"] = {"type": "string", "enum": [self.candidate.candidate_id]}
+        fields["row_input_fingerprint"] = {"type": "string", "enum": [self.fingerprint]}
+        fields["evidence_ids"] = (
+            {"type": "array", "items": {"type": "string", "enum": list[JsonValue](evidence)}, "maxItems": 8}
+            if evidence
+            else {"type": "array", "items": {"type": "string"}, "maxItems": 0}
+        )
+        fields["grounding_quotes"] = {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                identity: {"type": "string", "enum": list[JsonValue](page.quotes)}
+                for identity, page in evidence.items()
+            },
+        }
+        outcome["properties"] = fields
+        definitions[SubmittedOutcome.__name__] = outcome
+        schema["$defs"] = definitions
+        return tool_schema("finalize", "Submit the candidate judgment or explicit failure.", schema)
+
     def parse(self, value: JsonValue) -> SubmittedOutcome:
         fields = _OBJECT.validate_python(value)
         label = fields.get("label")
@@ -216,15 +256,19 @@ class RowInput:
         self, outcome: SubmittedOutcome, pages: dict[str, LivePage], grounding: GroundingOrigins
     ) -> tuple[LiveSupport, list[SemanticSnippet]]:
         ids = set(outcome.evidence_ids)
-        if (
-            outcome.failure_code
-            or outcome.failure_detail
-            or len(ids) != len(outcome.evidence_ids)
-            or ids != outcome.grounding_quotes.keys()
-            or not ids <= pages.keys()
-        ):
+        if outcome.failure_code or outcome.failure_detail:
+            raise ValueError("Set failure_code and failure_detail to empty strings when submitting a label.")
+        if not ids or not ids <= pages.keys():
             raise ValueError(
-                "Success requires distinct assigned evidence IDs, exact quotes, and no failure fields"
+                "Select at least one evidence_id from a page fetched for this row; query hits do not count."
+            )
+        if len(ids) != len(outcome.evidence_ids) or ids != outcome.grounding_quotes.keys():
+            raise ValueError(
+                "Use distinct evidence_ids and exactly the same IDs as keys in grounding_quotes."
+            )
+        if not outcome.grounding_rationale.strip():
+            raise ValueError(
+                "Explain how the selected verbatim passages support this row in grounding_rationale."
             )
         support = LiveSupport(
             row_input_fingerprint=self.fingerprint,

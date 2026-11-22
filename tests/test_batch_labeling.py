@@ -9,6 +9,7 @@ from unittest import TestCase
 from unittest.mock import patch
 from urllib.error import HTTPError
 
+from jsonschema import Draft202012Validator
 from mcp.types import CallToolResult, TextContent
 from pydantic import JsonValue
 from test_dataset_rules import make_candidate, make_label, make_rules
@@ -21,7 +22,7 @@ from codebench_pipeline.batch_labeling import (
     run_prepared_batches,
 )
 from codebench_pipeline.batch_labeling_config import BatchLabelingConfig
-from codebench_pipeline.batch_labeling_protocol import LiveSupport, page_observation
+from codebench_pipeline.batch_labeling_protocol import LiveSupport
 from codebench_pipeline.dataset_records import CandidateRecord
 from codebench_pipeline.grounding_tools import GroundingCredentials, LiveGroundingConfig
 from codebench_pipeline.inference_capacity import CapacityConfig, CapacityUnavailable, ContextBudgetExceeded
@@ -332,16 +333,58 @@ class BatchLabelingTests(TestCase):
         self.assertEqual((stats["grounding_iterations"], stats["tool_wave_sizes"]), (0, []))
         self.assertEqual(len(stats["model_request_sha256"]), 1)
 
-    def test_long_page_shows_a_verbatim_window_containing_the_relevant_flag(self) -> None:
-        body = (
-            ("Navigation\n" * 200)
-            + "Use --namespace to choose which namespace to inspect."
-            + ("Footer\n" * 240)
+    def test_finalize_schema_accepts_routed_prose_and_only_fetched_citation_options(self) -> None:
+        out = Path(self.enterContext(TemporaryDirectory()))
+        flag_passage = "Use --namespace to choose which namespace to inspect."
+        content = ("Navigation\n" * 200) + flag_passage + "\n" + ("Footer\n" * 240)
+        candidate = make_candidate("a").model_copy(
+            update={"command": "probe inspect --namespace fixture", "risk_candidates": ["CAT-8.1", "CAT-8.2"]}
         )
-        window = page_observation(body, ["probe inspect --namespace fixture"])
-        self.assertIn("--namespace to choose which namespace", window)
-        self.assertIn(window, body)
-        self.assertLess(len(window), len(body))
+
+        def reply(_url: str, body: bytes, *_):
+            (row,), results = request_parts(body)
+            parameters = next(
+                entry["function"]["parameters"]
+                for entry in json.loads(body)["tools"]
+                if entry["function"]["name"] == "finalize"
+            )
+            validator = Draft202012Validator(parameters)
+            if not results or not results[-1].get("page"):
+                self.assertTrue(validator.is_valid({"outcome": unsupported(row)}))
+                self.assertFalse(validator.is_valid({"outcome": submitted(row, ["search-hit"])}))
+                return row_retrieval(body)
+
+            page = results[-1]["page"]
+            passages = page["verbatim_passages"]
+            self.assertIn(flag_passage, passages)
+            self.assertTrue(all(passage in content and len(passage) <= 260 for passage in passages))
+            evidence_id = page["evidence_ids"]["a"]
+            outcome = submitted(row, [evidence_id], quote=flag_passage)
+            label = outcome["label"]
+            assert isinstance(label, dict)
+            self.assertTrue(validator.is_valid({"outcome": outcome}))
+            label_properties = parameters["properties"]["outcome"]["properties"]["label"]["anyOf"][0][
+                "properties"
+            ]
+            for field in ("description", "rationale"):
+                self.assertNotIn("pattern", label_properties[field])
+            for changes in (
+                {"category_id": "C"},
+                {"risk_id": "CAT-8.2"},
+                {"documentation_urls": ["https://example.org/not-fetched"]},
+            ):
+                self.assertFalse(validator.is_valid({"outcome": {**outcome, "label": {**label, **changes}}}))
+            self.assertFalse(
+                validator.is_valid(
+                    {"outcome": {**outcome, "grounding_quotes": {evidence_id: "Choose a namespace."}}}
+                )
+            )
+            return tool_reply("finalize", {"outcome": outcome})
+
+        with live_mcp_fixture({URL: content}):
+            (attempt,) = self.run_batch(reply, [candidate], out)
+        self.assertEqual(attempt.status, "success")
+        self.assertEqual([(doc.url, doc.snippet) for doc in attempt.documentation], [(URL, flag_passage)])
 
     def test_plain_reasoning_setting_can_produce_tools_without_exhausting_output(self) -> None:
         for effort, template in (
@@ -368,7 +411,16 @@ class BatchLabelingTests(TestCase):
                 self.assertEqual(attempt.status, "success")
 
     def test_grounded_judgment_requires_matching_fingerprint_fetched_quote_and_trusted_url(self) -> None:
-        for failure in ("stale_input", "discovery_only", "forged_quote", "foreign_evidence", "untrusted_url"):
+        for failure in (
+            "stale_input",
+            "discovery_only",
+            "forged_quote",
+            "foreign_evidence",
+            "untrusted_url",
+            "wrong_cited_url",
+            "wrong_route",
+            "blank_description",
+        ):
             with self.subTest(failure=failure), TemporaryDirectory() as directory:
                 out = Path(directory)
 
@@ -388,6 +440,14 @@ class BatchLabelingTests(TestCase):
                     )
                     if failure == "stale_input":
                         outcome["row_input_fingerprint"] = "wrong"
+                    label = outcome["label"]
+                    assert isinstance(label, dict)
+                    if failure == "wrong_cited_url":
+                        label["documentation_urls"] = ["https://example.org/not-fetched"]
+                    if failure == "wrong_route":
+                        label["risk_id"] = "CAT-8.2"
+                    if failure == "blank_description":
+                        label["description"] = "  "
                     return tool_reply("finalize", {"outcome": outcome})
 
                 alternate = "https://untrusted.example/docs" if failure == "untrusted_url" else None
