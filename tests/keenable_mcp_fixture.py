@@ -1,4 +1,5 @@
 import json
+import os
 from collections.abc import Generator
 from contextlib import contextmanager
 from unittest.mock import patch
@@ -49,7 +50,14 @@ def keenable_mcp_fixture(*, empty: bool = False, failed: bool = False) -> Genera
         )
 
     with (
-        patch.dict("os.environ", {"KEENABLE_API_KEY": "fixture-key"}),
+        patch.dict(
+            os.environ,
+            {
+                **{key: value for key, value in os.environ.items() if not key.startswith("KEENABLE_")},
+                "KEENABLE_API_KEY": "fixture-key",
+            },
+            clear=True,
+        ),
         patch(ASYNC_CLIENT, side_effect=client),
         patch("codebench_pipeline.keenable.request_direct", side_effect=AssertionError("Origin transport")),
     ):
