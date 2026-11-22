@@ -7,6 +7,12 @@ context and `python3 scripts/stack.py`; `--help` lists commands. For installatio
 credentials or a fresh development cutover, see [README](README.md). Never start a replacement
 stack, adopt unmarked volumes, or reset shared data to get past a failed check.
 
+Fix problems in the existing Compose setup using its supported configuration.
+For example, correcting a worker's Compose `dns` setting is a repair. Adding a
+DNS proxy, patching the container runtime, or creating a host service is new
+infrastructure. If a fix requires new infrastructure, explain why and get explicit
+approval before building or testing it, even as a temporary local workaround.
+
 | Intent | Command from the checkout |
 | --- | --- |
 | Inspect without starting anything | `python3 scripts/stack.py status` |
