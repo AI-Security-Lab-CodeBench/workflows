@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from fractions import Fraction
 from pathlib import Path
-from typing import TypedDict
+from typing import Final, TypedDict
 
 from langgraph.constants import END, START
 from langgraph.graph import StateGraph
@@ -46,7 +46,7 @@ from codebench_pipeline.labeling_outcomes import (
     validate_attempts,
 )
 from codebench_pipeline.labeling_stage_settings import LabelingRules
-from codebench_pipeline.live_grounding import LiveGrounding, PageFetchInput, QueryInput
+from codebench_pipeline.live_grounding import LiveGrounding, LivePage, PageFetchInput, QueryInput
 from codebench_pipeline.model_config import ModelConfig
 from codebench_pipeline.models import SemanticSnippet
 from codebench_pipeline.openai_transport import complete as plain_complete
@@ -55,6 +55,8 @@ from scripts.dataset_schema import SECRET_PATTERNS
 
 _OBJECT = TypeAdapter(dict[str, JsonValue])
 _ARRAY = TypeAdapter(list[JsonValue])
+_ACTIVE_ROWS: Final = 8
+_FOLLOWUP_REPLAY_BYTES: Final = 48 * 1024
 type BatchRules = CategoryRules | LabelingRules
 
 
@@ -110,6 +112,13 @@ class _Conversation:
     results: dict[str, LabelingAttempt] = field(default_factory=dict)
     supports: dict[str, tuple[LiveSupport, list[SemanticSnippet]]] = field(default_factory=dict)
     errors: dict[str, str] = field(default_factory=dict)
+    prompt_records: dict[str, dict[str, JsonValue]] = field(default_factory=dict)
+    prompt_examples: dict[str, JsonValue] = field(default_factory=dict)
+    row_last_shown: dict[str, int] = field(default_factory=dict)
+    page_last_shown: dict[tuple[str, int], int] = field(default_factory=dict)
+    retrieval_errors: dict[str, str] = field(default_factory=dict)
+    recent_errors: deque[str] = field(default_factory=lambda: deque(maxlen=4))
+    compact_followups: bool = False
     failure_code: str = "protocol_exhausted"
     last_error: str = "The model did not submit this row within the bounded conversation."
     output_exhausted: bool = False
@@ -134,10 +143,8 @@ class _Conversation:
             "Example documentation never supplies candidate evidence. Finalize any ready rows early, and correct "
             "only rejected rows. Final prose does not submit outcomes."
         )
-        examples: dict[str, JsonValue] = {}
         example_refs: dict[str, str] = {}
-        records: list[JsonValue] = []
-        for row in self.rows.values():
+        for identity, row in self.rows.items():
             _, payload = request(row.candidate, [], self.model.rules)
             payload.pop("documentation")
             payload["candidate"] = row.candidate.model_dump(mode="json", exclude={"transformations"})
@@ -145,16 +152,14 @@ class _Conversation:
             example_ids: list[JsonValue] = []
             for example in TypeAdapter(list[JsonValue]).validate_python(raw_examples):
                 identifier = example_refs.setdefault(fingerprint(example), f"ex{len(example_refs) + 1}")
-                examples[identifier] = example
+                self.prompt_examples[identifier] = example
                 example_ids.append(identifier)
             payload.update(row_input_fingerprint=row.fingerprint, example_ids=example_ids)
-            records.append(payload)
+            self.prompt_records[identity] = payload
         payload: dict[str, JsonValue] = {
-            "records": records,
-            "examples": examples,
-            "grounding_call_budget": self.broker.limit,
-            "trusted_domains": _ARRAY.validate_python(self.broker.config.allowed_domains),
-            "trusted_url_prefixes": _ARRAY.validate_python(self.broker.config.trusted_url_prefixes),
+            "records": list(self.prompt_records.values()),
+            "examples": self.prompt_examples,
+            **self.grounding_prompt(),
         }
         self.messages.extend(
             [
@@ -162,6 +167,116 @@ class _Conversation:
                 {"role": "user", "content": _encoded(payload).decode()},
             ]
         )
+
+    def grounding_prompt(self) -> dict[str, JsonValue]:
+        return {
+            "grounding_call_budget": self.broker.limit,
+            "trusted_domains": _ARRAY.validate_python(self.broker.config.allowed_domains),
+            "trusted_url_prefixes": _ARRAY.validate_python(self.broker.config.trusted_url_prefixes),
+        }
+
+    def followup_messages(self, turn: int) -> list[dict[str, JsonValue]]:
+        pending = [identity for identity in self.rows if identity not in self.results]
+        pages: dict[str, list[LivePage]] = {identity: [] for identity in pending}
+        for page in self.broker.pages.values():
+            for identity in page.candidate_ids:
+                if identity in pages:
+                    pages[identity].append(page)
+        ordered = sorted(
+            pending, key=lambda identity: (self.row_last_shown.get(identity, 0), not pages[identity])
+        )
+
+        active: list[str] = []
+        evidence: list[JsonValue] = []
+        for identity in ordered:
+            row_pages = sorted(
+                pages[identity],
+                key=lambda item: (
+                    self.page_last_shown.get((identity, item.request_index), 0),
+                    -item.request_index,
+                ),
+            )[:2]
+            if len(active) == _ACTIVE_ROWS or len(evidence) + len(row_pages) > _ACTIVE_ROWS:
+                break
+            active.append(identity)
+            self.row_last_shown[identity] = turn
+            for page in row_pages:
+                self.page_last_shown[identity, page.request_index] = turn
+                evidence.append(self.page_prompt(page, [identity]))
+
+        discoveries: dict[str, JsonValue] = {}
+        for receipt in reversed(self.broker.history):
+            if receipt.request is None or not receipt.discovery:
+                continue
+            for identity in receipt.request.candidate_ids:
+                if identity in active and identity not in discoveries:
+                    hits: list[JsonValue] = [
+                        {"url": hit.url, "snippet": hit.snippet[:160]}
+                        for hit in receipt.discovery
+                        if len(hit.url) <= 2048
+                    ]
+                    discoveries[identity] = hits[:3]
+
+        records = [self.prompt_records[identity] for identity in active]
+        examples = {
+            ref: self.prompt_examples[ref]
+            for record in records
+            for ref in _ARRAY.validate_python(record["example_ids"])
+            if isinstance(ref, str)
+        }
+        payload: dict[str, JsonValue] = {
+            "records": [record for record in records],
+            "examples": examples,
+            **self.grounding_prompt(),
+            "remaining_grounding_calls": self.broker.limit - len(self.broker.history),
+            "pending_row_count": len(pending),
+            "evidence": evidence,
+            "discoveries": discoveries,
+            "submission_errors": {
+                identity: self.errors[identity] for identity in active if identity in self.errors
+            },
+            "retrieval_errors": {
+                identity: self.retrieval_errors[identity]
+                for identity in active
+                if identity in self.retrieval_errors
+            },
+            "recent_errors": list(self.recent_errors),
+        }
+        return [
+            {
+                "role": "system",
+                "content": f"{self.messages[0]['content']}\n"
+                "This is the current working view of the same batch. Only work on records shown here. "
+                "Other pending records will rotate in; finished rows need no further action. "
+                "Use the exact excerpts in evidence for quotations. Discovery snippets are not evidence. "
+                "Finalize ready rows now even if other rows need retrieval.",
+            },
+            {"role": "user", "content": _encoded(payload).decode()},
+        ]
+
+    def page_prompt(self, page: LivePage, identities: list[str]) -> dict[str, JsonValue]:
+        return {
+            "url": page.url,
+            "content": page_observation(
+                page.content, [self.rows[identity].candidate.command for identity in identities]
+            ),
+            "evidence_ids": {
+                identity: page_evidence_id(self.rows[identity].candidate, page) for identity in identities
+            },
+        }
+
+    def remember_retrieval_error(self, tool: str, arguments: str, error: str) -> None:
+        schema = QueryInput if tool == "query" else PageFetchInput
+        try:
+            request = schema.model_validate_json(arguments)
+        except ValidationError:
+            self.recent_errors.append(f"{tool}: {error}")
+            return
+        scoped = (self.rows.keys() - self.results.keys()).intersection(request.candidate_ids)
+        for identity in scoped:
+            self.retrieval_errors[identity] = f"{tool}: {error}"
+        if not scoped:
+            self.recent_errors.append(f"{tool}: {error}")
 
     def complete(self, state: _State) -> Command[str]:
         turn = state["turn"] + 1
@@ -180,7 +295,9 @@ class _Conversation:
             ]
         body: dict[str, JsonValue] = {
             "model": model.model,
-            "messages": _ARRAY.validate_python(self.messages),
+            "messages": _ARRAY.validate_python(
+                self.followup_messages(turn) if self.compact_followups else self.messages
+            ),
             "tools": _ARRAY.validate_python(tools),
             "tool_choice": {"type": "function", "function": {"name": "finalize"}}
             if len(tools) == 1
@@ -202,6 +319,15 @@ class _Conversation:
             body["chat_template_kwargs"] = {"enable_thinking": False}
         turn_path = self.out / f"turn-{turn - 1:02d}"
         raw = _encoded(body)
+        if (
+            turn > 1
+            and len(self.rows) > _ACTIVE_ROWS
+            and not self.compact_followups
+            and len(raw) > min(_FOLLOWUP_REPLAY_BYTES, self.model.max_request_bytes)
+        ):
+            self.compact_followups = True
+            body["messages"] = _ARRAY.validate_python(self.followup_messages(turn))
+            raw = _encoded(body)
         try:
             if len(raw) > self.model.max_request_bytes:
                 raise ContextBudgetExceeded("serialized_request_budget_exceeded")
@@ -264,6 +390,7 @@ class _Conversation:
 
     def correct(self, turn: int, destination: str, error: str) -> Command[str]:
         self.last_error = error
+        self.recent_errors.append(error)
         self.messages.append({"role": "user", "content": error})
         return Command(update={"turn": turn}, goto=destination)
 
@@ -285,6 +412,12 @@ class _Conversation:
             self.messages.append(
                 {"role": "tool", "tool_call_id": call.id, "content": _encoded(result).decode()}
             )
+            if (
+                call.function.name not in {"query", "page_fetch"}
+                and isinstance(result, dict)
+                and isinstance(error := result.get("error"), str)
+            ):
+                self.recent_errors.append(error)
         _write(
             self.out / f"conversation-{state['turn'] - 1:02d}.json",
             _encoded(_ARRAY.validate_python(self.messages)),
@@ -300,16 +433,9 @@ class _Conversation:
         result = receipt.model_dump(mode="json", include={"tool", "error", "discovery"}, exclude_none=True)
         if receipt.page_id is not None:
             page = self.broker.pages[receipt.page_id]
-            result["page"] = {
-                "url": page.url,
-                "content": page_observation(
-                    page.content, [self.rows[identity].candidate.command for identity in page.candidate_ids]
-                ),
-                "evidence_ids": {
-                    identity: page_evidence_id(self.rows[identity].candidate, page)
-                    for identity in page.candidate_ids
-                },
-            }
+            result["page"] = self.page_prompt(page, list(page.candidate_ids))
+        if receipt.error is not None:
+            self.remember_retrieval_error(tool, arguments, receipt.error)
         if result.get("error") is None and result.get("discovery"):
             result["note"] = "Search hits are discovery only. Fetch actual page text before citing."
         result["remaining_grounding_calls"] = self.broker.limit - len(self.broker.history)

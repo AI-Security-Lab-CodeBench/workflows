@@ -7,6 +7,7 @@ from unittest import TestCase
 from unittest.mock import patch
 
 from mcp.types import CallToolResult, TextContent
+from pydantic import JsonValue
 from test_dataset_rules import make_candidate, make_label, make_rules
 
 from codebench_pipeline.batch_labeling import (
@@ -84,14 +85,27 @@ def tool_replies(*calls: tuple[str, dict | str], finish_reason: str = "tool_call
     )
 
 
-def submitted(record: dict, evidence_ids: list[str], url: str = URL, *, quote: str = QUOTE) -> dict:
-    candidate = CandidateRecord.model_validate({**record["candidate"], "transformations": []})
-    label = make_label(candidate, make_rules()).model_copy(update={"documentation_urls": [url]})
+def submitted(
+    record: dict[str, JsonValue],
+    evidence_ids: list[str],
+    url: str = URL,
+    *,
+    quote: str = QUOTE,
+    documentation_urls: list[str] | None = None,
+) -> dict[str, JsonValue]:
+    candidate_data = record["candidate"]
+    assert isinstance(candidate_data, dict)
+    candidate = CandidateRecord.model_validate({**candidate_data, "transformations": []})
+    label = make_label(candidate, make_rules()).model_copy(
+        update={
+            "documentation_urls": documentation_urls if documentation_urls is not None else [url],
+        }
+    )
     return {
         "candidate_id": candidate.candidate_id,
         "row_input_fingerprint": record["row_input_fingerprint"],
         "label": label.model_dump(mode="json", by_alias=True),
-        "evidence_ids": evidence_ids,
+        "evidence_ids": [identifier for identifier in evidence_ids],
         "grounding_quotes": {identifier: quote for identifier in evidence_ids},
         "grounding_rationale": "The quoted documentation describes this operation.",
         "failure_code": "",
@@ -111,7 +125,11 @@ def live_mcp_fixture(
             if name == "search_web_pages":
                 if arguments["query"] == "failed":
                     return CallToolResult(isError=True, content=[TextContent(type="text", text="error")])
-                body = {"results": [{"url": url, "snippet": QUOTE} for url in pages]}
+                body = {
+                    "results": [
+                        {"url": url, "snippet": QUOTE} for url in list(pages)[: arguments["max_results"]]
+                    ]
+                }
             else:
                 assert name == "fetch_page_content" and arguments["live"] and "prompt" not in arguments
                 url = arguments["url"]
@@ -158,6 +176,134 @@ def shared_retrieval(body: bytes) -> HTTPResponse:
 
 
 class BatchLabelingTests(TestCase):
+    def test_large_followups_bound_wire_size_and_reach_every_row(self) -> None:
+        out = Path(self.enterContext(TemporaryDirectory()))
+        candidates = [
+            make_candidate(f"row-{index:02}").model_copy(
+                update={"context": f"Independent example {index}. " + "Maintainer reference detail. " * 58}
+            )
+            for index in range(25)
+        ]
+        urls = {row.candidate_id: f"{URL}/{row.candidate_id}" for row in candidates[:22]}
+        multi_page_row, second_page_row = list(urls)[:2]
+        deferred = {row.candidate_id for row in candidates[22:]}
+        pages = {url: (f"{QUOTE} Read-only inspection. " * 76) for url in [URL, *urls.values()]}
+        wire_sizes: list[int] = []
+        seen: set[str] = set()
+        completed: set[str] = set()
+        rejected: str | None = None
+
+        def reply(_url: str, body: bytes, _key: str | None, _timeout: float) -> HTTPResponse:
+            nonlocal rejected
+            wire_sizes.append(len(body))
+            request = json.loads(body)
+            self.assertEqual(request["max_completion_tokens"], 8192)
+            messages = request["messages"]
+            prompt = json.loads(messages[1]["content"])
+            records = {record["candidate"]["candidate_id"]: record for record in prompt["records"]}
+            if len(wire_sizes) == 1:
+                self.assertEqual(set(records), {row.candidate_id for row in candidates})
+                return tool_replies(
+                    *(
+                        (
+                            "page_fetch",
+                            {
+                                "url": url,
+                                "candidate_ids": [identity, multi_page_row]
+                                if identity == second_page_row
+                                else [identity],
+                            },
+                        )
+                        for identity, url in urls.items()
+                    ),
+                    ("query", {"query": "failed", "candidate_ids": sorted(deferred)}),
+                    ("query", {"query": "Probe inspect documentation", "candidate_ids": sorted(deferred)}),
+                )
+            self.assertLess(len(body), min(wire_sizes[0], 45_000), "follow-up grew beyond its wire budget")
+            self.assertEqual([message["role"] for message in messages], ["system", "user"])
+            self.assertLessEqual(len(records), 8)
+            self.assertFalse(completed.intersection(records))
+            self.assertEqual(prompt["grounding_call_budget"], 25)
+            self.assertLessEqual(len(prompt["evidence"]), 8)
+            seen.update(records)
+            evidence: dict[str, list[tuple[str, str]]] = {}
+            for page in prompt["evidence"]:
+                if QUOTE in page["content"]:
+                    for identity, evidence_id in page["evidence_ids"].items():
+                        evidence.setdefault(identity, []).append((page["url"], evidence_id))
+            if len(wire_sizes) == 2:
+                self.assertEqual(set(evidence), records.keys())
+            calls: list[tuple[str, dict[str, JsonValue]]] = []
+            if missing := deferred.intersection(records) - evidence.keys():
+                self.assertEqual(prompt["remaining_grounding_calls"], 1)
+                for identity in missing:
+                    self.assertIn(URL, {hit["url"] for hit in prompt["discoveries"][identity]})
+                    self.assertIn(identity, prompt["retrieval_errors"])
+                pending_ids: list[JsonValue] = [identity for identity in sorted(deferred - completed)]
+                calls.append(("page_fetch", {"url": URL, "candidate_ids": pending_ids}))
+            outcomes: list[JsonValue] = []
+            for identity, record in records.items():
+                if identity not in evidence:
+                    continue
+                row_evidence = evidence[identity]
+                outcome = submitted(
+                    record,
+                    [evidence_id for _, evidence_id in row_evidence],
+                    documentation_urls=[url for url, _ in row_evidence],
+                )
+                if rejected is None:
+                    rejected = identity
+                    outcome["row_input_fingerprint"] = "incorrect"
+                else:
+                    if identity == rejected:
+                        self.assertIn(identity, prompt["submission_errors"])
+                    completed.add(identity)
+                outcomes.append(outcome)
+            if outcomes:
+                calls.append(("finalize", {"outcomes": outcomes}))
+            return tool_replies(*calls)
+
+        config = batch_config(out).model_copy(
+            update={
+                "inference_mode": "plain",
+                "capacity": None,
+                "grounding_calls_per_command": 1,
+                "maximum_model_turns": 8,
+            }
+        )
+        model = remote_model().model_copy(update={"max_output_tokens": 8192})
+        with (
+            live_mcp_fixture(pages) as provider_calls,
+            patch("codebench_pipeline.batch_labeling.plain_complete", side_effect=reply),
+        ):
+            attempts = annotate_batches(candidates, make_rules(), model, config, out)
+        self.assertEqual(seen, {row.candidate_id for row in candidates})
+        self.assertEqual([attempt.status for attempt in attempts], ["success"] * 25)
+        self.assertEqual(len(provider_calls), 25)
+        (transcript_path,) = (out / "batches").glob("*/transcript.json")
+        transcript = json.loads(transcript_path.read_bytes())
+        self.assertEqual(transcript["provider_calls"], 25)
+        self.assertEqual(
+            sum(
+                "page" in json.loads(message["content"])
+                for message in transcript["messages"]
+                if message["role"] == "tool"
+            ),
+            23,
+        )
+        for candidate, attempt in zip(candidates, attempts, strict=True):
+            proof = LiveSupport.model_validate_json(
+                (out / attempt.attempt_evidence_reference).with_name("verified.json").read_bytes()
+            )
+            proof.verify(candidate, attempt, batch_config(out).grounding)
+            expected_urls = {urls.get(candidate.candidate_id, URL)}
+            if candidate.candidate_id == multi_page_row:
+                expected_urls.add(urls[second_page_row])
+            self.assertEqual(
+                {page.url: page.content for page in proof.pages.values()},
+                {url: pages[url] for url in expected_urls},
+            )
+
     def test_long_page_shows_a_verbatim_window_containing_the_relevant_flag(self) -> None:
         body = (
             ("Navigation\n" * 200)
