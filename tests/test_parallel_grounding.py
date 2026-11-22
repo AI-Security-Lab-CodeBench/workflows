@@ -3,25 +3,36 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
-from collections import deque
 from collections.abc import AsyncGenerator, Awaitable, Callable
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from pathlib import Path
 from threading import Event, Lock
+from time import monotonic_ns
 from typing import Literal
 from unittest.mock import patch
 
 import anyio
 import httpx
+from httpx import AsyncClient
 from mcp.types import CallToolResult, TextContent
+from pydantic import JsonValue, TypeAdapter
 
-from codebench_pipeline import live_grounding
+from codebench_pipeline import keenable_admission, keenable_provider, live_grounding
 from codebench_pipeline.grounding_tools import GroundingCredentials, GroundingFiles, LiveGroundingConfig
+from codebench_pipeline.keenable_admission import KeenableAdmissionLedger
 from codebench_pipeline.keenable_policy import KeenableError
+from codebench_pipeline.keenable_provider import (
+    KeenableAdmission,
+    KeenableIncident,
+    KeenableTransport,
+    admit_tool_dispatch,
+)
+from codebench_pipeline.keenable_snippets import DiscoveryRun
 from codebench_pipeline.live_grounding import LiveGrounding, LiveReceipt
 
 _KEY = "synthetic-provider-key"
+_SECOND_KEY = "secondary-provider-key"
 _URL = "https://example.org/docs"
 _SCOPE = {"first", "second"}
 
@@ -44,7 +55,11 @@ def _interval(receipt: LiveReceipt) -> tuple[int, int]:
     return start, end
 
 
-def _mcp_client(body: str, *, tool_error: bool, status: int) -> httpx.AsyncClient:
+def _mcp_client(
+    body: str, *, tool_error: bool, statuses: tuple[int, ...]
+) -> Callable[..., httpx.AsyncClient]:
+    responses = iter(statuses)
+
     def respond(request: httpx.Request) -> httpx.Response:
         message = json.loads(request.content)
         match message["method"]:
@@ -64,14 +79,22 @@ def _mcp_client(body: str, *, tool_error: bool, status: int) -> httpx.AsyncClien
                     ]
                 }
             case "tools/call":
+                status = next(responses)
                 if status != 200:
-                    return httpx.Response(status)
+                    return httpx.Response(
+                        status, headers={"Retry-After": "0"}, text=f"raw provider error for {_KEY}"
+                    )
                 result = {"content": [{"type": "text", "text": body}], "isError": tool_error}
             case _:
                 raise AssertionError("Unexpected synthetic MCP request")
         return httpx.Response(200, json={"jsonrpc": "2.0", "id": message["id"], "result": result})
 
-    return httpx.AsyncClient(transport=httpx.MockTransport(respond))
+    def client(*, headers: dict[str, str], timeout: float, trust_env: bool) -> httpx.AsyncClient:
+        return AsyncClient(
+            headers=headers, timeout=timeout, trust_env=trust_env, transport=httpx.MockTransport(respond)
+        )
+
+    return client
 
 
 class _Provider:
@@ -79,26 +102,29 @@ class _Provider:
         self.respond = respond
 
     async def call_tool(self, name: str, arguments: dict[str, str | int | bool]) -> CallToolResult:
+        await admit_tool_dispatch()
         value = str(arguments["query" if name == "search_web_pages" else "url"])
         return CallToolResult(content=[TextContent(type="text", text=await self.respond(name, value))])
 
     @asynccontextmanager
     async def session(self, key: str) -> AsyncGenerator[_Provider]:
-        assert key == _KEY
+        assert key in {_KEY, _SECOND_KEY}
         yield self
 
 
 class ParallelGroundingTests(unittest.TestCase):
     def setUp(self) -> None:
         self.root = Path(self.enterContext(tempfile.TemporaryDirectory()))
-        self.enterContext(patch.object(live_grounding, "_STARTS", deque[int]()))
+        self.enterContext(patch.object(keenable_provider, "_ADMISSION", KeenableAdmission()))
 
-    def broker(self, name: str, *, slots: int = 20, total_bytes: int = 4096) -> LiveGrounding:
+    def broker(
+        self, name: str, *, slots: int = 20, total_bytes: int = 4096, key: str = _KEY
+    ) -> LiveGrounding:
         return LiveGrounding(
             LiveGroundingConfig(
                 allowed_domains=["example.org"], maximum_total_response_bytes=total_bytes, timeout=5
             ),
-            GroundingCredentials(keenable=_KEY),
+            GroundingCredentials(keenable=key),
             GroundingFiles(self.root / name),
             slots,
         )
@@ -107,7 +133,7 @@ class ParallelGroundingTests(unittest.TestCase):
         self.enterContext(patch.object(live_grounding, "search_session", _Provider(respond).session))
 
     def test_mcp_task_groups_preserve_known_failure_codes(self) -> None:
-        marker = "synthetic confidential provider content"
+        marker = "synthetic confidential provider content claiming HTTP 500 and 429 with Retry-After"
         oversized_hit = json.dumps({"results": [{"url": _URL, "snippet": marker + "x" * 501}]})
         cases = (
             (_query("provider error"), marker, True, 200, "provider_search_failed"),
@@ -118,23 +144,53 @@ class ParallelGroundingTests(unittest.TestCase):
                 json.dumps({"url": _URL, "content": [marker]}),
                 False,
                 200,
-                "invalid_grounding_arguments_or_response",
+                "provider_response_invalid",
             ),
             (_fetch(_URL), marker, True, 200, "provider_fetch_failed"),
-            (_query("http failure"), "", False, 429, "provider_transport_failed"),
+            (_query("http failure"), marker, False, 429, "provider_http_status"),
         )
         for index, ((tool, arguments), body, tool_error, status, expected) in enumerate(cases):
             with self.subTest(expected=expected):
                 broker = self.broker(str(index))
-                client = _mcp_client(body, tool_error=tool_error, status=status)
-                with patch("codebench_pipeline.keenable_mcp.httpx.AsyncClient", return_value=client):
+                client = _mcp_client(body, tool_error=tool_error, statuses=(status,) * 4)
+                with patch("codebench_pipeline.keenable_mcp.httpx.AsyncClient", side_effect=client):
                     receipt = broker.call(tool, arguments, _SCOPE)
                 path = self.root / str(index) / "operation-000/receipt.json"
                 persisted = path.read_text()
                 self.assertEqual(receipt.error, expected)
+                assert receipt.provider_error is not None
+                self.assertEqual(receipt.provider_error.code, expected)
+                self.assertEqual(receipt.provider_error.status, 429 if status == 429 else None)
                 self.assertEqual(LiveReceipt.model_validate_json(persisted).error, expected)
                 self.assertNotIn(marker, persisted)
                 self.assertEqual((broker.response_bytes, broker.pages), (0, {}))
+                self.assertEqual(broker.incidents, {})
+
+    def test_recovered_http_500_keeps_redacted_audit_separate_from_success(self) -> None:
+        broker = self.broker("recovered")
+        marker = "private-page-marker"
+        client = _mcp_client(_page(_URL), tool_error=False, statuses=(500, 200))
+        tool, arguments = _fetch(f"{_URL}/{marker}")
+        with (
+            self.assertLogs("codebench_pipeline.keenable_provider", level="WARNING") as logs,
+            patch("codebench_pipeline.keenable_mcp.httpx.AsyncClient", side_effect=client),
+        ):
+            receipt = broker.call(tool, arguments, _SCOPE)
+
+        self.assertEqual((receipt.error, receipt.provider_error), (None, None))
+        self.assertIsNotNone(receipt.page_id)
+        operation = self.root / "recovered/operation-000"
+        persisted = (operation / "provider-incidents.json").read_text()
+        self.assertNotIn(marker, persisted)
+        self.assertNotIn(_URL, persisted)
+        self.assertNotIn(_KEY, persisted)
+        (incident,) = [KeenableIncident.model_validate(record) for record in json.loads(persisted)]
+        self.assertEqual(broker.incidents, {0: (incident,)})
+        self.assertEqual((incident.tool, incident.attempt, incident.error.status), ("fetch", 1, 500))
+        (event,) = logs.records
+        self.assertEqual(event.getMessage(), "keenable.server_error status=500 attempt=1")
+        self.assertIsNone(event.exc_info)
+        self.assertNotIn("keenable.server_error", (operation / "receipt.json").read_text())
 
     def test_mixed_group_does_not_guess_a_single_known_cause(self) -> None:
         async def respond(_name: str, _query_value: str) -> str:
@@ -147,6 +203,26 @@ class ParallelGroundingTests(unittest.TestCase):
         tool, arguments = _query("mixed provider errors")
         receipt = self.broker("mixed").call(tool, arguments, _SCOPE)
         self.assertEqual(receipt.error, "provider_transport_failed")
+
+    def test_numbered_credential_is_rejected_in_arguments_and_responses(self) -> None:
+        additional = 'extra"provider-key'
+
+        async def respond(_name: str, _query_value: str) -> str:
+            return json.dumps({"results": [{"url": _URL, "snippet": additional}]})
+
+        self.provider(respond)
+        broker = self.broker("numbered")
+        broker.credentials = GroundingCredentials.bind(
+            broker.config, {"KEENABLE_API_KEY": _KEY, "KEENABLE_API_KEY_1": additional}.get
+        )
+        blocked, filtered = broker.call_many(
+            [_query(f"search {additional}"), _query("safe question")], _SCOPE
+        )
+
+        self.assertEqual(blocked.error, "sensitive_grounding_arguments")
+        self.assertEqual((filtered.error, filtered.discovery), (None, ()))
+        for path in (self.root / "numbered").rglob("*.json"):
+            self.assertNotIn("extra", path.read_text())
 
     def test_query_calls_overlap_and_receipts_bind_in_request_order(self) -> None:
         first_started, second_started = anyio.Event(), anyio.Event()
@@ -202,7 +278,7 @@ class ParallelGroundingTests(unittest.TestCase):
             [
                 "invalid_candidate_scope",
                 "sensitive_grounding_arguments",
-                "provider_transport_failed",
+                "provider_timeout",
                 None,
                 "grounding_budget_exhausted",
             ],
@@ -257,7 +333,7 @@ class ParallelGroundingTests(unittest.TestCase):
             return '{"results":[]}'
 
         self.provider(respond)
-        first, second = self.broker("capacity-a"), self.broker("capacity-b")
+        first, second = self.broker("capacity-a"), self.broker("capacity-b", key=_SECOND_KEY)
         with ThreadPoolExecutor(2) as threads:
             wave_a = threads.submit(first.call_many, [_query(str(i)) for i in range(5)], _SCOPE)
             try:
@@ -287,3 +363,140 @@ class ParallelGroundingTests(unittest.TestCase):
         starts = sorted(_interval(receipt)[0] for receipt in receipts)
         self.assertLess(starts[9] - starts[0], 1_000_000_000)
         self.assertTrue(all(later - earlier >= 1_000_000_000 for earlier, later in zip(starts, starts[10:])))
+
+    def test_mock_wire_starts_follow_shared_rate_despite_nonuniform_mcp_handshakes(self) -> None:
+        self._assert_mock_wire_window(staggered=True)
+
+    def test_mock_wire_rate_survives_forward_wall_clock_step(self) -> None:
+        self._assert_mock_wire_window(staggered=False, wall_step=2_000_000_000)
+
+    def _assert_mock_wire_window(self, *, staggered: bool, wall_step: int = 0) -> None:
+        ledger = KeenableAdmissionLedger(self.root / "ledger")
+        broker = self.broker("wire")
+        config = broker.config.model_copy(update={"timeout": 8})
+        broker.credentials = GroundingCredentials.bind(
+            config, {"KEENABLE_API_KEY": _KEY}.get, keenable_ledger=ledger
+        )
+        broker.config = config
+        credentials = broker.credentials.keenable_pool
+        assert credentials is not None
+        collection = DiscoveryRun(self.root, KeenableTransport(credentials, ledger=ledger))
+        wire: list[tuple[int, str]] = []
+        lock = Lock()
+        first_five_initializing = Event()
+        initializations = 0
+        wall_offset = 0
+        obj = TypeAdapter(dict[str, JsonValue])
+        string = TypeAdapter(str)
+
+        async def respond(request: httpx.Request) -> httpx.Response:
+            nonlocal initializations, wall_offset
+            message = obj.validate_json(request.content)
+            result: dict[str, JsonValue]
+            match message["method"]:
+                case "initialize":
+                    with lock:
+                        index = initializations
+                        initializations += 1
+                        if initializations == 5:
+                            first_five_initializing.set()
+                    if staggered and index < 5:
+                        await anyio.sleep(0.68 + index * 0.02)
+                    result = {
+                        "protocolVersion": obj.validate_python(message["params"])["protocolVersion"],
+                        "capabilities": {},
+                        "serverInfo": {"name": "synthetic", "version": "1"},
+                    }
+                case "notifications/initialized":
+                    return httpx.Response(202)
+                case "tools/list":
+                    result = {
+                        "tools": [
+                            {"name": name, "inputSchema": {"type": "object"}}
+                            for name in ("search_web_pages", "fetch_page_content")
+                        ]
+                    }
+                case "tools/call":
+                    params = obj.validate_python(message["params"])
+                    payload = obj.validate_python(params["arguments"])
+                    name = string.validate_python(params["name"])
+                    operation = string.validate_python(payload.get("query", name))
+                    with lock:
+                        wire.append((monotonic_ns(), operation))
+                        if len(wire) == 10:
+                            wall_offset = wall_step
+                    text = '{"results":[]}' if name == "search_web_pages" else _page(_URL)
+                    result = {"content": [{"type": "text", "text": text}]}
+                case _:
+                    raise AssertionError("Unexpected synthetic MCP request")
+            return httpx.Response(200, json={"jsonrpc": "2.0", "id": message["id"], "result": result})
+
+        def client(*, headers: dict[str, str], timeout: float, trust_env: bool) -> AsyncClient:
+            return AsyncClient(
+                headers=headers, timeout=timeout, trust_env=trust_env, transport=httpx.MockTransport(respond)
+            )
+
+        actions: list[tuple[Literal["query", "page_fetch"], str]] = [
+            *(_query(f"labeling {i}") for i in range(13)),
+            _fetch(_URL),
+        ]
+        with (
+            patch.object(keenable_admission, "time_ns", lambda: monotonic_ns() + wall_offset, create=True),
+            patch("codebench_pipeline.keenable_mcp.httpx.AsyncClient", side_effect=client),
+            ThreadPoolExecutor(2) as threads,
+        ):
+            wave = threads.submit(broker.call_many, actions, _SCOPE)
+            self.assertTrue(first_five_initializing.wait(5))
+            discovered = threads.submit(anyio.run, collection.search, "collection", (8, 500), 1)
+            receipts = wave.result()
+            self.assertEqual(discovered.result().results, ())
+
+        self.assertEqual([r.error for r in receipts], [None] * 14)
+        self.assertEqual(len(wire), 15)
+        self.assertIn("collection", [operation for _, operation in wire])
+        self.assertIn("fetch_page_content", [operation for _, operation in wire])
+        starts = sorted(start for start, _ in wire)
+        self.assertGreaterEqual(
+            min(later - earlier for earlier, later in zip(starts, starts[10:])),
+            1_000_000_000,
+            f"Rolling window exceeded; wire offsets in seconds: {[(start - starts[0]) / 1e9 for start in starts]}",
+        )
+
+    def test_sdk_serialized_credential_echo_is_not_retained_in_page_or_search_receipt(self) -> None:
+        key = r"synthetic\"serialized-field-marker"
+        decoded = 'synthetic"serialized-field-marker'
+        returned_url = f"{_URL}/{decoded}"
+        cases = (
+            (_fetch(_URL), {"url": returned_url, "content": "Synthetic page"}),
+            (_query("synthetic query"), {"results": [{"url": _URL, "snippet": decoded}]}),
+        )
+        for index, ((tool, arguments), body) in enumerate(cases):
+            with self.subTest(tool=tool):
+                envelope = json.dumps(body)
+                self.assertIn(key, envelope)
+                self.assertNotIn(key, decoded)
+                name = f"serialized-{index}"
+                broker = self.broker(name)
+                broker.credentials = GroundingCredentials.bind(
+                    broker.config, {"KEENABLE_API_KEY": _KEY, "KEENABLE_API_KEY_1": key}.get
+                )
+                client = _mcp_client(envelope, tool_error=False, statuses=(200,))
+                with (
+                    patch("codebench_pipeline.keenable_mcp.httpx.AsyncClient", side_effect=client),
+                    self.assertNoLogs("codebench_pipeline.keenable_provider", level="WARNING"),
+                ):
+                    receipt = broker.call(tool, arguments, _SCOPE)
+
+                self.assertEqual(
+                    (receipt.page_id, receipt.response_sha256, receipt.discovery), (None, None, ())
+                )
+                if tool == "page_fetch":
+                    assert receipt.provider_error is not None
+                    self.assertEqual(receipt.provider_error.code, "sensitive_provider_response")
+                else:
+                    self.assertIsNone(receipt.error)
+                self.assertEqual(broker.pages, {})
+                artifact_dir = self.root / name
+                self.assertEqual(list(artifact_dir.glob("pages/*.json")), [])
+                for path in artifact_dir.rglob("*.json"):
+                    self.assertNotIn(key.encode(), path.read_bytes(), path.name)

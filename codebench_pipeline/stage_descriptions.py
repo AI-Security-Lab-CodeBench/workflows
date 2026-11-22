@@ -64,8 +64,10 @@ Quarantined records remain here, not in the downstream human-review queue.
 ReAct conversation for each row, with up to `row_concurrency` active rows (default 8).
 In each grounding iteration the model can ask Keenable MCP to run multiple searches or
 fetches. Their observations all return before the model reasons again. At most five
-retrievals run in a shared wave across rows, subject to the shared 10 calls/sec service
-limit. A row can use several calls per iteration; there is no five-call total per row.
+retrievals run in a shared wave across rows. Searches and fetches draw on the same
+10 calls/sec budget for each configured organization, even when it has several keys.
+Transient retries do not consume a model turn; server errors are recorded separately
+even if retrieval subsequently succeeds. There is no five-call total per row.
 Only fetched pages from configured trusted origins can support the label.
 
 **Input:** Eligible filtered commands, labeling rules and mapped inference settings.
@@ -98,7 +100,9 @@ no human approval. Invalid identities, routing or evidence fail validation.
 **How it works:** Failed outcomes are selected from the same current labeling-attempt
 table that supplies successful annotations. Original commands, failure reasons and
 evidence references are retained without manufacturing taxonomy or confidence values.
-Inspect these rows to distinguish exhausted documentation grounding from invalid output.
+Inspect the attempt evidence to distinguish a terminal provider error from missing
+documentation or invalid model output. A recovered provider error is recorded with
+the attempt; it does not by itself put a supported label in the failure table.
 
 **Input:** The current complete labeling-attempt table.
 **Goal:** Make unsupported and failed labeling attempts visible for audit and targeted repair.

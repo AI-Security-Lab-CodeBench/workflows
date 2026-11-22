@@ -20,6 +20,8 @@ from pydantic import BaseModel, ConfigDict, Field, JsonValue, TypeAdapter, Valid
 from scripts.dataset_schema import SECRET_PATTERNS
 
 from .grounding_policy import OperationGrant
+from .keenable_admission import KeenableAdmissionLedger
+from .keenable_provider import KeenableCredentials
 from .object_store import safe_key
 from .repository_receipts import publish_bytes
 from .storage import IntegrityError
@@ -111,20 +113,29 @@ Provider = Literal["context7", "keenable"]
 class GroundingCredentials:
     keenable: str | None = field(default=None, repr=False)
     context7: str | None = field(default=None, repr=False)
+    keenable_pool: KeenableCredentials | None = field(default=None, repr=False)
+    keenable_ledger: KeenableAdmissionLedger | None = field(default=None, repr=False)
 
     @classmethod
     def bind(
-        cls, config: GroundingConfig | LiveGroundingConfig, lookup: Callable[[str], str | None]
+        cls,
+        config: GroundingConfig | LiveGroundingConfig,
+        lookup: Callable[[str], str | None],
+        *,
+        keenable_ledger: KeenableAdmissionLedger | None = None,
     ) -> GroundingCredentials:
         context7 = lookup(config.context7_api_key_env) if isinstance(config, GroundingConfig) else None
-        return cls(lookup(config.keenable_api_key_env), context7)
+        primary = lookup(config.keenable_api_key_env)
+        return cls(primary, context7, KeenableCredentials.bind(primary, lookup), keenable_ledger)
 
     @classmethod
     def from_environment(cls, config: GroundingConfig | LiveGroundingConfig) -> GroundingCredentials:
         return cls.bind(config, os.environ.get)
 
     def contains(self, text: str) -> bool:
-        return any(key is not None and bool(key) and key in text for key in (self.keenable, self.context7))
+        return any(
+            key is not None and bool(key) and key in text for key in (self.keenable, self.context7)
+        ) or (self.keenable_pool is not None and self.keenable_pool.contains(text))
 
 
 class DocumentationQuery(_Frozen):

@@ -21,6 +21,10 @@ volumes and real settings in ignored env files. No host source mounts, socket
 mounts, host networking, or machine paths in tracked configuration. Never log
 resolved secret-bearing config. Leave the shared stack running after work.
 
+For additional Keenable organizations, put numbered `KEENABLE_API_KEY_N` entries
+in the private pipeline env file; use the same `KEENABLE_ORG`/`KEENABLE_ORG_N` label
+only for keys that share an organization's quota.
+
 ## Verify a change
 
 - Run **only affected E2E scenarios**, including affected downstream consumers:
@@ -49,6 +53,8 @@ resolved secret-bearing config. Leave the shared stack running after work.
   data; never execute them. Execute only reviewed, hash-pinned configuration ETL.
 - Preserve original evidence and receipts. Label each row from its own fetched
   documentation. Respect the shared provider limit across rows.
+  Grounding is limited to 10 calls/sec per organization across searches and
+  fetches; additional keys for that organization do not increase its limit.
   Deduplicate only proven exact matches; apply eligibility before review and
   caps after approval. An empty queue needs no human decision. A nonempty queue
   requires real decisions and completion for the current snapshot.

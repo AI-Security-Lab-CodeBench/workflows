@@ -9,9 +9,11 @@ from unittest.mock import patch
 from httpx import AsyncClient, MockTransport, Request, Response
 from pydantic import JsonValue
 
+from codebench_pipeline.dataframe_io import frame_bytes
 from codebench_pipeline.keenable_decisions import DiscoveryModel
 from codebench_pipeline.keenable_inspection import AuthoredInspection, InspectionTaxonomy
 from codebench_pipeline.keenable_policy import KeenableError, KeenableSnippetSettings
+from codebench_pipeline.keenable_provider import KeenableCredentials, KeenableTransport
 from codebench_pipeline.keenable_snippets import (
     DiscoveryRun,
     SnippetCollectionReceipt,
@@ -28,11 +30,20 @@ SNIPPET_SETTINGS = KeenableSnippetSettings(seeds=("docker_inventory",))
 @dataclass(slots=True)
 class KeenableWire:
     results: list[dict[str, JsonValue]]
+    keys: tuple[str, ...] = (SNIPPET_KEY,)
+    fail_first_search: bool = False
     calls: list[str] = field(default_factory=list)
     queries: list[str] = field(default_factory=list)
+    search_keys: list[str] = field(default_factory=list)
+
+    def client(self, *, headers: dict[str, str], timeout: float, trust_env: bool) -> AsyncClient:
+        return AsyncClient(
+            headers=headers, timeout=timeout, trust_env=trust_env, transport=MockTransport(self.respond)
+        )
 
     def respond(self, request: Request) -> Response:
-        if str(request.url) != "https://api.keenable.ai/mcp" or request.headers["X-API-Key"] != SNIPPET_KEY:
+        key = request.headers["X-API-Key"]
+        if str(request.url) != "https://api.keenable.ai/mcp" or key not in self.keys:
             raise AssertionError("Unexpected MCP destination or credential")
         message = json.loads(request.content)
         method = message["method"]
@@ -60,6 +71,9 @@ class KeenableWire:
                 ):
                     raise AssertionError("Expected the configured snippet search")
                 self.queries.append(message["params"]["arguments"]["query"])
+                self.search_keys.append(key)
+                if self.fail_first_search and len(self.queries) == 1:
+                    return Response(500, text=" ".join(self.keys), headers={"Retry-After": "0"})
                 return Response(
                     200,
                     json={
@@ -82,7 +96,109 @@ class KeenableWire:
 class KeenableSnippetTests(TestCase):
     def setUp(self) -> None:
         self.evidence = Path(self.enterContext(TemporaryDirectory()))
-        self.access = DiscoveryRun(self.evidence, SNIPPET_KEY)
+        self.access = DiscoveryRun(self.evidence, snippet_transport())
+
+    def test_replay_a_serialized_extracted_description_cannot_echo_a_numbered_key(self) -> None:
+        key = 'synthetic-retained-description-marker"'
+        unsafe = {
+            "url": SNIPPET_URL,
+            "description": "",
+            "snippet": "```sh\n# synthetic-retained-description-marker\ndocker system df\n```",
+        }
+        for value in (*unsafe.values(), json.dumps(unsafe, separators=(",", ":"))):
+            self.assertNotIn(key, value)
+        safe = {"url": SNIPPET_URL, "snippet": "```sh\ndocker system df\n```"}
+        transport = KeenableTransport(KeenableCredentials.bind(SNIPPET_KEY, {"KEENABLE_API_KEY_1": key}.get))
+        wire = KeenableWire([{**unsafe}, {**safe}], keys=(SNIPPET_KEY, key))
+        with patch("codebench_pipeline.keenable_mcp.httpx.AsyncClient", side_effect=wire.client):
+            frame = provider_snippet_candidates(SNIPPET_SETTINGS, DiscoveryRun(self.evidence, transport))
+        result = self.evidence / "discovery-01-result.json"
+        for raw in (result.read_bytes(), frame.attrs["keenable_receipt_json"].encode()):
+            self.assertNotIn(key.encode(), raw)
+            receipt = SnippetCollectionReceipt.model_validate_json(raw)
+            self.assertEqual([hit.outcome for hit in receipt.searches[0].hits], ["sensitive", "extracted"])
+            (candidate,) = receipt.candidates.values()
+            self.assertEqual(receipt.read_body(candidate.body_sha256), safe["snippet"].encode())
+        self.assertEqual(frame.command.tolist(), ["docker system df"])
+        self.assertNotIn(key.encode(), frame_bytes(frame))
+
+    def test_derived_feedback_and_frame_values_do_not_escape_in_safe_sibling_outputs(self) -> None:
+        feedback_key = 'storage"]'
+        position_only = "```sh\n# Fixture comment\n docker system df\n```"
+        start = position_only.index("docker")
+        frame_key = f"bytes:{start}:{start + len('docker system df')}"
+        transport = KeenableTransport(
+            KeenableCredentials.bind(
+                SNIPPET_KEY, {"KEENABLE_API_KEY_1": feedback_key, "KEENABLE_API_KEY_2": frame_key}.get
+            )
+        )
+        shared_url = SNIPPET_URL
+        wire = KeenableWire(
+            [
+                {"url": shared_url, "snippet": "```sh\ndocker ps\n```", "description": "VOLUMES STORAGE"},
+                {"url": shared_url, "snippet": position_only},
+                {"url": shared_url, "snippet": "```sh\ndocker system df\n```", "description": "image sizes"},
+            ],
+            keys=(SNIPPET_KEY, feedback_key, frame_key),
+        )
+        requests: list[bytes] = []
+
+        def reply(_url: str, body: bytes, _key: str | None, _timeout: float) -> HTTPResponse:
+            requests.append(body)
+            return model_reply(
+                {"action": "query", "seed": "docker_inventory", "context": "disk usage"}
+                if len(requests) == 1
+                else {"action": "finalize", "seed": None}
+            )
+
+        with (
+            patch("codebench_pipeline.keenable_mcp.httpx.AsyncClient", side_effect=wire.client),
+            patch("codebench_pipeline.keenable_decisions.complete", side_effect=reply),
+        ):
+            frame = provider_snippet_candidates(
+                *discovery_settings(2, DiscoveryRun(self.evidence, transport))
+            )
+        feedback = json.loads(json.loads(requests[1])["messages"][1]["content"])["previous"][0]
+        self.assertEqual(feedback["excerpt_context"], ["image sizes"])
+        self.assertEqual(frame.command.tolist(), ["docker system df"])
+        raw = frame.attrs["keenable_receipt_json"].encode()
+        receipt = SnippetCollectionReceipt.model_validate_json(raw)
+        self.assertEqual(
+            [hit.outcome for hit in receipt.searches[0].hits], ["sensitive", "sensitive", "extracted"]
+        )
+        outputs = [
+            raw,
+            frame_bytes(frame),
+            *requests,
+            *(path.read_bytes() for path in self.evidence.glob("*.json")),
+        ]
+        for key in (feedback_key, frame_key):
+            self.assertTrue(all(key.encode() not in output for output in outputs))
+
+    def test_final_receipt_is_checked_even_when_every_hit_was_safe(self) -> None:
+        key = '"stop":"budget"'
+        transport = KeenableTransport(KeenableCredentials.bind(SNIPPET_KEY, {"KEENABLE_API_KEY_1": key}.get))
+        wire = KeenableWire([], keys=(SNIPPET_KEY, key))
+        with (
+            patch("codebench_pipeline.keenable_mcp.httpx.AsyncClient", side_effect=wire.client),
+            self.assertRaisesRegex(KeenableError, "^sensitive_discovery_output$"),
+        ):
+            provider_snippet_candidates(SNIPPET_SETTINGS, DiscoveryRun(self.evidence, transport))
+        self.assertEqual(len(wire.queries), 1)
+        self.assertTrue(all(key.encode() not in path.read_bytes() for path in self.evidence.glob("*.json")))
+
+    def test_nested_model_feedback_json_is_checked_before_dispatch(self) -> None:
+        key = '"available":'
+        transport = KeenableTransport(KeenableCredentials.bind(SNIPPET_KEY, {"KEENABLE_API_KEY_1": key}.get))
+        with (
+            patch("codebench_pipeline.keenable_decisions.complete") as model,
+            patch("codebench_pipeline.keenable_mcp.httpx.AsyncClient") as mcp,
+            self.assertRaisesRegex(KeenableError, "^sensitive_discovery_output$"),
+        ):
+            provider_snippet_candidates(*discovery_settings(2, DiscoveryRun(self.evidence, transport)))
+        model.assert_not_called()
+        mcp.assert_not_called()
+        self.assertEqual(list(self.evidence.iterdir()), [])
 
     def test_same_page_can_contribute_distinct_literal_snippets(self) -> None:
         first = "Préface\r\n```bash\r\n  $ docker container ls --all\r\n```\r\n"
@@ -135,6 +251,31 @@ class KeenableSnippetTests(TestCase):
         )
         self.assertEqual(receipt.snippets, {})
         self.assertNotIn(SNIPPET_KEY, serialized)
+
+    def test_serialized_key_echo_excludes_an_otherwise_valid_collection_hit(self) -> None:
+        key = r"synthetic\"collection-key"
+        decoded_description = 'synthetic"collection-key'
+        hit: dict[str, JsonValue] = {
+            "url": SNIPPET_URL,
+            "snippet": "```sh\ndocker system df\n```",
+            "description": decoded_description,
+        }
+        self.assertIn(key, json.dumps(hit))
+        self.assertNotIn(key, decoded_description)
+        credentials = KeenableCredentials.bind(SNIPPET_KEY, {"KEENABLE_API_KEY_1": key}.get)
+        access = replace(self.access, transport=KeenableTransport(credentials))
+        wire = KeenableWire([hit], keys=(SNIPPET_KEY, key))
+        client = AsyncClient(headers={"X-API-Key": SNIPPET_KEY}, transport=MockTransport(wire.respond))
+        with patch("codebench_pipeline.keenable_mcp.httpx.AsyncClient", return_value=client):
+            frame = provider_snippet_candidates(SNIPPET_SETTINGS, access)
+
+        self.assertTrue(frame.empty)
+        serialized = frame.attrs["keenable_receipt_json"]
+        self.assertNotIn(key, serialized)
+        receipt = SnippetCollectionReceipt.model_validate_json(serialized)
+        (observation,) = receipt.searches[0].hits
+        self.assertEqual(observation.outcome, "sensitive")
+        self.assertEqual(receipt.snippets, {})
 
     def test_discovery_rejects_out_of_scope_commands_even_from_a_successful_search(self) -> None:
         lines = (
@@ -260,6 +401,10 @@ class KeenableSnippetTests(TestCase):
         ):
             provider_snippet_candidates(archived, self.access)
         network.assert_not_called()
+
+
+def snippet_transport() -> KeenableTransport:
+    return KeenableTransport(KeenableCredentials.bind(SNIPPET_KEY, lambda _: None))
 
 
 def discovery_settings(

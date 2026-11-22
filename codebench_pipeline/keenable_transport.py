@@ -18,6 +18,7 @@ from urllib.parse import urlsplit
 from .keenable_policy import MAX_RESULTS, PROVIDER, QUERIES, RESPONSE_BYTES, Case, KeenableError
 
 TIMEOUT: Final = 30.0
+MAX_RETRY_AFTER_SECONDS: Final = 10**18
 
 
 class HttpStatusError(KeenableError):
@@ -99,13 +100,13 @@ def _remaining(deadline: float) -> float:
     return remaining
 
 
-def _retry_after(value: str) -> int | None:
+def retry_after_seconds(value: str) -> int | None:
     header = value.strip()
     if not header:
         return None
     if fullmatch(r"[0-9]+", header):
         digits = header.lstrip("0")
-        return 10**18 if len(digits) > 18 else int(digits or "0")
+        return MAX_RETRY_AFTER_SECONDS if len(digits) > 18 else int(digits or "0")
     try:
         until = parsedate_to_datetime(header)
     except (ValueError, OverflowError):
@@ -117,7 +118,9 @@ def _retry_after(value: str) -> int | None:
 
 def _read_response(response: HTTPResponse, expected: str, peer: str | None = None) -> bytes:
     if response.status != 200:
-        raise HttpStatusError(response.status, _retry_after(response.headers.get("Retry-After", "")), peer)
+        raise HttpStatusError(
+            response.status, retry_after_seconds(response.headers.get("Retry-After", "")), peer
+        )
     headers = response.headers
     lengths = headers.get_all("Content-Length", [])
     transfers = headers.get_all("Transfer-Encoding", [])

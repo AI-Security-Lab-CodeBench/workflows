@@ -2,11 +2,13 @@ import ast
 import hashlib
 import json
 import unittest
+from collections import Counter
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from traceback import extract_stack
 from unittest.mock import MagicMock, patch
 
+import httpx
 import pandas as pd
 from dagster import (
     AssetExecutionContext,
@@ -21,12 +23,30 @@ from dagster import (
     asset,
     materialize,
 )
+from mcp import ClientSession
 from pandera.typing import DataFrame
 from pydantic import JsonValue, TypeAdapter, ValidationError
+from test_batch_labeling import (
+    QUOTE,
+    URL,
+    batch_config,
+    live_mcp_fixture,
+    remote_model,
+    submitted,
+    tool_replies,
+    tool_reply,
+    unsupported,
+)
 from test_dataset_annotation import documentation
 from test_dataset_rules import make_candidate, make_label, make_rules
 from test_declared_dataset_graph import fixture_spec
 
+from codebench_pipeline.batch_labeling import (
+    BatchExecution,
+    LabelingGeneration,
+    prepare_batch_rows,
+    run_prepared_batches,
+)
 from codebench_pipeline.category_rules import CategoryRules
 from codebench_pipeline.config_assets import (
     GLOBAL_CONFIG,
@@ -42,16 +62,21 @@ from codebench_pipeline.dataset_assets_annotations import annotation_assets
 from codebench_pipeline.dataset_assets_sources import category_rules
 from codebench_pipeline.dataset_collection_binding import FINALIZATION_BINDING
 from codebench_pipeline.dataset_engine import implementation_signature
+from codebench_pipeline.dataset_records import CandidateRecord
 from codebench_pipeline.dataset_storage_io import RegisteredDatasetTableIO
 from codebench_pipeline.finalization_cache_reuse import materialization_attempt_succeeded
 from codebench_pipeline.finalization_publication import TableOutputAdmission
 from codebench_pipeline.finalization_table_asset import FINALIZATION_TABLE_IO
 from codebench_pipeline.finalization_table_io import finalization_table_io
+from codebench_pipeline.grounding_tools import GroundingCredentials
 from codebench_pipeline.human_review_store import HumanReviewStore
-from codebench_pipeline.labeling_outcomes import failed_attempt, label_attempt
+from codebench_pipeline.keenable_mcp import SearchHit, SearchResult
+from codebench_pipeline.labeling_checkpoint_store import LabelingCheckpointCache
+from codebench_pipeline.labeling_outcomes import LabelingAttempt, failed_attempt, label_attempt
 from codebench_pipeline.labeling_stage_settings import ProposalRules
 from codebench_pipeline.labeling_tables import failures_from_attempts, proposed_from_attempts
 from codebench_pipeline.object_store import ObjectStore
+from codebench_pipeline.openai_transport import HTTPResponse
 from codebench_pipeline.stage_implementation import ImplementationSource, processing_versions
 from codebench_pipeline.storage import IntegrityError
 from codebench_pipeline.typed_config import TypedConfig
@@ -111,8 +136,12 @@ class AnnotationProjectionAssetTests(unittest.TestCase):
         self.enterContext(
             patch("codebench_pipeline.dataset_collection_binding.finalization_binding", return_value=binding)
         )
+
+        def run_configuration(_run_id: str, _dataset_id: str) -> RegisteredConfig:
+            return self.registered
+
         self.enterContext(
-            patch.object(DataFrameIOManager, "run_configuration", side_effect=lambda *_: self.registered)
+            patch.object(DataFrameIOManager, "run_configuration", side_effect=run_configuration)
         )
         self.enterContext(
             patch(
@@ -156,6 +185,139 @@ class AnnotationProjectionAssetTests(unittest.TestCase):
             },
             instance=self.instance,
             partition_key=self.partition,
+        )
+
+    def test_terminal_provider_failure_projects_but_a_later_grounded_label_does_not(self) -> None:
+        obj = TypeAdapter(dict[str, JsonValue])
+        objects = TypeAdapter(list[dict[str, JsonValue]])
+        string = TypeAdapter(str)
+        search_calls: Counter[str] = Counter()
+
+        def reply(_url: str, body: bytes, *_: object) -> HTTPResponse:
+            messages = objects.validate_python(obj.validate_json(body)["messages"])
+            row = obj.validate_json(string.validate_python(messages[1]["content"]))
+            observations = [
+                obj.validate_json(string.validate_python(message["content"]))
+                for message in messages
+                if message["role"] == "tool"
+            ]
+            identity = string.validate_python(obj.validate_python(row["candidate"])["candidate_id"])
+            if not observations:
+                return tool_reply("query", {"query": "manual", "candidate_ids": ["wrong-row"]})
+            self.assertEqual(observations[0]["error"], "invalid_candidate_scope")
+            if len(observations) == 1:
+                return tool_replies(
+                    ("query", {"query": f"terminal {identity}", "candidate_ids": [identity]}),
+                    ("query", {"query": f"discovery {identity}", "candidate_ids": [identity]}),
+                )
+            self.assertEqual(observations[1]["error"], "provider_http_status")
+            self.assertNotIn("status", observations[1])
+            self.assertNotIn("provider_error", observations[1])
+            self.assertNotIn("error", observations[2])
+            self.assertNotIn(b"private provider response", body)
+            self.assertNotIn(b"retry_after_seconds", body)
+            if identity == "unresolved":
+                self.assertEqual(observations[2]["discovery"], [])
+                return tool_reply("finalize", {"outcome": unsupported(row)})
+            if len(observations) == 3:
+                self.assertEqual(
+                    observations[2]["discovery"], [{"url": URL, "snippet": "Operation documentation"}]
+                )
+                return tool_reply("page_fetch", {"url": URL, "candidate_ids": [identity]})
+            page = obj.validate_python(observations[3]["page"])
+            evidence_id = string.validate_python(obj.validate_python(page["evidence_ids"])[identity])
+            return tool_reply("finalize", {"outcome": submitted(row, [evidence_id])})
+
+        async def search(_session: ClientSession, query: str, _limits: tuple[int, int]) -> SearchResult:
+            search_calls[query] += 1
+            if query == "discovery unresolved":
+                return SearchResult(results=())
+            if query == "discovery recovered" and search_calls[query] > 1:
+                return SearchResult(results=(SearchHit(url=URL, snippet="Operation documentation"),))
+            status = 429 if query.startswith("terminal ") else 500
+            request = httpx.Request("POST", "https://example.org/provider")
+            response = httpx.Response(status, request=request, headers={"Retry-After": "0"})
+            raise httpx.HTTPStatusError("private provider response", request=request, response=response)
+
+        rules = self.registered.rules
+        candidates = [make_candidate(identity, rules.risks[0].id) for identity in ("unresolved", "recovered")]
+        scratch = self.home / "synthetic-labeling"
+        config = batch_config(scratch).model_copy(
+            update={
+                "inference_mode": "plain",
+                "capacity": None,
+                "maximum_grounding_turns": 3,
+                "row_concurrency": 1,
+            }
+        )
+        model = remote_model()
+        execution = BatchExecution(None, GroundingCredentials("fixture-projection-key"))
+        generation = LabelingGeneration(
+            LabelingCheckpointCache(self.home / "cache", self.home / "operations"), "a" * 64
+        )
+        prepared = prepare_batch_rows(candidates, rules, model, config, implementation="fixture-projection")
+
+        def label_rows(rows: list[CandidateRecord], out: Path) -> list[LabelingAttempt]:
+            return run_prepared_batches(
+                rows, prepared, rules, model, config, out, execution, 1_048_576, generation
+            )
+
+        with (
+            live_mcp_fixture({URL: QUOTE}),
+            patch("codebench_pipeline.live_grounding.search_snippets", side_effect=search),
+            patch("codebench_pipeline.batch_labeling.plain_complete", side_effect=reply) as infer,
+        ):
+            outcomes = label_rows(candidates, scratch)
+            infer.reset_mock()
+            resumed = self.home / "resumed"
+            self.assertEqual(label_rows(candidates[1:], resumed), outcomes[1:])
+            infer.assert_not_called()
+        self.assertEqual(
+            search_calls,
+            {
+                "terminal unresolved": 4,
+                "terminal recovered": 4,
+                "discovery unresolved": 1,
+                "discovery recovered": 2,
+            },
+        )
+        incident_path = (scratch / outcomes[1].attempt_evidence_reference).with_name(
+            "provider-incidents.json"
+        )
+        incidents = json.loads(incident_path.read_bytes())
+        self.assertEqual(list(incidents), ["2"])
+        self.assertEqual(
+            [(item["tool"], item["attempt"], item["error"]["status"]) for item in incidents["2"]],
+            [("search", 1, 500)],
+        )
+        self.assertEqual(
+            (resumed / incident_path.relative_to(scratch)).read_bytes(), incident_path.read_bytes()
+        )
+        for outcome in outcomes:
+            receipt_path = (scratch / outcome.attempt_evidence_reference).with_name("grounding.json")
+            receipts = json.loads(receipt_path.read_bytes())["provider_receipts"]
+            self.assertEqual(
+                [receipt["error"] for receipt in receipts[:2]],
+                ["invalid_candidate_scope", "provider_http_status"],
+            )
+            self.assertEqual(
+                receipts[1]["provider_error"],
+                {"code": "provider_http_status", "status": 429, "retry_after_seconds": 0},
+            )
+        binding = self.attempts.attrs[FINALIZATION_BINDING]
+        self.attempts = validated_frame(
+            [outcome.model_dump(mode="json") for outcome in outcomes], LabelingAttemptsTable
+        )
+        self.attempts.attrs[FINALIZATION_BINDING] = binding
+        run = self.materialize_projections()
+        failures = run.output_for_node(FAILURES.to_python_identifier())
+        self.assertEqual(failures["candidate_id"].tolist(), ["unresolved"])
+        self.assertEqual(failures["failure_code"].tolist(), ["provider_http_status"])
+        self.assertEqual(
+            failures["attempt_evidence_reference"].tolist(), [outcomes[0].attempt_evidence_reference]
+        )
+        self.assertEqual(
+            run.output_for_node(PROPOSED.to_python_identifier())["candidate_id"].tolist(), ["recovered"]
         )
 
     def test_projection_compute_avoids_storage_and_cache_hits_keep_receipts(self) -> None:

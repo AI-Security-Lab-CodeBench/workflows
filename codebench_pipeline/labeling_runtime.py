@@ -8,6 +8,7 @@ from codebench_pipeline.dataframe_io import DataFrameIOManager
 from codebench_pipeline.dataset_registry import DatasetRegistry
 from codebench_pipeline.grounding_tools import GroundingCredentials, LiveGroundingConfig
 from codebench_pipeline.inference_capacity import CapacityPaths
+from codebench_pipeline.keenable_admission import KeenableAdmissionLedger
 from codebench_pipeline.storage import IntegrityError
 
 
@@ -40,8 +41,14 @@ class LabelingRuntime:
     def capacity_paths(self, dataset_id: str) -> CapacityPaths:
         return DatasetRegistry(self.dataset_home).labeling_capacity_paths(dataset_id)
 
+    @property
+    def keenable_admission(self) -> KeenableAdmissionLedger:
+        return KeenableAdmissionLedger(self.dataset_home / "keenable-admission")
+
     def execution(self, model_api_key_env: str | None, grounding: LiveGroundingConfig) -> BatchExecution:
         return BatchExecution(
             model_api_key=self.credential(model_api_key_env) if model_api_key_env is not None else None,
-            grounding=GroundingCredentials.bind(grounding, self.credential),
+            grounding=GroundingCredentials.bind(
+                grounding, self.credential, keenable_ledger=self.keenable_admission
+            ),
         )

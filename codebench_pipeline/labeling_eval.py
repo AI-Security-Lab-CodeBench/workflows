@@ -18,6 +18,7 @@ from codebench_pipeline.dataset_config import AnnotationConfig
 from codebench_pipeline.dataset_records import CandidateRecord, LabelDecision
 from codebench_pipeline.dataset_registry import read_registered_spec
 from codebench_pipeline.labeling_outcomes import LabelingAttempt, validate_attempts
+from codebench_pipeline.labeling_runtime import LabelingRuntime
 from codebench_pipeline.labeling_stage_settings import LabelingRules
 from codebench_pipeline.live_grounding import LiveReceipt
 from codebench_pipeline.model_config import ModelConfig
@@ -378,6 +379,7 @@ def run_evaluation(
     concurrency: int | None = None,
     *,
     limit: int | None = None,
+    runtime: LabelingRuntime | None = None,
 ) -> dict[str, JsonValue]:
     cohort_bytes = cohort_path.read_bytes()
     cohort = EvaluationCohort.model_validate_json(cohort_bytes)
@@ -442,6 +444,7 @@ def run_evaluation(
         config.model,
         batch,
         out / "inference",
+        execution=runtime.execution(config.model.api_key_env, batch.grounding) if runtime else None,
         maximum_context_characters=config.max_request_bytes,
     )
     elapsed = time.monotonic() - started
@@ -498,10 +501,20 @@ def main() -> None:
         parser.error("--limit must be positive and cannot be used with --split heldout")
     if args.credentials_stdin:
         _credentials()
+    home = os.environ.get("CODEBENCH_HOME")
+    if not home:
+        parser.error("CODEBENCH_HOME must point to the shared pipeline dataset home")
+    runtime = LabelingRuntime.for_home(Path(home))
     match args.split:
         case "development" | "heldout" | "all" as split:
             summary = run_evaluation(
-                args.cohort, args.annotation_config, args.out, split, args.concurrency, limit=args.limit
+                args.cohort,
+                args.annotation_config,
+                args.out,
+                split,
+                args.concurrency,
+                limit=args.limit,
+                runtime=runtime,
             )
         case _:
             parser.error("Invalid evaluation split")

@@ -1,5 +1,5 @@
 import json
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Iterator, Mapping
 from contextlib import asynccontextmanager, contextmanager
 from email.message import Message
 from pathlib import Path
@@ -47,11 +47,13 @@ def remote_model() -> ModelConfig:
     return ModelConfig(provider="openai_compatible", model="fixture/model", base_url="http://fixture/v1")
 
 
-def tool_reply(name: str, arguments: dict, finish_reason: str = "tool_calls") -> HTTPResponse:
+def tool_reply(name: str, arguments: Mapping[str, object], finish_reason: str = "tool_calls") -> HTTPResponse:
     return tool_replies((name, arguments), finish_reason=finish_reason)
 
 
-def tool_replies(*calls: tuple[str, dict | str], finish_reason: str = "tool_calls") -> HTTPResponse:
+def tool_replies(
+    *calls: tuple[str, Mapping[str, object] | str], finish_reason: str = "tool_calls"
+) -> HTTPResponse:
     return HTTPResponse(
         json.dumps(
             {
@@ -71,7 +73,9 @@ def tool_replies(*calls: tuple[str, dict | str], finish_reason: str = "tool_call
                                     "type": "function",
                                     "function": {
                                         "name": name,
-                                        "arguments": args if isinstance(args, str) else json.dumps(args),
+                                        "arguments": args
+                                        if isinstance(args, str)
+                                        else json.dumps(dict(args)),
                                     },
                                 }
                                 for index, (name, args) in enumerate(calls)
@@ -457,6 +461,51 @@ class BatchLabelingTests(TestCase):
                 self.assertFalse(
                     (out / attempt.attempt_evidence_reference).with_name("verified.json").exists()
                 )
+
+    def test_numbered_key_in_decoded_fetch_url_never_enters_pages_or_model(self) -> None:
+        key = 'fixture-extra"provider-key'
+        self._assert_fetch_url_does_not_reach_model(key, key)
+
+    def test_numbered_key_in_serialized_fetch_url_never_enters_pages_or_model(self) -> None:
+        self._assert_fetch_url_does_not_reach_model(
+            r"fixture-extra\"provider-key", 'fixture-extra"provider-key'
+        )
+
+    def _assert_fetch_url_does_not_reach_model(self, key: str, decoded_url_suffix: str) -> None:
+        out = Path(self.enterContext(TemporaryDirectory()))
+        returned_url = f"{URL}/{decoded_url_suffix}"
+        observations: list[dict[str, JsonValue]] = []
+
+        def reply(_url: str, body: bytes, *_):
+            (row,), results = request_parts(body)
+            if len(results) < 2:
+                return row_retrieval(body)
+            observations.append(results[1])
+            return tool_reply("finalize", {"outcome": unsupported(row)})
+
+        with (
+            patch.dict("os.environ", {"KEENABLE_API_KEY_1": key}),
+            live_mcp_fixture({URL: QUOTE}, response_url=returned_url),
+        ):
+            (attempt,) = self.run_batch(reply, [make_candidate("a")], out)
+
+        self.assertEqual((attempt.status, attempt.documentation), ("failure", []))
+        (observation,) = observations
+        self.assertEqual(observation.get("error"), "sensitive_provider_response")
+        self.assertNotIn("page", observation)
+        self.assertNotIn("provider_error", observation)
+        retained = (out / attempt.attempt_evidence_reference).with_name("grounding.json")
+        receipt = json.loads(retained.read_bytes())["provider_receipts"][-1]
+        self.assertEqual(
+            (receipt["error"], receipt["page_id"], receipt["response_sha256"]),
+            ("sensitive_provider_response", None, None),
+        )
+        self.assertEqual(
+            receipt["provider_error"],
+            {"code": "sensitive_provider_response", "status": None, "retry_after_seconds": None},
+        )
+        self.assertNotIn(key.encode(), retained.read_bytes())
+        self.assertEqual(list(out.glob("**/pages/*.json")), [])
 
     def test_guarded_capacity_pause_propagates_without_becoming_a_label_failure(self) -> None:
         out = Path(self.enterContext(TemporaryDirectory()))

@@ -8,10 +8,9 @@ from unittest.mock import patch
 from urllib.request import Request
 
 from dagster import build_asset_context
-from httpx import AsyncClient, MockTransport
 from pydantic import JsonValue, TypeAdapter
 from test_declared_dataset_graph import fixture_spec, with_keenable_declaration
-from test_keenable_snippets import SNIPPET_KEY, SNIPPET_URL, KeenableWire, model_reply
+from test_keenable_snippets import SNIPPET_KEY, SNIPPET_URL, KeenableWire, model_reply, snippet_transport
 
 from codebench_pipeline.collection_config import KeenableSnippetDeclaration
 from codebench_pipeline.collection_stage_settings import KeenableCandidateSettings
@@ -23,6 +22,7 @@ from codebench_pipeline.finalization_table_asset import CollectionCacheInput, Co
 from codebench_pipeline.inference_capacity import CapacityConfig
 from codebench_pipeline.keenable_decisions import DiscoveryModel
 from codebench_pipeline.keenable_policy import KeenableSnippetSettings
+from codebench_pipeline.keenable_provider import KeenableIncident
 from codebench_pipeline.keenable_snippets import (
     DiscoveryRun,
     SnippetCollectionReceipt,
@@ -39,6 +39,79 @@ class _HTTPBody(BytesIO):
 
 
 class DiscoveryMappingTests(TestCase):
+    def test_declared_search_retries_with_org_key_pool_and_retains_only_safe_evidence(self) -> None:
+        home = Path(self.enterContext(TemporaryDirectory()))
+        evidence = home / "evidence"
+        evidence.mkdir()
+        primary, alternate = "synthetic-collection-primary", "synthetic-collection-alternate"
+        credentials = {
+            "KEENABLE_ORG": "synthetic-mapping-org",
+            "KEENABLE_API_KEY_1": alternate,
+            "KEENABLE_ORG_1": "synthetic-mapping-org",
+        }
+        spec = fixture_spec(home)
+        spec = with_keenable_declaration(
+            spec,
+            KeenableSnippetDeclaration(
+                schema_version="4",
+                dataset_id=spec.dataset_id,
+                search=KeenableSnippetSettings(seeds=("docker_inventory",), max_search_calls=1),
+            ),
+        )
+        mapped = collection_stage_configs(DeclaredGlobalConfig.from_spec(spec), "keenable")[
+            "keenable/command_candidates"
+        ]
+        assert isinstance(mapped, KeenableCandidateSettings)
+        inputs = CollectionInput(settings=mapped)
+        inputs.bind_cache(CollectionCacheInput("fixture", None, evidence))
+        (asset,) = declared_source_assets(BRANCH_BY_NAMESPACE["keenable"])
+        snippet = "```bash\ndocker system df\n```"
+        wire = KeenableWire(
+            [
+                {"url": SNIPPET_URL, "snippet": snippet},
+                {"url": SNIPPET_URL, "snippet": f"{primary}\n{snippet}"},
+                {"url": SNIPPET_URL, "snippet": snippet, "description": alternate},
+                {"url": f"https://example.org/{alternate}", "snippet": snippet},
+                {"url": SNIPPET_URL, "snippet": "```bash\ndocker system prune\n```"},
+            ],
+            keys=(primary, alternate),
+            fail_first_search=True,
+        )
+        runtime = LabelingRuntime(home, credentials.get)
+        storage = DataFrameIOManager.from_environment(spec.storage)
+        with (
+            patch("codebench_pipeline.keenable_mcp.httpx.AsyncClient", side_effect=wire.client),
+            build_asset_context(
+                resources={
+                    "keenable_credential": KeenableDiscovery(primary),
+                    "labeling_runtime": runtime,
+                    "dataset_io_manager": storage,
+                }
+            ) as context,
+        ):
+            asset(context, mapped_config=inputs)
+
+        self.assertEqual(wire.search_keys, [primary, alternate])
+        self.assertEqual(len(wire.queries), 2)
+        self.assertEqual(wire.queries[0], wire.queries[1])
+        result = evidence / "discovery-01-result.json"
+        receipt = SnippetCollectionReceipt.model_validate_json(result.read_bytes())
+        (search,) = receipt.searches
+        self.assertEqual(
+            [hit.outcome for hit in search.hits],
+            ["extracted", "sensitive", "sensitive", "sensitive", "outside_inspection"],
+        )
+        self.assertEqual([row.command for row in receipt.candidates.values()], ["docker system df"])
+        self.assertEqual(receipt.read_body(next(iter(receipt.snippets))), snippet.encode())
+        self.assertFalse((evidence / "discovery-02-result.json").exists())
+        audit = evidence / "discovery-01-provider-incidents.json"
+        (incident,) = TypeAdapter(list[KeenableIncident]).validate_json(audit.read_bytes())
+        self.assertEqual((incident.tool, incident.attempt, incident.error.status), ("search", 1, 500))
+        self.assertEqual(len(list((home / "keenable-admission").glob("*.json"))), 1)
+        for artifact in evidence.glob("*.json"):
+            self.assertNotIn(primary.encode(), artifact.read_bytes())
+            self.assertNotIn(alternate.encode(), artifact.read_bytes())
+
     def test_plain_override_routes_to_its_own_provider_and_resolves_its_credential(self) -> None:
         home = Path(self.enterContext(TemporaryDirectory()))
         spec = fixture_spec(home)
@@ -177,7 +250,6 @@ class DiscoveryMappingTests(TestCase):
                 }
             ]
         )
-        client = AsyncClient(headers={"X-API-Key": SNIPPET_KEY}, transport=MockTransport(wire.respond))
         requests: list[bytes] = []
 
         def reply(
@@ -193,14 +265,16 @@ class DiscoveryMappingTests(TestCase):
             return model_reply({"action": "query", "seed": seed_ids[index], "context": context})
 
         with (
-            patch("codebench_pipeline.keenable_mcp.httpx.AsyncClient", return_value=client),
+            patch("codebench_pipeline.keenable_mcp.httpx.AsyncClient", side_effect=wire.client),
             patch("codebench_pipeline.keenable_decisions.guarded_complete", side_effect=reply),
             patch("codebench_pipeline.keenable_decisions.complete") as plain,
         ):
             frame = provider_snippet_candidates(
                 mapped.search,
                 DiscoveryRun(
-                    home, SNIPPET_KEY, DiscoveryModel(mapped.inference.model, None, mapped.taxonomy, capacity)
+                    home,
+                    snippet_transport(),
+                    DiscoveryModel(mapped.inference.model, None, mapped.taxonomy, capacity),
                 ),
             )
         plain.assert_not_called()

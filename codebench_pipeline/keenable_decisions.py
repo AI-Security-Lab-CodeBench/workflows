@@ -1,4 +1,5 @@
 import json
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from re import fullmatch
@@ -53,7 +54,9 @@ class DiscoveryModel:
     taxonomy: tuple[InspectionTaxonomy, ...]
     capacity: CapacityConfig | None = None
 
-    def choose(self, turn: DiscoveryTurn, evidence: Path) -> DiscoveryChoice:
+    def choose(
+        self, turn: DiscoveryTurn, evidence: Path, check_output: Callable[[bytes], None]
+    ) -> DiscoveryChoice:
         config = self.config
         if config.api_key_env is not None and not self.key:
             raise KeenableError("discovery_model_credential_unavailable")
@@ -67,6 +70,8 @@ class DiscoveryModel:
             }
             for item in self.taxonomy
         ]
+        content = json.dumps({**turn.model_dump(mode="json"), "available": available})
+        check_output(content.encode())
         body = json.dumps(
             {
                 "model": config.model,
@@ -84,7 +89,7 @@ class DiscoveryModel:
                     },
                     {
                         "role": "user",
-                        "content": json.dumps({**turn.model_dump(mode="json"), "available": available}),
+                        "content": content,
                     },
                 ],
                 "response_format": (
@@ -104,6 +109,7 @@ class DiscoveryModel:
                 "stream": False,
             }
         ).encode()
+        check_output(body)
         try:
             raw = (
                 guarded_complete(

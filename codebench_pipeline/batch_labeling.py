@@ -387,6 +387,28 @@ class _Conversation:
 
     def receipt(self) -> BatchRow:
         attempt = self.result
+        if not self.offered_passages and (
+            attempt is not None
+            and attempt.status == "failure"
+            or attempt is None
+            and self.failure_code == "protocol_exhausted"
+        ):
+            has_discovery = any(receipt.discovery for receipt in self.broker.history)
+            for receipt in reversed(self.broker.history):
+                if (provider_error := receipt.provider_error) is not None and (
+                    receipt.tool == "page_fetch" or not has_discovery
+                ):
+                    code = provider_error.code
+                    attempt = failed_attempt(
+                        self.row.candidate,
+                        code,
+                        f"Documentation retrieval failed ({code}); see grounding.json and provider-incidents.json "
+                        "beside the attempt receipt.",
+                        [],
+                        self.row.fingerprint,
+                        self.reference,
+                    )
+                    break
         if attempt is None:
             attempt = failed_attempt(
                 self.row.candidate,
@@ -423,6 +445,12 @@ class _Conversation:
             "response.json": attempt.model_dump_json().encode(),
             "grounding.json": _encoded(
                 {"provider_receipts": [receipt.model_dump(mode="json") for receipt in self.broker.history]}
+            ),
+            "provider-incidents.json": _encoded(
+                {
+                    str(index): [incident.model_dump(mode="json") for incident in incidents]
+                    for index, incidents in self.broker.incidents.items()
+                }
             ),
             "receipt.json": _encoded(
                 {

@@ -1,15 +1,15 @@
-from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Final, Literal, Self
 
 from anyio import run, to_thread
 from pandera.typing import DataFrame
-from pydantic import Field, model_validator
+from pydantic import Field, JsonValue, TypeAdapter, model_validator
 
 from scripts.dataset_schema import SECRET_PATTERNS
 
-from .dataframe_schemas import CommandCandidatesTable, validated_frame
+from .dataframe_io import frame_bytes
+from .dataframe_schemas import CommandCandidatesTable, frame_records, validated_frame
 from .keenable_decisions import (
     DiscoveryChoice,
     DiscoveryDecision,
@@ -18,7 +18,7 @@ from .keenable_decisions import (
     DiscoveryTurn,
 )
 from .keenable_inspection import INSPECTIONS, AuthoredInspection, shell_spans
-from .keenable_mcp import search_session, search_snippets
+from .keenable_mcp import SearchResult, search_session, search_snippets
 from .keenable_policy import (
     Digest,
     KeenableError,
@@ -27,9 +27,12 @@ from .keenable_policy import (
     canonical_url,
     digest,
 )
+from .keenable_provider import KeenableIncident, KeenableTransport
 from .keenable_tables import PROVIDER_RECEIPT, provider_source_id
 
 _PARSER: Final = "keenable-inspection-shell-block-v1"
+_INCIDENTS = TypeAdapter(list[KeenableIncident])
+_JSON = TypeAdapter(JsonValue)
 
 
 class SnippetCandidateReceipt(Record):
@@ -99,11 +102,72 @@ def _candidate_id(url: str, body_sha256: str, start: int, end: int) -> str:
     return digest(f"{url}\n{body_sha256}\n{start}:{end}".encode())
 
 
+def _candidate_row(candidate: SnippetCandidateReceipt) -> dict[str, JsonValue]:
+    return {
+        "candidate_id": candidate.candidate_id,
+        "command": candidate.command,
+        "util": candidate.command.split()[0],
+        "context": candidate.description,
+        "source_id": candidate.source_id,
+        "source_url": candidate.url,
+        "source_position": f"bytes:{candidate.start}:{candidate.end}",
+        "transformations": [_PARSER],
+        "risk_candidates": [],
+    }
+
+
 @dataclass(frozen=True, slots=True)
 class DiscoveryRun:
     evidence: Path
-    api_key: str = field(repr=False)
+    transport: KeenableTransport = field(repr=False)
     model: DiscoveryModel | None = field(default=None, repr=False)
+
+    def contains_credential(self, text: str) -> bool:
+        model_key = self.model.key if self.model is not None else None
+        return self.transport.credentials.contains(text) or bool(model_key and model_key in text)
+
+    def sensitive(self, text: str) -> bool:
+        return self.contains_credential(text) or any(pattern.search(text) for pattern in SECRET_PATTERNS)
+
+    def contains_decoded_credential(self, value: JsonValue) -> bool:
+        match value:
+            case str():
+                return self.contains_credential(value)
+            case list():
+                return any(self.contains_decoded_credential(item) for item in value)
+            case dict():
+                return any(
+                    self.contains_credential(key) or self.contains_decoded_credential(item)
+                    for key, item in value.items()
+                )
+            case _:
+                return False
+
+    def contains_output_credential(self, body: bytes) -> bool:
+        return self.contains_credential(body.decode("utf-8")) or self.contains_decoded_credential(
+            _JSON.validate_json(body)
+        )
+
+    def check_output(self, body: bytes) -> None:
+        if self.contains_output_credential(body):
+            raise KeenableError("sensitive_discovery_output")
+
+    def write_output(self, path: Path, body: bytes) -> None:
+        self.check_output(body)
+        path.write_bytes(body)
+
+    async def search(self, query: str, limits: tuple[int, int], turn: int) -> SearchResult:
+        async def operation(key: str) -> SearchResult:
+            async with search_session(key) as session:
+                return await search_snippets(session, query, limits)
+
+        incidents: list[KeenableIncident] = []
+        try:
+            return await self.transport.call("search", operation, audit=incidents.append)
+        finally:
+            if incidents:
+                path = self.evidence / f"discovery-{turn:02}-provider-incidents.json"
+                self.write_output(path, _INCIDENTS.dump_json(incidents))
 
 
 async def _collect(
@@ -131,135 +195,131 @@ async def _collect(
     settings_sha256 = digest(settings.model_dump_json().encode())
     seen_queries: set[Digest] = set()
     seen_sources: set[str] = set()
-    model_key = model.key if model is not None else None
-    async with AsyncExitStack() as stack:
-        session = None
-        while len(searches) < limit:
-            turn = DiscoveryTurn(
-                available=seeds, previous=tuple(feedback), remaining_searches=limit - len(searches)
-            )
-            choice = (
-                await to_thread.run_sync(model.choose, turn, access.evidence)
-                if model is not None
-                else DiscoveryChoice(decision=DiscoveryDecision(action="query", seed=seeds[len(searches)]))
-            )
-            turn_number = len(searches) + 1
-            decision_path = access.evidence / f"discovery-{turn_number:02}-decision.json"
-            seed = choice.decision.seed
-            if seed is None:
-                finalize = choice
-                decision_path.write_text(choice.model_dump_json(), encoding="utf-8")
-                break
-            inspection = inspections[seed]
-            context = choice.decision.context
-            query = inspection.query if context is None else f"{inspection.query} Focus: {context}."
-            query_id = digest(query.encode())
-            if query_id in seen_queries:
-                raise KeenableError("discovery_query_already_used")
-            seen_queries.add(query_id)
-            choice = choice.model_copy(update={"query_id": query_id})
-            decision_path.write_text(choice.model_dump_json(), encoding="utf-8")
-            if session is None:
-                session = await stack.enter_async_context(search_session(access.api_key))
-            result = await search_snippets(
-                session, query, (settings.max_results, settings.snippet_max_length)
-            )
-            hits: list[_SearchObservation] = []
-            candidate_count = len(candidates)
-            accepted: set[str] = set()
-            observed_sources: set[str] = set()
-            excerpt_context: dict[str, None] = {}
-            for rank, hit in enumerate(result.results, 1):
-                url_sha256 = digest(hit.url.encode())
-                if (canonical := canonical_url(hit.url)) is None:
-                    hits.append(_SearchObservation(rank=rank, url_sha256=url_sha256, outcome="invalid_url"))
+    while len(searches) < limit:
+        turn = DiscoveryTurn(
+            available=seeds, previous=tuple(feedback), remaining_searches=limit - len(searches)
+        )
+        choice = (
+            await to_thread.run_sync(model.choose, turn, access.evidence, access.check_output)
+            if model is not None
+            else DiscoveryChoice(decision=DiscoveryDecision(action="query", seed=seeds[len(searches)]))
+        )
+        turn_number = len(searches) + 1
+        decision_path = access.evidence / f"discovery-{turn_number:02}-decision.json"
+        seed = choice.decision.seed
+        if seed is None:
+            finalize = choice
+            access.write_output(decision_path, choice.model_dump_json().encode())
+            break
+        inspection = inspections[seed]
+        context = choice.decision.context
+        query = inspection.query if context is None else f"{inspection.query} Focus: {context}."
+        if (
+            access.sensitive(seed)
+            or access.sensitive(query)
+            or access.contains_output_credential(_JSON.dump_json(query))
+        ):
+            raise KeenableError("sensitive_discovery_query")
+        query_id = digest(query.encode())
+        if query_id in seen_queries:
+            raise KeenableError("discovery_query_already_used")
+        seen_queries.add(query_id)
+        choice = choice.model_copy(update={"query_id": query_id})
+        access.write_output(decision_path, choice.model_dump_json().encode())
+        result = await access.search(query, (settings.max_results, settings.snippet_max_length), turn_number)
+        hits: list[_SearchObservation] = []
+        candidate_count = len(candidates)
+        accepted: set[str] = set()
+        observed_sources: set[str] = set()
+        excerpt_context: dict[str, None] = {}
+        for rank, hit in enumerate(result.results, 1):
+            url_sha256 = digest(hit.url.encode())
+            if (canonical := canonical_url(hit.url)) is None:
+                hits.append(_SearchObservation(rank=rank, url_sha256=url_sha256, outcome="invalid_url"))
+                continue
+            if any(
+                access.sensitive(value)
+                for value in (hit.url, hit.snippet, hit.description, hit.model_dump_json(), canonical)
+            ):
+                hits.append(_SearchObservation(rank=rank, url_sha256=url_sha256, outcome="sensitive"))
+                continue
+            phrases = inspection.excerpt_context(f"{hit.description}\n{hit.snippet}")
+            if access.contains_output_credential(_JSON.dump_json(list(phrases))):
+                hits.append(_SearchObservation(rank=rank, url_sha256=url_sha256, outcome="sensitive"))
+                continue
+            body = hit.snippet.encode()
+            body_sha256 = digest(body)
+            spans = shell_spans(body)
+            extracted: dict[Digest, SnippetCandidateReceipt] = {}
+            for span in spans:
+                literal = body[span.start : span.end]
+                command = literal.decode()
+                if not inspection.command.fullmatch(command):
                     continue
-                if any(
-                    access.api_key in value
-                    or (model_key and model_key in value)
-                    or any(pattern.search(value) for pattern in SECRET_PATTERNS)
-                    for value in (hit.url, hit.snippet, hit.description)
-                ):
-                    hits.append(_SearchObservation(rank=rank, url_sha256=url_sha256, outcome="sensitive"))
-                    continue
-                observed_sources.add(canonical)
-                for phrase in inspection.excerpt_context(f"{hit.description}\n{hit.snippet}"):
-                    if len(excerpt_context) < 4:
-                        excerpt_context[phrase] = None
-                body = hit.snippet.encode()
-                body_sha256 = digest(body)
-                spans = shell_spans(body)
-                ids: list[Digest] = []
-                for span in spans:
-                    literal = body[span.start : span.end]
-                    command = literal.decode()
-                    if not inspection.command.fullmatch(command):
-                        continue
-                    key = _candidate_id(hit.url, body_sha256, span.start, span.end)
-                    ids.append(key)
-                    if key not in candidates:
-                        candidates[key] = SnippetCandidateReceipt(
-                            candidate_id=key,
-                            source_id=provider_source_id(hit.url),
-                            url=hit.url,
-                            body_sha256=body_sha256,
-                            start=span.start,
-                            end=span.end,
-                            span_sha256=digest(literal),
-                            command=command,
-                            description=hit.description or span.description,
-                        )
-                if ids:
-                    snippets[body_sha256] = hit.snippet
-                    accepted.update(ids)
-                hits.append(
-                    _SearchObservation(
-                        rank=rank,
-                        url_sha256=url_sha256,
-                        outcome="extracted" if ids else "outside_inspection" if spans else "no_commands",
-                        candidate_ids=tuple(ids),
-                    )
+                key = _candidate_id(hit.url, body_sha256, span.start, span.end)
+                extracted[key] = SnippetCandidateReceipt(
+                    candidate_id=key,
+                    source_id=provider_source_id(hit.url),
+                    url=hit.url,
+                    body_sha256=body_sha256,
+                    start=span.start,
+                    end=span.end,
+                    span_sha256=digest(literal),
+                    command=command,
+                    description=hit.description or span.description,
                 )
-            observed = DiscoveryFeedback(
-                seed=seed,
-                results=len(hits),
-                accepted=len(accepted),
-                new_candidates=len(candidates) - candidate_count,
-                query_id=query_id,
-                query_context=context,
-                new_sources=len(observed_sources - seen_sources),
-                excerpt_context=tuple(excerpt_context),
+            if any(
+                access.contains_output_credential(candidate.model_dump_json().encode())
+                or access.contains_output_credential(_JSON.dump_json(_candidate_row(candidate)))
+                for candidate in extracted.values()
+            ):
+                hits.append(_SearchObservation(rank=rank, url_sha256=url_sha256, outcome="sensitive"))
+                continue
+            observed_sources.add(canonical)
+            for phrase in phrases:
+                if len(excerpt_context) < 4:
+                    excerpt_context[phrase] = None
+            if extracted:
+                snippets[body_sha256] = hit.snippet
+                accepted.update(extracted)
+                for key, candidate in extracted.items():
+                    candidates.setdefault(key, candidate)
+            hits.append(
+                _SearchObservation(
+                    rank=rank,
+                    url_sha256=url_sha256,
+                    outcome="extracted" if extracted else "outside_inspection" if spans else "no_commands",
+                    candidate_ids=tuple(extracted),
+                )
             )
-            seen_sources.update(observed_sources)
-            feedback.append(observed)
-            searches.append(_SearchReceipt(query=query, hits=tuple(hits), choice=choice, feedback=observed))
-            (access.evidence / f"discovery-{turn_number:02}-result.json").write_text(
-                SnippetCollectionReceipt(
-                    settings_sha256=settings_sha256,
-                    candidates=candidates,
-                    snippets=snippets,
-                    searches=tuple(searches),
-                ).model_dump_json(),
-                encoding="utf-8",
+        observed = DiscoveryFeedback(
+            seed=seed,
+            results=len(hits),
+            accepted=len(accepted),
+            new_candidates=len(candidates) - candidate_count,
+            query_id=query_id,
+            query_context=context,
+            new_sources=len(observed_sources - seen_sources),
+            excerpt_context=tuple(excerpt_context),
+        )
+        seen_sources.update(observed_sources)
+        feedback.append(observed)
+        searches.append(_SearchReceipt(query=query, hits=tuple(hits), choice=choice, feedback=observed))
+        access.write_output(
+            access.evidence / f"discovery-{turn_number:02}-result.json",
+            SnippetCollectionReceipt(
+                settings_sha256=settings_sha256,
+                candidates=candidates,
+                snippets=snippets,
+                searches=tuple(searches),
             )
+            .model_dump_json()
+            .encode(),
+        )
     frame = validated_frame(
-        [
-            {
-                "candidate_id": candidate.candidate_id,
-                "command": candidate.command,
-                "util": candidate.command.split()[0],
-                "context": candidate.description,
-                "source_id": candidate.source_id,
-                "source_url": candidate.url,
-                "source_position": f"bytes:{candidate.start}:{candidate.end}",
-                "transformations": [_PARSER],
-                "risk_candidates": [],
-            }
-            for candidate in candidates.values()
-        ],
-        CommandCandidatesTable,
+        [_candidate_row(candidate) for candidate in candidates.values()], CommandCandidatesTable
     )
-    frame.attrs[PROVIDER_RECEIPT] = SnippetCollectionReceipt(
+    receipt = SnippetCollectionReceipt(
         settings_sha256=settings_sha256,
         candidates=candidates,
         snippets=snippets,
@@ -271,6 +331,12 @@ async def _collect(
         else "seeds_exhausted",
         finalize=finalize,
     ).model_dump_json()
+    access.check_output(receipt.encode())
+    frame.attrs[PROVIDER_RECEIPT] = receipt
+    if any(
+        access.contains_decoded_credential(row) for row in frame_records(frame)
+    ) or access.contains_credential(frame_bytes(frame).decode("utf-8", errors="surrogateescape")):
+        raise KeenableError("sensitive_discovery_output")
     return frame
 
 

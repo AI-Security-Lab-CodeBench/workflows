@@ -8,7 +8,7 @@ from unittest.mock import patch
 from guarded_labeling_fixture import LabelingFixture
 from httpx import AsyncClient, MockTransport
 from test_keenable import PLAN
-from test_keenable_snippets import SNIPPET_KEY, SNIPPET_URL, KeenableWire
+from test_keenable_snippets import SNIPPET_KEY, SNIPPET_URL, KeenableWire, snippet_transport
 
 from codebench_pipeline.dataframe_schemas import model_records
 from codebench_pipeline.dataset_records import CandidateRecord
@@ -29,7 +29,7 @@ class GroundingAuthorityTests(TestCase):
         wire = KeenableWire([{"url": SNIPPET_URL, "snippet": text}])
         client = AsyncClient(headers={"X-API-Key": SNIPPET_KEY}, transport=MockTransport(wire.respond))
         with patch("codebench_pipeline.keenable_mcp.httpx.AsyncClient", return_value=client):
-            snippets = provider_snippet_candidates(settings, DiscoveryRun(scratch, SNIPPET_KEY))
+            snippets = provider_snippet_candidates(settings, DiscoveryRun(scratch, snippet_transport()))
         (original,) = model_records(snippets, CandidateRecord)
         row = original.model_copy(
             update={

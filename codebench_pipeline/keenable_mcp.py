@@ -1,3 +1,4 @@
+import json
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from datetime import timedelta
@@ -12,6 +13,7 @@ from mcp.types import TextContent
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from .keenable_policy import RESPONSE_BYTES, KeenableError
+from .keenable_provider import admit_tool_dispatch
 from .keenable_transport import TIMEOUT
 
 _ENDPOINT: Final = "https://api.keenable.ai/mcp"
@@ -31,23 +33,34 @@ class SearchResult(BaseModel):
     results: tuple[SearchHit, ...] = Field(max_length=50)
 
 
+async def _before_request(request: httpx.Request) -> None:
+    if request.method == "POST":
+        message: object = json.loads(request.content)
+        match message:
+            case {"method": "tools/call"}:
+                await admit_tool_dispatch()
+            case _:
+                return
+
+
 @asynccontextmanager
 async def search_session(api_key: str) -> AsyncGenerator[ClientSession]:
     """Connect to the fixed Keenable MCP endpoint without forwarding the key to a proxy."""
     if not fullmatch(r"[!-~]{1,512}", api_key):
         raise KeenableError("provider_credential_unavailable")
-    async with (
-        httpx.AsyncClient(
-            headers={"X-API-Key": api_key},
-            timeout=TIMEOUT,
-            trust_env=False,
-        ) as http,
-        streamable_http_client(_ENDPOINT, http_client=http) as (reader, writer, _),
-        ClientSession(reader, writer, read_timeout_seconds=timedelta(seconds=TIMEOUT)) as session,
-    ):
-        with fail_after(TIMEOUT):
-            await session.initialize()
-        yield session
+    async with httpx.AsyncClient(
+        headers={"X-API-Key": api_key},
+        timeout=TIMEOUT,
+        trust_env=False,
+    ) as http:
+        http.event_hooks["request"].append(_before_request)
+        async with (
+            streamable_http_client(_ENDPOINT, http_client=http) as (reader, writer, _),
+            ClientSession(reader, writer, read_timeout_seconds=timedelta(seconds=TIMEOUT)) as session,
+        ):
+            with fail_after(TIMEOUT):
+                await session.initialize()
+            yield session
 
 
 async def search_snippets(session: ClientSession, query: str, limits: tuple[int, int]) -> SearchResult:

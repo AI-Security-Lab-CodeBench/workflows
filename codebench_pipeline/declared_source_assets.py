@@ -35,6 +35,7 @@ from codebench_pipeline.finalization_table_asset import (
 )
 from codebench_pipeline.finalization_table_io import retain_failed_finalization
 from codebench_pipeline.keenable_decisions import DiscoveryModel
+from codebench_pipeline.keenable_provider import KeenableCredentials, KeenableTransport
 from codebench_pipeline.keenable_snippets import DiscoveryRun, provider_snippet_candidates
 from codebench_pipeline.labeling_runtime import LabelingRuntime
 from codebench_pipeline.repository import (
@@ -111,8 +112,12 @@ def declared_source_assets(branch: CollectionBranch) -> list[AssetsDefinition]:
                         settings.taxonomy,
                         capacity,
                     )
+                transport = KeenableTransport(
+                    KeenableCredentials.bind(keenable_credential.api_key, labeling_runtime.credential),
+                    ledger=labeling_runtime.keenable_admission,
+                )
                 return provider_snippet_candidates(
-                    settings.search, DiscoveryRun(evidence, keenable_credential.api_key, discovery)
+                    settings.search, DiscoveryRun(evidence, transport, discovery)
                 )
 
             return mapped_config.output(CommandCandidatesTable, compute)
