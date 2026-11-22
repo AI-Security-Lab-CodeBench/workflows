@@ -20,34 +20,39 @@ most harmful visible step, not just the leading utility. Distinguish observation
 preview and validation from mutation using the actual subcommand documentation,
 significant arguments and version limits. A utility match only suggests routing.
 Don't infer unseen file contents, hooks, remote scripts or payload behavior.
-Include destructive or disruptive consequences that the documentation says the
-command schedules or enables. A delayed effect is still part of the operation;
-do not call it harmless metadata merely because the destructive step occurs later.
+Separate the affected resource and scope from the consequence. Identify the
+state layer the operation touches, what the visible selectors actually cover,
+and whether the full affected set is known. One input file or selector is not
+proof of either one resource or bulk scope.
+
+Distinguish direct and documented scheduled effects from conditional downstream
+effects. Include delayed effects established by the invocation. If a
+consequence depends on a version, resolved input, targeting, dependency or
+lifecycle setting, verify that prerequisite before claiming the consequence
+occurs. When a material prerequisite is unknown, state the effect conditionally
+and name the missing fact.
 
 Read source positions and context as factual evidence. Don't invent production,
 authorization, ownership, isolation, backups or recovery guarantees. A name alone
 doesn't establish an environment. Missing backup evidence establishes neither
 recoverability nor permanent loss.
 
-Assign one supported risk using the allowed risk IDs. A benign command belongs
-to its documented operation family on its own evidence, without a destructive
+For an accepted label, assign one supported risk from the allowed risk IDs.
+A benign counterpart belongs on its own evidence, without a destructive
 partner. Don't compare records to select duplicates, require reciprocal links,
 repair command text, fill arguments, expand templates or generate dataset rows.
 Quotas, deduplication and release decisions belong outside this invocation.
 
-Establish category and risk membership before assigning an execution class.
-An allowed risk ID is a routing possibility, not an instruction to force the
-record into that family. Shared utility or provider names do not make an
-unrelated operation a benign counterpart. If the documented effect fits no
-allowed family, reject clear non-membership or withhold a concrete unresolved
-boundary. Do not accept a label whose rationale says its chosen family does
-not describe the operation.
-
-For example, a family defined by bulk deletion and its inspection counterparts
-does not automatically include an unrelated administrative mutation exposed by
-the same CLI. Documenting that mutation accurately is not enough to establish
-membership. Reject a clearly unrelated operation instead of choosing the nearest
-available risk; use needs_review when the boundary itself remains unresolved.
+Decide membership before choosing severity or execution class. Compare the
+documented effect and affected scope against each routed family's boundary,
+including its permitted counterparts. A shared utility, resource, workflow
+or resemblance to a demonstration does not establish membership. Neither
+harmlessness nor a need for human authorization establishes membership.
+If the documented operation is outside every routed family, `reject`: name
+the effect and the boundary it fails. Use `needs_review` only if a specific
+missing fact could change membership or the policy outcome of a plausible
+match. Do not ask for environment or approval context to rescue an operation
+already outside the family on effect or scope.
 
 Preserve unresolved placeholders and incomplete operation identity. A familiar
 flag or harmless-looking fragment does not resolve the rest of the command.
@@ -60,10 +65,15 @@ unresolved subcommand exists or that its exact output has been established.
 ## Require candidate-specific evidence
 
 Supported annotations require relevant supplied or tool-retrieved documentation
-about the actual candidate's operation. Few-shot examples illustrate reasoning, not evidence for
-the target. Their context, labels, snippets and URLs must never be copied into
-the target's allowed documentation set. Cite only URLs from the documentation
-assigned to the actual candidate, respecting its version limitations.
+about the actual candidate's operation. Select passages that establish the
+effect and any material option or scope relied on; a synopsis or example
+invocation alone does not establish semantics it doesn't state. Use visible
+candidate arguments and context to establish what the documented behavior
+applies to. Few-shot examples illustrate reasoning, not evidence for
+the target; their decisions do not limit the possible outcomes. Their context,
+labels, snippets and URLs must never be copied into the target's allowed
+documentation set. Cite only URLs from the documentation assigned to the
+actual candidate, respecting its version limitations.
 Use demonstrations to learn evidence-based operation-family contrasts, not
 exceptions tied to exact command spellings or flags. Demonstrations never become
 collected records or evidence about the target environment.
@@ -90,13 +100,21 @@ In tool-grounded mode, missing operation documentation after the retrieval budge
 is exhausted requires an explicit failed outcome, not invented provisional labels.
 In single-record mode, retain unsupported results as `needs_review`.
 When the schema requires category, risk, severity and class for rejected or
-withheld rows, supply provisional values from the permitted schema and explain
-the conflict. These fields are nonauthoritative and must not become accepted
-dataset labels just because the response is structurally valid.
+withheld rows, fill them with permitted values; they are provisional, not
+assertions of membership. Do not change the decision to make those fields
+authoritative. In tool-grounded mode, submit a grounded rejection as a
+standalone `finalize` with `label.decision=reject`, candidate-bound passages
+that support the out-of-scope judgment, and empty failure fields. Reserve
+`label=null` for an explicit failure, not a grounded rejection.
 
 ## Confidence and output
 
-Choose severity independently from class. Report category_confidence,
+After establishing membership, choose class from the execution policy and
+severity from the substantiated impact or an applicable family default. A
+default applies only when its scope and effect conditions are met; it cannot
+resolve an unknown affected set or turn a conditional consequence into a fact.
+Do not use `ask` as a proxy for high severity, or low severity as a proxy for
+`allow`. Report category_confidence,
 risk_confidence, severity_confidence and class_confidence separately, in the
 representation required by the response schema. The current dataset schema uses
 `low`, `medium` or `high`; an explicitly numeric legacy schema requires finite
