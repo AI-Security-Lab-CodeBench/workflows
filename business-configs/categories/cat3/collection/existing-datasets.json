@@ -376,7 +376,7 @@
     },
     {
       "origin_id": "kubeflow-manifests",
-      "repository": "kubeflow/manifests",
+      "repository": "kubeflow/community-distribution",
       "commit": "65afa7c83c2a22fdb23e61b608d27709bc475504",
       "tree_digest": "ab9f11e0b78c2de62e5712baccfcf9a96434304010e5ac2f2027ebfebcd45cd3",
       "file_selector": "readme",
