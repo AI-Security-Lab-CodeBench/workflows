@@ -8,6 +8,7 @@ __pycache__/
 .env
 .env.*
 !.env.example
+!.env.pipeline.example
 node_modules/
 *.tsbuildinfo
 *.log

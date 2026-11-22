@@ -1,0 +1,215 @@
+name: codebench
+
+x-runtime-labels: &runtime-labels
+  io.codebench.runtime: isolated-v1
+
+x-minio-image: &minio-image codebench/minio:2025-10-15
+
+x-app: &app
+  image: ${CODEBENCH_APP_IMAGE:-codebench/app:local}
+  build:
+    context: .
+  pull_policy: never
+  labels: *runtime-labels
+  init: true
+  read_only: true
+  tmpfs:
+    - /tmp
+  restart: unless-stopped
+  env_file:
+    - path: ${CODEBENCH_PIPELINE_ENV_FILE:-.env.pipeline}
+      format: raw
+  environment:
+    CODEBENCH_HOME: /var/lib/codebench/datasets
+    DAGSTER_HOME: /var/lib/codebench/datasets/dagster
+    CODEBENCH_REVIEW_DATABASE_URL: host=review-db port=5432 dbname=codebench user=codebench_review
+    PGPASSWORD: ${CODEBENCH_REVIEW_DATABASE_PASSWORD:?Set the review database application password}
+    AWS_SHARED_CREDENTIALS_FILE: /run/codebench-s3/credentials
+    AWS_ENDPOINT_URL_S3: http://minio:9000
+  volumes:
+    - type: volume
+      source: dataset-data
+      target: /var/lib/codebench/datasets
+    - minio-client:/run/codebench-s3:ro
+  networks:
+    - backend
+  depends_on:
+    review-db:
+      condition: service_healthy
+    minio-init:
+      condition: service_completed_successfully
+
+services:
+  webserver:
+    <<: *app
+    command:
+      - python
+      - -m
+      - codebench_pipeline.ui_server
+      - --home
+      - /var/lib/codebench/datasets
+      - --host
+      - 0.0.0.0
+      - --port
+      - "3041"
+    healthcheck:
+      test: ["CMD", "python", "-c", "from urllib.request import ProxyHandler, build_opener; build_opener(ProxyHandler({})).open('http://127.0.0.1:3041/', timeout=3).close()"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+
+  daemon:
+    <<: *app
+    command: ["dagster-daemon", "run", "-w", "/opt/codebench/config/workspace.yaml"]
+
+  ingress:
+    image: codebench/ingress:isolated-v1
+    pull_policy: never
+    build:
+      context: deploy
+      dockerfile_inline: |
+        FROM docker.io/library/haproxy:3.2-alpine@sha256:7816a9801a6846b912bc37e48529808e2fa87c3c47992441940f68e393ebcfeb
+        COPY haproxy.cfg /usr/local/etc/haproxy/haproxy.cfg
+    labels: *runtime-labels
+    restart: unless-stopped
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    ports:
+      - "127.0.0.1:3041:3041"
+    networks:
+      - frontend
+      - backend
+    depends_on:
+      webserver:
+        condition: service_healthy
+
+  review-db:
+    image: codebench/review-db:isolated-v1
+    pull_policy: never
+    build:
+      context: deploy
+      dockerfile_inline: |
+        FROM docker.io/library/postgres@sha256:266d3c257594e195b309ae9d1805e54c788f1d7b375f56bf6c367aac6c917e7b
+        COPY review-init.sql /docker-entrypoint-initdb.d/10-review-role.sql
+    labels: *runtime-labels
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: codebench
+      POSTGRES_USER: codebench_admin
+      POSTGRES_PASSWORD: ${CODEBENCH_POSTGRES_ADMIN_PASSWORD:?Set the Postgres administrator password}
+      POSTGRES_HOST_AUTH_METHOD: scram-sha-256
+      CODEBENCH_REVIEW_DATABASE_PASSWORD: ${CODEBENCH_REVIEW_DATABASE_PASSWORD:?Set the review database application password}
+    volumes:
+      - review-postgres:/var/lib/postgresql/data
+    networks:
+      - backend
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          PGPASSWORD="$$CODEBENCH_REVIEW_DATABASE_PASSWORD"
+          psql -w -h 127.0.0.1 -U codebench_review -d codebench -Atqc 'SELECT 1' >/dev/null
+      interval: 5s
+      timeout: 3s
+      retries: 24
+
+  minio:
+    image: *minio-image
+    pull_policy: never
+    labels: *runtime-labels
+    build:
+      context: deploy
+      dockerfile_inline: |
+        FROM docker.io/library/golang:1.24-alpine@sha256:8bee1901f1e530bfb4a7850aa7a479d17ae3a18beb6e09064ed54cfd245b7191 AS build
+        ENV CGO_ENABLED=0
+        RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache/go-build \
+            go install github.com/minio/minio@9e49d5e7a648f00e26f2246f4dc28e6b07f8c84a && \
+            go install github.com/minio/mc@7394ce0dd2a80935aded936b09fa12cbb3cb8096
+        FROM docker.io/library/alpine:3.20@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc
+        COPY --from=build /go/bin/minio /go/bin/mc /usr/local/bin/
+    entrypoint: ["/bin/sh", "-eu", "-c"]
+    command:
+      - |
+        umask 077
+        if [ ! -f /admin/password ]; then
+          od -An -N32 -tx1 /dev/urandom | tr -d ' \n' > /admin/password.new
+          test "$$(wc -c < /admin/password.new)" -eq 64
+          mv /admin/password.new /admin/password
+        fi
+        export MINIO_ROOT_USER=codebench-admin
+        MINIO_ROOT_PASSWORD=$$(cat /admin/password)
+        export MINIO_ROOT_PASSWORD
+        exec minio server /data
+    volumes:
+      - minio-data:/data
+      - minio-admin:/admin
+    networks:
+      - backend
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:9000/minio/health/ready"]
+      interval: 5s
+      timeout: 3s
+      retries: 24
+
+  minio-init:
+    image: *minio-image
+    pull_policy: never
+    labels: *runtime-labels
+    depends_on:
+      minio:
+        condition: service_healthy
+    volumes:
+      - minio-admin:/admin:ro
+      - minio-client:/client
+    networks:
+      - backend
+    entrypoint: ["/bin/sh", "-eu", "-c"]
+    command:
+      - |
+        umask 077
+        export MC_HOST_store="http://codebench-admin:$$(cat /admin/password)@minio:9000"
+        mc mb --ignore-existing store/codebench-datasets
+        mc admin policy create store dataset-objects /dev/stdin <<'POLICY'
+        {"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["s3:GetBucketLocation","s3:ListBucket","s3:ListBucketMultipartUploads"],"Resource":["arn:aws:s3:::codebench-datasets"]},{"Effect":"Allow","Action":["s3:GetObject","s3:PutObject","s3:DeleteObject","s3:AbortMultipartUpload","s3:ListMultipartUploadParts"],"Resource":["arn:aws:s3:::codebench-datasets/*"]}]}
+        POLICY
+        if [ ! -f /client/credentials ]; then
+          secret=$$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')
+          test "$${#secret}" -eq 64
+          printf '[default]\naws_access_key_id=codebench-pipeline\naws_secret_access_key=%s\n' "$$secret" > /client/credentials.new
+          chown 1000:100 /client/credentials.new
+          mv /client/credentials.new /client/credentials
+        fi
+        secret=$$(sed -n 's/^aws_secret_access_key=//p' /client/credentials)
+        test "$${#secret}" -eq 64
+        if ! mc admin user info store codebench-pipeline >/dev/null 2>&1; then
+          mc admin user add store codebench-pipeline "$$secret"
+        fi
+        if ! mc admin policy entities store --user codebench-pipeline | grep -qw dataset-objects; then
+          mc admin policy attach store dataset-objects --user codebench-pipeline
+        fi
+        export MC_HOST_pipeline="http://codebench-pipeline:$$secret@minio:9000"
+        mc ls pipeline/codebench-datasets >/dev/null
+
+networks:
+  backend:
+    driver: bridge
+    internal: true
+  frontend:
+    driver: bridge
+
+volumes:
+  dataset-data:
+    labels: *runtime-labels
+  review-postgres:
+    labels: *runtime-labels
+  minio-data:
+    labels: *runtime-labels
+  minio-admin:
+    labels: *runtime-labels
+  minio-client:
+    labels: *runtime-labels

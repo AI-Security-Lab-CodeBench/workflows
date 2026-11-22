@@ -1,0 +1,3 @@
+run_coordinator:
+  module: dagster._core.run_coordinator.sync_in_memory_run_coordinator
+  class: SyncInMemoryRunCoordinator

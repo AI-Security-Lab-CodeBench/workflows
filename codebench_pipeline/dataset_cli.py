@@ -3,7 +3,7 @@ import json
 from pathlib import Path
 from typing import Literal, TypedDict, overload
 
-from dagster import AssetKey
+from dagster import AssetKey, DagsterRunStatus, RunsFilter
 from pydantic import TypeAdapter
 
 from codebench_pipeline.dataset_branches import HISTORICAL_PROCESSING_STAGES
@@ -75,7 +75,7 @@ def main() -> None:
         description="Build category-configured datasets as typed DataFrame assets."
     )
     subcommands = parser.add_subparsers(dest="action", required=True)
-    for name in ("stages", "through"):
+    for name in ("stages", "through", "check-idle"):
         command = subcommands.add_parser(name)
         command.add_argument("--home", type=Path, default=DEFAULT_HOME)
         if name == "through":
@@ -124,6 +124,14 @@ def main() -> None:
         if name in {"attest-release", "revoke-release"}:
             control.add_argument("--proposal", required=True)
     args = parser.parse_args()
+    if args.action == "check-idle":
+        finished = {DagsterRunStatus.SUCCESS, DagsterRunStatus.FAILURE, DagsterRunStatus.CANCELED}
+        with dataset_instance(args.home) as instance:
+            if instance.get_runs_count(
+                filters=RunsFilter(statuses=[s for s in DagsterRunStatus if s not in finished])
+            ):
+                raise SystemExit("Drain active and queued Dagster runs before replacing the application.")
+        return
     if args.action in {"stages", "through"}:
         home = args.home
         definitions = build_definitions(home)
@@ -135,7 +143,7 @@ def main() -> None:
             return
         target = AssetKey.from_user_string(args.stage)
         if target not in available:
-            parser.error("Unknown build stage; use the full key printed by make stages")
+            parser.error("Unknown build stage; use a full key from python3 scripts/stack.py stages")
         selected = (
             {target} | set(definitions.resolve_asset_graph().get_ancestor_asset_keys(target))
         ) & available

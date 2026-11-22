@@ -262,7 +262,7 @@ def build_definitions(home: Path) -> Definitions:
             AutomationConditionSensorDefinition(
                 name="dataset_build_requests",
                 target=automation_selection,
-                default_status=DefaultSensorStatus.RUNNING,
+                default_status=DefaultSensorStatus.STOPPED,
             ),
             SensorDefinition(
                 name="dataset_release_requests",

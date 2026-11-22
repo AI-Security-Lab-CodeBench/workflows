@@ -1,0 +1,6 @@
+\getenv review_password CODEBENCH_REVIEW_DATABASE_PASSWORD
+BEGIN;
+CREATE ROLE codebench_review LOGIN PASSWORD :'review_password';
+REVOKE ALL ON DATABASE codebench FROM PUBLIC;
+GRANT CONNECT, CREATE, TEMPORARY ON DATABASE codebench TO codebench_review;
+COMMIT;

@@ -48,7 +48,7 @@ def integrated_app(factory: ApplicationFactory, api: Starlette) -> Starlette:
     return Starlette(routes=[Mount("/codebench/api", app=api), Mount("/", app=factory.create_asgi_app())])
 
 
-def serve(home: Path, bundle: Path, port: int) -> None:
+def serve(home: Path, bundle: Path, port: int, *, host: str = "127.0.0.1") -> None:
     if not 1 <= port <= 65535:
         raise ValueError("UI port must be between 1 and 65535")
     manifest_path = bundle / "codebench-build.json"
@@ -74,18 +74,19 @@ def serve(home: Path, bundle: Path, port: int) -> None:
         )
         with WorkspaceProcessContext(instance, target, version=__version__) as workspace:
             app = integrated_app(NativeWebserver(workspace, bundle), api)
-            uvicorn.run(app, host="127.0.0.1", port=port)
+            uvicorn.run(app, host=host, port=port)
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Native Dagster data and human-review panels.")
     parser.add_argument("--home", type=Path, required=True)
+    parser.add_argument("--host", default="127.0.0.1", help="Address to listen on")
     parser.add_argument("--port", type=int, default=3000)
     parser.add_argument(
         "--bundle", type=Path, default=Path(__file__).resolve().parents[1] / "dagster_ui" / "build"
     )
     args = parser.parse_args()
-    serve(Path(args.home).resolve(), Path(args.bundle).resolve(), int(args.port))
+    serve(Path(args.home).resolve(), Path(args.bundle).resolve(), int(args.port), host=str(args.host))
 
 
 if __name__ == "__main__":
