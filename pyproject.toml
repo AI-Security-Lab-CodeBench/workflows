@@ -13,6 +13,7 @@ dependencies = [
   "pandas>=2.2,<4",
   "pyarrow>=18",
   "boto3>=1.40,<2",
+  "httpx2>=2.16.2,<3",
   "polars>=1.32,<2",
   "pydantic>=2.11,<3",
   "mcp>=1.12,<2",

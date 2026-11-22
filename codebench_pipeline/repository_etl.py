@@ -21,7 +21,7 @@ from codebench_pipeline.storage import IntegrityError, digest
 from codebench_pipeline.typed_config import ConfigArtifact
 
 _DEPLOYMENT_ROOT: Final = Path(__file__).resolve().parents[1]
-_RUNTIME_DIGEST: Final = "9043f507e1e64b449e22fd43302311c15ccda30e0e1ccb268d8b69f39970b805"
+_RUNTIME_DIGEST: Final = "cd309257fc2bc1bf4d3c44bdc5ac6190a477a6698921ea98a7a0a710246a9834"
 _LEGACY_CHEATSHEETS: Final = (
     "transforms/cheatsheets.py",
     "7580c09e876750b9f3d2affd042559f2c0e9744c8c8278f109f54dc3d90ad371",

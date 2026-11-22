@@ -1,12 +1,24 @@
 from __future__ import annotations
 
+import errno
 import hashlib
+import random
 import re
+import socket
+import ssl
+import time
+from atexit import register
+from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
+from functools import cache
+from http.client import HTTPException
+from http.cookiejar import CookieJar, DefaultCookiePolicy
 from pathlib import PurePosixPath
+from threading import Lock
 from typing import Final, Literal, Protocol, assert_never
 from urllib.parse import quote
-from urllib.request import HTTPRedirectHandler, Request, build_opener
 
+import httpx2
 from pydantic import BaseModel, ConfigDict, Field
 
 from codebench_pipeline.repository_config import Commit, RepositoryName, RepositoryOriginScope, check_path
@@ -17,21 +29,104 @@ COMPOSE_NAMES: Final = frozenset({"compose.yaml", "compose.yml", "docker-compose
 TLDR_PLATFORMS: Final = frozenset(
     {"android", "common", "freebsd", "linux", "netbsd", "openbsd", "osx", "sunos"}
 )
+_ATTEMPTS: Final = 4
+_RETRYABLE_STATUS: Final = frozenset({408, 429, 500, 502, 503, 504})
+_MAX_RETRY_DELAY: Final = 10
+_TRANSIENT_ERRNOS: Final = frozenset({errno.ENETDOWN, errno.ENETUNREACH, errno.EHOSTUNREACH})
+_CLIENT_LOCK: Final = Lock()
 
 
-class _NoRedirect(HTTPRedirectHandler):
-    max_redirections = 0
+@cache
+def _repository_client() -> httpx2.Client:
+    """Share keep-alive connections across all repository capture workers in this process."""
+    client = httpx2.Client(
+        verify=True,
+        follow_redirects=False,
+        timeout=httpx2.Timeout(connect=5.0, read=30.0, write=10.0, pool=10.0),
+        limits=httpx2.Limits(max_connections=200, max_keepalive_connections=40, keepalive_expiry=30.0),
+        headers={"User-Agent": "CodeBench/2.0", "Accept-Encoding": "identity"},
+        cookies=CookieJar(DefaultCookiePolicy(allowed_domains=())),
+    )
+    register(client.close)
+    return client
+
+
+def _retry_after(value: str) -> float:
+    header = value.strip()
+    if not header:
+        return 0.0
+    if re.fullmatch(r"[0-9]+", header):
+        digits = header.lstrip("0")
+        if len(digits) > len(str(_MAX_RETRY_DELAY)):
+            return _MAX_RETRY_DELAY
+        return min(_MAX_RETRY_DELAY, int(digits or "0"))
+    try:
+        until = parsedate_to_datetime(header)
+    except (ValueError, OverflowError):
+        return 0.0
+    until = until.replace(tzinfo=UTC) if until.tzinfo is None else until
+    return min(_MAX_RETRY_DELAY, max(0.0, (until - datetime.now(UTC)).total_seconds()))
+
+
+def _transient_transport(error: httpx2.TransportError) -> bool:
+    """Distinguish broken connections from malformed protocol, DNS, or TLS failures."""
+    if isinstance(error, (httpx2.ConnectTimeout, httpx2.ReadTimeout, httpx2.WriteTimeout)):
+        return True
+    if isinstance(error, httpx2.RemoteProtocolError):
+        return str(error).startswith(
+            (
+                "Server disconnected without sending a response.",
+                "peer closed connection without sending complete message body",
+            )
+        )
+    cause = error.__cause__
+    while cause is not None:
+        if isinstance(cause, ssl.SSLError):
+            return isinstance(cause, ssl.SSLEOFError)
+        if isinstance(cause, socket.gaierror):
+            return cause.errno == socket.EAI_AGAIN
+        if isinstance(cause, (ConnectionError, TimeoutError)):
+            return True
+        if isinstance(cause, OSError):
+            return cause.errno in _TRANSIENT_ERRNOS
+        cause = cause.__cause__
+    return False
 
 
 def fetch_repository_bytes(url: str, limit: int) -> bytes:
-    request = Request(url, headers={"User-Agent": "CodeBench/2.0", "Accept-Encoding": "identity"})
-    with build_opener(_NoRedirect()).open(request, timeout=45) as response:
-        if response.status != 200 or response.geturl() != url:
-            raise IntegrityError(f"Repository response did not return the exact requested resource: {url}")
-        body = response.read(limit + 1)
-    if len(body) > limit:
+    """Fetch a complete, size-bounded pinned resource, retrying only transient failures."""
+    with _CLIENT_LOCK:
+        client = _repository_client()
+    for attempt in range(1, _ATTEMPTS + 1):
+        retry_after = 0.0
+        try:
+            with client.stream("GET", url) as response:
+                status = response.status_code
+                if status == 200:
+                    return _read_repository_body(response, url, limit)
+                if status not in _RETRYABLE_STATUS or attempt == _ATTEMPTS:
+                    raise HTTPException(f"Repository HTTP {status} {response.reason_phrase}: {url}")
+                retry_after = _retry_after(response.headers.get("Retry-After", ""))
+        except httpx2.TransportError as error:
+            if attempt == _ATTEMPTS or not _transient_transport(error):
+                raise HTTPException(f"Repository transport failed for {url}: {error}") from error
+        base = 0.5 * 2 ** (attempt - 1)
+        time.sleep(min(_MAX_RETRY_DELAY, max(base, retry_after) + random.uniform(0, base / 2)))
+    raise AssertionError("The final repository attempt must return or raise")
+
+
+def _read_repository_body(response: httpx2.Response, url: str, limit: int) -> bytes:
+    if str(response.url) != url:
+        raise IntegrityError(f"Repository response did not return the exact requested resource: {url}")
+    length = response.headers.get("Content-Length")
+    if length is not None and int(length) > limit:
         raise IntegrityError(f"Repository resource exceeded its capture limit: {url}")
-    return body
+    body = bytearray()
+    for chunk in response.iter_raw():
+        if len(chunk) > limit - len(body):
+            raise IntegrityError(f"Repository resource exceeded its capture limit: {url}")
+        body.extend(chunk)
+    return bytes(body)
 
 
 class RepositoryLocation(Protocol):
