@@ -316,7 +316,8 @@ class ConfidencePublicationTests(unittest.TestCase):
     def test_all_high_confidence_build_publishes_without_human_decisions_and_reuses_release(self) -> None:
         with ExitStack() as stack:
             home = Path(stack.enter_context(tempfile.TemporaryDirectory()))
-            spec = LabelingFixture(self, home, native=True, limit_per_risk=4).spec
+            fixture = LabelingFixture(self, home, native=True, limit_per_risk=4)
+            spec = fixture.spec
             DatasetRegistry(home).register(spec)
             built = run_registered(spec.dataset_id, home).materialized_stages
             self.assertNotIn("dataset_release", built)
@@ -391,14 +392,21 @@ class ConfidencePublicationTests(unittest.TestCase):
                 {f"label/{sha256(identity.encode()).hexdigest()}/receipt.json" for identity in identities},
             )
             store = ObjectStore(spec.storage)
-            scheduled: list[str] = []
-            for path, uri in receipts.items():
-                if path.startswith("ranked-packets/") and path.endswith("/label-packets.json"):
-                    key = "/".join(uri.rsplit("/", 2)[-2:])
-                    packet = TypeAdapter(dict[str, JsonValue]).validate_json(store.read(key))
-                    for batch_ids in TypeAdapter(list[list[str]]).validate_python(packet["packets"]):
-                        scheduled.extend(batch_ids)
-            self.assertCountEqual(scheduled, identities)
+            self.assertCountEqual(fixture.remote_rows, identities)
+            filtered = data.read_current(spec.dataset_id, "filtered_commands").value
+            assert isinstance(filtered, pd.DataFrame)
+            weights = TypeAdapter(dict[str, float]).validate_python(
+                dict(zip(filtered["candidate_id"], filtered["source_weight"], strict=True))
+            )
+            dispatched_weights = [weights[identity] for identity in fixture.remote_rows]
+            self.assertEqual(dispatched_weights, sorted(dispatched_weights, reverse=True))
+            self.assertGreater(len(set(dispatched_weights)), 1)
+            for identity in identities:
+                path = f"label/{sha256(identity.encode()).hexdigest()}/transcript.json"
+                key = "/".join(receipts[path].rsplit("/", 2)[-2:])
+                transcript = TypeAdapter(dict[str, JsonValue]).validate_json(store.read(key))
+                self.assertEqual(transcript["candidate_ids"], [identity])
+                self.assertTrue(transcript["model_request_sha256"])
             with HumanReviewStore(home).reader() as transaction:
                 publication = transaction.last_publication(spec.dataset_id)
             assert publication is not None

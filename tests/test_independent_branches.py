@@ -1,6 +1,7 @@
 import tempfile
 import unittest
 from dataclasses import replace
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
 from unittest.mock import patch
@@ -10,6 +11,7 @@ from configuration_fixture import example_config, seed_prepared_snapshot
 from dagster import DagsterInstance, build_sensor_context
 from guarded_labeling_fixture import DOCS, LIVE_URL, LabelingFixture
 from native_dataset_cycle import NativeDatasetCycle
+from pydantic import JsonValue, TypeAdapter
 from test_declared_dataset_graph import fixture_spec
 from test_repository import RepositoryFixture, repository_branch_fixture, repository_config_fixture
 
@@ -505,7 +507,12 @@ class IndependentBranchDatasetTests(unittest.TestCase):
         spec = fixture.spec
         self.registry.register(spec)
         cycle = NativeDatasetCycle(self.home)
-        with dataset_instance(self.home) as instance:
+        fetched_at = datetime(2026, 1, 1, tzinfo=UTC)
+        with (
+            dataset_instance(self.home) as instance,
+            patch("codebench_pipeline.live_grounding.datetime", wraps=datetime) as grounding_clock,
+        ):
+            grounding_clock.now.return_value = fetched_at
             self.refresh(cycle, instance, spec.dataset_id)
             cycle.drain(instance, partition=spec.dataset_id)
             data = DatasetDataService(self.home, instance)
@@ -520,7 +527,38 @@ class IndependentBranchDatasetTests(unittest.TestCase):
                     dataset_id=spec.dataset_id, batch_id=view.batch.batch_id, candidate_id=identity
                 )
             )
-            self.assertTrue(evidence.fields["duplicate_evidence"])
+            record = TypeAdapter(dict[str, JsonValue])
+            survivor = record.validate_python(evidence.fields["reviewed_annotation"])
+            (duplicate_evidence,) = TypeAdapter(list[dict[str, JsonValue]]).validate_python(
+                evidence.fields["duplicate_evidence"]
+            )
+            duplicate = record.validate_python(duplicate_evidence["reviewed_annotation"])
+            self.assertEqual(
+                evidence.fields["duplicates"],
+                [
+                    {
+                        "survivor_id": identity,
+                        "duplicate_id": duplicate["candidate_id"],
+                        "normalized_command": "docker ps --all",
+                        "reason": "exact_normalized_command_and_annotation",
+                    }
+                ],
+            )
+            self.assertNotEqual(duplicate["candidate_id"], identity)
+            self.assertNotEqual(duplicate["source_position"], survivor["source_position"])
+            different_provenance = {"candidate_id", "source_position"}
+            self.assertEqual(
+                {key: value for key, value in survivor.items() if key not in different_provenance},
+                {key: value for key, value in duplicate.items() if key not in different_provenance},
+            )
+            self.assertEqual(duplicate_evidence["source_document"], evidence.fields["source_document"])
+            proposed = data.read_current(spec.dataset_id, "proposed_annotations").value
+            assert isinstance(proposed, pd.DataFrame)
+            row_documentation = record.validate_python(proposed.attrs["row_documentation"])
+            duplicate_id = TypeAdapter(str).validate_python(duplicate["candidate_id"])
+            self.assertEqual(row_documentation[identity], row_documentation[duplicate_id])
+            (document,) = TypeAdapter(list[dict[str, JsonValue]]).validate_python(row_documentation[identity])
+            self.assertEqual(document["retrieved_at"], fetched_at.isoformat())
             before = data.query("documentation/command_candidates", query)
             assert isinstance(before, TableResponse)
             self.assertIsNone(before.publication_state)

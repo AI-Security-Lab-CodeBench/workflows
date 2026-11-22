@@ -36,7 +36,7 @@ from guarded_labeling_fixture import LabelingFixture
 from native_dataset_cycle import NativeDatasetCycle
 from pandera.errors import SchemaError, SchemaErrors
 from pydantic import JsonValue, TypeAdapter
-from test_batch_labeling import tool_reply
+from test_batch_labeling import request_parts, tool_reply
 from test_dataset_annotation import documentation
 from test_dataset_rules import make_candidate, make_label, make_rules
 from test_review_release import attest_fixture_release
@@ -214,9 +214,8 @@ class LabelingTableTests(unittest.TestCase):
             url: str, body: bytes, key: str | None, timeout: float, capacity: CapacityConfig, path: Path
         ) -> HTTPResponse:
             nonlocal interrupted, step_retry
-            messages = json.loads(body)["messages"]
-            if len(messages) == 2:
-                (request,) = json.loads(messages[1]["content"])["records"]
+            (request,), observations = request_parts(body)
+            if not observations:
                 requests.append(str(request["candidate"]["candidate_id"]))
                 if len(requests) == 2 and step_retry:
                     step_retry = False
