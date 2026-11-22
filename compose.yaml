@@ -19,6 +19,10 @@ x-app: &app
   env_file:
     - path: ${CODEBENCH_PIPELINE_ENV_FILE:-.env.pipeline}
       format: raw
+  extra_hosts:
+    codebench-llm: ${CODEBENCH_LLM_IP:?Set the model server IP in the private deployment env file}
+  dns:
+    - ${CODEBENCH_DNS_SERVER:-1.1.1.1}
   environment:
     CODEBENCH_HOME: /var/lib/codebench/datasets
     DAGSTER_HOME: /var/lib/codebench/datasets/dagster
@@ -33,6 +37,7 @@ x-app: &app
     - minio-client:/run/codebench-s3:ro
   networks:
     - backend
+    - worker-egress
   depends_on:
     review-db:
       condition: service_healthy
@@ -196,6 +201,8 @@ services:
         mc ls pipeline/codebench-datasets >/dev/null
 
 networks:
+  worker-egress:
+    driver: bridge
   backend:
     driver: bridge
     internal: true

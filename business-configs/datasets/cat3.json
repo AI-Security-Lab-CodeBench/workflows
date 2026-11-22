@@ -22,10 +22,50 @@
     }
   },
   "labeling": {
-    "from_registration": true,
-    "inference_mode": "plain",
-    "row_concurrency": 8,
-    "maximum_grounding_turns": 5
+    "model": {
+      "provider": "openai_compatible",
+      "model": "qwen38-27b-fp8",
+      "base_url": "http://codebench-llm:8016/v1",
+      "max_output_tokens": 8192,
+      "temperature": 0
+    },
+    "max_request_bytes": 262144,
+    "batch": {
+      "backend_revision": "qwen38-27b-fp8",
+      "inference_mode": "plain",
+      "reasoning_effort": "none",
+      "row_concurrency": 8,
+      "maximum_grounding_turns": 5,
+      "grounding": {
+        "allowed_domains": [
+          "docs.docker.com", "kubernetes.io", "minikube.sigs.k8s.io", "docs.aws.amazon.com",
+          "awscli.amazonaws.com", "learn.microsoft.com", "cloud.google.com", "docs.cloud.google.com",
+          "www.postgresql.org", "postgresql.org", "dev.mysql.com", "redis.io", "developer.hashicorp.com",
+          "opentofu.org", "www.pulumi.com", "pulumi.com", "helm.sh", "k3d.io", "kind.sigs.k8s.io",
+          "kops.sigs.k8s.io", "eksctl.io", "docs.podman.io", "podman.io", "firebase.google.com",
+          "docs.netlify.com", "cli.netlify.com", "fly.io", "docs.railway.com", "www.serverless.com",
+          "serverless.com", "docs.serverless.com", "developers.cloudflare.com", "vercel.com", "docs.min.io",
+          "min.io", "rclone.org", "www.backblaze.com", "linuxcontainers.org", "docs.redhat.com",
+          "docs.openshift.com", "docs.okd.io"
+        ],
+        "trusted_url_prefixes": [
+          "https://github.com/docker/docs", "https://github.com/docker/cli", "https://github.com/docker/compose",
+          "https://github.com/moby/moby", "https://github.com/kubernetes/website", "https://github.com/kubernetes/kubectl",
+          "https://github.com/kubernetes/kubernetes", "https://github.com/helm/helm-www",
+          "https://github.com/hashicorp/terraform", "https://github.com/pulumi/pulumi", "https://github.com/pulumi/docs",
+          "https://github.com/opentofu/opentofu", "https://github.com/aws/aws-cli", "https://github.com/awsdocs",
+          "https://github.com/Azure/azure-docs-cli", "https://github.com/Azure/azure-cli",
+          "https://github.com/GoogleCloudPlatform", "https://github.com/postgres/postgres", "https://github.com/redis/docs",
+          "https://github.com/redis/redis", "https://github.com/containerd/nerdctl", "https://github.com/containers/podman",
+          "https://github.com/firebase/firebase-tools", "https://github.com/netlify/cli", "https://github.com/vercel/vercel",
+          "https://github.com/cloudflare/cloudflare-docs", "https://github.com/rclone/rclone", "https://github.com/minio/mc",
+          "https://github.com/lxc/incus", "https://github.com/kubernetes-sigs/kind", "https://github.com/k3d-io/k3d",
+          "https://github.com/kubernetes/kops", "https://github.com/eksctl-io/eksctl",
+          "https://github.com/openshift/openshift-docs", "https://raw.githubusercontent.com/aws/aws-cli",
+          "https://raw.githubusercontent.com/docker/compose"
+        ]
+      }
+    }
   },
   "discovery": {
     "max_output_tokens": 1024,

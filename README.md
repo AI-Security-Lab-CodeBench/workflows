@@ -15,7 +15,7 @@ For a **fresh installation**, start from a clean checkout of the intended commit
 cp .env.example .env
 cp .env.pipeline.example .env.pipeline
 chmod 600 .env .env.pipeline
-# Set two different random database passwords in .env.
+# Set two different random database passwords and CODEBENCH_LLM_IP in .env.
 # Put provider keys (including any numbered keys) in .env.pipeline.
 docker compose --env-file .env -f compose.yaml config --quiet
 python3 scripts/stack.py up
@@ -35,10 +35,12 @@ Run `python3 scripts/stack.py --help` for stage selection and targeted E2E.
 
 The UI is published on the **Docker host's loopback**, port `3041`; use a
 loopback-only tunnel when the engine is remote. PostgreSQL, MinIO and the
-pipeline communicate over service DNS on an internal bridge. The UI proxy is
-not an outbound proxy. Stages that call external documentation or model
-providers need an explicitly approved route reachable from the internal
-network; providing an API key does not create that route.
+pipeline communicate over service DNS on an internal bridge. Webserver and daemon
+also have ordinary outbound bridge access. PostgreSQL and MinIO do not.
+Compose maps `codebench-llm` directly to `CODEBENCH_LLM_IP` for the two workers.
+Keep the address in the private deployment env file; never put it in Git.
+External lookups use `CODEBENCH_DNS_SERVER` (default `1.1.1.1`); no DNS sidecar,
+host-list generator, proxy, or outbound allowlist is needed.
 
 **Replacing a development installation:** start with empty project volumes and
 rematerialize CAT-3; no historical data import is required. Drain any active
