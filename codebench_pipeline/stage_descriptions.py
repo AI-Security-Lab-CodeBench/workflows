@@ -59,6 +59,28 @@ whether an eligible command is safe.
 `filter_decision` and `filter_reason`. Filtering does not assign safety labels.
 Quarantined records remain here, not in the downstream human-review queue.
 """,
+    "labeling_attempts": """
+**How it works:** Take eligible commands in source-trust order and run a separate
+ReAct conversation for each row, with up to `row_concurrency` active rows (default 8).
+In each grounding iteration the model can ask Keenable MCP to run multiple searches or
+fetches. Their observations all return before the model reasons again. At most five
+retrievals run in a shared wave across rows, subject to the shared 10 calls/sec service
+limit. A row can use several calls per iteration; there is no five-call total per row.
+Only fetched pages from configured trusted origins can support the label.
+
+**Input:** Eligible filtered commands, labeling rules and mapped inference settings.
+**Grounding and finalization:** `maximum_grounding_turns` counts full grounding
+iterations (default 5), not provider calls. A mixed response runs retrievals and
+ignores finalize; malformed nonterminal responses still spend an iteration.
+A row not already finalized gets one finalize-only invocation after the grounding
+iterations, or immediately when the limit is zero.
+**Output:** A complete `LabelingAttemptsTable` with exact evidence, transcripts,
+and explicit failures. Malformed or unsupported outcomes cannot become labels.
+Stop scheduling a subrisk at 250 distinct eligible all-high labels and record quota
+deferrals. Plain transport calls the configured model directly; guarded transport
+also requires capacity admission. Completed successful rows are resumable only
+within a matching failed-step retry lineage.
+""",
     "proposed_annotations": """
 **How it works:** The current labeling-attempt table is validated, and only successful
 outcomes are decoded into complete command labels. Each label retains its own documentation

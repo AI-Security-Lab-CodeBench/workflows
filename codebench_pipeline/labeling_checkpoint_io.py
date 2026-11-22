@@ -8,6 +8,7 @@ from dagster import AssetKey, InitResourceContext, ResourceDefinition
 from dagster._core.execution.stats import StepEventStatus
 from dagster._core.storage.tags import PARTITION_NAME_TAG
 
+from codebench_pipeline.batch_labeling_protocol import ROW_LABELING_CONTRACT
 from codebench_pipeline.batch_labeling_rows import BatchRow
 from codebench_pipeline.labeling_checkpoint_store import LabelingCheckpointCache
 from codebench_pipeline.repository_config import repository_component
@@ -22,6 +23,7 @@ def labeling_generation_identity(
     return fingerprint(
         {
             "asset": LABELING_ATTEMPTS.to_user_string(),
+            "checkpoint_contract": ROW_LABELING_CONTRACT,
             "partition": partition,
             "input_output_signature": stage_signature,
             "model_binding": fingerprint(expected_model_path) if expected_model_path is not None else None,
@@ -52,7 +54,7 @@ def labeling_checkpoint_resource(home: Path) -> ResourceDefinition:
             raise IntegrityError("Labeling checkpoints require a dataset partition")
         dataset = repository_component(partition)
         step_key = LABELING_ATTEMPTS.to_python_identifier()
-        root = home / "row-inference-v2" / dataset / "runs"
+        root = home / "row-inference-v3" / dataset / "runs"
         operations = home / "label-grounding-v2" / dataset
         current = root / fingerprint([run.run_id, step_key])
         plan = (

@@ -215,12 +215,17 @@ existing data before replacing it; never overwrite concurrent work.
   `command_candidates`. Preserve raw extraction and transformation/exclusion evidence.
 - Converge authorized, current branch candidates at `merged_command_candidates`
   before shared `filtered_commands` and `labeling_attempts`.
-  Enhanced labeling groups pending commands by parsed command prefixes without
-  embeddings. Each batch uses a LangGraph ReAct loop with `query`, `page_fetch`,
-  and `finalize`; query and fetch use Keenable MCP and share a total call budget
-  of floor(actual batch size * configured grounding_calls_per_command), default 1.5.
-  Only fetched documentation can support labels. Preserve independent row
-  judgments and completed-batch checkpoints. Project successful outcomes to `proposed_annotations`
+   Enhanced labeling runs one independent ReAct loop per row, with up to
+   `row_concurrency` active rows (default 8). `maximum_grounding_turns`
+   (default 5) counts complete model/action/observation cycles. Each cycle may
+   issue multiple Keenable MCP queries or fetches and returns all observations
+   before the next model invocation. Across all rows, at most five retrievals
+   run per shared wave, subject to the shared 10 calls/sec service limit. There
+   is no five-call total per row. Mixed retrieval/finalize responses use the
+   retrievals only, and malformed nonterminal responses consume a cycle. An
+   unfinished row gets one finalize-only invocation after the limit (immediately
+   at zero). Only fetched documentation can support labels. Preserve independent row
+   judgments and completed-row checkpoints. Project successful outcomes to `proposed_annotations`
   and unsupported/invalid outcomes to `labeling_failures`, then apply conservative
   exact deduplication only to the supported annotations.
   Namespace candidate and source identities by branch and retain original identities.
@@ -295,9 +300,9 @@ local skill does not install or authorize the Dagster Plus MCP server.
   for equivalent approval. Preserve immutable historical outputs and decisions
   while clearly distinguishing their currentness.
 - Labeling checkpoints provide crash recovery only. A retry with the same asset
-  inputs, source versions and I/O contract may resume completed batches. If a
+   inputs, source versions and I/O contract may resume completed rows. If a
   change to any of these requires rematerialization, label the whole input again,
-  even rows identical to the previous materialization. A failed batch may retry
+   even rows identical to the previous materialization. A failed row may retry
   in full. Historical receipts remain evidence, not input to the new labeling run.
 - Human decisions remain reusable per record. Adding or changing a neighboring
   record does not erase a human decision. Human decision identity
@@ -310,13 +315,14 @@ local skill does not install or authorize the Dagster Plus MCP server.
   query persisted pages and must not traverse upstream graphs, reload live
   configuration or recreate snapshots. Use per-dataset writer serialization,
   optimistic revisions and durable waiting, not a sleeping compute worker.
-- Bound complete batch context, output, model turns and documentation-provider calls.
+- Bound each row's context, output and grounding iterations, and the shared
+  documentation-provider waves and rate.
   Select the transport in the model's business configuration. Plain OpenAI-compatible
   inference calls chat completions without querying server telemetry. Guarded SGLang
   inference uses shared admission capped at 50% of measured request-slot and token
   capacity; side load pauses new calls and missing or stale metrics fail closed.
   Never fall back from guarded to plain on an admission failure.
-  During recovery, skip only completed batches from the interrupted materialization.
+  During recovery, skip only completed rows from the interrupted materialization.
   Preserve original inference receipts and explicit human-decision carry-forward
   provenance. A new release snapshot with a nonempty uncertainty queue still
   requires explicit completion; an empty queue is revalidated automatically.
@@ -340,7 +346,7 @@ local skill does not install or authorize the Dagster Plus MCP server.
 ## Data and review contracts
 
 - Label each record independently from source context and relevant subcommand
-  documentation, sharing retrieval rather than judgments across similarity batches.
+  documentation, without taking judgments or evidence applicability from other rows.
   Native single-command inference remains available for baseline compatibility.
   Local source preparation is separate
   from command labeling and never supplies a fifth command confidence.

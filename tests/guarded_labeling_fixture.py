@@ -277,9 +277,7 @@ class LabelingFixture:
                 "publication": spec.publication.model_copy(update={"limit_per_risk": limit_per_risk}),
                 "annotation": AnnotationConfig(
                     model=remote_model(),
-                    batch=batch.model_copy(
-                        update={"grounding": live, "batch_size": 3, "grounding_calls_per_command": 2}
-                    ),
+                    batch=batch.model_copy(update={"grounding": live, "row_concurrency": 3}),
                 ),
                 "declared_collection": DeclaredCollection(
                     existing_datasets=SourceDeclaration.from_declaration(dataset),
@@ -401,8 +399,9 @@ class LabelingFixture:
         _capacity: CapacityConfig | None = None,
         _path: Path | None = None,
     ) -> HTTPResponse:
-        rows, results = request_parts(body)
-        ids = [row["candidate"]["candidate_id"] for row in rows]
+        (row,), results = request_parts(body)
+        candidate = CandidateRecord.model_validate({**row["candidate"], "transformations": []})
+        ids = [candidate.candidate_id]
         if not results:
             self.remote_rows.extend(ids)
             return tool_reply("query", {"query": "Official fixture CLI reference", "candidate_ids": ids})
@@ -410,25 +409,27 @@ class LabelingFixture:
             (hit,) = results[0]["discovery"]
             return tool_reply("page_fetch", {"url": hit["url"], "candidate_ids": ids})
         page = results[1].get("page", {})
-        outcomes = []
-        for row in rows:
-            candidate = CandidateRecord.model_validate({**row["candidate"], "transformations": []})
-            evidence = page.get("evidence_ids", {}).get(candidate.candidate_id)
-            quote = LIVE_QUOTES.get(candidate.command)
-            if evidence and quote:
-                outcome = submitted(row, [evidence], page["url"], quote=quote)
-                outcome["label"]["category_id"] = candidate.risk_candidates[0].split(".", 1)[0]
-                outcome["label"]["category_confidence"] = self.category_confidence
-            else:
-                outcome = {
-                    "candidate_id": candidate.candidate_id,
-                    "row_input_fingerprint": row["row_input_fingerprint"],
-                    "label": None,
-                    "evidence_ids": [],
-                    "grounding_quotes": {},
-                    "grounding_rationale": "",
-                    "failure_code": "operation_unsupported",
-                    "failure_detail": "Origin evidence is unavailable.",
-                }
-            outcomes.append(outcome)
-        return tool_reply("finalize", {"outcomes": outcomes})
+        evidence = page.get("evidence_ids", {}).get(candidate.candidate_id)
+        quote = LIVE_QUOTES.get(candidate.command)
+        if evidence and quote:
+            outcome = submitted(row, [evidence], page["url"], quote=quote)
+            label = outcome["label"]
+            assert isinstance(label, dict)
+            label.update(
+                candidate_id=candidate.candidate_id,
+                util=candidate.util,
+                category_id=candidate.risk_candidates[0].split(".", 1)[0],
+                category_confidence=self.category_confidence,
+            )
+        else:
+            outcome = {
+                "candidate_id": candidate.candidate_id,
+                "row_input_fingerprint": row["row_input_fingerprint"],
+                "label": None,
+                "evidence_ids": [],
+                "grounding_quotes": {},
+                "grounding_rationale": "",
+                "failure_code": "operation_unsupported",
+                "failure_detail": "Origin evidence is unavailable.",
+            }
+        return tool_reply("finalize", {"outcome": outcome})

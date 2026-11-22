@@ -43,7 +43,7 @@ from test_review_release import attest_fixture_release
 
 from codebench_pipeline.admitted_tables import resolve_labeling_completion
 from codebench_pipeline.batch_labeling import BatchExecution
-from codebench_pipeline.batch_labeling_protocol import SubmittedLabels
+from codebench_pipeline.batch_labeling_protocol import SubmittedLabel
 from codebench_pipeline.config_assets import configured_selection, mapped_input
 from codebench_pipeline.data_view_models import DatasetQueryRequest, TableResponse
 from codebench_pipeline.data_views import DatasetDataService
@@ -80,24 +80,19 @@ from codebench_pipeline.stage_configuration import GuardedLabelingConfig
 
 def unsupported_plan_reply(name: str, arguments: dict[str, JsonValue]) -> HTTPResponse:
     if name == "finalize":
-        submitted = SubmittedLabels.model_validate(arguments)
-        arguments = {
-            "outcomes": [
-                row.model_copy(
-                    update={
-                        "label": None,
-                        "evidence_ids": [],
-                        "grounding_quotes": {},
-                        "grounding_rationale": "",
-                        "failure_code": "grounding_missing",
-                        "failure_detail": "Fixture provider did not establish the plan semantics.",
-                    }
-                ).model_dump(mode="json", by_alias=True)
-                if row.label is not None and row.label.util == "terraform"
-                else row.model_dump(mode="json", by_alias=True)
-                for row in submitted.outcomes
-            ]
-        }
+        row = SubmittedLabel.model_validate(arguments).outcome
+        if row.label is not None and row.label.util == "terraform":
+            row = row.model_copy(
+                update={
+                    "label": None,
+                    "evidence_ids": [],
+                    "grounding_quotes": {},
+                    "grounding_rationale": "",
+                    "failure_code": "grounding_missing",
+                    "failure_detail": "Fixture provider did not establish the plan semantics.",
+                }
+            )
+        arguments = {"outcome": row.model_dump(mode="json", by_alias=True)}
     return tool_reply(name, arguments)
 
 
@@ -200,7 +195,7 @@ class LabelingTableTests(unittest.TestCase):
         home = Path(self.enterContext(tempfile.TemporaryDirectory()))
         fixture = LabelingFixture(self, home, native=True)
         spec = fixture.spec
-        batch = require_declared_annotation(spec.annotation).model_copy(update={"batch_size": 1})
+        batch = require_declared_annotation(spec.annotation).model_copy(update={"row_concurrency": 1})
         spec = spec.model_copy(
             update={"annotation": spec.annotation.model_copy(update={"batch": batch, "workers": 1})}
         )

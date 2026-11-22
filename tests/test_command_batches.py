@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from test_batch_labeling import QUOTE, URL, batch_config, live_mcp_fixture, remote_model, shared_retrieval
+from test_batch_labeling import QUOTE, URL, batch_config, live_mcp_fixture, remote_model, row_retrieval
 from test_dataset_rules import make_candidate, make_rules
 
 from codebench_pipeline.batch_labeling import (
@@ -62,11 +62,11 @@ class CommandBatchTests(unittest.TestCase):
         for observed, original in zip((row for batch in result for row in batch), candidates, strict=True):
             self.assertIs(observed, original)
 
-    def test_changed_generation_regroups_all_rows_and_full_replay_needs_no_provider(self) -> None:
+    def test_changed_generation_relabels_all_rows_and_full_replay_needs_no_provider(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             a, b, c, d = [make_candidate(identity) for identity in "abcd"]
-            config = batch_config(root).model_copy(update={"batch_size": 2})
+            config = batch_config(root).model_copy(update={"row_concurrency": 2})
             rules, model = make_rules(), remote_model()
             cache = LabelingCheckpointCache(root / "cache", root / "operations")
 
@@ -89,14 +89,19 @@ class CommandBatchTests(unittest.TestCase):
                 live_mcp_fixture({URL: QUOTE}) as calls,
                 patch(
                     "codebench_pipeline.batch_labeling.guarded_complete",
-                    side_effect=lambda _url, body, *_: shared_retrieval(body),
+                    side_effect=lambda _url, body, *_: row_retrieval(body),
                 ),
             ):
                 original = run([a, c], "original", "original inputs")
                 expanded = run([d, c, b, a], "expanded", "expanded inputs")
-                self.assertEqual([name for name, _ in calls], ["search_web_pages", "fetch_page_content"] * 3)
-            packets = json.loads((root / "expanded" / "label-packets.json").read_text(encoding="utf-8"))
-            self.assertEqual(packets["packets"], [["a", "b"], ["c", "d"]])
+                self.assertCountEqual(
+                    [name for name, _ in calls], ["search_web_pages", "fetch_page_content"] * 6
+                )
+            membership = [
+                json.loads(path.read_bytes())["candidate_ids"]
+                for path in (root / "expanded").glob("batches/*/transcript.json")
+            ]
+            self.assertCountEqual(membership, [["a"], ["b"], ["c"], ["d"]])
             self.assertEqual([row.status for row in expanded], ["success"] * 4)
             self.assertNotEqual(expanded[3].row_input_fingerprint, original[0].row_input_fingerprint)
             with (

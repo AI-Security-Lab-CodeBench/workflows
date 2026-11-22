@@ -246,7 +246,11 @@ class RegisteredConfigMaterializationTests(TestCase):
                 "annotation": spec.annotation.model_copy(
                     update={
                         "batch": batch.model_copy(
-                            update={"grounding": grounding, "grounding_calls_per_command": 2.75}
+                            update={
+                                "grounding": grounding,
+                                "row_concurrency": 16,
+                                "maximum_grounding_turns": 0,
+                            }
                         )
                     }
                 ),
@@ -354,13 +358,10 @@ class RegisteredConfigMaterializationTests(TestCase):
             )
             self.assertEqual(labeling.labeling_attempts.batch.grounding.trusted_url_prefixes, [origin])
             self.assertEqual(labeling.labeling_attempts.batch.grounding.timeout, 12.5)
-            self.assertEqual(labeling.labeling_attempts.batch.grounding_calls_per_command, 2.75)
-            self.assertEqual(
-                labeling.labeling_attempts.batch.bind_capacity(
-                    str(home / "capacity"), "/fixture/model"
-                ).grounding_calls_per_command,
-                2.75,
-            )
+            scoped = labeling.labeling_attempts.batch
+            self.assertEqual((scoped.row_concurrency, scoped.maximum_grounding_turns), (16, 0))
+            bound = scoped.bind_capacity(str(home / "capacity"), "/fixture/model")
+            self.assertEqual((bound.row_concurrency, bound.maximum_grounding_turns), (16, 0))
             self.assertNotIn("collection", labeling.model_dump())
             self.assertEqual(
                 registered.release_config().grounding.verifier_config().trusted_url_prefixes, [origin]

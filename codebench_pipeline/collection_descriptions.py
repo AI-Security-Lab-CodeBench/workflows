@@ -46,17 +46,4 @@ FINALIZATION_DESCRIPTIONS: Final = {
         "candidate and source IDs with the branch and retains the original IDs and acquisition receipts. "
         "Any unavailable or stale configured branch blocks the merge."
     ),
-    "labeling_attempts": (
-        "Take eligible commands in source-trust order and group them by parsed command prefix. "
-        "Each batch runs a bounded LangGraph ReAct conversation with query, page_fetch and finalize tools. "
-        "Query and fetch call Keenable MCP; collected documentation is not an input. Only fetched pages "
-        "from configured trusted origins can support an independently validated row label. Search and "
-        "fetch share a total call budget of floor(batch row count * grounding_calls_per_command), "
-        "whose multiplier defaults to 1.5. Preserve exact evidence, transcripts and explicit failures. "
-        "Stop scheduling a subrisk at 250 distinct eligible all-high labels, retaining quota deferrals. "
-        "The output is a complete LabelingAttemptsTable; malformed or unsupported outcomes cannot "
-        "become labels. Plain transport calls the configured model directly; guarded transport also "
-        "requires capacity admission. Completed all-success conversations can resume within a matching "
-        "failed-step retry lineage."
-    ),
 }

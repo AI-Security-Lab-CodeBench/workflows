@@ -1,5 +1,4 @@
 import json
-from collections.abc import Mapping
 from hashlib import sha256
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -15,20 +14,14 @@ from test_batch_labeling import (
     live_mcp_fixture,
     remote_model,
     request_parts,
-    shared_retrieval,
+    row_retrieval,
     submitted,
     tool_reply,
 )
 from test_dataset_rules import make_candidate, make_rules
 from test_declared_dataset_graph import fixture_spec
 
-from codebench_pipeline.batch_labeling import (
-    BatchExecution,
-    LabelingGeneration,
-    run_prepared_batches,
-)
-from codebench_pipeline.batch_labeling_config import BatchLabelingConfig
-from codebench_pipeline.batch_labeling_protocol import RowInput
+from codebench_pipeline.batch_labeling import BatchExecution
 from codebench_pipeline.batch_labeling_ranked import QUOTA_DEFERRED, QUOTA_RECEIPT, RankedLabeling
 from codebench_pipeline.dataframe_schemas import FilteredCommandsTable, validated_frame
 from codebench_pipeline.dataset_config import DatasetBuildSpec, require_declared_annotation
@@ -39,10 +32,9 @@ from codebench_pipeline.grounding_tools import GroundingCredentials
 from codebench_pipeline.inference_capacity import CapacityConfig, CapacityUnavailable
 from codebench_pipeline.labeling_checkpoint_io import labeling_generation_identity
 from codebench_pipeline.labeling_checkpoint_store import LabelingCheckpointCache
-from codebench_pipeline.labeling_outcomes import LabelingAttempt, failed_attempt
+from codebench_pipeline.labeling_outcomes import failed_attempt
 from codebench_pipeline.labeling_stage_settings import LabelingRules, ProposalRules
 from codebench_pipeline.labeling_tables import proposed_from_attempts
-from codebench_pipeline.model_config import ModelConfig
 from codebench_pipeline.openai_transport import HTTPResponse
 from codebench_pipeline.stage_configuration import GuardedLabelingConfig
 from codebench_pipeline.storage import fingerprint
@@ -57,13 +49,13 @@ def bound_labeling(spec: DatasetBuildSpec) -> GuardedLabeling:
 
 
 class RankedLabelingTests(TestCase):
-    def test_guarded_packets_overlap_but_credit_and_refill_in_rank_order(self) -> None:
+    def test_guarded_rows_overlap_but_credit_and_refill_in_rank_order(self) -> None:
         home = Path(self.enterContext(TemporaryDirectory()))
         rules = make_rules()
         first_risk, second_risk = (risk.id for risk in rules.risks)
         spec = fixture_spec(home)
         annotation = spec.annotation.model_copy(
-            update={"workers": 2, "batch": batch_config(home).model_copy(update={"batch_size": 1})}
+            update={"batch": batch_config(home).model_copy(update={"row_concurrency": 2})}
         )
         spec = spec.model_copy(update={"rules": rules, "annotation": annotation})
         rows = [
@@ -98,22 +90,24 @@ class RankedLabelingTests(TestCase):
             (row,), results = request_parts(body)
             identity = str(row["candidate"]["candidate_id"])
             if results:
+                if len(results) == 2:
+                    finished[identity].set()
                 if identity == "lower" and len(results) == 2:
                     evidence = results[-1]["page"]["evidence_ids"][identity]
                     return tool_reply(
-                        "finalize", {"outcomes": [submitted(row, [evidence], quote=publish_quote)]}
+                        "finalize", {"outcome": submitted(row, [evidence], quote=publish_quote)}
                     )
-                return shared_retrieval(body)
+                return row_retrieval(body)
             with calls_lock:
                 calls.append(identity)
             match identity:
                 case "a-first":
                     first_started.set()
                     self.assertTrue(
-                        finished["b-duplicate"].wait(5), "Second packet did not finish concurrently"
+                        finished["b-duplicate"].wait(5), "Second row did not reach judgment concurrently"
                     )
                 case "b-duplicate":
-                    self.assertTrue(first_started.wait(5), "First packet did not start concurrently")
+                    self.assertTrue(first_started.wait(5), "First row did not start concurrently")
                 case "c-refill":
                     self.assertTrue(finished["a-first"].is_set(), "Refill ran before quota was available")
                 case "lower":
@@ -122,38 +116,11 @@ class RankedLabelingTests(TestCase):
                     )
                 case _:
                     self.fail(f"Unexpected inference for {identity}")
-            return shared_retrieval(body)
-
-        def observe_packet(
-            packet: list[CandidateRecord],
-            prepared: Mapping[str, RowInput],
-            rules: LabelingRules,
-            model: ModelConfig,
-            config: BatchLabelingConfig,
-            out: Path,
-            execution: BatchExecution,
-            maximum_context_characters: int,
-            generation: LabelingGeneration | None,
-        ) -> list[LabelingAttempt]:
-            attempts = run_prepared_batches(
-                packet,
-                prepared,
-                rules,
-                model,
-                config,
-                out,
-                execution,
-                maximum_context_characters,
-                generation,
-            )
-            (candidate,) = packet
-            finished[candidate.candidate_id].set()
-            return attempts
+            return row_retrieval(body)
 
         with (
             live_mcp_fixture({URL: f"{QUOTE}\n\n{publish_quote}"}) as mcp,
             patch("codebench_pipeline.batch_labeling.guarded_complete", side_effect=provider),
-            patch("codebench_pipeline.grounding_tables.run_prepared_batches", side_effect=observe_packet),
             patch("codebench_pipeline.batch_labeling_ranked.SUBRISK_QUOTA", 2),
         ):
             labeling = bound_labeling(spec)
@@ -178,7 +145,7 @@ class RankedLabelingTests(TestCase):
         rules = make_rules()
         spec = fixture_spec(home)
         annotation = spec.annotation.model_copy(
-            update={"workers": 1, "batch": batch_config(home).model_copy(update={"batch_size": 1})}
+            update={"batch": batch_config(home).model_copy(update={"row_concurrency": 1})}
         )
         spec = spec.model_copy(update={"rules": rules, "annotation": annotation})
         candidates = [make_candidate("first"), make_candidate("later")]
@@ -204,7 +171,7 @@ class RankedLabelingTests(TestCase):
                 calls.append(str(row["candidate"]["candidate_id"]))
             if len(calls) == 2 and len(results) == 1:
                 raise CapacityUnavailable("fixture side load")
-            return shared_retrieval(body)
+            return row_retrieval(body)
 
         mcp = self.enterContext(live_mcp_fixture({URL: QUOTE}))
         self.enterContext(patch("codebench_pipeline.batch_labeling.guarded_complete", side_effect=provider))
@@ -304,24 +271,23 @@ class RankedLabelingTests(TestCase):
         def judge(
             _base: str, body: bytes, *_args: str | float | Path | CapacityConfig | None
         ) -> HTTPResponse:
-            rows, results = request_parts(body)
-            identities = [str(row["candidate"]["candidate_id"]) for row in rows]
+            (row,), results = request_parts(body)
+            identity = str(row["candidate"]["candidate_id"])
             if not results:
-                inferred.extend(identities)
+                inferred.append(identity)
             if len(results) < 2:
-                return shared_retrieval(body)
+                return row_retrieval(body)
             evidence = results[1]["page"]["evidence_ids"]
-            outcomes = []
-            for row, identity in zip(rows, identities, strict=True):
-                quote = (
-                    "Forged citation that is not present on the fetched page."
-                    if identity == "ungrounded"
-                    else QUOTE
-                )
-                outcome = submitted(row, [evidence[identity]], quote=quote)
-                outcome["label"].update(amendments.get(identity, {}))
-                outcomes.append(outcome)
-            return tool_reply("finalize", {"outcomes": outcomes})
+            quote = (
+                "Forged citation that is not present on the fetched page."
+                if identity == "ungrounded"
+                else QUOTE
+            )
+            outcome = submitted(row, [evidence[identity]], quote=quote)
+            label = outcome["label"]
+            assert isinstance(label, dict)
+            label.update(amendments.get(identity, {}))
+            return tool_reply("finalize", {"outcome": outcome})
 
         with (
             live_mcp_fixture({URL: QUOTE}),
@@ -370,7 +336,7 @@ class RankedLabelingTests(TestCase):
         ) -> HTTPResponse:
             (row,), results = request_parts(body)
             if not results:
-                return shared_retrieval(body)
+                return row_retrieval(body)
             outcome = {
                 **submitted(row, []),
                 "label": None,
@@ -378,7 +344,7 @@ class RankedLabelingTests(TestCase):
                 "failure_code": "missing_operation_documentation",
                 "failure_detail": "The documentation search yielded no results.",
             }
-            return tool_reply("finalize", {"outcomes": [outcome]})
+            return tool_reply("finalize", {"outcome": outcome})
 
         with (
             live_mcp_fixture({}) as calls,
@@ -437,7 +403,7 @@ class RankedLabelingTests(TestCase):
         scheduler = RankedLabeling(
             LabelingRules.from_rules(rules),
             remote_model(),
-            batch_config(home).model_copy(update={"batch_size": 1}),
+            batch_config(home).model_copy(update={"row_concurrency": 1}),
             home / "stage",
             100_000,
         )

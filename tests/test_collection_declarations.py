@@ -4,7 +4,7 @@ from tempfile import TemporaryDirectory
 from unittest import TestCase
 
 from pydantic import JsonValue, TypeAdapter, ValidationError
-from test_declared_dataset_graph import fixture_spec
+from test_declared_dataset_graph import BUNDLE, declared_labeling_fixture, fixture_spec
 from test_keenable import permission
 from test_keenable import source_declaration as historical_keenable_fixture
 from test_repository import COLLECTION, repository_config_fixture
@@ -18,6 +18,7 @@ from codebench_pipeline.collection_config import (
 from codebench_pipeline.dataset_branches import Branch
 from codebench_pipeline.dataset_config import DatasetBuildSpec
 from codebench_pipeline.dataset_registry import DatasetRegistry, read_registered_spec
+from codebench_pipeline.declared_dataset_bundle import DeclaredDatasetBundle
 from codebench_pipeline.keenable_policy import KeenableDeclaration
 from codebench_pipeline.repository_branch_config import (
     DeclaredRepositoryOrigin,
@@ -26,7 +27,7 @@ from codebench_pipeline.repository_branch_config import (
     load_repository_branch,
 )
 from codebench_pipeline.repository_config import RepositoryBranch
-from codebench_pipeline.stage_configuration import stage_configs
+from codebench_pipeline.stage_configuration import labeling_settings, stage_configs
 from codebench_pipeline.storage import IntegrityError, fingerprint
 
 
@@ -36,7 +37,11 @@ class CollectionDeclarationTests(TestCase):
         spec = fixture_spec(home)
         payload = spec.model_dump(mode="json")
         batch = payload["annotation"]["batch"]
-        batch.pop("grounding_calls_per_command")
+        batch.pop("row_concurrency")
+        batch.pop("maximum_grounding_turns")
+        batch["batch_size"] = 3
+        batch["maximum_model_turns"] = 4
+        batch["grounding_calls_per_command"] = 2.75
         batch["maximum_grounding_rounds"] = 2
         wire = json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
         revision = fingerprint(wire)
@@ -49,10 +54,59 @@ class CollectionDeclarationTests(TestCase):
         restored = DatasetRegistry(home).get_snapshot(spec.dataset_id)
 
         assert restored.annotation.batch is not None
-        self.assertEqual(restored.annotation.batch.grounding_calls_per_command, 1.5)
+        self.assertEqual(restored.annotation.batch.row_concurrency, 8)
+        self.assertEqual(restored.annotation.batch.maximum_grounding_turns, 5)
+        current_payload = labeling_settings(restored.annotation).batch.model_dump()
+        for obsolete in ("batch_size", "maximum_model_turns", "grounding_calls_per_command"):
+            self.assertNotIn(obsolete, current_payload)
         self.assertEqual(stored.read_text(encoding="utf-8"), wire)
         with self.assertRaises(ValidationError):
             DatasetBuildSpec.model_validate_json(wire)
+
+    def test_authored_row_limits_survive_guarded_projection_and_binding(self) -> None:
+        home = Path(self.enterContext(TemporaryDirectory()))
+        declaration = declared_labeling_fixture(home)
+        payload = declaration.model_dump(mode="json")
+        payload["batch"].update(row_concurrency=64, maximum_grounding_turns=0)
+
+        annotation = type(declaration).model_validate(payload).registered()
+        scoped = labeling_settings(annotation).batch
+        effective = scoped.bind_capacity(str(home / "capacity"), "/fixture/model")
+
+        self.assertEqual((effective.row_concurrency, effective.maximum_grounding_turns), (64, 0))
+        self.assertEqual(effective.inference_mode, "guarded")
+        assert annotation.batch is not None
+        self.assertEqual(effective.require_capacity(), annotation.batch.require_capacity())
+        for field, value in (
+            ("row_concurrency", 65),
+            ("maximum_grounding_turns", -1),
+            ("batch_size", 3),
+            ("maximum_model_turns", 4),
+            ("grounding_calls_per_command", 2.75),
+        ):
+            with self.subTest(field=field), self.assertRaisesRegex(ValidationError, field):
+                type(declaration).model_validate({**payload, "batch": {**payload["batch"], field: value}})
+
+    def test_current_bundle_overrides_registered_row_limits_without_changing_model(self) -> None:
+        home = Path(self.enterContext(TemporaryDirectory()))
+        spec = fixture_spec(home)
+        payload = spec.model_dump(mode="json")
+        payload["annotation"]["batch"].update(row_concurrency=16, maximum_grounding_turns=3)
+        wire = json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
+        revision = fingerprint(wire)
+        directory = home / "dataset-specifications" / spec.dataset_id
+        directory.mkdir(parents=True)
+        (directory / f"{revision}.json").write_text(wire, encoding="utf-8")
+        (directory / "current").write_text(revision, encoding="ascii")
+
+        bundle = DeclaredDatasetBundle.model_validate_json(BUNDLE.read_bytes())
+        resolved = bundle.resolve(BUNDLE.resolve().parent, home=home).annotation
+
+        assert resolved.batch is not None
+        self.assertEqual((resolved.batch.row_concurrency, resolved.batch.maximum_grounding_turns), (8, 5))
+        self.assertEqual(resolved.model, spec.annotation.model)
+        self.assertEqual(resolved.batch.inference_mode, "plain")
+        self.assertIsNone(resolved.batch.capacity)
 
     def test_registration_resolves_independent_path_free_repository_declarations(self) -> None:
         home = Path(self.enterContext(TemporaryDirectory()))

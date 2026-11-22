@@ -19,16 +19,19 @@ def _validated_spec(payload: bytes) -> tuple[DatasetBuildSpec, str | None]:
     snapshot = json_object.validate_json(payload)
     original_checksum = fingerprint(json_object.dump_json(snapshot).decode())
     match snapshot.get("annotation"):
-        case {"batch": dict() as batch} if "maximum_grounding_rounds" in batch:
-            rounds = batch.pop("maximum_grounding_rounds")
-            if type(rounds) is not int or not 0 <= rounds <= 4:
-                raise IntegrityError("Invalid historical labeling grounding-round limit")
-            grounding = GroundingConfig.model_validate_json(
-                TypeAdapter(JsonValue).dump_json(batch["grounding"])
-            )
-            batch["grounding"] = grounding.model_dump(
-                mode="json", include=set(LiveGroundingConfig.model_fields)
-            )
+        case {"batch": dict() as batch}:
+            if "maximum_grounding_rounds" in batch:
+                rounds = batch.pop("maximum_grounding_rounds")
+                if type(rounds) is not int or not 0 <= rounds <= 4:
+                    raise IntegrityError("Invalid historical labeling grounding-round limit")
+                grounding = GroundingConfig.model_validate_json(
+                    TypeAdapter(JsonValue).dump_json(batch["grounding"])
+                )
+                batch["grounding"] = grounding.model_dump(
+                    mode="json", include=set(LiveGroundingConfig.model_fields)
+                )
+            for obsolete in ("batch_size", "maximum_model_turns", "grounding_calls_per_command"):
+                batch.pop(obsolete, None)
         case _:
             pass
     if "refresh_external_inputs" in snapshot:

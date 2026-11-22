@@ -17,7 +17,7 @@ from pydantic import JsonValue, TypeAdapter
 from test_dataset_rules import make_candidate, make_label, make_rules
 from test_review_release import attest_fixture_release
 
-from codebench_pipeline.batch_labeling import SubmittedLabels
+from codebench_pipeline.batch_labeling_protocol import SubmittedLabel
 from codebench_pipeline.data_view_models import DatasetQueryRequest, DatasetViewError, TableResponse
 from codebench_pipeline.data_views import DatasetDataService
 from codebench_pipeline.dataframe_io import REVIEW_PREPARATION, DataFrameIOManager
@@ -62,14 +62,11 @@ def mixed_confidence_reply(
     function = TypeAdapter(dict[str, str]).validate_python(call["function"])
     if function["name"] != "finalize":
         return response
-    submitted = SubmittedLabels.model_validate_json(function["arguments"])
-    outcomes = [
-        row.model_copy(update={"label": row.label.model_copy(update={"category_confidence": "medium"})})
-        if row.label is not None and row.label.util == "docker"
-        else row
-        for row in submitted.outcomes
-    ]
-    function["arguments"] = SubmittedLabels(outcomes=outcomes).model_dump_json(by_alias=True)
+    submitted = SubmittedLabel.model_validate_json(function["arguments"])
+    row = submitted.outcome
+    if row.label is not None and row.label.util == "docker":
+        row = row.model_copy(update={"label": row.label.model_copy(update={"category_confidence": "medium"})})
+    function["arguments"] = SubmittedLabel(outcome=row).model_dump_json(by_alias=True)
     return HTTPResponse(
         json.dumps(
             {

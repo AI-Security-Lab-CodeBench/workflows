@@ -4,7 +4,11 @@ from typing import Annotated, Literal
 from pydantic import Field, JsonValue, field_validator, model_validator
 from pydantic_core import PydanticCustomError
 
-from codebench_pipeline.batch_labeling_config import DeclaredBatchLabelingConfig
+from codebench_pipeline.batch_labeling_config import (
+    DeclaredBatchLabelingConfig,
+    MaximumGroundingTurns,
+    RowConcurrency,
+)
 from codebench_pipeline.business_config import compile_business_rules
 from codebench_pipeline.category_rules import CategoryRules
 from codebench_pipeline.collection_config import CollectionMergeConfig, DeclaredCollection, SourceDeclaration
@@ -74,6 +78,8 @@ class FromRegistration(StrictStageConfig):
 
 class LabelingFromRegistration(FromRegistration):
     inference_mode: Literal["plain"] | None = None
+    row_concurrency: RowConcurrency | None = None
+    maximum_grounding_turns: MaximumGroundingTurns | None = None
 
 
 class DeclaredLabeling(StrictStageConfig):
@@ -148,7 +154,7 @@ class DeclaredDatasetBundle(StrictStageConfig):
         registry = DatasetRegistry(dataset_home)
         registered = None
         match self.labeling:
-            case LabelingFromRegistration(inference_mode=mode):
+            case LabelingFromRegistration() as labeling:
                 try:
                     registered = registry.get_snapshot(self.dataset_id)
                 except FileNotFoundError as error:
@@ -157,10 +163,11 @@ class DeclaredDatasetBundle(StrictStageConfig):
                     ) from error
                 annotation = registered.annotation
                 batch = require_declared_annotation(annotation)
-                if mode is not None:
-                    annotation = annotation.model_copy(
-                        update={"batch": batch.model_copy(update={"inference_mode": mode, "capacity": None})}
-                    )
+                overrides = labeling.model_dump(exclude={"from_registration"}, exclude_none=True)
+                if overrides:
+                    if labeling.inference_mode is not None:
+                        overrides["capacity"] = None
+                    annotation = annotation.model_copy(update={"batch": batch.model_copy(update=overrides)})
             case DeclaredLabeling() as labeling:
                 annotation = labeling.registered()
         match self.storage:

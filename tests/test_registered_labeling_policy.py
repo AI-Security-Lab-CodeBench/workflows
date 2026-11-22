@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import tempfile
 import unittest
+from contextlib import redirect_stdout
+from io import StringIO
 from pathlib import Path
 from unittest.mock import ANY, patch
 
@@ -14,12 +17,19 @@ from test_dataset_rules import make_candidate, make_label, make_rules
 from test_declared_dataset_graph import fixture_spec
 
 from codebench_pipeline.batch_labeling_config import BatchLabelingConfig
+from codebench_pipeline.batch_labeling_protocol import ROW_LABELING_CONTRACT
 from codebench_pipeline.dataset_annotation import request
 from codebench_pipeline.dataset_config import AnnotationConfig
 from codebench_pipeline.dataset_registry import DatasetRegistry
 from codebench_pipeline.grounding_tools import LiveGroundingConfig
-from codebench_pipeline.labeling_eval import CohortRecord, EvaluationCohort, run_evaluation
-from codebench_pipeline.labeling_outcomes import failed_attempt, label_attempt
+from codebench_pipeline.labeling_eval import (
+    CohortRecord,
+    EvaluationCohort,
+    evaluation_summary,
+    main,
+    run_evaluation,
+)
+from codebench_pipeline.labeling_outcomes import LabelingAttempt, failed_attempt, label_attempt
 from codebench_pipeline.labeling_stage_settings import LabelingRules
 from codebench_pipeline.model_config import ModelConfig
 from codebench_pipeline.openai_transport import HTTPResponse
@@ -55,6 +65,12 @@ class RegisteredEvaluationTests(unittest.TestCase):
         self.cohort_path = self.root / "cohort.json"
         self.annotation_path = self.root / "annotation.json"
         self.out = self.root / "evaluation"
+        self.write_annotation(5)
+        self.failure = failed_attempt(
+            self.candidate, "unsupported", "No qualifying page.", [], "a" * 64, "label/receipt.json"
+        )
+
+    def write_annotation(self, maximum_grounding_turns: int) -> None:
         self.annotation_path.write_text(
             AnnotationConfig(
                 model=ModelConfig(
@@ -63,13 +79,11 @@ class RegisteredEvaluationTests(unittest.TestCase):
                 batch=BatchLabelingConfig(
                     backend_revision="fixture-v1",
                     inference_mode="plain",
+                    maximum_grounding_turns=maximum_grounding_turns,
                     grounding=LiveGroundingConfig(allowed_domains=["example.org"]),
                 ),
             ).model_dump_json(),
             encoding="utf-8",
-        )
-        self.failure = failed_attempt(
-            self.candidate, "unsupported", "No qualifying page.", [], "a" * 64, "label/receipt.json"
         )
 
     def write_cohort(self, *records: CohortRecord) -> None:
@@ -100,6 +114,43 @@ class RegisteredEvaluationTests(unittest.TestCase):
         self.assertEqual(batches.call_args.args[1], scoped)
         receipt = TypeAdapter(dict[str, JsonValue]).validate_json((self.out / "run-input.json").read_bytes())
         self.assertEqual(receipt["rules"], scoped.model_dump(mode="json"))
+
+    def test_cli_all_prefix_is_tuning_and_never_reorders_frozen_rows(self) -> None:
+        later = make_candidate("later-development")
+        self.write_cohort(
+            self.record,
+            self.record.model_copy(update={"row": later.model_dump(mode="json"), "split": "development"}),
+        )
+        argv = [
+            "labeling_eval",
+            "--cohort",
+            str(self.cohort_path),
+            "--annotation-config",
+            str(self.annotation_path),
+            "--out",
+            str(self.out),
+            "--split",
+            "all",
+            "--limit",
+            "1",
+            "--concurrency",
+            "3",
+        ]
+        with (
+            patch.object(sys, "argv", argv),
+            redirect_stdout(StringIO()),
+            patch("codebench_pipeline.labeling_eval.annotate_batches", return_value=[self.failure]),
+        ):
+            main()
+
+        receipt = TypeAdapter(dict[str, JsonValue]).validate_json((self.out / "run-input.json").read_bytes())
+        self.assertEqual(receipt["candidate_ids"], [self.candidate.candidate_id])
+        self.assertEqual(receipt["purpose"], "tuning")
+        self.assertEqual(receipt["selected_split_counts"], {"heldout": 1})
+        self.assertEqual(receipt["row_concurrency"], 3)
+        original = AnnotationConfig.model_validate_json(self.annotation_path.read_bytes())
+        assert original.batch is not None
+        self.assertEqual(original.batch.row_concurrency, 8)
 
     def test_incomplete_or_duplicate_outcomes_fail_with_attempt_evidence_retained(self) -> None:
         self.write_cohort(self.record)
@@ -177,14 +228,15 @@ class RegisteredEvaluationTests(unittest.TestCase):
             ],
         )
 
-    def test_evaluation_reports_actual_membership_and_admitted_grounding_calls(self) -> None:
+    def test_evaluation_reports_one_grounding_round_for_two_admitted_queries(self) -> None:
         self.write_cohort(self.record)
-        query = json.dumps({"candidate_ids": [self.candidate.candidate_id], "query": "probe inspect"})
+        self.write_annotation(1)
         response = HTTPResponse(
             json.dumps(
                 {
                     "id": "fixture-completion",
                     "model": "fixture/model",
+                    "usage": {"prompt_tokens": 71, "completion_tokens": 18},
                     "choices": [
                         {
                             "index": 0,
@@ -195,7 +247,15 @@ class RegisteredEvaluationTests(unittest.TestCase):
                                     {
                                         "id": str(index),
                                         "type": "function",
-                                        "function": {"name": "query", "arguments": query},
+                                        "function": {
+                                            "name": "query",
+                                            "arguments": json.dumps(
+                                                {
+                                                    "candidate_ids": [self.candidate.candidate_id],
+                                                    "query": f"probe inspect {index}",
+                                                }
+                                            ),
+                                        },
                                     }
                                     for index in range(2)
                                 ],
@@ -214,21 +274,109 @@ class RegisteredEvaluationTests(unittest.TestCase):
         ):
             summary = run_evaluation(self.cohort_path, self.annotation_path, self.out, "heldout", None)
 
-        retrieve.assert_awaited_once()
-        self.assertEqual(summary["documentation_provider_calls"], 1)
+        self.assertEqual(retrieve.await_count, 2)
+        self.assertEqual(summary["documentation_provider_calls"], 2)
         self.assertEqual(summary["untranscribed_candidate_ids"], [])
         self.assertEqual(
-            summary["batches"],
+            summary["row_conversations"],
             [
                 {
-                    "batch_id": ANY,
+                    "conversation_id": ANY,
                     "transcript": ANY,
                     "candidate_ids": [self.candidate.candidate_id],
                     "rows": 1,
-                    "grounding_call_budget": 1,
-                    "documentation_provider_calls": 1,
-                    "query_calls": 1,
+                    "grounding_call_budget": ANY,
+                    "documentation_provider_calls": 2,
+                    "query_calls": 2,
                     "page_fetch_calls": 0,
                 }
             ],
         )
+        self.assertEqual(
+            summary["row_telemetry"],
+            {
+                self.candidate.candidate_id: {
+                    "grounding_iterations": 1,
+                    "query_calls": 2,
+                    "page_fetch_calls": 0,
+                    "tool_wave_sizes": [2],
+                    "calls_in_multi_action_waves": 2,
+                    "row_latency_seconds": ANY,
+                }
+            },
+        )
+        elapsed = summary["elapsed_seconds"]
+        assert type(elapsed) is float
+        self.assertEqual(summary["model_calls"], 2)
+        self.assertEqual(summary["success_fraction"], 0.0)
+        self.assertEqual(summary["rows_per_minute"], 60 / elapsed)
+        self.assertEqual(summary["prompt_tokens_per_second"], 142 / elapsed)
+        self.assertEqual(summary["completion_tokens_per_second"], 36 / elapsed)
+
+    def test_historical_transcript_is_readable_without_claiming_usage_or_row_latency(self) -> None:
+        identity = self.candidate.candidate_id
+        conversation = self.root / "batches" / "previous"
+        turn = conversation / "turn-00"
+        turn.mkdir(parents=True)
+        (conversation / "transcript.json").write_text(
+            json.dumps(
+                {
+                    "logical_batch_id": "previous",
+                    "provider_calls": 0,
+                    "grounding_call_budget": 1,
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": json.dumps({"records": [{"candidate": {"candidate_id": identity}}]}),
+                        }
+                    ],
+                }
+            )
+        )
+        (turn / "request.json").write_text("{}")
+        (turn / "raw_response.json").write_text('{"usage":{"prompt_tokens":20}}')
+
+        summary = evaluation_summary([self.record], [self.failure], self.root, 4.0)
+
+        self.assertEqual(summary["untranscribed_candidate_ids"], [])
+        self.assertEqual(summary["row_latency_samples"], 0)
+        self.assertIsNone(summary["peak_active_rows"])
+        self.assertIsNone(summary["p95_row_latency_seconds"])
+        self.assertEqual(summary["prompt_tokens_per_second"], 5.0)
+        self.assertIsNone(summary["completion_tokens_per_second"])
+
+    def test_row_latency_uses_processing_intervals_not_worker_limit(self) -> None:
+        records: list[CohortRecord] = []
+        attempts: list[LabelingAttempt] = []
+        for index, (started, finished) in enumerate(((0, 6), (1, 3), (3, 7))):
+            candidate = make_candidate(f"timed-{index}")
+            records.append(self.record.model_copy(update={"row": candidate.model_dump(mode="json")}))
+            attempts.append(
+                failed_attempt(
+                    candidate, "unsupported", "No qualifying page.", [], "a" * 64, "label/receipt.json"
+                )
+            )
+            conversation = self.root / "batches" / str(index)
+            conversation.mkdir(parents=True)
+            (conversation / "transcript.json").write_text(
+                json.dumps(
+                    {
+                        "conversation_id": str(index),
+                        "labeling_contract": ROW_LABELING_CONTRACT,
+                        "candidate_ids": [candidate.candidate_id],
+                        "messages": [],
+                        "provider_calls": 0,
+                        "grounding_iterations": 0,
+                        "tool_wave_sizes": [],
+                        "started_monotonic_ns": started * 1_000_000_000,
+                        "finished_monotonic_ns": finished * 1_000_000_000,
+                    }
+                )
+            )
+
+        summary = evaluation_summary(records, attempts, self.root, 7.0)
+
+        self.assertEqual(summary["row_latency_samples"], 3)
+        self.assertEqual(summary["p50_row_latency_seconds"], 4.0)
+        self.assertEqual(summary["p95_row_latency_seconds"], 6.0)
+        self.assertEqual(summary["peak_active_rows"], 2)

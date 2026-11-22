@@ -113,10 +113,9 @@ def labeling_settings(config: AnnotationConfig) -> ScopedAnnotationConfig:
         workers=config.workers,
         batch=ScopedBatchConfig(
             instructions=batch.instructions,
-            batch_size=batch.batch_size,
             reasoning_effort=batch.reasoning_effort,
-            maximum_model_turns=batch.maximum_model_turns,
-            grounding_calls_per_command=batch.grounding_calls_per_command,
+            row_concurrency=batch.row_concurrency,
+            maximum_grounding_turns=batch.maximum_grounding_turns,
             backend_revision=batch.backend_revision,
             inference_mode=batch.inference_mode,
             grounding=batch.grounding,

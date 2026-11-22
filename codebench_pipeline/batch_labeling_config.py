@@ -10,14 +10,15 @@ from codebench_pipeline.typed_config import TypedConfig
 
 BackendRevision = Annotated[str, Field(min_length=1)]
 InferenceMode = Literal["guarded", "plain"]
+RowConcurrency = Annotated[int, Field(ge=1, le=64)]
+MaximumGroundingTurns = Annotated[int, Field(ge=0)]
 
 
 class BatchPromptConfig(TypedConfig):
     instructions: str = Field(default="", max_length=16000)
-    batch_size: int = Field(default=25, ge=1, le=50)
     reasoning_effort: str | None = Field(default=None, pattern=r"^(none|low|high|max)$")
-    maximum_model_turns: int = Field(default=4, ge=2, le=8)
-    grounding_calls_per_command: float = Field(default=1.5, ge=0, allow_inf_nan=False)
+    row_concurrency: RowConcurrency = 8
+    maximum_grounding_turns: MaximumGroundingTurns = 5
 
 
 class BatchLabelingConfig(BatchPromptConfig):
@@ -48,10 +49,9 @@ class DeclaredBatchLabelingConfig(BatchPromptConfig):
     def registered(self) -> BatchLabelingConfig:
         return BatchLabelingConfig(
             instructions=self.instructions,
-            batch_size=self.batch_size,
             reasoning_effort=self.reasoning_effort,
-            maximum_model_turns=self.maximum_model_turns,
-            grounding_calls_per_command=self.grounding_calls_per_command,
+            row_concurrency=self.row_concurrency,
+            maximum_grounding_turns=self.maximum_grounding_turns,
             backend_revision=self.backend_revision,
             inference_mode=self.inference_mode,
             grounding=self.grounding,

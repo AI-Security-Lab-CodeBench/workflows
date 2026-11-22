@@ -129,7 +129,6 @@ class GuardedLabeling:
             self.batch,
             evidence,
             settings.max_request_bytes,
-            workers=settings.workers,
             execution=self.execution,
         )
 

@@ -5,12 +5,14 @@ import os
 import sys
 import time
 from collections import Counter
+from math import ceil
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, JsonValue, TypeAdapter
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, JsonValue, TypeAdapter
 
 from codebench_pipeline.batch_labeling import annotate_batches
+from codebench_pipeline.batch_labeling_protocol import ROW_LABELING_CONTRACT
 from codebench_pipeline.dataframe_io import AssetReference
 from codebench_pipeline.dataset_config import AnnotationConfig
 from codebench_pipeline.dataset_records import CandidateRecord, LabelDecision
@@ -24,6 +26,7 @@ from codebench_pipeline.review_policy import requires_human_review
 from codebench_pipeline.storage import IntegrityError
 
 type EvaluationSplit = Literal["development", "heldout", "all"]
+NonnegativeInt = Annotated[int, Field(ge=0)]
 
 
 class CohortRecord(BaseModel):
@@ -88,10 +91,16 @@ class _BatchInput(BaseModel):
 
 class _BatchTranscript(BaseModel):
     model_config = ConfigDict(strict=True, frozen=True)
-    logical_batch_id: str
+    conversation_id: str = Field(validation_alias=AliasChoices("conversation_id", "logical_batch_id"))
+    labeling_contract: str | None = None
     provider_calls: int = Field(ge=0)
-    grounding_call_budget: int = Field(ge=0)
+    grounding_call_budget: NonnegativeInt | None = None
     messages: list[_ConversationMessage]
+    candidate_ids: list[str] | None = None
+    grounding_iterations: NonnegativeInt | None = None
+    tool_wave_sizes: list[NonnegativeInt] | None = None
+    started_monotonic_ns: NonnegativeInt | None = None
+    finished_monotonic_ns: NonnegativeInt | None = None
 
 
 def _batch_evidence(evidence: Path, candidate_ids: set[str]) -> dict[str, JsonValue]:
@@ -99,22 +108,36 @@ def _batch_evidence(evidence: Path, candidate_ids: set[str]) -> dict[str, JsonVa
     plan_path = evidence / "label-packets.json"
     plan = _PacketPlan.model_validate_json(plan_path.read_bytes()) if plan_path.exists() else None
     batches: list[JsonValue] = []
+    row_conversations: list[JsonValue] = []
     represented: set[str] = set()
     tool_calls: Counter[str] = Counter()
+    row_telemetry: dict[str, JsonValue] = {}
+    row_intervals: list[tuple[int, int]] = []
     for path in sorted(evidence.glob("batches/*/transcript.json")):
         transcript = _BatchTranscript.model_validate_json(path.read_bytes())
-        if transcript.logical_batch_id != path.parent.name:
-            raise IntegrityError(f"Batch transcript ID differs from its evidence path: {path.parent.name}")
-        initial_request = next(
-            (message.content for message in transcript.messages if message.role == "user"), None
-        )
-        if initial_request is None:
-            raise IntegrityError(f"Batch has no initial request: {transcript.logical_batch_id}")
-        batch_input = _BatchInput.model_validate_json(initial_request)
-        members: list[JsonValue] = [row.candidate.candidate_id for row in batch_input.records]
-        member_ids = {row.candidate.candidate_id for row in batch_input.records}
-        if len(member_ids) != len(members) or member_ids & represented or not member_ids <= candidate_ids:
-            raise IntegrityError(f"Invalid batch membership: {transcript.logical_batch_id}")
+        current_row = transcript.labeling_contract == ROW_LABELING_CONTRACT
+        if transcript.conversation_id != path.parent.name:
+            raise IntegrityError(f"Conversation ID differs from its evidence path: {path.parent.name}")
+        if transcript.candidate_ids is not None:
+            identities = transcript.candidate_ids
+        else:
+            initial_request = next(
+                (message.content for message in transcript.messages if message.role == "user"), None
+            )
+            if initial_request is None:
+                raise IntegrityError(f"Batch has no initial request: {transcript.conversation_id}")
+            batch_input = _BatchInput.model_validate_json(initial_request)
+            identities = [row.candidate.candidate_id for row in batch_input.records]
+        members: list[JsonValue] = list(identities)
+        member_ids = set(identities)
+        if (
+            not member_ids
+            or len(member_ids) != len(members)
+            or member_ids & represented
+            or not member_ids <= candidate_ids
+            or (current_row and (transcript.candidate_ids is None or len(member_ids) != 1))
+        ):
+            raise IntegrityError(f"Invalid conversation membership: {transcript.conversation_id}")
         represented.update(member_ids)
         operations = [
             LiveReceipt.model_validate_json(operation.read_bytes())
@@ -123,16 +146,47 @@ def _batch_evidence(evidence: Path, candidate_ids: set[str]) -> dict[str, JsonVa
         if (
             len(operations) != transcript.provider_calls
             or sorted(operation.index for operation in operations) != list(range(len(operations)))
-            or transcript.provider_calls > transcript.grounding_call_budget
+            or (
+                transcript.grounding_call_budget is not None
+                and transcript.provider_calls > transcript.grounding_call_budget
+            )
         ):
             raise IntegrityError(
-                f"Grounding receipts do not match the batch budget: {transcript.logical_batch_id}"
+                f"Grounding receipts do not match conversation totals or budget: {transcript.conversation_id}"
             )
         calls = Counter(operation.tool for operation in operations)
         tool_calls.update(calls)
-        batches.append(
+        iterations = transcript.grounding_iterations
+        waves = transcript.tool_wave_sizes
+        started = transcript.started_monotonic_ns
+        finished = transcript.finished_monotonic_ns
+        if current_row:
+            if (
+                len(member_ids) != 1
+                or iterations is None
+                or waves is None
+                or len(waves) != iterations
+                or sum(waves) != transcript.provider_calls
+                or started is None
+                or finished is None
+                or finished < started
+            ):
+                raise IntegrityError(f"Inconsistent row telemetry: {transcript.conversation_id}")
+            (identity,) = member_ids
+            row_intervals.append((started, finished))
+            wave_sizes: list[JsonValue] = list(waves)
+            row_telemetry[identity] = {
+                "grounding_iterations": iterations,
+                "query_calls": calls["query"],
+                "page_fetch_calls": calls["page_fetch"],
+                "tool_wave_sizes": wave_sizes,
+                "calls_in_multi_action_waves": sum(size for size in waves if size > 1),
+                "row_latency_seconds": (finished - started) / 1_000_000_000,
+            }
+        destination = row_conversations if current_row else batches
+        destination.append(
             {
-                "batch_id": transcript.logical_batch_id,
+                ("conversation_id" if current_row else "batch_id"): transcript.conversation_id,
                 "transcript": path.relative_to(evidence).as_posix(),
                 "candidate_ids": members,
                 "rows": len(members),
@@ -143,13 +197,33 @@ def _batch_evidence(evidence: Path, candidate_ids: set[str]) -> dict[str, JsonVa
             }
         )
     untranscribed: list[JsonValue] = list(sorted(candidate_ids - represented))
+    latencies = sorted((end - start) / 1_000_000_000 for start, end in row_intervals)
+    peak: int | None = None
+    p50: float | None = None
+    p95: float | None = None
+    if len(latencies) == len(candidate_ids) and latencies:
+        p50 = latencies[ceil(0.50 * len(latencies)) - 1]
+        p95 = latencies[ceil(0.95 * len(latencies)) - 1]
+        active = peak = 0
+        events = sorted(
+            event for start, end in row_intervals if start < end for event in ((start, 1), (end, -1))
+        )
+        for _, delta in events:
+            active += delta
+            peak = max(peak, active)
     return {
         "packet_plan": plan.model_dump(mode="json") if plan is not None else None,
         "batches": batches,
+        "row_conversations": row_conversations,
         "untranscribed_candidate_ids": untranscribed,
         "documentation_provider_calls": tool_calls.total(),
         "query_calls": tool_calls["query"],
         "page_fetch_calls": tool_calls["page_fetch"],
+        "row_telemetry": row_telemetry,
+        "row_latency_samples": len(latencies),
+        "p50_row_latency_seconds": p50,
+        "p95_row_latency_seconds": p95,
+        "peak_active_rows": peak,
     }
 
 
@@ -170,7 +244,7 @@ def _credentials() -> None:
 def evaluation_summary(
     records: list[CohortRecord], attempts: list[LabelingAttempt], evidence: Path, elapsed: float
 ) -> dict[str, JsonValue]:
-    """Summarize validated outcomes and observed batch receipts without assigning correctness."""
+    """Summarize validated outcomes and recorded inference evidence without assigning correctness."""
     originals = {record.candidate().candidate_id: record for record in records}
     changes: list[JsonValue] = []
     outcomes: Counter[str] = Counter()
@@ -230,23 +304,26 @@ def evaluation_summary(
             }
         )
     model_calls = 0
-    prompt_tokens = 0
-    completion_tokens = 0
-    for path in evidence.glob("batches/*/turn-*/raw_response.json"):
+    tokens: Counter[str] = Counter()
+    usage_responses: Counter[str] = Counter()
+    turns = list(evidence.glob("batches/*/turn-*"))
+    model_requests = sum((directory / "request.json").is_file() for directory in turns)
+    for directory in turns:
+        path = directory / "raw_response.json"
+        if not path.is_file():
+            continue
         payload = TypeAdapter(dict[str, JsonValue]).validate_json(path.read_bytes())
         usage = payload.get("usage")
         model_calls += 1
         if isinstance(usage, dict):
-            for name, target in (("prompt_tokens", "prompt"), ("completion_tokens", "completion")):
-                value = usage.get(name, 0)
-                if isinstance(value, int) and not isinstance(value, bool):
-                    if target == "prompt":
-                        prompt_tokens += value
-                    else:
-                        completion_tokens += value
+            for name in ("prompt_tokens", "completion_tokens"):
+                value = usage.get(name)
+                if type(value) is int and value >= 0:
+                    tokens[name] += value
+                    usage_responses[name] += 1
     model_seconds = 0.0
     capacity_wait_seconds = 0.0
-    for directory in evidence.glob("batches/*/turn-*/capacity/capacity-*"):
+    for directory in (path for turn in turns for path in turn.glob("capacity/capacity-*")):
         times: dict[str, list[int]] = {}
         for path in directory.glob("*.json"):
             event = TypeAdapter(dict[str, JsonValue]).validate_json(path.read_bytes()).get("event")
@@ -259,6 +336,8 @@ def evaluation_summary(
     return {
         "status": "completed",
         "rows": len(records),
+        "rows_per_minute": len(records) * 60 / elapsed if elapsed > 0 else None,
+        "success_fraction": len(labels) / len(records) if records else None,
         "outcomes": dict(outcomes),
         "failure_reasons": dict(failures),
         "rows_with_baseline": baseline_rows,
@@ -268,9 +347,21 @@ def evaluation_summary(
         "risks": dict(Counter(label.risk_id for label in labels)),
         "classes": dict(Counter(label.class_ for label in labels)),
         "model_calls": model_calls,
+        "model_requests_recorded": model_requests,
         **_batch_evidence(evidence, set(originals)),
-        "prompt_tokens": prompt_tokens,
-        "completion_tokens": completion_tokens,
+        "prompt_tokens": tokens["prompt_tokens"],
+        "completion_tokens": tokens["completion_tokens"],
+        "prompt_token_usage_responses": usage_responses["prompt_tokens"],
+        "completion_token_usage_responses": usage_responses["completion_tokens"],
+        "token_rate_basis": "provider_reported_usage_per_labeling_wall_second",
+        **{
+            f"{name}_per_second": (
+                tokens[name] / elapsed
+                if elapsed > 0 and model_requests <= model_calls == usage_responses[name] > 0
+                else None
+            )
+            for name in ("prompt_tokens", "completion_tokens")
+        },
         "elapsed_seconds": elapsed,
         "active_model_seconds": model_seconds,
         "capacity_wait_seconds": capacity_wait_seconds,
@@ -284,33 +375,62 @@ def run_evaluation(
     annotation_path: Path,
     out: Path,
     split: EvaluationSplit,
-    batch_size: int | None,
+    concurrency: int | None = None,
+    *,
+    limit: int | None = None,
 ) -> dict[str, JsonValue]:
     cohort_bytes = cohort_path.read_bytes()
     cohort = EvaluationCohort.model_validate_json(cohort_bytes)
-    config = AnnotationConfig.model_validate_json(annotation_path.read_bytes())
+    annotation_bytes = annotation_path.read_bytes()
+    config = AnnotationConfig.model_validate_json(annotation_bytes)
     batch = config.batch
     if batch is None:
-        raise ValueError("Evaluation requires an enhanced batch-labeling configuration")
-    if batch_size is not None:
-        batch = batch.model_copy(update={"batch_size": batch_size})
+        raise ValueError("Evaluation requires an enhanced labeling configuration")
+    if concurrency is not None:
+        batch = type(batch).model_validate(
+            batch.model_dump(round_trip=True) | {"row_concurrency": concurrency}
+        )
         config = config.model_copy(update={"batch": batch})
-    spec = read_registered_spec((cohort_path.parent / "spec.json").read_bytes())
+    spec_bytes = (cohort_path.parent / "spec.json").read_bytes()
+    spec = read_registered_spec(spec_bytes)
+    if spec.dataset_id != cohort.dataset:
+        raise ValueError("Evaluation cohort and frozen registered specification identify different datasets")
     rules = LabelingRules.from_rules(spec.rules)
     if any(record.seed_documentation for record in cohort.records):
         raise ValueError("Live-grounding evaluation cannot use seed documentation")
-    records = [record for record in cohort.records if split == "all" or record.split == split]
+    if len({record.candidate().candidate_id for record in cohort.records}) != len(cohort.records):
+        raise ValueError("Evaluation cohort contains duplicate identities")
+    if limit is not None and (split == "heldout" or limit < 1):
+        raise ValueError("Evaluation limit must be positive and cannot be used on the heldout split")
+    records = [record for record in cohort.records if split == "all" or record.split == split][:limit]
     if not records:
         raise ValueError("Evaluation split contains no cohort rows")
     candidates = [record.candidate() for record in records]
-    if len({candidate.candidate_id for candidate in candidates}) != len(candidates):
-        raise ValueError("Evaluation cohort contains duplicate identities")
+    selected_ids: list[JsonValue] = [candidate.candidate_id for candidate in candidates]
+    purpose = (
+        "tuning"
+        if limit is not None or split == "development"
+        else "heldout_evaluation"
+        if split == "heldout"
+        else "final_evaluation"
+    )
+    run_settings: dict[str, JsonValue] = {
+        "split": split,
+        "purpose": purpose,
+        "limit": limit,
+        "selected_split_counts": dict(Counter(record.split for record in records)),
+        "row_concurrency": batch.row_concurrency,
+        "maximum_grounding_turns": batch.maximum_grounding_turns,
+    }
     out.mkdir(parents=True, exist_ok=False)
     _write(
         out / "run-input.json",
         {
             "cohort_sha256": hashlib.sha256(cohort_bytes).hexdigest(),
-            "split": split,
+            "annotation_config_sha256": hashlib.sha256(annotation_bytes).hexdigest(),
+            "registered_spec_sha256": hashlib.sha256(spec_bytes).hexdigest(),
+            "candidate_ids": selected_ids,
+            **run_settings,
             "annotation": config.model_dump(mode="json"),
             "rules": rules.model_dump(mode="json"),
         },
@@ -340,6 +460,7 @@ def run_evaluation(
             out / "summary.json",
             {
                 "status": "failed",
+                **run_settings,
                 "rows": len(records),
                 "attempt_rows": len(attempts),
                 "failure_reasons": {"invalid_outcomes": 1},
@@ -354,7 +475,7 @@ def run_evaluation(
             },
         )
         raise
-    summary = evaluation_summary(records, attempts, out / "inference", elapsed)
+    summary = run_settings | evaluation_summary(records, attempts, out / "inference", elapsed)
     _write(out / "summary.json", summary)
     return summary
 
@@ -367,18 +488,29 @@ def main() -> None:
     parser.add_argument("--annotation-config", type=Path, required=True)
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--split", choices=("development", "heldout", "all"), default="development")
-    parser.add_argument("--batch-size", type=int, choices=range(16, 51))
+    parser.add_argument("--concurrency", type=int, help="Override the configured row concurrency")
+    parser.add_argument("--limit", type=int, help="Tuning pilot: use the first N rows of the selected split")
     parser.add_argument("--credentials-stdin", action="store_true")
     args = parser.parse_args()
+    if args.concurrency is not None and args.concurrency < 1:
+        parser.error("--concurrency must be positive")
+    if args.limit is not None and (args.limit < 1 or args.split == "heldout"):
+        parser.error("--limit must be positive and cannot be used with --split heldout")
     if args.credentials_stdin:
         _credentials()
     match args.split:
         case "development" | "heldout" | "all" as split:
-            summary = run_evaluation(args.cohort, args.annotation_config, args.out, split, args.batch_size)
+            summary = run_evaluation(
+                args.cohort, args.annotation_config, args.out, split, args.concurrency, limit=args.limit
+            )
         case _:
             parser.error("Invalid evaluation split")
     print(
-        json.dumps({key: value for key, value in summary.items() if key != "changes"}, indent=2), flush=True
+        json.dumps(
+            {key: value for key, value in summary.items() if key not in {"changes", "row_telemetry"}},
+            indent=2,
+        ),
+        flush=True,
     )
 
 

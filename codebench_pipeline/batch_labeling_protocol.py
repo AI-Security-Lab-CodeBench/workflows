@@ -1,7 +1,6 @@
 import re
-from collections import Counter
 from dataclasses import dataclass
-from typing import Literal
+from typing import Final, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, TypeAdapter
 
@@ -12,6 +11,8 @@ from codebench_pipeline.labeling_outcomes import LabelingAttempt
 from codebench_pipeline.live_grounding import LivePage, trusted_live_url
 from codebench_pipeline.models import SemanticSnippet
 from codebench_pipeline.storage import IntegrityError, fingerprint
+
+ROW_LABELING_CONTRACT: Final = "independent-row-react-v1"
 
 
 class _Strict(BaseModel):
@@ -29,8 +30,8 @@ class SubmittedOutcome(_Strict):
     failure_detail: str = Field(max_length=1200)
 
 
-class SubmittedLabels(_Strict):
-    outcomes: list[SubmittedOutcome] = Field(min_length=1, max_length=50)
+class SubmittedLabel(_Strict):
+    outcome: SubmittedOutcome
 
 
 class Function(_Strict):
@@ -75,7 +76,7 @@ _OUTCOMES = TypeAdapter(list[JsonValue])
 def tool_schema(name: str, description: str, schema: type[BaseModel]) -> dict[str, JsonValue]:
     raw = _OBJECT.validate_python(schema.model_json_schema())
     definitions = _OBJECT.validate_python(raw.pop("$defs", {}))
-    if schema is SubmittedLabels:
+    if schema is SubmittedLabel:
         label = _OBJECT.validate_python(definitions[LabelDecision.__name__])
         properties = _OBJECT.validate_python(label["properties"])
         for field in ("candidate_id", "util"):
@@ -105,21 +106,11 @@ def tool_schema(name: str, description: str, schema: type[BaseModel]) -> dict[st
     }
 
 
-def submitted_values(arguments: str) -> list[tuple[str, JsonValue, bool]]:
+def submitted_value(arguments: str) -> JsonValue:
     envelope = _OBJECT.validate_json(arguments)
-    values = _OUTCOMES.validate_python(envelope.get("outcomes"))
-    if envelope.keys() != {"outcomes"} or not 1 <= len(values) <= 50:
-        raise ValueError("Expected a nonempty outcomes array of at most 50 rows")
-    indexed = [
-        (identity, value)
-        for value in values
-        for identity in [value.get("candidate_id") if isinstance(value, dict) else None]
-    ]
-    counts = Counter(identity for identity, _ in indexed if isinstance(identity, str))
-    return [
-        (identity, value, counts[identity] > 1) if isinstance(identity, str) else ("", value, False)
-        for identity, value in indexed
-    ]
+    if envelope.keys() != {"outcome"}:
+        raise ValueError("Expected a single outcome object")
+    return envelope["outcome"]
 
 
 def page_evidence_id(candidate: CandidateRecord, page: LivePage) -> str:

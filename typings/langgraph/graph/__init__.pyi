@@ -1,10 +1,13 @@
 from collections.abc import Callable, Sequence
-from typing import Self
+from typing import Self, TypedDict
 
 from langgraph.types import Command
 
+class _InvokeConfig(TypedDict, total=False):
+    recursion_limit: int
+
 class _CompiledStateGraph[InputT, OutputT]:
-    def invoke(self, input: InputT) -> OutputT: ...
+    def invoke(self, input: InputT, config: _InvokeConfig | None = None) -> OutputT: ...
 
 class StateGraph[StateT, ContextT, InputT, OutputT]:
     def __init__(

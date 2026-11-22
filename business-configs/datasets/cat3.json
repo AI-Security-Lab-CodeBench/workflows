@@ -23,7 +23,9 @@
   },
   "labeling": {
     "from_registration": true,
-    "inference_mode": "plain"
+    "inference_mode": "plain",
+    "row_concurrency": 8,
+    "maximum_grounding_turns": 5
   },
   "discovery": {
     "max_output_tokens": 1024,

@@ -1,6 +1,5 @@
 from collections import Counter, deque
 from collections.abc import Callable
-from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from itertools import groupby
 from pathlib import Path
@@ -10,7 +9,6 @@ from pydantic import JsonValue, TypeAdapter
 
 from codebench_pipeline.batch_labeling import BatchExecution, annotate_batches_bound
 from codebench_pipeline.batch_labeling_config import BatchLabelingConfig
-from codebench_pipeline.command_batches import command_family_batches
 from codebench_pipeline.dataset_finalization import normalized_command
 from codebench_pipeline.dataset_records import CandidateRecord, index_records, routing
 from codebench_pipeline.labeling_outcomes import LabelingAttempt, failed_attempt, validate_attempts
@@ -33,7 +31,6 @@ class RankedLabeling:
     config: BatchLabelingConfig
     out: Path
     maximum_context_characters: int
-    workers: int = 1
     execution: BatchExecution = BatchExecution(None)
 
     def _commit_packet_evidence(self, packet_path: Path) -> None:
@@ -131,13 +128,8 @@ class RankedLabeling:
         scheduled = Counter[str]()
         deferred_ids: set[str] = set()
         packet_count = 0
-        in_flight: deque[tuple[Path, Counter[str], Future[list[LabelingAttempt]]]] = deque()
-        reserved = Counter[str]()
 
-        def commit_next_packet() -> None:
-            """Apply results in rank order, then release unused quota reservations."""
-            packet_path, packet_reservations, future = in_flight.popleft()
-            attempts = future.result()
+        def commit_packet(packet_path: Path, attempts: list[LabelingAttempt]) -> None:
             self._commit_packet_evidence(packet_path)
             for attempt in attempts:
                 identity = attempt.candidate_id
@@ -164,77 +156,50 @@ class RankedLabeling:
                 ):
                     credited = credits[label.risk_id]
                     credited.setdefault(normalized_command(attempt.command), identity)
-            reserved.subtract(packet_reservations)
 
-        with ThreadPoolExecutor(max_workers=self.workers) as executor:
-            for _, tier in ranked:
-                tier_rows = list(tier)
-                schedulable = [
-                    candidate
-                    for candidate in tier_rows
-                    if any(len(credits[risk]) < SUBRISK_QUOTA for risk in routes[candidate.candidate_id])
-                ]
-                clustered = command_family_batches(schedulable, self.config.batch_size)
-                clustered_ids = {candidate.candidate_id for group in clustered for candidate in group}
-                pending = deque(candidate for group in clustered for candidate in group)
-                pending.extend(
-                    candidate for candidate in tier_rows if candidate.candidate_id not in clustered_ids
-                )
-                while pending:
-                    if len(in_flight) == self.workers:
-                        commit_next_packet()
-                    packet: list[CandidateRecord] = []
-                    packet_reservations = Counter[str]()
-                    while pending and len(packet) < self.config.batch_size:
-                        candidate = pending[0]
-                        identity = candidate.candidate_id
-                        open_routes = {
-                            risk for risk in possibly_routed[identity] if len(credits[risk]) < SUBRISK_QUOTA
-                        }
-                        if not open_routes:
-                            pending.popleft()
-                            deferred_ids.add(identity)
-                            outcomes[identity] = failed_attempt(
-                                candidate,
-                                QUOTA_DEFERRED,
-                                "All compatible subrisk quotas were already met; no labeling was scheduled.",
-                                [],
-                                fingerprint({"quota_scope": scope, "candidate_id": identity}),
-                                QUOTA_RECEIPT,
-                            )
-                            continue
-                        quota_reserved = any(
-                            len(credits[risk]) + reserved[risk] + packet_reservations[risk] >= SUBRISK_QUOTA
-                            for risk in open_routes
-                        )
-                        if in_flight and (quota_reserved or not routes[identity]):
-                            commit_next_packet()
-                            continue
-                        if quota_reserved:
-                            break
+        for _, tier in ranked:
+            pending = deque(tier)
+            while pending:
+                packet: list[CandidateRecord] = []
+                reservations = Counter[str]()
+                while pending and len(packet) < self.config.row_concurrency:
+                    candidate = pending[0]
+                    identity = candidate.candidate_id
+                    open_routes = {
+                        risk for risk in possibly_routed[identity] if len(credits[risk]) < SUBRISK_QUOTA
+                    }
+                    if not open_routes:
                         pending.popleft()
-                        scheduled.update(possibly_routed[identity])
-                        if not routes[identity]:
-                            outcomes[identity] = failed_attempt(
-                                candidate,
-                                "routing_unverified",
-                                "No verified compatible subrisk could be supplied for labeling.",
-                                [],
-                                fingerprint({"quota_scope": scope, "candidate_id": identity}),
-                                QUOTA_RECEIPT,
-                            )
-                            continue
-                        packet_reservations.update(open_routes)
-                        packet.append(candidate)
-                    if not packet:
+                        deferred_ids.add(identity)
+                        outcomes[identity] = failed_attempt(
+                            candidate,
+                            QUOTA_DEFERRED,
+                            "All compatible subrisk quotas were already met; no labeling was scheduled.",
+                            [],
+                            fingerprint({"quota_scope": scope, "candidate_id": identity}),
+                            QUOTA_RECEIPT,
+                        )
                         continue
+                    if any(len(credits[risk]) + reservations[risk] >= SUBRISK_QUOTA for risk in open_routes):
+                        break
+                    pending.popleft()
+                    scheduled.update(possibly_routed[identity])
+                    if not routes[identity]:
+                        outcomes[identity] = failed_attempt(
+                            candidate,
+                            "routing_unverified",
+                            "No verified compatible subrisk could be supplied for labeling.",
+                            [],
+                            fingerprint({"quota_scope": scope, "candidate_id": identity}),
+                            QUOTA_RECEIPT,
+                        )
+                        continue
+                    reservations.update(open_routes)
+                    packet.append(candidate)
+                if packet:
                     packet_count += 1
                     packet_path = Path("ranked-packets") / f"{packet_count:06}"
-                    future = executor.submit(run_packet, packet, self.out / packet_path)
-                    reserved.update(packet_reservations)
-                    in_flight.append((packet_path, packet_reservations, future))
-                while in_flight:
-                    commit_next_packet()
+                    commit_packet(packet_path, run_packet(packet, self.out / packet_path))
 
         scoped = Counter(risk for allowed in possibly_routed.values() for risk in allowed)
         unavailable = Counter(

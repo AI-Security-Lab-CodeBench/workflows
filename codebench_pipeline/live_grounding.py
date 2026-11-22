@@ -1,7 +1,12 @@
+from collections import deque
+from collections.abc import AsyncGenerator
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from hashlib import sha256
-from typing import Literal
+from threading import BoundedSemaphore, Lock
+from time import monotonic_ns
+from typing import Final, Literal
 from urllib.parse import urlsplit
 
 import anyio
@@ -74,6 +79,57 @@ class LiveReceipt(BaseModel):
     page_id: str | None = None
     response_sha256: str | None = None
     error: str | None = None
+    provider_started_monotonic_ns: int | None = None
+    provider_finished_monotonic_ns: int | None = None
+
+
+type _Tool = Literal["query", "page_fetch"]
+type _Request = QueryInput | PageFetchInput
+type _Response = tuple[LiveHit, ...] | tuple[_Page, str, int]
+type _GroundingError = (
+    KeenableError | ValidationError | TimeoutError | McpError | httpx.HTTPError | ExceptionGroup
+)
+_GROUNDING_ERRORS = (KeenableError, ValidationError, TimeoutError, McpError, httpx.HTTPError, ExceptionGroup)
+_PROVIDER_SLOTS: Final = BoundedSemaphore(5)
+_STARTS_LOCK: Final = Lock()
+_STARTS: Final[deque[int]] = deque()
+_SECOND_NS: Final = 1_000_000_000
+
+
+@dataclass(slots=True)
+class _Operation:
+    request: _Request
+    started: int | None = None
+    finished: int | None = None
+    response: _Response | _GroundingError | None = None
+
+    @asynccontextmanager
+    async def provider_call(self) -> AsyncGenerator[None]:
+        while True:
+            with _STARTS_LOCK:
+                now = monotonic_ns()
+                while _STARTS and now - _STARTS[0] >= _SECOND_NS:
+                    _STARTS.popleft()
+                if len(_STARTS) < 10:
+                    _STARTS.append(now)
+                    self.started = now
+                    break
+                delay = (_STARTS[0] + _SECOND_NS - now) / _SECOND_NS
+            await anyio.sleep(delay)
+        try:
+            yield
+        finally:
+            self.finished = monotonic_ns()
+
+
+def _failed(receipt: LiveReceipt, error: _GroundingError) -> LiveReceipt:
+    match error:
+        case KeenableError(code=code):
+            return receipt.model_copy(update={"error": code})
+        case ValidationError():
+            return receipt.model_copy(update={"error": "invalid_grounding_arguments_or_response"})
+        case TimeoutError() | McpError() | httpx.HTTPError() | ExceptionGroup():
+            return receipt.model_copy(update={"error": "provider_transport_failed"})
 
 
 def trusted_live_url(config: GroundingOrigins, url: str) -> bool:
@@ -89,24 +145,24 @@ def trusted_live_url(config: GroundingOrigins, url: str) -> bool:
     )
 
 
-async def _retrieve(
-    key: str, request: QueryInput | PageFetchInput, maximum: int
-) -> tuple[LiveHit, ...] | tuple[_Page, str, int]:
+async def _retrieve(key: str, operation: _Operation, maximum: int) -> _Response:
     async with search_session(key) as session:
-        match request:
+        match operation.request:
             case QueryInput(query=query):
-                results = await search_snippets(session, query, (8, 500))
+                async with operation.provider_call():
+                    results = await search_snippets(session, query, (8, 500))
                 return tuple(LiveHit(url=hit.url, snippet=hit.snippet) for hit in results.results)
             case PageFetchInput(url=url):
-                reply = await session.call_tool(
-                    "fetch_page_content",
-                    arguments={
-                        "url": url,
-                        "max_chars": min(20_000, maximum),
-                        "live": True,
-                        "output_format": "json",
-                    },
-                )
+                async with operation.provider_call():
+                    reply = await session.call_tool(
+                        "fetch_page_content",
+                        arguments={
+                            "url": url,
+                            "max_chars": min(20_000, maximum),
+                            "live": True,
+                            "output_format": "json",
+                        },
+                    )
                 if reply.isError:
                     raise KeenableError("provider_fetch_failed")
                 match reply.content:
@@ -131,31 +187,75 @@ class LiveGrounding:
     pages: dict[str, LivePage] = field(default_factory=dict)
     response_bytes: int = 0
 
-    def execute(self, tool: Literal["query", "page_fetch"], arguments: str, pending: set[str]) -> LiveReceipt:
-        index = len(self.history)
-        if index >= self.limit:
-            self.blocked += 1
-            return LiveReceipt(
-                index=index,
-                tool=tool,
-                request_sha256=fingerprint(arguments),
-                error="grounding_budget_exhausted",
-            )
-        receipt = LiveReceipt(index=index, tool=tool, request_sha256=fingerprint(arguments))
-        self.files.write(f"operation-{index:03}/request.json", receipt.model_dump_json().encode())
-        try:
-            receipt = self._execute(receipt, arguments, pending)
-        except KeenableError as error:
-            receipt = receipt.model_copy(update={"error": error.code})
-        except ValidationError:
-            receipt = receipt.model_copy(update={"error": "invalid_grounding_arguments_or_response"})
-        except (TimeoutError, McpError, httpx.HTTPError, ExceptionGroup):
-            receipt = receipt.model_copy(update={"error": "provider_transport_failed"})
-        self.history.append(receipt)
-        self.files.write(f"operation-{index:03}/receipt.json", receipt.model_dump_json().encode())
-        return receipt
+    def call(self, tool: _Tool, arguments: str, pending: set[str]) -> LiveReceipt:
+        return self.call_many([(tool, arguments)], pending)[0]
 
-    def _execute(self, receipt: LiveReceipt, arguments: str, pending: set[str]) -> LiveReceipt:
+    execute = call
+
+    def call_many(self, calls: list[tuple[_Tool, str]], pending: set[str]) -> list[LiveReceipt]:
+        """Run one row's retrieval wave; admit responses against its byte budget in request order."""
+        receipts: list[LiveReceipt] = []
+        operations: dict[int, _Operation] = {}
+        start = len(self.history)
+        remaining_slots = max(0, self.limit - start)
+        maximum = min(
+            self.config.maximum_response_bytes, self.config.maximum_total_response_bytes - self.response_bytes
+        )
+        key = self.credentials.keenable
+        for offset, (tool, arguments) in enumerate(calls):
+            index = start + min(offset, remaining_slots)
+            receipt = LiveReceipt(index=index, tool=tool, request_sha256=fingerprint(arguments))
+            if offset >= remaining_slots:
+                self.blocked += 1
+                receipts.append(receipt.model_copy(update={"error": "grounding_budget_exhausted"}))
+                continue
+            self.files.write(f"operation-{index:03}/request.json", receipt.model_dump_json().encode())
+            try:
+                request = self._prepare(receipt, arguments, pending)
+                if not key:
+                    raise KeenableError("provider_credential_unavailable")
+                if maximum <= 0:
+                    raise KeenableError("provider_response_budget")
+                operations[index] = _Operation(request)
+            except _GROUNDING_ERRORS as error:
+                receipt = _failed(receipt, error)
+            receipts.append(receipt)
+
+        async def run(operation: _Operation, credential: str) -> None:
+            await anyio.to_thread.run_sync(_PROVIDER_SLOTS.acquire)
+            try:
+                with anyio.fail_after(self.config.timeout):
+                    operation.response = await _retrieve(credential, operation, maximum)
+            except _GROUNDING_ERRORS as error:
+                operation.response = error
+            finally:
+                _PROVIDER_SLOTS.release()
+
+        async def wave(credential: str) -> None:
+            async with anyio.create_task_group() as group:
+                for operation in operations.values():
+                    group.start_soon(run, operation, credential)
+
+        if operations and key:
+            anyio.run(wave, key)
+        for offset, receipt in enumerate(receipts[:remaining_slots]):
+            if (operation := operations.get(receipt.index)) is not None:
+                receipt = receipt.model_copy(
+                    update={
+                        "provider_started_monotonic_ns": operation.started,
+                        "provider_finished_monotonic_ns": operation.finished,
+                    }
+                )
+                try:
+                    receipt = self._retain(receipt, operation)
+                except _GROUNDING_ERRORS as error:
+                    receipt = _failed(receipt, error)
+            receipts[offset] = receipt
+            self.history.append(receipt)
+            self.files.write(f"operation-{receipt.index:03}/receipt.json", receipt.model_dump_json().encode())
+        return receipts
+
+    def _prepare(self, receipt: LiveReceipt, arguments: str, pending: set[str]) -> _Request:
         request = (
             QueryInput.model_validate_json(arguments)
             if receipt.tool == "query"
@@ -181,23 +281,25 @@ class LiveGrounding:
                 )
         self.queries.append(query_record)
         self.files.write(f"operation-{receipt.index:03}/arguments.json", request.model_dump_json().encode())
-        key = self.credentials.keenable
-        if not key:
-            raise KeenableError("provider_credential_unavailable")
-        remaining = self.config.maximum_total_response_bytes - self.response_bytes
-        maximum = min(remaining, self.config.maximum_response_bytes)
-        if maximum <= 0:
+        return request
+
+    def _charge(self, size: int) -> None:
+        if (
+            size > self.config.maximum_response_bytes
+            or self.response_bytes + size > self.config.maximum_total_response_bytes
+        ):
             raise KeenableError("provider_response_budget")
+        self.response_bytes += size
 
-        async def retrieve() -> tuple[LiveHit, ...] | tuple[_Page, str, int]:
-            with anyio.fail_after(self.config.timeout):
-                return await _retrieve(key, request, maximum)
-
-        response = anyio.run(retrieve)
+    def _retain(self, receipt: LiveReceipt, operation: _Operation) -> LiveReceipt:
+        response, request = operation.response, operation.request
+        assert response is not None
+        if isinstance(response, _GROUNDING_ERRORS):
+            raise response
         receipt = receipt.model_copy(update={"request": request})
         match response:
             case (_Page() as page, str() as response_digest, int() as size):
-                self.response_bytes += size
+                self._charge(size)
                 if not trusted_live_url(self.config, page.url):
                     raise KeenableError("untrusted_fetch_response_url")
                 if self.credentials.contains(page.model_dump_json()) or self.credentials.contains(
@@ -211,7 +313,7 @@ class LiveGrounding:
                     **page.model_dump(),
                     request_index=receipt.index,
                     request_url=request.url,
-                    candidate_ids=tuple(ids),
+                    candidate_ids=tuple(request.candidate_ids),
                     fetched_at=datetime.now(UTC).isoformat(),
                     response_sha256=response_digest,
                 )
@@ -221,6 +323,8 @@ class LiveGrounding:
                     update={"page_id": saved.identity, "response_sha256": response_digest}
                 )
             case hits:
+                body = "[" + ",".join(hit.model_dump_json() for hit in hits) + "]"
+                self._charge(len(body.encode()))
                 safe = tuple(
                     hit.model_copy(update={"url": canonical})
                     for hit in hits
@@ -229,9 +333,4 @@ class LiveGrounding:
                     and not self.credentials.contains(hit.model_dump_json())
                     and not any(pattern.search(hit.model_dump_json()) for pattern in SECRET_PATTERNS)
                 )
-                body = "[" + ",".join(hit.model_dump_json() for hit in hits) + "]"
-                size = len(body.encode())
-                if size > maximum:
-                    raise KeenableError("provider_response_budget")
-                self.response_bytes += size
                 return receipt.model_copy(update={"discovery": safe})
