@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 from hashlib import sha256
 from threading import BoundedSemaphore, Lock
 from time import monotonic_ns
-from typing import Final, Literal
+from typing import Final, Literal, TypeGuard
 from urllib.parse import urlsplit
 
 import anyio
@@ -122,14 +122,25 @@ class _Operation:
             self.finished = monotonic_ns()
 
 
-def _failed(receipt: LiveReceipt, error: _GroundingError) -> LiveReceipt:
+def _is_exception_group(error: Exception) -> TypeGuard[ExceptionGroup[Exception]]:
+    return isinstance(error, ExceptionGroup)
+
+
+def _error_code(error: Exception) -> str:
     match error:
         case KeenableError(code=code):
-            return receipt.model_copy(update={"error": code})
+            return code
         case ValidationError():
-            return receipt.model_copy(update={"error": "invalid_grounding_arguments_or_response"})
-        case TimeoutError() | McpError() | httpx.HTTPError() | ExceptionGroup():
-            return receipt.model_copy(update={"error": "provider_transport_failed"})
+            return "invalid_grounding_arguments_or_response"
+        case group if _is_exception_group(group):
+            codes = {_error_code(child) for child in group.exceptions}
+            return codes.pop() if len(codes) == 1 else "provider_transport_failed"
+        case _:
+            return "provider_transport_failed"
+
+
+def _failed(receipt: LiveReceipt, error: _GroundingError) -> LiveReceipt:
+    return receipt.model_copy(update={"error": _error_code(error)})
 
 
 def trusted_live_url(config: GroundingOrigins, url: str) -> bool:

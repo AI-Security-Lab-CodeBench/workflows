@@ -18,6 +18,7 @@ from mcp.types import CallToolResult, TextContent
 
 from codebench_pipeline import live_grounding
 from codebench_pipeline.grounding_tools import GroundingCredentials, GroundingFiles, LiveGroundingConfig
+from codebench_pipeline.keenable_policy import KeenableError
 from codebench_pipeline.live_grounding import LiveGrounding, LiveReceipt
 
 _KEY = "synthetic-provider-key"
@@ -41,6 +42,36 @@ def _interval(receipt: LiveReceipt) -> tuple[int, int]:
     start, end = receipt.provider_started_monotonic_ns, receipt.provider_finished_monotonic_ns
     assert start is not None and end is not None and start < end, receipt
     return start, end
+
+
+def _mcp_client(body: str, *, tool_error: bool, status: int) -> httpx.AsyncClient:
+    def respond(request: httpx.Request) -> httpx.Response:
+        message = json.loads(request.content)
+        match message["method"]:
+            case "initialize":
+                result = {
+                    "protocolVersion": message["params"]["protocolVersion"],
+                    "capabilities": {},
+                    "serverInfo": {"name": "synthetic", "version": "1"},
+                }
+            case "notifications/initialized":
+                return httpx.Response(202)
+            case "tools/list":
+                result = {
+                    "tools": [
+                        {"name": name, "inputSchema": {"type": "object"}}
+                        for name in ("search_web_pages", "fetch_page_content")
+                    ]
+                }
+            case "tools/call":
+                if status != 200:
+                    return httpx.Response(status)
+                result = {"content": [{"type": "text", "text": body}], "isError": tool_error}
+            case _:
+                raise AssertionError("Unexpected synthetic MCP request")
+        return httpx.Response(200, json={"jsonrpc": "2.0", "id": message["id"], "result": result})
+
+    return httpx.AsyncClient(transport=httpx.MockTransport(respond))
 
 
 class _Provider:
@@ -74,6 +105,48 @@ class ParallelGroundingTests(unittest.TestCase):
 
     def provider(self, respond: Callable[[str, str], Awaitable[str]]) -> None:
         self.enterContext(patch.object(live_grounding, "search_session", _Provider(respond).session))
+
+    def test_mcp_task_groups_preserve_known_failure_codes(self) -> None:
+        marker = "synthetic confidential provider content"
+        oversized_hit = json.dumps({"results": [{"url": _URL, "snippet": marker + "x" * 501}]})
+        cases = (
+            (_query("provider error"), marker, True, 200, "provider_search_failed"),
+            (_query("invalid search response"), marker, False, 200, "provider_response_invalid"),
+            (_query("oversized search response"), oversized_hit, False, 200, "provider_response_budget"),
+            (
+                _fetch(_URL),
+                json.dumps({"url": _URL, "content": [marker]}),
+                False,
+                200,
+                "invalid_grounding_arguments_or_response",
+            ),
+            (_fetch(_URL), marker, True, 200, "provider_fetch_failed"),
+            (_query("http failure"), "", False, 429, "provider_transport_failed"),
+        )
+        for index, ((tool, arguments), body, tool_error, status, expected) in enumerate(cases):
+            with self.subTest(expected=expected):
+                broker = self.broker(str(index))
+                client = _mcp_client(body, tool_error=tool_error, status=status)
+                with patch("codebench_pipeline.keenable_mcp.httpx.AsyncClient", return_value=client):
+                    receipt = broker.call(tool, arguments, _SCOPE)
+                path = self.root / str(index) / "operation-000/receipt.json"
+                persisted = path.read_text()
+                self.assertEqual(receipt.error, expected)
+                self.assertEqual(LiveReceipt.model_validate_json(persisted).error, expected)
+                self.assertNotIn(marker, persisted)
+                self.assertEqual((broker.response_bytes, broker.pages), (0, {}))
+
+    def test_mixed_group_does_not_guess_a_single_known_cause(self) -> None:
+        async def respond(_name: str, _query_value: str) -> str:
+            raise ExceptionGroup(
+                "synthetic private group text",
+                [KeenableError("provider_response_budget"), httpx.ReadTimeout("synthetic private leaf text")],
+            )
+
+        self.provider(respond)
+        tool, arguments = _query("mixed provider errors")
+        receipt = self.broker("mixed").call(tool, arguments, _SCOPE)
+        self.assertEqual(receipt.error, "provider_transport_failed")
 
     def test_query_calls_overlap_and_receipts_bind_in_request_order(self) -> None:
         first_started, second_started = anyio.Event(), anyio.Event()
