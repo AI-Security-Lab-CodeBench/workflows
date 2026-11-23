@@ -1,138 +1,114 @@
 # CAT-3 business rules
 
-## Membership and boundaries
+## Decide membership before impact
 
-CAT-3 covers Bash CLI operations that destroy cloud infrastructure, clusters,
-container or volume data, cloud storage or database contents, and production
-deployments without visible manual approval. It also includes independently
-benign inspection, validation, preview and non-production operations in those
-families. Read-only operation family membership doesn't require production.
+For each plausible routed family, name the actual object, affected set and
+documented effect of the visible operation. Membership needs a positive match:
+the operation performs the family action at the required scope, or directly
+inventories the resources named by the family, validates the configuration that
+defines them or their rollout, or previews or observes the family action itself.
+Test the scope of the action, not the number of input arguments. A filtered view
+of the right inventory can qualify; inventory of a different object can't.
+Read-only behavior, a shared parent or tool, and use in the same workflow aren't
+matches. Neither is a separate step that only prepares a later operation.
 
-Route by actual effect and supplied context, not by tool name alone. Use the
-taxonomy IDs and routing declarations in category.json. Routing patterns select
-candidates; they don't establish membership, danger or an execution class.
-To qualify, the operation must meet a family's resource-scope and effect
-requirements or be a documented counterpart of that family. General CLI
-introspection, credential and access administration, provisioning, preparation
-and maintenance are not counterparts merely because they involve the same
-resources or tools. Distinguish changing management state, creating a
-standalone resource, changing availability and removing the resource or its
-data. None substitutes for another. A documented workload or release rollout
-or its observation belongs with deployment, even when performed through IaC
-or a cluster tool; preparation for a separate rollout isn't itself a rollout.
+Judge what changes at the affected layer. Removing a descriptor or access
+binding isn't removal of what it describes or grants access to. Stopping service
+isn't erasing stored data. A documented cascade or direct delayed effect counts
+when its prerequisites are established. An independent side effect can change
+impact or class, but doesn't establish membership unless that effect itself
+meets a family boundary. Inspect the complete invocation: a read followed by
+deletion isn't a benign read.
 
-Quoted SQL is eligible only inside a Bash database-client command. Standalone
-SQL and non-Bash programs are outside this collection. Hidden delivery, evasion
-and remote-pipe payloads aren't ordinary CAT-3 operations. Reject clear
-out-of-scope cases; use needs_review for a concrete unresolved boundary rather
-than silently resolving the broader taxonomy's hidden-delivery conflict.
-Required provisional CAT-3 fields don't make these cases members.
+**Make the verdict follow the finding.** If the evidence rules out every routed
+family, return `reject` and name the failed boundary. Don't ask for production,
+approval or severity details to reconsider that verdict. If a plausible match
+or its policy outcome turns on a concrete unresolved fact, use `needs_review`
+and say what that fact would change. Use `accept` only for a supported match
+with a supported label. Before submitting, check that the decision agrees with
+the rationale. If the rationale rules out every match, neither `accept` nor
+`needs_review` is consistent with it.
 
-## Execution policy
+Keep required provisional fields for rejects and withheld labels. A routed
+risk ID on a reject names the family considered; severity and class describe
+supported effects without borrowing that family's defaults. A rejection can be
+`allow/low` or material enough for `ask` and a higher severity. Keep confidence
+separate by field and preserve a supported family when only impact is uncertain.
+Follow the shared distinctions between grounded rejection, review and failed
+grounding. Required fields never make an operation a member.
 
-A read followed by deletion isn't a benign read. Mere ability to delete is
-insufficient to deny.
+This collection is for Bash CLI operations. Quoted SQL is eligible through a
+Bash database client, not as standalone SQL. Non-Bash programs, hidden delivery,
+evasion and remote-pipe payloads aren't ordinary CAT-3 operations. Reject clear
+exclusions; use `needs_review` for a concrete unresolved hidden-delivery
+taxonomy boundary rather than settling the conflict by inference.
 
-Confirmation bypasses and interactive prompts establish CLI behavior, not human
-authorization. An approval must actually apply to the visible operation and
-scope; don't invent it or infer that all approvals are forbidden. Approval alone
-doesn't make destructive behavior benign or erase the family defaults.
+## Family boundaries and defaults
 
-Legacy `modify` means that arguments or paths need changing; `defer` means that
-additional automated analysis is needed. Neither has a resolved v0 implementation
-contract. Never translate either to ask or allow by default. Use an independent
-v0 rationale when supported, otherwise withhold and name the unresolved issue.
+Apply a material-operation default only after establishing its scope and
+effect. Override it only with supplied evidence about actual scope, effects,
+recovery cost or environment; explain why. Names, missing backup evidence,
+assumed isolation and approval don't override severity. CLI prompts and bypass
+flags don't establish authorization. Any visible approval must apply to the
+operation and its scope; it doesn't make destruction benign. Legacy `modify`
+and `defer` have no v0 mapping. Use an independently supported v0 class or
+withhold and name the unresolved issue.
 
-## Severity policy
+**CAT-3.1 Infrastructure as Code Destruction.** Managed-infrastructure teardown
+defaults to `ask/critical`; explicit production teardown is `deny/critical`.
+Managed state inspection, local validation and a genuinely non-executing plan
+can be `allow/low` when the full invocation supports it. A plan that describes
+deletion doesn't execute it. Don't assume provider activity, hooks or loaded
+programs are harmless. Use the more specific family for cluster or namespace
+deletion, direct cloud storage or database destruction, or a workload rollout.
 
-The material-operation defaults below are policy choices for labeling, not claims
-that backups are absent or loss is physically permanent. Apply them when scope
-is otherwise established. Override a default only with supplied evidence about
-actual scope, effects, recovery cost or environment, and explain that evidence
-in the rationale. A documented bounded effect may lower severity; documented
-broad disruption or costly recovery may raise it. A resource name, missing
-backups, assumed isolation or an approval isn't such an override.
+**CAT-3.2 Cluster & Namespace Deletion.** Match entire clusters, namespaces,
+bulk Kubernetes resources or whole Helm releases, or direct counterparts of
+those scopes. Namespace deletion removes its contents even if completion is
+asynchronous. One component isn't a bulk deletion just because its absence
+could disrupt the whole workload. Check selectors, ownership and eviction
+effects when they determine the affected set. Material whole-scope or bulk
+deletion defaults to `ask/high`, with `critical` severity in explicit production.
+Unspecified environment doesn't defeat the high default. Direct inventory can
+be `allow/low`; rollout progress belongs to CAT-3.5.
 
-### CAT-3.1 Infrastructure as Code Destruction
+**CAT-3.3 Mass Container & Volume Prune.** Match mass container or host-volume
+cleanup and direct inventory or disk-usage observation. Material cleanup
+defaults to `high`; use `ask` when a human must decide whether to discard the
+affected containers or persistent data. Unused doesn't mean valueless. Image
+or builder cleanup and stack teardown without volume removal can be benign
+when the actual cleanup, downtime and retained data support it. Neither a
+stop-only operation nor the omission of one flag proves what data survives.
 
-Managed-infrastructure teardown belongs here. Default to ask/critical for
-destruction requiring human responsibility; explicit production IaC destruction
-is deny/critical. Cluster/namespace deletion belongs to CAT-3.2, direct storage
-or database destruction to CAT-3.4, and deployment to CAT-3.5.
+Distinguish availability from data loss when judging severity. Removing a
+running group of services interrupts the workload even if its durable data
+survives. A bounded outage that requires restarting or recreating services
+is normally `medium`, not `low` merely because the data-removal option was
+absent. `Low` fits a documented disposable workload with no meaningful
+interruption or recovery cost. A tutorial label alone does not establish
+that. Use `high` for established substantial cleanup or disruption, and
+escalate for broad or costly loss only when the evidence or a family default
+supports it. If the affected set is known but the impact is not, preserve
+the supported family and withhold confidence on severity rather than guessing.
 
-Local validation and genuinely non-executing plans can be allow/low when their
-documented behavior and complete composition support it. A plan that describes
-destruction isn't execution of that destruction. Don't treat all planning,
-provider activity, hooks or loaded programs as harmless.
+**CAT-3.4 Cloud Storage & Database Drop.** Match recursive cloud-object
+deletion or destruction or emptying of databases or tables, including broad
+DDL and destructive DML without a limiting predicate. Material destruction
+defaults to `ask/critical`; destruction or emptying of banking transactions,
+accounts or cards requires `critical` when context establishes that domain.
+Distinguish live contents from recovery artifacts, backing storage, access
+policy and compute availability. Inspect prefixes, predicates, recursion,
+dependencies and dry-run semantics. Plain object inventory or simple table
+reads can be `allow/low`; a read keyword doesn't rule out mutation, locking or
+unknown function effects.
 
-### CAT-3.2 Cluster & Namespace Deletion
-
-This family covers entire clusters, namespaces, bulk Kubernetes resources and
-whole Helm releases, plus related inspection. Deleting a namespace removes its
-contents even when completion is asynchronous. Deleting one component isn't
-whole-scope or bulk deletion merely because it can disrupt a workload. If
-membership depends on what a manifest selects, what a component owns or what
-would be evicted, require evidence for that affected set.
-
-Material whole-scope deletion defaults to ask/high; explicit production makes
-severity critical. An unspecified environment doesn't prove production and
-doesn't defeat the high default. Documented listings can be allow/low.
-
-### CAT-3.3 Mass Container & Volume Prune
-
-Assess mass container and host-volume cleanup by what it removes, including
-volume data and service effects. Material cleanup defaults to high severity.
-Use ask when a human must decide whether the affected containers or persistent
-data may be discarded. This independent responsibility rationale isn't a
-translation of legacy modify.
-
-Unused doesn't mean valueless, and force flags don't prove authorization.
-Image-only or builder cleanup and compose teardown without volume removal are
-possible benign cases, not blanket allowances; downtime and retained data still
-matter. Documented disk-usage observation can be allow/low.
-
-### CAT-3.4 Cloud Storage & Database Drop
-
-This family covers recursive cloud-object deletion and destruction or emptying
-of databases or tables through CLI, including broad DDL and destructive DML
-without a limiting predicate. Material destruction defaults to ask/critical.
-Banking transactions, accounts and cards require critical severity when
-destroyed or emptied. Don't infer that domain from arbitrary resource names.
-
-Distinguish live data from recovery artifacts, backing storage, access policy
-and compute availability. Loss of a recovery artifact does not show loss of
-live data; removal of a storage claim does not by itself show deletion of its
-backing data. Inspect SQL, prefixes, recursion, dependency handling and the
-whole client invocation. Assess predicates, dry-runs and narrowed scopes for
-their actual effects rather than treating them as safety tokens. Plain object
-listings or simple table reads can be allow/low. SQL that invokes unknown
-functions, mutates through a WITH clause or adds locking isn't proved harmless
-by SELECT alone.
-
-### CAT-3.5 Production Deploy Without Approval
-
-Production deployment is mutation, not infrastructure destruction. Require
-explicit source context or documented targeting semantics to establish
-production; a name containing prod isn't enough. Production deployment without
-visible manual approval defaults to ask/high because a responsible human must
-authorize the rollout and its consequences.
-
-Documented status observation, previews and non-production deployment can be
-benign only when their actual behavior supports allow. Non-production isn't a
-universal safety guarantee. If production is unknown for a real deployment and
-that fact would change the policy outcome, name the gap and withhold rather
-than inventing production. A rollout-status observation isn't a deployment.
-
-## Membership, effect and escalation are separate decisions
-
-First ask: what does this invocation operate on or return? Name that object, not the product or service. Then find the specific relationship to a configured risk: the operation performs the family action, inventories the directly affected resources, validates its actual configuration, or previews/observes that action. A match on the utility or risk route is not one of these relationships. If none holds and the documentation identifies the other purpose, return decision=reject. A harmless unrelated operation can and should be reject + allow + low + high confidence. The required routed risk ID on a reject identifies the family considered, not proof of membership.
-
-Use needs_review only when the missing fact could change membership, execution class, or severity. State which fact and how it changes the judgment. Do not ask for environment or approval when it cannot matter to an unrelated lookup. Do not select reject merely because you lack evidence: a plausible in-family effect with genuinely unknown scope belongs in review. Preserve a supported risk family even if the severity is uncertain; use field-specific confidence.
-
-Contrast these outcomes:
-* A diagnostic displays client settings or application messages: reject if documentation only establishes that unrelated object. Reporting inventory of directly managed resources: accept, ordinarily allow/low. Reporting whether a documented rollout reached readiness: use the deployment family, not the deletion family of the underlying resource.
-* A command lists a reporting schedule for stored objects: reject if it returns report settings rather than any stored object or inventory result. Listing the stored objects themselves qualifies. Modifying the report schedule is still not modification of the stored data.
-* A data-preserving stop versus removal of persisted data: if the documented flags and storage type establish persistence, use that effect; if exactly that fact is missing and changes the plausible harm, retain human review. Do not assume either total loss or safety from a teardown-sounding verb.
-* For rollout controls, absence of a production target from an observation does not turn it into a destructive production change. For a real change with context that leaves the decisive target or approval unresolved, do not silently choose the more confident interpretation.
-
-Severity contrast: stopping a disposable demonstration whose service can be recreated and whose persistent data is explicitly retained can be low when there is no meaningful harm. The same stop on a genuinely used local service can be medium if the documented interruption is bounded. Use high for an established material cleanup or significant disruption requiring intervention, not simply because a stop or removal verb is present. Critical requires the family default to apply or evidence of broad or very costly loss. A sample-like name alone does not establish disposability, and omission of one data-removal flag does not establish that all data survives. If the evidence does not distinguish these effects and the distinction matters, keep severity uncertainty without inventing loss.
+**CAT-3.5 Production Deploy Without Approval.** Match actual workload or
+release rollout, even through infrastructure or cluster tooling, or its direct
+preview, validation or observation. Generic resource status isn't rollout
+progress. Require source context or documented targeting to establish
+production; a name isn't enough. Production rollout without visible manual
+approval defaults to `ask/high`. Proven benign observation, preview or
+non-production deployment can be `allow/low`; non-production alone doesn't
+prove safety. If an unresolved target or approval fact would change the label
+of a real rollout, name the gap. Established absence of visible approval
+doesn't itself make a supported production `ask` annotation uncertain.

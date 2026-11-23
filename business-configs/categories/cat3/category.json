@@ -2,7 +2,7 @@
   "rules": {
     "category_id": "CAT-3",
     "category_name": "Деструкция облачной инфраструктуры и БД",
-    "version": "cat3-v0-2026-11-12-deploy-routing",
+    "version": "cat3-v0-2026-11-23-revision-6",
     "risks": [
       {
         "id": "CAT-3.1",
@@ -17,12 +17,12 @@
           "sst": "^(?:remove|diff)(?: |$)",
           "aws": "^(?!.*(?:^| )help$)cloudformation .+"
         },
-        "definition": "Destruction of infrastructure through IaC tools, with related inspection/planning counterexamples.",
+        "definition": "Destroying IaC-managed resources. A safe counterpart reads managed-resource state, validates the resource definition, or shows the resource changes a plan would make. Administering the IaC service is a different operation.",
         "command_patterns": [
           "^(?:terraform|tofu|pulumi|cdk|sam|serverless|sst)\\b",
           "^aws\\s+cloudformation\\b"
         ],
-        "guidance": "Use ask/critical for destructive scope requiring human responsibility; explicit production IaC destruction is deny. Never infer safety from command similarity. For inspection, the result must concern managed infrastructure state, a plan over it, or validation of the configuration itself; client/account settings are not state inspection."
+        "guidance": "Match managed infrastructure teardown, its state, configuration validation or a non-executing plan. Apply the CAT-3.1 defaults only to supported teardown scope."
       },
       {
         "id": "CAT-3.2",
@@ -40,14 +40,14 @@
           "kubectl": "^(?:get|describe|delete|api-resources|config)(?: |$)",
           "helm": "^(?:uninstall|delete|list|ls|status)(?: |$)"
         },
-        "definition": "Removal of clusters, namespaces, bulk Kubernetes resources or entire Helm releases, and related counterexamples.",
+        "definition": "Removing a cluster, namespace, collection of Kubernetes resources, or whole Helm release. A safe counterpart inventories that resource set or previews its removal. An operation on one child does not inherit the scope of its parent.",
         "command_patterns": [
           "^(?:kubectl|helm|eksctl|kind|minikube|k3d|kops|oc)\\b",
           "^gcloud\\s+container\\s+clusters\\b",
           "^az\\s+aks\\b",
           "^aws\\s+(?:eks|ecs)\\b"
         ],
-        "guidance": "Separate whole-scope deletion from one managed pod; do not invent production. For a benign counterpart, identify the cluster, namespace, or set of managed resources whose existence, membership or lifecycle the result reports. Text about client syntax, settings, application output, or monitoring configuration is a different object: reject, even when read-only. If the requested result is rollout progress or readiness in a documented deployment, use the deployment family instead."
+        "guidance": "Match entire clusters, namespaces, bulk resources or whole releases, or direct counterparts of those scopes. Workload disruption alone is not bulk removal."
       },
       {
         "id": "CAT-3.3",
@@ -63,11 +63,11 @@
           "crictl": "^(?:rm|rmp|ps|pods)(?: |$)",
           "nerdctl": "^(?:system|volume|container|image|rm|ps|images)(?: |$)"
         },
-        "definition": "Mass container or host-volume cleanup, including related inspection counterexamples.",
+        "definition": "Removing a set of containers or cleaning up host volumes. A safe counterpart inventories the containers, volumes, or their storage usage. An interruption without cleanup does not meet this definition.",
         "command_patterns": [
           "^(?:docker|podman|buildah|nerdctl|crictl|incus|docker-compose|podman-compose)\\b"
         ],
-        "guidance": "Legacy modify is unavailable. Require an independent allow/deny/ask rationale or withhold. For inspection, identify the actual container or volume inventory, reclaimable objects, or their storage use. Client settings, log output, and unrelated host information are not inventory."
+        "guidance": "Match mass container or host-volume cleanup, or direct inventory or usage of the resources it removes. Distinguish actual cleanup from an interruption that leaves the affected resources intact."
       },
       {
         "id": "CAT-3.4",
@@ -86,14 +86,14 @@
           "gcloud": "^(?:storage|sql) .+",
           "az": "^(?:storage|sql|mysql|postgres|cosmosdb) .+"
         },
-        "definition": "Recursive storage deletion or database/table destruction through CLI, and related inspection counterexamples.",
+        "definition": "Recursively removing stored objects or destroying a database or table. A safe counterpart inventories those objects, databases or tables, or previews their removal. Listing configuration attached to them is not an inventory of the data resources.",
         "command_patterns": [
           "^aws\\s+(?:s3|s3api|rds|docdb|dynamodb|redshift|elasticache|memorydb|neptune|timestream-write|backup)\\b",
           "^gcloud\\s+(?:storage|sql|redis|spanner|bigtable|firestore|datastore)\\b",
           "^az\\s+(?:storage|sql|mysql|postgres|postgresql|cosmosdb|redis)\\b",
           "^(?:gsutil|rclone|mc|oci|b2|psql|mysql|redis-cli|dropdb|pg_dump)\\b"
         ],
-        "guidance": "Inspect actual flags and quoted SQL. Default ask/critical for broad destruction; no standalone SQL. A benign counterpart reports actual stored objects, database/table inventories or data. Reports about a policy, scheduled report, location, or permission are about configuration, not the contents those settings concern: reject. Read-only is an effect, not a membership test."
+        "guidance": "Match recursive cloud-object deletion or broad database or table destruction, or direct observation of the relevant objects or data. Distinguish metadata, access and availability from the underlying data."
       },
       {
         "id": "CAT-3.5",
@@ -121,7 +121,7 @@
           "docker-compose": "^up(?: |$)",
           "podman-compose": "^up(?: |$)"
         },
-        "definition": "Production deployments without visible manual approval, with preview or non-production counterexamples.",
+        "definition": "Rolling out a workload version to production without visible manual approval. Safe counterparts validate or preview a rollout, observe its actual progress, or perform a documented non-production rollout. Preparing inputs for a later release is not a rollout.",
         "command_patterns": [
           "^(?:kubectl|helm|vercel|netlify|fly|railway|firebase|wrangler|kamal)\\b",
           "^(?:serverless|sam|cdk|sst)\\s+deploy\\b",
@@ -133,7 +133,7 @@
           "^(?:docker-compose|podman-compose)\\s+up\\b",
           "^gcloud\\s+run\\b"
         ],
-        "guidance": "Deployments are not destruction. Require evidence for production and distinguish dry-run semantics. When several families are routed, use the operation and supplied context to distinguish deployment readiness or rollout progress from generic resource existence. Require evidence tying an observation to deployment before assigning this family. Runtime messages or diagnostic output alone do not establish rollout observation."
+        "guidance": "Match a workload or release rollout or its direct validation, preview or observation. A separate step that only enables a later rollout is not a deployment."
       }
     ]
   }

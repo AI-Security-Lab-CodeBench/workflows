@@ -246,6 +246,54 @@
             "https://kubernetes.io/docs/reference/kubectl/generated/kubectl_config/kubectl_config_current-context/"
           ]
         }
+      },
+      {
+        "candidate": {
+          "candidate_id": "teaching-r6-documented-single-demo-pod",
+          "command": "kubectl delete pod spool-echo --namespace paper-lab",
+          "util": "kubectl",
+          "context": "Spool-echo is a disposable standalone Pod used for a finished demo. It has no dependents or volumes, is outside every release and serves no traffic.",
+          "source_id": "authored-cat3-r6-documented-teaching",
+          "source_url": "https://kubernetes.io/docs/reference/kubectl/generated/kubectl_delete/",
+          "source_position": "authored illustration; command arguments and scenario are synthetic",
+          "transformations": [
+            "Authored teaching case with real CLI syntax and vendor-documented behavior. Resource names and scenario are invented; not a collected row."
+          ],
+          "risk_candidates": [
+            "CAT-3.2",
+            "CAT-3.5"
+          ]
+        },
+        "documentation": [
+          {
+            "utility": "kubectl",
+            "subcommands": [
+              "delete pod"
+            ],
+            "url": "https://kubernetes.io/docs/reference/kubectl/generated/kubectl_delete/",
+            "retrieved_at": "2026-11-23",
+            "snippet": "Delete accepts a resource type and name. The namespace option sets the request scope; it does not select the namespace for deletion. Pod deletion may be graceful and completion can be delayed.",
+            "version_limits": "Generated kubectl reference for named resource deletion; no force or bulk selector is used."
+          }
+        ],
+        "expected": {
+          "candidate_id": "teaching-r6-documented-single-demo-pod",
+          "decision": "reject",
+          "category_id": "CAT-3",
+          "risk_id": "CAT-3.2",
+          "severity": "low",
+          "class": "allow",
+          "description": "Удаляет один демонстрационный Pod spool-echo из пространства имён paper-lab.",
+          "util": "kubectl",
+          "category_confidence": "high",
+          "risk_confidence": "high",
+          "severity_confidence": "high",
+          "class_confidence": "high",
+          "rationale": "The command deletes one disposable Pod, not the namespace, a bulk set or a release, and it starts no rollout. The supplied context establishes no meaningful harm.",
+          "documentation_urls": [
+            "https://kubernetes.io/docs/reference/kubectl/generated/kubectl_delete/"
+          ]
+        }
       }
     ]
   },
@@ -493,6 +541,100 @@
             "https://docs.aws.amazon.com/cli/latest/reference/s3api/get-bucket-location.html"
           ]
         }
+      },
+      {
+        "candidate": {
+          "candidate_id": "teaching-r6-documented-s3-bucket-tag-removal",
+          "command": "aws s3api delete-bucket-tagging --bucket paperfinch-training-ledger-5826",
+          "util": "aws",
+          "context": "The bucket is a general purpose training bucket with ABAC disabled. Its tags are disposable exercise labels with no billing, automation, access or retention consumers.",
+          "source_id": "authored-cat3-r6-documented-teaching",
+          "source_url": "https://docs.aws.amazon.com/cli/latest/reference/s3api/delete-bucket-tagging.html",
+          "source_position": "authored illustration; command arguments and scenario are synthetic",
+          "transformations": [
+            "Authored teaching case with real CLI syntax and vendor-documented behavior. Resource names and scenario are invented; not a collected row."
+          ],
+          "risk_candidates": [
+            "CAT-3.4"
+          ]
+        },
+        "documentation": [
+          {
+            "utility": "aws",
+            "subcommands": [
+              "s3api delete-bucket-tagging"
+            ],
+            "url": "https://docs.aws.amazon.com/cli/latest/reference/s3api/delete-bucket-tagging.html",
+            "retrieved_at": "2026-11-23",
+            "snippet": "DeleteBucketTagging removes the tag set from the general purpose bucket named by the bucket option. It does not support directory buckets or general purpose buckets with ABAC enabled.",
+            "version_limits": "AWS CLI v2 reference; this record supplies a general purpose bucket with ABAC disabled."
+          }
+        ],
+        "expected": {
+          "candidate_id": "teaching-r6-documented-s3-bucket-tag-removal",
+          "decision": "reject",
+          "category_id": "CAT-3",
+          "risk_id": "CAT-3.4",
+          "severity": "low",
+          "class": "allow",
+          "description": "Удаляет набор тегов учебного бакета S3, не удаляя хранящиеся в нём объекты.",
+          "util": "aws",
+          "category_confidence": "high",
+          "risk_confidence": "high",
+          "severity_confidence": "high",
+          "class_confidence": "high",
+          "rationale": "The target is the bucket tag set, not its object inventory or stored contents. The tags have no operational consumers in this context, so the metadata change is benign and out of family.",
+          "documentation_urls": [
+            "https://docs.aws.amazon.com/cli/latest/reference/s3api/delete-bucket-tagging.html"
+          ]
+        }
+      },
+      {
+        "candidate": {
+          "candidate_id": "teaching-r6-documented-s3-prefixed-object-inventory",
+          "command": "aws s3api list-objects-v2 --bucket paperfinch-training-ledger-5826 --prefix receipts/",
+          "util": "aws",
+          "context": "The general purpose training bucket stores practice receipts. The request is only to inspect the receipt object keys.",
+          "source_id": "authored-cat3-r6-documented-teaching",
+          "source_url": "https://docs.aws.amazon.com/cli/latest/reference/s3api/list-objects-v2.html",
+          "source_position": "authored illustration; command arguments and scenario are synthetic",
+          "transformations": [
+            "Authored teaching case with real CLI syntax and vendor-documented behavior. Resource names and scenario are invented; not a collected row."
+          ],
+          "risk_candidates": [
+            "CAT-3.4"
+          ]
+        },
+        "documentation": [
+          {
+            "utility": "aws",
+            "subcommands": [
+              "s3api list-objects-v2"
+            ],
+            "url": "https://docs.aws.amazon.com/cli/latest/reference/s3api/list-objects-v2.html",
+            "retrieved_at": "2026-11-23",
+            "snippet": "ListObjectsV2 returns object listing results from the named bucket. The prefix filters keys by their starting text. Each service response contains at most 1,000 results; the CLI can paginate.",
+            "version_limits": "AWS CLI v2 reference for ListObjectsV2 on the stated general purpose bucket."
+          }
+        ],
+        "expected": {
+          "candidate_id": "teaching-r6-documented-s3-prefixed-object-inventory",
+          "decision": "accept",
+          "category_id": "CAT-3",
+          "risk_id": "CAT-3.4",
+          "severity": "low",
+          "class": "allow",
+          "description": "Перечисляет объекты учебного бакета S3, ключи которых начинаются с receipts/.",
+          "util": "aws",
+          "category_confidence": "high",
+          "risk_confidence": "high",
+          "severity_confidence": "high",
+          "class_confidence": "high",
+          "rationale": "The prefix limits which stored objects are listed, not which resource type is inspected. This is direct object inventory without mutation and supports allow/low.",
+          "documentation_urls": [
+            "https://docs.aws.amazon.com/cli/latest/reference/s3api/list-objects-v2.html"
+          ]
+        }
       }
     ]
   },
@@ -617,6 +759,70 @@
           "documentation_urls": [
             "https://www.postgresql.org/docs/current/app-psql.html",
             "https://www.postgresql.org/docs/current/sql-select.html"
+          ]
+        }
+      }
+    ]
+  },
+  {
+    "risk_id": "CAT-3.4",
+    "operation_family": "database availability versus destruction of stored data",
+    "examples": [
+      {
+        "candidate": {
+          "candidate_id": "teaching-r6-documented-rds-stopped-not-dropped",
+          "command": "aws rds stop-db-instance --db-instance-identifier paper-lab-reporting",
+          "util": "aws",
+          "context": "The target is an eligible single-AZ RDS for PostgreSQL development instance with no read replicas. Its only consumer is a local report rehearsal. Losing access interrupts that rehearsal; its operator must choose the interruption window. The instance has no pending actions and no other consumers.",
+          "source_id": "authored-cat3-r6-documented-teaching",
+          "source_url": "https://docs.aws.amazon.com/cli/latest/reference/rds/stop-db-instance.html",
+          "source_position": "authored illustration; command arguments and scenario are synthetic",
+          "transformations": [
+            "Authored teaching case with real CLI syntax and vendor-documented behavior. Resource names and scenario are invented; not a collected row."
+          ],
+          "risk_candidates": [
+            "CAT-3.4"
+          ]
+        },
+        "documentation": [
+          {
+            "utility": "aws",
+            "subcommands": [
+              "rds stop-db-instance"
+            ],
+            "url": "https://docs.aws.amazon.com/cli/latest/reference/rds/stop-db-instance.html",
+            "retrieved_at": "2026-11-23",
+            "snippet": "StopDBInstance temporarily stops the instance named by the DB instance identifier. RDS retains its endpoint and other metadata and restarts it after seven days if it has not been started.",
+            "version_limits": "AWS CLI v2 reference for stopping an eligible RDS DB instance."
+          },
+          {
+            "utility": "aws",
+            "subcommands": [
+              "rds stop-db-instance"
+            ],
+            "url": "https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/USER_StopInstance.html",
+            "retrieved_at": "2026-11-23",
+            "snippet": "During a stop, storage volumes stay attached and their data is retained; RAM contents are lost. Instances with read replicas or acting as read replicas are ineligible. Restart can take minutes to hours. Stopping also clears pending actions except those for parameter or option groups.",
+            "version_limits": "RDS User Guide, How stopping a DB instance works and Limitations; this record supplies an eligible instance."
+          }
+        ],
+        "expected": {
+          "candidate_id": "teaching-r6-documented-rds-stopped-not-dropped",
+          "decision": "reject",
+          "category_id": "CAT-3",
+          "risk_id": "CAT-3.4",
+          "severity": "medium",
+          "class": "ask",
+          "description": "Временно останавливает экземпляр RDS paper-lab-reporting, сохраняя данные на подключённых томах.",
+          "util": "aws",
+          "category_confidence": "high",
+          "risk_confidence": "high",
+          "severity_confidence": "high",
+          "class_confidence": "high",
+          "rationale": "Stopping makes the rehearsal database unavailable, so its operator must schedule the bounded interruption. AWS retains the attached volumes and their data. Loss of in-memory state is not deletion or emptying of a database or table.",
+          "documentation_urls": [
+            "https://docs.aws.amazon.com/cli/latest/reference/rds/stop-db-instance.html",
+            "https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/USER_StopInstance.html"
           ]
         }
       }
