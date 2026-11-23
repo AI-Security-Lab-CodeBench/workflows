@@ -7,9 +7,9 @@ from dagster._core.definitions.decorators.op_decorator import DecoratedOpFunctio
 from jsonschema import Draft202012Validator
 from jsonschema.protocols import Validator
 from pandera.typing import DataFrame, Series
-from pyarrow.parquet import ParquetFile
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, TypeAdapter
 
+from codebench_pipeline.dataframe_io import open_parquet
 from codebench_pipeline.dataframe_schemas import LabelingAttemptsTable
 from codebench_pipeline.labeling_outcomes import LabelingAttempt
 from codebench_pipeline.table_query import QueryModel
@@ -154,7 +154,7 @@ def table_artifact_schema(
         and set(required) <= set(columns) <= properties.keys()
     ):
         return ArtifactSchema(source="declared", schema=declared)
-    with ParquetFile(arrow.BufferReader(payload)) as parquet_file:
+    with open_parquet(payload) as parquet_file:
         stored = parquet_file.schema_arrow
     fields: list["arrow.Field[arrow.DataType]"] = list(stored)
     storage_properties: dict[str, JsonValue] = {}

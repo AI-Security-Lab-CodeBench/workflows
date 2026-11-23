@@ -8,7 +8,8 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
-from typing import Final, Literal, assert_never
+from typing import Final, Literal, Protocol, assert_never
+from warnings import catch_warnings, filterwarnings
 
 import pandas as pd
 import pyarrow
@@ -38,6 +39,9 @@ from codebench_pipeline.stage_implementation import ImplementationSource
 from codebench_pipeline.storage import IntegrityError, open_directory
 
 REVIEW_PREPARATION: Final = "codebench_review_preparation"
+_ATTRS_CHUNK_BYTES: Final = 16 * 1024 * 1024
+_ATTRS_CHUNK_PREFIX: Final = "codebench:attrs:v1:"
+_MAX_LEGACY_FOOTER_BYTES: Final = 300 * 1024 * 1024
 _LABELING_NESTED_TYPES: Final = {
     "label": pyarrow.struct(
         [
@@ -107,6 +111,20 @@ class CategoryDtype(BaseModel):
     ordered: bool
 
 
+class _PandasArrowTable(Protocol):
+    @property
+    def schema(self) -> pyarrow.Schema: ...
+
+    def to_pandas(self) -> pd.DataFrame: ...
+
+
+class _ParquetFrameReader(Protocol):
+    @property
+    def metadata(self) -> parquet.FileMetaData: ...
+
+    def read(self, *, use_pandas_metadata: bool) -> _PandasArrowTable: ...
+
+
 @dataclass(frozen=True, slots=True)
 class AssetSnapshot:
     reference: AssetReference
@@ -141,24 +159,74 @@ def frame_bytes(frame: pd.DataFrame) -> bytes:
             arrow = arrow.set_column(
                 arrow.schema.get_field_index(name), name, pyarrow.array(table[name].tolist(), type=dtype)
             )
-    if attributes:
+    encoded_attrs = json.dumps(attributes) if attributes else ""
+    if encoded_attrs and len(encoded_attrs) <= _ATTRS_CHUNK_BYTES:
         metadata = arrow.schema.metadata or {}
         pandas_metadata = TypeAdapter(dict[str, JsonValue]).validate_json(metadata[b"pandas"])
         arrow = arrow.replace_schema_metadata(
             {
                 **metadata,
                 b"pandas": json.dumps({**pandas_metadata, "attributes": attributes}).encode(),
-                b"PANDAS_ATTRS": json.dumps(attributes).encode(),
+                b"PANDAS_ATTRS": encoded_attrs.encode(),
             }
         )
     with BytesIO() as output:
         with parquet.ParquetWriter(output, arrow.schema, compression="snappy") as writer:
+            if len(encoded_attrs) > _ATTRS_CHUNK_BYTES:
+                writer.add_key_value_metadata(
+                    {
+                        f"{_ATTRS_CHUNK_PREFIX}{index}": encoded_attrs[start : start + _ATTRS_CHUNK_BYTES]
+                        for index, start in enumerate(range(0, len(encoded_attrs), _ATTRS_CHUNK_BYTES))
+                    }
+                )
             writer.write_table(arrow)
         return output.getvalue()
 
 
+def open_parquet(payload: bytes) -> parquet.ParquetFile:
+    """Use default limits unless a valid, bounded footer needs a larger string budget."""
+    try:
+        return parquet.ParquetFile(pyarrow.BufferReader(payload))
+    except (OSError, pyarrow.ArrowInvalid) as error:
+        if "TProtocolException: Exceeded size limit" not in str(error):
+            raise
+        footer_size = int.from_bytes(payload[-8:-4], "little")
+        if (
+            not payload.startswith(b"PAR1")
+            or not payload.endswith(b"PAR1")
+            or not 0 < footer_size <= min(len(payload) - 12, _MAX_LEGACY_FOOTER_BYTES)
+        ):
+            raise
+        return parquet.ParquetFile(pyarrow.BufferReader(payload), thrift_string_size_limit=footer_size)
+
+
 def read_frame(payload: bytes) -> pd.DataFrame:
-    frame = pd.read_parquet(BytesIO(payload), engine="pyarrow")
+    with open_parquet(payload) as source:
+        return _read_parquet_frame(source)
+
+
+def _read_parquet_frame(source: _ParquetFrameReader) -> pd.DataFrame:
+    arrow = source.read(use_pandas_metadata=True)
+    frame = arrow.to_pandas()
+    convert_manager: Callable[[Literal["array"], bool], pd.DataFrame] | None = getattr(
+        frame, "_as_manager", None
+    )
+    if convert_manager is not None:
+        with catch_warnings():
+            filterwarnings("ignore", message="data_manager option is deprecated", category=FutureWarning)
+            use_array_manager = pd.get_option("mode.data_manager") == "array"
+        if use_array_manager:
+            frame = convert_manager("array", False)
+    inline_attrs = (arrow.schema.metadata or {}).get(b"PANDAS_ATTRS")
+    if inline_attrs is not None:
+        frame.attrs.update(TypeAdapter(dict[str, JsonValue]).validate_json(inline_attrs))
+    else:
+        footer = source.metadata.metadata or {}
+        prefix = _ATTRS_CHUNK_PREFIX.encode()
+        chunks = {key: value for key, value in footer.items() if key.startswith(prefix)}
+        if chunks:
+            encoded_attrs = b"".join(chunks[prefix + str(i).encode()] for i in range(len(chunks)))
+            frame.attrs.update(TypeAdapter(dict[str, JsonValue]).validate_json(encoded_attrs))
     metadata = TypeAdapter(dict[str, CategoryDtype]).validate_python(
         frame.attrs.pop("_codebench_categories", {})
     )
