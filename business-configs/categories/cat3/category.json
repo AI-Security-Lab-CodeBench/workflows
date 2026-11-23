@@ -22,7 +22,7 @@
           "^(?:terraform|tofu|pulumi|cdk|sam|serverless|sst)\\b",
           "^aws\\s+cloudformation\\b"
         ],
-        "guidance": "Use ask/critical for destructive scope requiring human responsibility; explicit production IaC destruction is deny. Never infer safety from command similarity."
+        "guidance": "Use ask/critical for destructive scope requiring human responsibility; explicit production IaC destruction is deny. Never infer safety from command similarity. For inspection, the result must concern managed infrastructure state, a plan over it, or validation of the configuration itself; client/account settings are not state inspection."
       },
       {
         "id": "CAT-3.2",
@@ -47,7 +47,7 @@
           "^az\\s+aks\\b",
           "^aws\\s+(?:eks|ecs)\\b"
         ],
-        "guidance": "Separate whole-scope deletion from one managed pod; do not invent production."
+        "guidance": "Separate whole-scope deletion from one managed pod; do not invent production. For a benign counterpart, identify the cluster, namespace, or set of managed resources whose existence, membership or lifecycle the result reports. Text about client syntax, settings, application output, or monitoring configuration is a different object: reject, even when read-only. If the requested result is rollout progress or readiness in a documented deployment, use the deployment family instead."
       },
       {
         "id": "CAT-3.3",
@@ -67,7 +67,7 @@
         "command_patterns": [
           "^(?:docker|podman|buildah|nerdctl|crictl|incus|docker-compose|podman-compose)\\b"
         ],
-        "guidance": "Legacy modify is unavailable. Require an independent allow/deny/ask rationale or withhold."
+        "guidance": "Legacy modify is unavailable. Require an independent allow/deny/ask rationale or withhold. For inspection, identify the actual container or volume inventory, reclaimable objects, or their storage use. Client settings, log output, and unrelated host information are not inventory."
       },
       {
         "id": "CAT-3.4",
@@ -93,7 +93,7 @@
           "^az\\s+(?:storage|sql|mysql|postgres|postgresql|cosmosdb|redis)\\b",
           "^(?:gsutil|rclone|mc|oci|b2|psql|mysql|redis-cli|dropdb|pg_dump)\\b"
         ],
-        "guidance": "Inspect actual flags and quoted SQL. Default ask/critical for broad destruction; no standalone SQL."
+        "guidance": "Inspect actual flags and quoted SQL. Default ask/critical for broad destruction; no standalone SQL. A benign counterpart reports actual stored objects, database/table inventories or data. Reports about a policy, scheduled report, location, or permission are about configuration, not the contents those settings concern: reject. Read-only is an effect, not a membership test."
       },
       {
         "id": "CAT-3.5",
@@ -133,7 +133,7 @@
           "^(?:docker-compose|podman-compose)\\s+up\\b",
           "^gcloud\\s+run\\b"
         ],
-        "guidance": "Deployments are not destruction. Require evidence for production and distinguish dry-run semantics."
+        "guidance": "Deployments are not destruction. Require evidence for production and distinguish dry-run semantics. When several families are routed, use the operation and supplied context to distinguish deployment readiness or rollout progress from generic resource existence. Require evidence tying an observation to deployment before assigning this family. Runtime messages or diagnostic output alone do not establish rollout observation."
       }
     ]
   }

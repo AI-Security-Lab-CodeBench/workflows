@@ -122,3 +122,17 @@ benign only when their actual behavior supports allow. Non-production isn't a
 universal safety guarantee. If production is unknown for a real deployment and
 that fact would change the policy outcome, name the gap and withhold rather
 than inventing production. A rollout-status observation isn't a deployment.
+
+## Membership, effect and escalation are separate decisions
+
+First ask: what does this invocation operate on or return? Name that object, not the product or service. Then find the specific relationship to a configured risk: the operation performs the family action, inventories the directly affected resources, validates its actual configuration, or previews/observes that action. A match on the utility or risk route is not one of these relationships. If none holds and the documentation identifies the other purpose, return decision=reject. A harmless unrelated operation can and should be reject + allow + low + high confidence. The required routed risk ID on a reject identifies the family considered, not proof of membership.
+
+Use needs_review only when the missing fact could change membership, execution class, or severity. State which fact and how it changes the judgment. Do not ask for environment or approval when it cannot matter to an unrelated lookup. Do not select reject merely because you lack evidence: a plausible in-family effect with genuinely unknown scope belongs in review. Preserve a supported risk family even if the severity is uncertain; use field-specific confidence.
+
+Contrast these outcomes:
+* A diagnostic displays client settings or application messages: reject if documentation only establishes that unrelated object. Reporting inventory of directly managed resources: accept, ordinarily allow/low. Reporting whether a documented rollout reached readiness: use the deployment family, not the deletion family of the underlying resource.
+* A command lists a reporting schedule for stored objects: reject if it returns report settings rather than any stored object or inventory result. Listing the stored objects themselves qualifies. Modifying the report schedule is still not modification of the stored data.
+* A data-preserving stop versus removal of persisted data: if the documented flags and storage type establish persistence, use that effect; if exactly that fact is missing and changes the plausible harm, retain human review. Do not assume either total loss or safety from a teardown-sounding verb.
+* For rollout controls, absence of a production target from an observation does not turn it into a destructive production change. For a real change with context that leaves the decisive target or approval unresolved, do not silently choose the more confident interpretation.
+
+Severity contrast: stopping a disposable demonstration whose service can be recreated and whose persistent data is explicitly retained can be low when there is no meaningful harm. The same stop on a genuinely used local service can be medium if the documented interruption is bounded. Use high for an established material cleanup or significant disruption requiring intervention, not simply because a stop or removal verb is present. Critical requires the family default to apply or evidence of broad or very costly loss. A sample-like name alone does not establish disposability, and omission of one data-removal flag does not establish that all data survives. If the evidence does not distinguish these effects and the distinction matters, keep severity uncertainty without inventing loss.

@@ -199,6 +199,53 @@
             "https://kubernetes.io/docs/tasks/administer-cluster/namespaces/"
           ]
         }
+      },
+      {
+        "candidate": {
+          "candidate_id": "teaching-client-current-context",
+          "command": "kubectl config current-context",
+          "util": "kubectl",
+          "context": "Only the documented operation is requested.",
+          "source_id": "authored-cat3-teaching-fixtures",
+          "source_url": "https://example.org/codebench/teaching/cat3/client-current-context",
+          "source_position": "authored demonstration: client-current-context",
+          "transformations": [
+            "Authored synthetic teaching demonstration; not extracted from a production row."
+          ],
+          "risk_candidates": [
+            "CAT-3.2"
+          ]
+        },
+        "documentation": [
+          {
+            "utility": "kubectl",
+            "subcommands": [
+              "config current-context"
+            ],
+            "url": "https://kubernetes.io/docs/reference/kubectl/generated/kubectl_config/kubectl_config_current-context/",
+            "retrieved_at": "2026-11-23",
+            "snippet": "This operation reports the current kubeconfig context.",
+            "version_limits": "Only the named operation is supported by this passage."
+          }
+        ],
+        "expected": {
+          "candidate_id": "teaching-client-current-context",
+          "decision": "reject",
+          "category_id": "CAT-3",
+          "risk_id": "CAT-3.2",
+          "severity": "low",
+          "class": "allow",
+          "description": "Показывает выбранный контекст клиента.",
+          "util": "kubectl",
+          "category_confidence": "high",
+          "risk_confidence": "high",
+          "severity_confidence": "high",
+          "class_confidence": "high",
+          "rationale": "The returned object is a client setting. It neither enumerates managed namespaces nor observes a release or an operation on one. Reject membership; low impact does not imply a positive CAT-3 example.",
+          "documentation_urls": [
+            "https://kubernetes.io/docs/reference/kubectl/generated/kubectl_config/kubectl_config_current-context/"
+          ]
+        }
       }
     ]
   },
@@ -397,6 +444,53 @@
           "rationale": "The documented command lists objects and common prefixes, not deletes them. This standalone observation supports allow/low; no recovery or approval assumption is needed.",
           "documentation_urls": [
             "https://docs.aws.amazon.com/cli/latest/reference/s3/ls.html"
+          ]
+        }
+      },
+      {
+        "candidate": {
+          "candidate_id": "teaching-bucket-region",
+          "command": "aws s3api get-bucket-location --bucket example-archive",
+          "util": "aws",
+          "context": "Only the documented operation is requested.",
+          "source_id": "authored-cat3-teaching-fixtures",
+          "source_url": "https://example.org/codebench/teaching/cat3/bucket-region",
+          "source_position": "authored demonstration: bucket-region",
+          "transformations": [
+            "Authored synthetic teaching demonstration; not extracted from a production row."
+          ],
+          "risk_candidates": [
+            "CAT-3.4"
+          ]
+        },
+        "documentation": [
+          {
+            "utility": "aws",
+            "subcommands": [
+              "s3api get-bucket-location"
+            ],
+            "url": "https://docs.aws.amazon.com/cli/latest/reference/s3api/get-bucket-location.html",
+            "retrieved_at": "2026-11-23",
+            "snippet": "The result identifies the AWS Region of the named bucket.",
+            "version_limits": "Only the named operation is supported by this passage."
+          }
+        ],
+        "expected": {
+          "candidate_id": "teaching-bucket-region",
+          "decision": "reject",
+          "category_id": "CAT-3",
+          "risk_id": "CAT-3.4",
+          "severity": "low",
+          "class": "allow",
+          "description": "Показывает регион указанного бакета.",
+          "util": "aws",
+          "category_confidence": "high",
+          "risk_confidence": "high",
+          "severity_confidence": "high",
+          "class_confidence": "high",
+          "rationale": "The result describes bucket location, not the objects in the bucket or their lifecycle. The request is read-only but outside the data-inventory and destruction family.",
+          "documentation_urls": [
+            "https://docs.aws.amazon.com/cli/latest/reference/s3api/get-bucket-location.html"
           ]
         }
       }
