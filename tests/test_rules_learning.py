@@ -513,7 +513,7 @@ def test_capture_resume_replays_pins_and_only_requests_unfinished_closure(tamper
     slate = request.messages[-1].content
     assert slate is not None
     assert _JSON.validate_json(slate)["diagnostic_codes"] == ["provider_http"]
-    assert result.batches[0] == done
+    assert result.batches[0] == selected_batches[0]
     assert result.batches[1].prior_runs == (unfinished.run,)
     assert result.batches[1].justification == "Retained 1 validated rule(s); covered 1 row(s) and abstained on 0 row(s)."
 

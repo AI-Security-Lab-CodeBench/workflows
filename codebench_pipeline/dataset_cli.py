@@ -3,6 +3,7 @@ import json
 import sys
 from pathlib import Path
 from typing import Literal, TypedDict, overload
+from uuid import UUID
 
 from dagster import AssetKey, DagsterRunStatus, RunsFilter
 from pydantic import TypeAdapter
@@ -104,6 +105,7 @@ def main() -> None:
             command.add_argument("--sha256", required=True, help="Expected SHA-256 of the private registration bytes.")
         if name == "rules-capture":
             command.add_argument("--category", required=True, help="Selected train category partition.")
+            command.add_argument("--resume-run", type=UUID, help="Resume a specific failed capture run UUID.")
     split_commands = {
         "configure-splits": splits,
         **{name: subcommands.add_parser(name) for name in split_jobs},
@@ -179,6 +181,8 @@ def main() -> None:
                     }
                 }
             }
+        if args.action == "rules-capture" and args.resume_run is not None:
+            run_config = {"ops": {"codebench__rules_capture": {"config": {"resume_run": str(args.resume_run)}}}}
         with dataset_instance(args.home) as instance:
             result = job.execute_in_process(instance=instance, partition_key=partition, run_config=run_config)
         print(json.dumps({"job": job_name, "partition": partition, "run_id": result.run_id}))

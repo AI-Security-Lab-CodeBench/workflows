@@ -160,7 +160,7 @@ class _NoArguments(ConfigArtifact):
 def _capture_batch(agent: RuleAgent, train: _Train, work: _CaptureWork) -> CaptureDecision:
     batch, previous = work.batch, work.previous
     if previous is not None and previous.run.status == "finished":
-        return previous.model_copy(update={"descriptor_sha256": batch.descriptor_sha256})
+        return previous
     evidence = TrainEvidence()
     accepted = list(previous.rules) if previous is not None else []
     prior_runs = () if previous is None else (*previous.prior_runs, previous.run)

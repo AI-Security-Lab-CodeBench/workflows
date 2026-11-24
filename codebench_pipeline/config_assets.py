@@ -62,7 +62,7 @@ from codebench_pipeline.stage_configuration import (
     category_eligibility_settings,
     dataset_release_settings,
 )
-from codebench_pipeline.storage import IntegrityError, fingerprint
+from codebench_pipeline.storage import IntegrityError, fingerprint, open_directory, open_regular_file
 
 GLOBAL_CONFIG: Final = AssetKey(["datasets", "global_config"])
 CONFIG_DIRECTORY: Final = AssetKey(["datasets", "config_directory"])
@@ -195,12 +195,17 @@ class ConfigRunIOManager(ConfigurableIOManager):
         _record_config_digest(context, payload)
 
     @staticmethod
-    def write_private(path: Path, payload: bytes) -> None:
+    def write_private(path: Path, payload: bytes, *, exclusive: bool = False) -> None:
         path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+        flag = os.O_EXCL if exclusive else os.O_TRUNC
+        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW | flag, 0o600)
         with os.fdopen(descriptor, "wb") as stream:
             os.fchmod(stream.fileno(), 0o600)
             stream.write(payload)
+
+    def read_private(self, path: Path) -> bytes:
+        with open_directory(path.parent) as directory, open_regular_file(directory, path.name) as stream:
+            return stream.read()
 
     def load_input(self, context: InputContext) -> BaseModel | None:
         if context.asset_key == CONFIG_DIRECTORY:

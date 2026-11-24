@@ -7,7 +7,9 @@ from dagster import (
     AssetIn,
     AssetKey,
     AssetSelection,
+    Config,
     Dict,
+    Failure,
     MetadataValue,
     Output,
     PythonObjectDagsterType,
@@ -22,12 +24,14 @@ from codebench_pipeline.dataset_identity import CODEBENCH_DATASET_ID
 from codebench_pipeline.rules_agents import RuleAgent
 from codebench_pipeline.rules_artifacts import (
     RULES_EVAL_KEY,
+    RULES_EVIDENCE_DIGEST,
     FinalizedRules,
     RulesCaptureArtifact,
     RulesDedupArtifact,
     RulesMetricsTable,
     aggregate_holdout,
     holdout_chart,
+    load_capture_attempt,
     record_rules_evidence,
 )
 from codebench_pipeline.rules_contracts import Bundle
@@ -60,6 +64,10 @@ _CORPUS_TYPE: Final = PythonObjectDagsterType(Corpus, name="RulesCorpus")
 _CAPTURE_TYPE: Final = PythonObjectDagsterType(RulesCaptureArtifact, name="RulesCaptureArtifact")
 _DEDUP_TYPE: Final = PythonObjectDagsterType(RulesDedupArtifact, name="RulesDedupArtifact")
 _FINAL_TYPE: Final = PythonObjectDagsterType(FinalizedRules, name="FinalizedRules")
+
+
+class RulesCaptureConfig(Config):
+    resume_run: str | None = None
 
 
 def _corpus_input(split: Split, *, per_category: bool = False) -> AssetIn:
@@ -101,23 +109,35 @@ def _agent(context: AssetExecutionContext, settings: AgentSettings, pins: Learni
         "train": _corpus_input("train", per_category=True),
     },
 )
-def rules_capture(context: AssetExecutionContext, settings: RulesCaptureSettings, train: Corpus) -> Output[RulesCaptureArtifact]:
+def rules_capture(
+    context: AssetExecutionContext, config: RulesCaptureConfig, settings: RulesCaptureSettings, train: Corpus,
+) -> Output[RulesCaptureArtifact]:
     """Teach one category while gating each learned rule on the entire pinned train split."""
     _require_corpus(train, settings.pins.train, "train")
+    source = config.resume_run
+    resume = load_capture_attempt(context, settings, source) if source is not None else None
     client = BashguardClient(settings.runtime.base_url, settings.runtime.version)
-    result = capture_rules(_agent(context, settings.agent, settings.pins), train, client, category=settings.category)
+    result = capture_rules(
+        _agent(context, settings.agent, settings.pins), train, client, category=settings.category, resume=resume,
+    )
     if not result.batches or not result.complete:
-        record_rules_evidence(context, result)
+        digest = record_rules_evidence(context, result)
         failures = sorted({
             diagnostic.code for batch in result.batches for diagnostic in batch.run.diagnostics
         } | {batch.run.status for batch in result.batches if batch.run.status != "finished"})
-        raise IntegrityError(f"Category capture did not finish every selected batch: {', '.join(failures)}")
+        raise Failure(
+            f"Category capture did not finish every selected batch: {', '.join(failures)}",
+            metadata={RULES_EVIDENCE_DIGEST: digest},
+        )
     return Output(
         RulesCaptureArtifact(
             pins=settings.pins, category=settings.category, inference_digest=settings.agent.inference_digest,
             result=result,
         ),
-        metadata={"rules": len(result.packages), "batches": len(result.batches), "train digest": train.digest},
+        metadata={
+            "rules": len(result.packages), "batches": len(result.batches), "train digest": train.digest,
+            **({"resumed from run": source} if source is not None else {}),
+        },
     )
 
 

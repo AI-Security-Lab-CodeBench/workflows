@@ -1,5 +1,5 @@
 import json
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from hashlib import sha256
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -10,6 +10,8 @@ from typing import NamedTuple
 import httpx2
 import pytest
 from dagster import DagsterInstance, Definitions, MarkdownMetadataValue
+from pydantic import JsonValue
+from rules_capture_recovery_fixture import CaptureCompletion, exercise_capture_resume
 from starlette.testclient import TestClient
 from test_declared_dataset_graph import fixture_spec
 
@@ -41,7 +43,7 @@ class _HTTP(NamedTuple):
 
 
 @contextmanager
-def _services() -> Iterator[_HTTP]:
+def _services(complete: Callable[[dict[str, JsonValue]], dict[str, JsonValue]]) -> Iterator[_HTTP]:
     calls: list[tuple[str, dict]] = []
 
     class Handler(BaseHTTPRequestHandler):
@@ -50,7 +52,7 @@ def _services() -> Iterator[_HTTP]:
             calls.append((self.path, request))
             match self.path:
                 case "/v1/chat/completions":
-                    response = _complete(request)
+                    response = complete(request)
                 case "/v1/evaluate":
                     response = _evaluate(request)
                 case _:
@@ -142,6 +144,7 @@ def _evaluate(request: dict) -> dict:
 
 def test_rules_pipeline(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     blobs: dict[str, bytes] = {}
+    completion = CaptureCompletion(_complete, _MODEL)
 
     def split(number: int, commands: dict[str, str]) -> TrainConfig:
         sources = []
@@ -164,7 +167,7 @@ def test_rules_pipeline(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None
         return httpx2.Response(200, stream=httpx2.ByteStream(blobs[request.url.path]))
 
     with (
-        _services() as services,
+        _services(completion) as services,
         dataset_instance(tmp_path) as instance,
         httpx2.Client(transport=httpx2.MockTransport(reply)) as repository,
     ):
@@ -223,12 +226,14 @@ def test_rules_pipeline(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None
         monkeypatch.setattr(DataFrameIOManager, "read_version", read_pinned)
         assert run("capture_rules", "CAT-3").success
         assert not run("learn_rules", raise_on_error=False).success
-        assert run("capture_rules", "CAT-4").success
+        assert completion.requests == 3
+        exercise_capture_resume(tmp_path, instance, completion, monkeypatch)
+        capture_requests = completion.requests
         assert run("learn_rules").success
+        assert completion.requests == capture_requests + 1
         for path, request in services.calls:
             if path == "/v1/evaluate":
                 assert {row["command"] for row in request["rows"]}.isdisjoint({"pwd -L", "whoami"})
-        assert len([request for path, request in services.calls if path == "/v1/chat/completions"]) == 6
         services.calls.clear()
         allowed_snapshot = test.digest
         assert run("evaluate_rules").success
