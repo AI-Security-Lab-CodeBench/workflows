@@ -43,7 +43,7 @@ class AgentRun(ConfigArtifact):
     backend_revision: str
     guide_sha256: Digest
     request_sha256: tuple[Digest, ...]
-    status: Literal["finished", "exhausted", "context_limit", "endpoint_error"]
+    status: Literal["finished", "exhausted", "context_limit", "endpoint_error", "request_too_large"]
     failures: tuple[AgentFailure, ...]
 
     @property
