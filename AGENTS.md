@@ -2,8 +2,33 @@
 
 ## Operate the stack
 
-One `codebench` Compose project runs one pipeline version. Use the active Docker
-context and `python3 scripts/stack.py`; `--help` lists commands. For installation,
+One **shared** `codebench` Compose project runs one pipeline version. On the
+development host it runs on the `codebench-rootless-docker.service` user daemon,
+not necessarily the CLI's `default` engine. An empty `docker ps` on the default
+socket is **not** evidence that the deployment is absent. Connect read-only first:
+
+```sh
+systemctl --user is-active codebench-rootless-docker.service
+export DOCKER_HOST="unix://${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/codebench-docker.sock"
+unset DOCKER_CONTEXT
+python3 scripts/stack.py status
+deployment_env=$(docker inspect -f '{{index .Config.Labels "com.docker.compose.project.environment_file"}}' codebench-webserver-1)
+docker inspect -f '{{index .Config.Labels "com.docker.compose.project.working_dir"}} {{.Config.Image}}' codebench-webserver-1
+python3 scripts/stack.py --env-file "$deployment_env" stages
+```
+
+Use the release and env-file paths recorded on the **running** container; do
+not copy credentials, print the env file, or assume the current checkout's
+`.env` describes the deployment. Keep `DOCKER_HOST` in the shell running all
+stack commands. Do not switch the user's global Docker context, use `sudo
+docker`, or create another project if the socket or a service is unavailable.
+Check the user service and report the mismatch. Other sessions share the
+workers, ports, volumes, database, and object store. Use `stack.py e2e` with its
+disposable database for verification; do not reset volumes, stop the stack,
+enable sensors, or roll out a candidate to test it. Changes to a checkout are
+not automatically present in the running image.
+
+Use `python3 scripts/stack.py`; `--help` lists commands. For installation,
 credentials or a fresh development cutover, see [README](README.md). Never start a replacement
 stack, adopt unmarked volumes, or reset shared data to get past a failed check.
 
