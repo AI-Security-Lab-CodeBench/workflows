@@ -54,6 +54,9 @@ from codebench_pipeline.storage import IntegrityError, fingerprint
 
 
 class MaterializationStorageEvidence(BaseModel):
+    split_revision: Digest | None = Field(
+        default=None, validation_alias=AliasPath("resources", "train_table_io", "config", "registered_revision")
+    )
     revision: Digest | None = Field(
         default=None,
         validation_alias=AliasPath("resources", "dataset_io_manager", "config", "registered_revision"),

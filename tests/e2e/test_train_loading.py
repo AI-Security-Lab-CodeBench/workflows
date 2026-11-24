@@ -10,8 +10,10 @@ from dagster import AssetKey, MultiPartitionKey
 from pydantic import ValidationError
 from test_declared_dataset_graph import fixture_spec
 
+from codebench_pipeline.artifact_views import ArtifactDataService, ArtifactKey, ArtifactQuery, ArtifactTable
 from codebench_pipeline.config_assets import GLOBAL_CONFIG
 from codebench_pipeline.dataframe_io import DataFrameIOManager
+from codebench_pipeline.dataset_artifacts import DatasetArtifactCatalog
 from codebench_pipeline.dataset_cli import main
 from codebench_pipeline.dataset_registry import DatasetRegistry
 from codebench_pipeline.definitions import build_definitions
@@ -84,6 +86,8 @@ def test_train_loading(tmp_path: Path) -> None:
         )
         assert not incomplete.success
         assert not instance.get_latest_materialization_event(AssetKey(["train", "merged_rows"]))
+        viewer = ArtifactDataService(DatasetArtifactCatalog(tmp_path, instance), defs)
+        assert not viewer.partitions(ArtifactKey(asset_key=("train", "merged_rows"))).partitions
         cli("train-load", "--category", "CAT-4")
         cli("train-merge")
         cli("test-load", "--category", "CAT-3")
@@ -97,6 +101,13 @@ def test_train_loading(tmp_path: Path) -> None:
         }
         assert table("train", "merged_rows", spec.dataset_id)["command"].tolist() == ["pwd", "ls", "date"]
         assert table("test", "merged_rows", spec.dataset_id)["command"].tolist() == ["whoami"]
+        for split, commands in (("train", ["pwd", "ls", "date"]), ("test", ["whoami"])):
+            asset_key = (split, "merged_rows")
+            assert viewer.partitions(ArtifactKey(asset_key=asset_key)).partitions == (spec.dataset_id,)
+            artifact = viewer.query(ArtifactQuery(asset_key=asset_key, partition_key=spec.dataset_id))
+            assert isinstance(artifact, ArtifactTable)
+            assert artifact.publication_state is None
+            assert [row.values["command"] for row in artifact.page.rows] == commands
         key = ["train", "merged_rows"]
         digest = manager.reference_at(key, spec.dataset_id)
         load_train.execute_in_process(instance=instance, partition_key=p3)

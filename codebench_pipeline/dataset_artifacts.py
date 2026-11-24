@@ -48,6 +48,7 @@ CONFIG_KEYS: Final = frozenset(
         *(mapping_key(scope) for scope in (*COLLECTION_SCOPES.values(), *FINALIZATION_STAGES)),
     )
 )
+SPLIT_MERGES: Final = frozenset({("train", "merged_rows"), ("test", "merged_rows")})
 
 
 def text_metadata(record: EventLogRecord, key: str) -> str | None:
@@ -77,7 +78,8 @@ class DatasetArtifactCatalog:
         return ArtifactPartitions(asset_key=key.asset_key, partitions=tuple(partitions))
 
     def resolve(self, target: ArtifactTarget) -> ArtifactBinding | RunConfigBinding:
-        if target.asset_key[0] != "datasets" or target.partition_key is None:
+        split_merge = target.asset_key in SPLIT_MERGES
+        if target.partition_key is None or (target.asset_key[0] != "datasets" and not split_merge):
             raise DatasetViewError("not_found", "No persisted artifact binding")
         records_filter = AssetRecordsFilter(
             asset_key=AssetKey(target.asset_key), asset_partitions=[target.partition_key]
@@ -197,7 +199,9 @@ class DatasetArtifactCatalog:
                         state = release.publication_state
             return ArtifactBinding(storage, reference, state)
 
-        if is_latest and ArtifactCurrentness(self.home, self.instance).stale(latest, reference):
+        if not split_merge and is_latest and ArtifactCurrentness(self.home, self.instance).stale(
+            latest, reference
+        ):
             state = "stale"
         return ArtifactBinding(storage, reference, state)
 
@@ -218,7 +222,10 @@ class DatasetArtifactCatalog:
             raise DatasetViewError("not_materialized", "No persisted run identifies this artifact's storage")
         try:
             evidence = MaterializationStorageEvidence.model_validate(run.run_config)
-            revision, inline = evidence.revision, evidence.storage
+            if record.asset_key is not None and tuple(record.asset_key.path) in SPLIT_MERGES:
+                revision, inline = evidence.split_revision, None
+            else:
+                revision, inline = evidence.revision, evidence.storage
             if revision is not None and inline is None:
                 storage = self.registry.storage(partition, revision=revision)
             elif (
