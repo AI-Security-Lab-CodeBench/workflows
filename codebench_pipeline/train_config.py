@@ -1,3 +1,4 @@
+from collections import defaultdict
 from pathlib import PureWindowsPath
 from typing import Annotated, Final, Literal
 
@@ -6,10 +7,11 @@ from pydantic_core import PydanticCustomError
 
 from codebench_pipeline.models import Digest
 from codebench_pipeline.repository_config import Commit, check_path
-from codebench_pipeline.storage import IntegrityError
+from codebench_pipeline.storage import IntegrityError, fingerprint
 from codebench_pipeline.typed_config import ConfigArtifact
 
 TrainGroupColumn = Literal["risk", "severity", "class"]
+SplitCategory = Annotated[str, Field(pattern=r"^CAT-[1-9][0-9]*$")]
 _DEFAULT_GROUP_BY: Final[tuple[TrainGroupColumn, ...]] = ("risk", "severity", "class")
 
 
@@ -24,7 +26,7 @@ class TrainSource(ConfigArtifact):
     branch: str = Field(min_length=1)
     commit: Commit
     path: str
-    category: Annotated[str, Field(pattern=r"^CAT-[1-9][0-9]*$")]
+    category: SplitCategory
     sha256: Digest
 
     @field_validator("branch")
@@ -56,6 +58,14 @@ class TrainSource(ConfigArtifact):
         return value
 
 
+class CategorySources(ConfigArtifact):
+    sources: list[TrainSource]
+
+    @property
+    def digest(self) -> str:
+        return fingerprint(self.model_dump_json())
+
+
 class TrainConfig(ConfigArtifact):
     sources: list[TrainSource]
     group_by: list[TrainGroupColumn] = Field(default_factory=lambda: list(_DEFAULT_GROUP_BY), min_length=1)
@@ -75,7 +85,34 @@ class TrainConfig(ConfigArtifact):
             raise PydanticCustomError("train_group_by", "Train grouping columns must be distinct")
         return value
 
+    def sources_by_category(self) -> dict[str, CategorySources]:
+        groups: defaultdict[str, list[TrainSource]] = defaultdict(list)
+        for source in self.sources:
+            groups[source.category].append(source)
+        return {category: CategorySources(sources=sources) for category, sources in groups.items()}
+
 
 class SplitSections(ConfigArtifact):
     train: TrainConfig
     test: TrainConfig
+
+
+class CountSettings(ConfigArtifact):
+    group_by: list[TrainGroupColumn]
+    sources_digest: Digest
+
+
+class MergeSettings(ConfigArtifact):
+    category_digests: dict[SplitCategory, Digest]
+
+
+class SplitMarginalCount(ConfigArtifact):
+    category: SplitCategory
+    label: TrainGroupColumn
+    value: str
+    count: Annotated[int, Field(gt=0)]
+
+
+class SplitStats(ConfigArtifact):
+    total_rows: Annotated[int, Field(ge=0)]
+    marginal_counts: tuple[SplitMarginalCount, ...]

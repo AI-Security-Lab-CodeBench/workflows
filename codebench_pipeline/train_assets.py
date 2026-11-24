@@ -1,5 +1,3 @@
-from collections import defaultdict
-from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Final, Literal, assert_never
 
@@ -12,6 +10,7 @@ from dagster import (
     AssetSelection,
     DagsterInstance,
     DataVersion,
+    Dict,
     DynamicPartitionsDefinition,
     InputContext,
     MultiPartitionsDefinition,
@@ -22,7 +21,8 @@ from dagster import (
     input_manager,
 )
 from dagster._core.definitions.unresolved_asset_job_definition import UnresolvedAssetJobDefinition
-from dagster._core.types.dagster_type import Any as DagsterAny
+from dagster_pandera import pandera_schema_to_dagster_type
+from pandera.typing import DataFrame
 
 from codebench_pipeline.config_assets import (
     GLOBAL_CONFIG,
@@ -35,32 +35,22 @@ from codebench_pipeline.dataframe_io import DataFrameIOManager, materialized_ref
 from codebench_pipeline.dataset_asset_types import DATASET_PARTITIONS
 from codebench_pipeline.dataset_config import DatasetBuildSpec
 from codebench_pipeline.input_provenance import current_materialization
+from codebench_pipeline.split_schema import SplitRowsTable
 from codebench_pipeline.storage import IntegrityError, fingerprint
-from codebench_pipeline.train_config import TrainConfig, TrainGroupColumn, TrainSource
-from codebench_pipeline.train_tables import count_train_labels, load_train_category, merge_train_categories
+from codebench_pipeline.train_config import (
+    CategorySources,
+    CountSettings,
+    MergeSettings,
+    SplitStats,
+    TrainConfig,
+)
+from codebench_pipeline.train_tables import load_train_category, merge_train_categories, train_stats
 from codebench_pipeline.typed_config import ConfigArtifact
 
 Split = Literal["train", "test"]
 _SPLITS: Final[tuple[Split, ...]] = ("train", "test")
 DATASET_DIM: Final = MultiToSingleDimensionPartitionMapping(partition_dimension_name="dataset")
 TRAIN_TABLE_IO: Final = "train_table_io"
-
-
-class CategorySources(ConfigArtifact):
-    sources: list[TrainSource]
-
-    @property
-    def digest(self) -> str:
-        return fingerprint(self.model_dump_json())
-
-
-class CountSettings(ConfigArtifact):
-    group_by: list[TrainGroupColumn]
-    sources_digest: str
-
-
-class MergeSettings(ConfigArtifact):
-    category_digests: dict[str, str]
 
 
 @dataclass(frozen=True, slots=True)
@@ -93,13 +83,6 @@ def register_dataset_partitions(instance: DagsterInstance, spec: DatasetBuildSpe
             )
 
 
-def _categories(config: TrainConfig) -> Mapping[str, CategorySources]:
-    groups: defaultdict[str, list[TrainSource]] = defaultdict(list)
-    for source in config.sources:
-        groups[source.category].append(source)
-    return {category: CategorySources(sources=sources) for category, sources in groups.items()}
-
-
 def _output[T: ConfigArtifact](value: T) -> Output[T]:
     return Output(value, data_version=DataVersion(fingerprint(value.model_dump_json())))
 
@@ -107,20 +90,23 @@ def _output[T: ConfigArtifact](value: T) -> Output[T]:
 _SOURCE_TYPE = PythonObjectDagsterType(CategorySources, name="TrainCategorySources")
 _COUNT_TYPE = PythonObjectDagsterType(CountSettings, name="TrainCountSettings")
 _MERGE_TYPE = PythonObjectDagsterType(MergeSettings, name="TrainMergeSettings")
+_STATS_TYPE = PythonObjectDagsterType(SplitStats, name="SplitStats")
+_ROWS_TYPE = pandera_schema_to_dagster_type(SplitRowsTable)
+_CATEGORY_ROWS_TYPE = Dict[str, _ROWS_TYPE]
 _CATEGORY_CONFIG = AssetIn(
     key=GLOBAL_CONFIG, dagster_type=REGISTERED_CONFIG_TYPE, partition_mapping=DATASET_DIM
 )
 
 
 @input_manager(required_resource_keys={TRAIN_TABLE_IO})
-def train_partition_inputs(context: InputContext) -> Mapping[str, pd.DataFrame]:
+def train_partition_inputs(context: InputContext) -> dict[str, DataFrame[SplitRowsTable]]:
     manager = context.resources.train_table_io
     if not isinstance(manager, DataFrameIOManager):
         raise IntegrityError("Category merge requires registered dataset storage")
     partitions = context.asset_partitions_def
     if not isinstance(partitions, MultiPartitionsDefinition):
         raise IntegrityError("Category merge requires multipartitioned category rows")
-    frames: dict[str, pd.DataFrame] = {}
+    frames: dict[str, DataFrame[SplitRowsTable]] = {}
     for key in sorted(context.asset_partition_keys):
         record = current_materialization(context.instance, context.asset_key, key)
         if record is not None:
@@ -129,7 +115,7 @@ def train_partition_inputs(context: InputContext) -> Mapping[str, pd.DataFrame]:
             if not isinstance(snapshot.value, pd.DataFrame):
                 raise IntegrityError("Expected a category table")
             category = partitions.get_partition_key_from_str(key).keys_by_dimension["category"]
-            frames[category] = snapshot.value
+            frames[category] = SplitRowsTable.validate(snapshot.value)
     return frames
 
 
@@ -152,7 +138,7 @@ def _split_assets(split: Split) -> _SplitAssets:
 
     def category_sources(context: AssetExecutionContext, config: TrainConfig) -> CategorySources:
         category = partitions.get_partition_key_from_str(context.partition_key).keys_by_dimension["category"]
-        sources = _categories(config).get(category)
+        sources = config.sources_by_category().get(category)
         if sources is None:
             raise IntegrityError(f"No {split} sources configured for {category}")
         return sources
@@ -196,56 +182,58 @@ def _split_assets(split: Split) -> _SplitAssets:
         ins={"registered": registered_input()},
     )
     def merge_config(registered: RegisteredConfig) -> Output[MergeSettings]:
-        return _output(
-            MergeSettings(
-                category_digests={k: v.digest for k, v in _categories(configured(registered)).items()}
-            )
-        )
+        sources = configured(registered).sources_by_category()
+        return _output(MergeSettings(category_digests={key: value.digest for key, value in sources.items()}))
 
     @asset(
         key=rows_key,
         partitions_def=partitions,
         group_name=split,
         io_manager_key=TRAIN_TABLE_IO,
+        dagster_type=_ROWS_TYPE,
         ins={"settings": AssetIn(key=load_config.key, dagster_type=_SOURCE_TYPE)},
     )
-    def category_rows(settings: CategorySources) -> pd.DataFrame:
+    def category_rows(settings: CategorySources) -> DataFrame[SplitRowsTable]:
         frame = load_train_category(settings.sources)
         frame.attrs[sources_attr] = [source.model_dump(mode="json") for source in settings.sources]
         frame.attrs[digest_attr] = settings.digest
         return frame
 
     @asset(
-        key=AssetKey([split, "label_counts"]),
+        key=AssetKey([split, "stats"]),
         partitions_def=partitions,
         group_name=split,
-        io_manager_key=TRAIN_TABLE_IO,
+        io_manager_key="config_run_io_manager",
+        dagster_type=_STATS_TYPE,
         ins={
-            "rows": AssetIn(key=rows_key),
+            "rows": AssetIn(key=rows_key, dagster_type=_ROWS_TYPE),
             "settings": AssetIn(key=count_config.key, dagster_type=_COUNT_TYPE),
         },
     )
-    def label_counts(rows: pd.DataFrame, settings: CountSettings) -> pd.DataFrame:
+    def stats(rows: DataFrame[SplitRowsTable], settings: CountSettings) -> Output[SplitStats]:
         require_source_version(rows, settings.sources_digest)
-        return count_train_labels(rows, settings.group_by)
+        return _output(train_stats(rows, settings.group_by))
 
     @asset(
         key=AssetKey([split, "merged_rows"]),
         partitions_def=DATASET_PARTITIONS,
         group_name=split,
         io_manager_key=TRAIN_TABLE_IO,
+        dagster_type=_ROWS_TYPE,
         ins={
             "categories": AssetIn(
                 key=rows_key,
-                dagster_type=DagsterAny,
+                dagster_type=_CATEGORY_ROWS_TYPE,
                 partition_mapping=DATASET_DIM,
                 input_manager_key="train_partition_inputs",
             ),
             "settings": AssetIn(key=merge_config.key, dagster_type=_MERGE_TYPE),
         },
     )
-    def merged_rows(categories: Mapping[str, pd.DataFrame], settings: MergeSettings) -> pd.DataFrame:
-        selected: dict[str, pd.DataFrame] = {}
+    def merged_rows(
+        categories: dict[str, DataFrame[SplitRowsTable]], settings: MergeSettings
+    ) -> DataFrame[SplitRowsTable]:
+        selected: dict[str, DataFrame[SplitRowsTable]] = {}
         for category, digest in sorted(settings.category_digests.items()):
             if category not in categories:
                 raise IntegrityError(f"Missing required {split} category: {category}")
@@ -257,11 +245,11 @@ def _split_assets(split: Split) -> _SplitAssets:
 
     return _SplitAssets(
         mappings=(load_config, count_config, merge_config),
-        tables=(category_rows, label_counts, merged_rows),
+        tables=(category_rows, stats, merged_rows),
         jobs=(
             UnresolvedAssetJobDefinition(
                 name=f"load_{split}_category",
-                selection=AssetSelection.assets(load_config, count_config, category_rows, label_counts),
+                selection=AssetSelection.assets(load_config, count_config, category_rows, stats),
             ),
             UnresolvedAssetJobDefinition(
                 name=f"merge_{split}_data", selection=AssetSelection.assets(merge_config, merged_rows)

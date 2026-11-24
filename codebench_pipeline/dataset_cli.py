@@ -7,7 +7,7 @@ from typing import Literal, TypedDict, overload
 from dagster import AssetKey, DagsterRunStatus, MultiPartitionKey, RunsFilter
 from pydantic import TypeAdapter
 
-from codebench_pipeline.config_assets import GLOBAL_CONFIG
+from codebench_pipeline.config_assets import GLOBAL_CONFIG, mapping_key
 from codebench_pipeline.dataset_branches import HISTORICAL_PROCESSING_STAGES
 from codebench_pipeline.dataset_config import load_build_config
 from codebench_pipeline.dataset_dependencies import KNOWN_STAGES
@@ -96,6 +96,9 @@ def main() -> None:
         command.add_argument("--dataset", required=True)
         if name.endswith("-load"):
             command.add_argument("--category", required=True, help="Category partition, e.g. CAT-3")
+            command.add_argument(
+                "--stats-only", action="store_true", help="Compute stats from persisted rows."
+            )
     for name in ("stages", "through", "check-idle"):
         command = subcommands.add_parser(name)
         command.add_argument("--home", type=Path, default=DEFAULT_HOME)
@@ -168,7 +171,15 @@ def main() -> None:
         job_name = split_jobs[args.action]
         job = build_definitions(args.home).resolve_job_def(job_name)
         with dataset_instance(args.home) as instance:
-            result = job.execute_in_process(instance=instance, partition_key=partition)
+            split = args.action.split("-", 1)[0]
+            selection = (
+                [mapping_key(f"{split}_counts"), AssetKey([split, "stats"])]
+                if category_job and args.stats_only
+                else None
+            )
+            result = job.execute_in_process(
+                instance=instance, partition_key=partition, asset_selection=selection
+            )
         print(json.dumps({"job": job_name, "partition": partition, "run_id": result.run_id}))
         return
     if args.action == "check-idle":

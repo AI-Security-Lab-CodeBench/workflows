@@ -23,6 +23,7 @@ class Options(argparse.Namespace):
     node: str
     manifest: Path
     category: str
+    stats_only: bool
 
 
 def output(*args: str) -> str:
@@ -129,6 +130,7 @@ def main() -> None:
         split.add_argument("--dataset", default=DATASET)
         if action.endswith("-load"):
             split.add_argument("category")
+            split.add_argument("--stats-only", action="store_true", help="Compute stats from persisted rows.")
     args = parser.parse_args(namespace=Options())
     if args.action == "status":
         run("docker", "ps", "--all", "--filter", "label=com.docker.compose.project=codebench")
@@ -178,6 +180,8 @@ def main() -> None:
             subprocess.run([*cli, "configure-splits", "--dataset", args.dataset], stdin=manifest, check=True)
     elif args.action in {"train-load", "test-load", "train-merge", "test-merge"}:
         category = ["--category", args.category] if args.action.endswith("-load") else []
+        if category and args.stats_only:
+            category.append("--stats-only")
         run(*cli, args.action, "--dataset", args.dataset, *category)
 
 

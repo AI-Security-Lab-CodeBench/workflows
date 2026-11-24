@@ -37,6 +37,12 @@ from codebench_pipeline.human_review_store import HumanReviewStore
 from codebench_pipeline.object_store import StorageConfig
 from codebench_pipeline.storage import IntegrityError
 
+SPLITS: Final = ("train", "test")
+SPLIT_CATEGORY_TABLES: Final = frozenset((split, "category_rows") for split in SPLITS)
+SPLIT_TABLES: Final = SPLIT_CATEGORY_TABLES | frozenset((split, "merged_rows") for split in SPLITS)
+SPLIT_CONFIGS: Final = frozenset((split, "stats") for split in SPLITS) | frozenset(
+    tuple(mapping_key(f"{split}_{scope}").path) for split in SPLITS for scope in ("load", "counts", "merge")
+)
 CONFIG_KEYS: Final = frozenset(
     tuple(key.path)
     for key in (
@@ -48,7 +54,6 @@ CONFIG_KEYS: Final = frozenset(
         *(mapping_key(scope) for scope in (*COLLECTION_SCOPES.values(), *FINALIZATION_STAGES)),
     )
 )
-SPLIT_MERGES: Final = frozenset({("train", "merged_rows"), ("test", "merged_rows")})
 
 
 def text_metadata(record: EventLogRecord, key: str) -> str | None:
@@ -67,7 +72,12 @@ class DatasetArtifactCatalog:
 
     def partitions(self, key: ArtifactKey) -> ArtifactPartitions:
         partitions: list[str] = []
-        for partition in self.registry.keys():
+        candidates = (
+            sorted(self.instance.get_materialized_partitions(AssetKey(key.asset_key)))
+            if key.asset_key in SPLIT_CATEGORY_TABLES or key.asset_key in SPLIT_CONFIGS
+            else self.registry.keys()
+        )
+        for partition in candidates:
             try:
                 self.resolve(ArtifactTarget(asset_key=key.asset_key, partition_key=partition))
             except DatasetViewError as error:
@@ -78,14 +88,14 @@ class DatasetArtifactCatalog:
         return ArtifactPartitions(asset_key=key.asset_key, partitions=tuple(partitions))
 
     def resolve(self, target: ArtifactTarget) -> ArtifactBinding | RunConfigBinding:
-        split_merge = target.asset_key in SPLIT_MERGES
-        if target.partition_key is None or (target.asset_key[0] != "datasets" and not split_merge):
+        split_asset = target.asset_key in SPLIT_TABLES or target.asset_key in SPLIT_CONFIGS
+        if target.partition_key is None or (target.asset_key[0] != "datasets" and not split_asset):
             raise DatasetViewError("not_found", "No persisted artifact binding")
         records_filter = AssetRecordsFilter(
             asset_key=AssetKey(target.asset_key), asset_partitions=[target.partition_key]
         )
         records = self.instance.fetch_materializations(records_filter, limit=1).records
-        if target.asset_key in CONFIG_KEYS:
+        if target.asset_key in CONFIG_KEYS or target.asset_key in SPLIT_CONFIGS:
             directory = target.asset_key == tuple(CONFIG_DIRECTORY.path)
             observations: Sequence[EventLogRecord] = (
                 self.instance.fetch_observations(records_filter, limit=1).records if directory else ()
@@ -139,11 +149,10 @@ class DatasetArtifactCatalog:
                 )
 
         binding = self.record_binding(target.partition_key, selected[0])
-        for record in selected[1:]:
-            if self.record_binding(target.partition_key, record) != binding:
-                raise DatasetViewError(
-                    "not_materialized", "The selected snapshot has conflicting storage bindings"
-                )
+        if any(self.record_binding(target.partition_key, record) != binding for record in selected[1:]):
+            raise DatasetViewError(
+                "not_materialized", "The selected snapshot has conflicting storage bindings"
+            )
         storage, reference = binding
         is_latest = selected[0].storage_id == latest.storage_id
         state = None if is_latest else "stale"
@@ -199,10 +208,9 @@ class DatasetArtifactCatalog:
                         state = release.publication_state
             return ArtifactBinding(storage, reference, state)
 
-        if not split_merge and is_latest and ArtifactCurrentness(self.home, self.instance).stale(
-            latest, reference
-        ):
-            state = "stale"
+        if is_latest and target.asset_key not in SPLIT_TABLES:
+            if ArtifactCurrentness(self.home, self.instance).stale(latest, reference):
+                state = "stale"
         return ArtifactBinding(storage, reference, state)
 
     def record_binding(self, partition: str, record: EventLogRecord) -> tuple[StorageConfig, AssetReference]:
@@ -222,19 +230,24 @@ class DatasetArtifactCatalog:
             raise DatasetViewError("not_materialized", "No persisted run identifies this artifact's storage")
         try:
             evidence = MaterializationStorageEvidence.model_validate(run.run_config)
-            if record.asset_key is not None and tuple(record.asset_key.path) in SPLIT_MERGES:
+            key = tuple(record.asset_key.path) if record.asset_key is not None else ()
+            if key in SPLIT_TABLES:
                 revision, inline = evidence.split_revision, None
             else:
                 revision, inline = evidence.revision, evidence.storage
-            if revision is not None and inline is None:
-                storage = self.registry.storage(partition, revision=revision)
-            elif (
-                revision is None
-                and inline is None
-                and (revision := ArtifactCurrentness(self.home, self.instance).revision(record)) is not None
-            ):
-                storage = self.registry.storage(partition, revision=revision)
-            elif revision is None and inline is not None and {"backend", "prefix"} <= inline.model_fields_set:
+            dataset_partition = (
+                run.tags.get("dagster/partition/dataset") if key in SPLIT_CATEGORY_TABLES else partition
+            )
+            if dataset_partition is None:
+                raise DatasetViewError("not_materialized", "The materializing run has no dataset partition")
+            if inline is None:
+                revision = revision or ArtifactCurrentness(self.home, self.instance).revision(
+                    record, dataset_partition=dataset_partition
+                )
+                if revision is None:
+                    raise ValueError("Missing storage binding")
+                storage = self.registry.storage(dataset_partition, revision=revision)
+            elif revision is None and {"backend", "prefix"} <= inline.model_fields_set:
                 storage = inline
                 if storage.backend == "local" and "local_root" not in inline.model_fields_set:
                     raise ValueError("Missing local root")

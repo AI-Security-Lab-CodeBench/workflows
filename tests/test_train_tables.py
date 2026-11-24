@@ -2,15 +2,21 @@ from __future__ import annotations
 
 import csv
 import io
+import json
 import unittest
 from dataclasses import dataclass, replace
 from hashlib import sha256
 
 import pandas as pd
+from dagster import AssetKey, check_dagster_type
 from pandas.testing import assert_frame_equal
+from pydantic import ValidationError
 
+from codebench_pipeline.dataframe_io import frame_bytes, read_frame
 from codebench_pipeline.storage import IntegrityError
-from codebench_pipeline.train_tables import count_train_labels, load_train_category, merge_train_categories
+from codebench_pipeline.train_assets import TRAIN_TABLES
+from codebench_pipeline.train_config import SplitStats
+from codebench_pipeline.train_tables import load_train_category, merge_train_categories, train_stats
 
 HEADER = ["command", "description", "util", "severity", "category", "risk", "source", "seed", "class"]
 SHA = "a" * 40
@@ -93,36 +99,6 @@ class TrainTablesTests(unittest.TestCase):
         with self.assertRaisesRegex(IntegrityError, "capture limit"):
             load_train_category([source_for(body)], fetch_bytes=fetch)
 
-    def test_label_counts_are_marginals_and_combine_category_display_variants(self) -> None:
-        frame = pd.DataFrame(
-            [
-                ("CAT-4 Other", "high", "ask"),
-                ("CAT-3 Name A", "low", "allow"),
-                ("CAT-3 Name B", "low", "ask"),
-                ("CAT-3", "", "ask"),
-                ("CAT-3 Name B", "low", "ask"),
-            ],
-            columns=["category", "severity", "class"],
-            index=[1, 1, 4, 5, 6],
-        )
-
-        result = count_train_labels(frame, ["severity", "class"])
-
-        assert_frame_equal(
-            result,
-            pd.DataFrame(
-                [
-                    ("CAT-3", "severity", "", 1),
-                    ("CAT-3", "severity", "low", 3),
-                    ("CAT-4", "severity", "high", 1),
-                    ("CAT-3", "class", "allow", 1),
-                    ("CAT-3", "class", "ask", 3),
-                    ("CAT-4", "class", "ask", 1),
-                ],
-                columns=["category", "label", "value", "count"],
-            ),
-        )
-
     def test_merge_orders_categories_but_keeps_each_table_order_and_duplicates(self) -> None:
         first = ["z", *ROW[1:]]
         second = ["a", *ROW[1:]]
@@ -138,10 +114,65 @@ class TrainTablesTests(unittest.TestCase):
 
     def test_empty_inputs_return_consumer_schemas(self) -> None:
         empty = pd.DataFrame(columns=HEADER)
+        body = csv_bytes()
+        loaded = load_train_category([source_for(body)], fetch_bytes=lambda _url, _limit: body)
 
         assert_frame_equal(load_train_category([]), empty)
+        assert_frame_equal(read_frame(frame_bytes(loaded)), empty)
         assert_frame_equal(merge_train_categories({}), empty)
-        assert_frame_equal(
-            count_train_labels(empty, "class"),
-            pd.DataFrame(columns=["category", "label", "value", "count"]),
+        self.assertEqual(train_stats(loaded, ["class"]), SplitStats(total_rows=0, marginal_counts=()))
+
+    def test_merge_fan_in_rejects_invalid_nested_tables(self) -> None:
+        merge = next(table for table in TRAIN_TABLES if table.key == AssetKey(["train", "merged_rows"]))
+        contract = merge.op.input_def_named("categories").dagster_type
+        frame = pd.DataFrame([ROW], columns=HEADER)
+
+        self.assertTrue(check_dagster_type(contract, {"CAT-3": frame}).success)
+        for invalid in (
+            frame.assign(seed=pd.Series([1], dtype=object)),
+            frame.assign(seed=None),
+            frame.assign(extra=""),
+            frame.drop(columns="seed"),
+            frame.loc[:, HEADER[::-1]],
+            pd.concat([frame, frame[["seed"]]], axis="columns"),
+        ):
+            with self.subTest(columns=invalid.columns.tolist(), seeds=invalid.dtypes.tolist()):
+                self.assertFalse(check_dagster_type(contract, {"CAT-3": invalid}).success)
+        self.assertFalse(check_dagster_type(contract, {3: frame}).success)
+
+    def test_stats_json_preserves_ordered_marginals_and_total_rows(self) -> None:
+        low = [*ROW[:-1], "allow"]
+        high = [*ROW[:3], "high", "CAT-3", *ROW[5:]]
+        other = [*ROW[:3], "high", "CAT-4 Other", *ROW[5:]]
+        cat3 = pd.DataFrame([ROW, low, high, ROW], columns=HEADER, index=[1, 1, 4, 5])
+        cat4 = pd.DataFrame([other], columns=HEADER)
+        frame = merge_train_categories({"CAT-4": cat4, "CAT-3": cat3})
+
+        payload = train_stats(frame, ["severity", "class", "risk"]).model_dump_json()
+
+        self.assertEqual(
+            json.loads(payload),
+            {
+                "total_rows": 5,
+                "marginal_counts": [
+                    {"category": "CAT-3", "label": "severity", "value": "high", "count": 1},
+                    {"category": "CAT-3", "label": "severity", "value": "low", "count": 3},
+                    {"category": "CAT-4", "label": "severity", "value": "high", "count": 1},
+                    {"category": "CAT-3", "label": "class", "value": "allow", "count": 1},
+                    {"category": "CAT-3", "label": "class", "value": "ask", "count": 3},
+                    {"category": "CAT-4", "label": "class", "value": "ask", "count": 1},
+                    {"category": "CAT-3", "label": "risk", "value": "", "count": 4},
+                    {"category": "CAT-4", "label": "risk", "value": "", "count": 1},
+                ],
+            },
         )
+        self.assertEqual(SplitStats.model_validate_json(payload).total_rows, 5)
+
+    def test_stats_json_rejects_coerced_counts_and_unknown_fields(self) -> None:
+        for payload in (
+            '{"total_rows":"1","marginal_counts":[]}',
+            '{"total_rows":0,"marginal_counts":[],"unexpected":true}',
+            '{"total_rows":1,"marginal_counts":[{"category":"CAT-3","label":"risk","value":"","count":"1"}]}',
+        ):
+            with self.subTest(payload=payload), self.assertRaises(ValidationError):
+                SplitStats.model_validate_json(payload)

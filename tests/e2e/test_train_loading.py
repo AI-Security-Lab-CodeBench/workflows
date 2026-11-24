@@ -10,7 +10,13 @@ from dagster import AssetKey, MultiPartitionKey
 from pydantic import ValidationError
 from test_declared_dataset_graph import fixture_spec
 
-from codebench_pipeline.artifact_views import ArtifactDataService, ArtifactKey, ArtifactQuery, ArtifactTable
+from codebench_pipeline.artifact_views import (
+    ArtifactDataService,
+    ArtifactJSON,
+    ArtifactKey,
+    ArtifactQuery,
+    ArtifactTable,
+)
 from codebench_pipeline.config_assets import GLOBAL_CONFIG
 from codebench_pipeline.dataframe_io import DataFrameIOManager
 from codebench_pipeline.dataset_artifacts import DatasetArtifactCatalog
@@ -88,17 +94,46 @@ def test_train_loading(tmp_path: Path) -> None:
         assert not instance.get_latest_materialization_event(AssetKey(["train", "merged_rows"]))
         viewer = ArtifactDataService(DatasetArtifactCatalog(tmp_path, instance), defs)
         assert not viewer.partitions(ArtifactKey(asset_key=("train", "merged_rows"))).partitions
+        assert not viewer.partitions(ArtifactKey(asset_key=("test", "stats"))).partitions
         cli("train-load", "--category", "CAT-4")
         cli("train-merge")
         cli("test-load", "--category", "CAT-3")
         cli("test-merge")
-        counts = table("train", "label_counts", p3).set_index(["category", "label", "value"])
-        assert counts["count"].to_dict() == {
-            ("CAT-3", "risk", "CAT-3.1"): 1,
-            ("CAT-3", "risk", "CAT-3.2"): 1,
-            ("CAT-3", "severity", "low"): 2,
-            ("CAT-3", "class", "allow"): 2,
-        }
+        with patch("codebench_pipeline.repository_tree._repository_client", side_effect=AssertionError):
+            cli("train-load", "--category", "CAT-3", "--stats-only")
+        p4 = MultiPartitionKey({"dataset": spec.dataset_id, "category": "CAT-4"})
+        for split, partitions, total, expected in (
+            (
+                "train",
+                (p3, p4),
+                2,
+                [
+                    ("risk", "CAT-3.1", 1),
+                    ("risk", "CAT-3.2", 1),
+                    ("severity", "low", 2),
+                    ("class", "allow", 2),
+                ],
+            ),
+            ("test", (p3,), 1, [("risk", "CAT-3.2", 1), ("severity", "low", 1), ("class", "ask", 1)]),
+        ):
+            stats_key = (split, "stats")
+            assert viewer.partitions(ArtifactKey(asset_key=stats_key)).partitions == partitions
+            stats = viewer.query(ArtifactQuery(asset_key=stats_key, partition_key=p3))
+            assert isinstance(stats, ArtifactJSON)
+            assert stats.data_schema.source == "declared"
+            assert stats.value == {
+                "total_rows": total,
+                "marginal_counts": [
+                    {"category": "CAT-3", "label": label, "value": value, "count": count}
+                    for label, value, count in expected
+                ],
+            }
+            category_key = (split, "category_rows")
+            assert viewer.partitions(ArtifactKey(asset_key=category_key)).partitions == partitions
+            category = viewer.query(ArtifactQuery(asset_key=category_key, partition_key=p3))
+            assert isinstance(category, ArtifactTable)
+            assert category.data_schema.source == "declared"
+            assert len(category.page.rows) == total
         assert table("train", "merged_rows", spec.dataset_id)["command"].tolist() == ["pwd", "ls", "date"]
         assert table("test", "merged_rows", spec.dataset_id)["command"].tolist() == ["whoami"]
         for split, commands in (("train", ["pwd", "ls", "date"]), ("test", ["whoami"])):

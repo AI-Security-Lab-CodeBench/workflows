@@ -5,16 +5,20 @@ from __future__ import annotations
 import csv
 import io
 import re
-from collections.abc import Callable, Sequence
+from collections import Counter
+from collections.abc import Callable, Mapping, Sequence
 from hashlib import sha256
 from typing import Final, Protocol
 
 import pandas as pd
+from pandera.typing import DataFrame
 from pydantic import TypeAdapter
 
 from codebench_pipeline.repository_config import Commit, RepositoryName, check_path
 from codebench_pipeline.repository_tree import RepositoryLocation, fetch_repository_bytes, raw_url
+from codebench_pipeline.split_schema import SplitRowsTable
 from codebench_pipeline.storage import IntegrityError
+from codebench_pipeline.train_config import SplitMarginalCount, SplitStats, TrainGroupColumn
 
 TRAIN_COLUMNS: Final = (
     "command",
@@ -27,7 +31,6 @@ TRAIN_COLUMNS: Final = (
     "seed",
     "class",
 )
-_COUNT_COLUMNS: Final = ("category", "label", "value", "count")
 _MAX_TRAIN_BYTES: Final = 32 * 1024 * 1024
 _CATEGORY_ID: Final = re.compile(r"CAT-[1-9][0-9]*")
 _REPOSITORY_NAME: Final = TypeAdapter[RepositoryName](RepositoryName)
@@ -54,7 +57,7 @@ def load_train_category(
     sources: Sequence[TrainSource],
     *,
     fetch_bytes: Callable[[str, int], bytes] = fetch_repository_bytes,
-) -> pd.DataFrame:
+) -> DataFrame[SplitRowsTable]:
     """Read one category in source/record order; fetch_bytes receives the pinned URL and byte cap."""
     categories = {source.category for source in sources}
     if len(categories) > 1 or any(not _CATEGORY_ID.fullmatch(category) for category in categories):
@@ -85,25 +88,28 @@ def load_train_category(
         except (UnicodeError, csv.Error) as error:
             raise IntegrityError(f"Training CSV is not readable UTF-8 CSV: {url}") from error
 
-    return pd.DataFrame(rows, columns=list(TRAIN_COLUMNS))
+    return SplitRowsTable.validate(pd.DataFrame(rows, columns=list(TRAIN_COLUMNS)))
 
 
-def count_train_labels(frame: pd.DataFrame, group_by: str | Sequence[str]) -> pd.DataFrame:
-    """Count each requested label independently, in label order and then category/value order."""
-    labels = (group_by,) if isinstance(group_by, str) else group_by
-    if frame.empty or not labels:
-        return pd.DataFrame(columns=list(_COUNT_COLUMNS))
-    category = frame["category"].str.split(" ", n=1).str[0]
-    counts: list[pd.DataFrame] = []
-    for label in dict.fromkeys(labels):
-        values = pd.DataFrame({"category": category, "value": frame[label]})
-        histogram = values.groupby(["category", "value"], sort=True, dropna=False, observed=True).size()
-        counts.append(histogram.reset_index(name="count").assign(label=label))
-    return pd.concat(counts, ignore_index=True).loc[:, list(_COUNT_COLUMNS)]
+def train_stats(frame: DataFrame[SplitRowsTable], group_by: Sequence[TrainGroupColumn]) -> SplitStats:
+    """Count each label independently, in label order and then category/value order."""
+    category_values: pd.Series[str] = frame["category"]
+    categories = [category.partition(" ")[0] for category in category_values]
+    counts: list[SplitMarginalCount] = []
+    for label in dict.fromkeys(group_by):
+        values: pd.Series[str] = frame[label]
+        histogram = Counter(zip(categories, values, strict=True))
+        counts.extend(
+            SplitMarginalCount(category=category, label=label, value=value, count=count)
+            for (category, value), count in sorted(histogram.items())
+        )
+    return SplitStats(total_rows=len(frame), marginal_counts=tuple(counts))
 
 
-def merge_train_categories(frames: dict[str, pd.DataFrame]) -> pd.DataFrame:
+def merge_train_categories(frames: Mapping[str, pd.DataFrame]) -> DataFrame[SplitRowsTable]:
     """Concatenate in category-key order without sorting or deduplicating within a frame."""
     if not frames:
-        return pd.DataFrame(columns=list(TRAIN_COLUMNS))
-    return pd.concat([frames[category] for category in sorted(frames)], ignore_index=True)
+        return SplitRowsTable.validate(pd.DataFrame(columns=list(TRAIN_COLUMNS)))
+    return SplitRowsTable.validate(
+        pd.concat([frames[category] for category in sorted(frames)], ignore_index=True)
+    )

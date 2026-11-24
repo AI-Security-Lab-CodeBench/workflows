@@ -55,7 +55,7 @@ from codebench_pipeline.storage import IntegrityError, fingerprint
 
 class MaterializationStorageEvidence(BaseModel):
     split_revision: Digest | None = Field(
-        default=None, validation_alias=AliasPath("resources", "train_table_io", "config", "registered_revision")
+        None, validation_alias=AliasPath("resources", "train_table_io", "config", "registered_revision")
     )
     revision: Digest | None = Field(
         default=None,
@@ -84,11 +84,11 @@ class ArtifactCurrentness:
         ).records
         return records[0] if records else None
 
-    def revision(self, record: EventLogRecord) -> Digest | None:
+    def revision(self, record: EventLogRecord, *, dataset_partition: str | None = None) -> Digest | None:
         materialization = record.asset_materialization
-        if materialization is None or materialization.partition is None:
+        if materialization is None or (partition := materialization.partition) is None:
             return None
-        partition = materialization.partition
+        dataset_partition = dataset_partition or partition
         provenance = extract_data_provenance_from_entry(record.event_log_entry)
         config = ConfigRunIOManager(home=str(self.home))
         if provenance is not None:
@@ -125,7 +125,7 @@ class ArtifactCurrentness:
                         return None
             if GLOBAL_CONFIG in provenance.input_storage_ids:
                 producer = self._configuration_input(
-                    record, partition, provenance, GLOBAL_CONFIG, manager_key="config_run_io_manager"
+                    record, dataset_partition, provenance, GLOBAL_CONFIG, manager_key="config_run_io_manager"
                 )
                 if producer is None:
                     return None
@@ -133,7 +133,7 @@ class ArtifactCurrentness:
                     registered = config.registered(producer.run_id, materialization=producer)
                 except (IntegrityError, ValidationError):
                     return None
-                return registered.registration_digest if registered.dataset_id == partition else None
+                return registered.registration_digest if registered.dataset_id == dataset_partition else None
 
         admitted = materialization.metadata.get(TABLE_REGISTRATION_METADATA)
         if isinstance(admitted, TextMetadataValue):

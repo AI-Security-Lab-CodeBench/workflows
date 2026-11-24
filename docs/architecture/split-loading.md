@@ -6,7 +6,7 @@ For each split the graph is:
 
 ```text
 datasets/global_config → map_<split>_load_config   → <split>/category_rows
-                       → map_<split>_counts_config → <split>/label_counts ← category_rows
+                       → map_<split>_counts_config → <split>/stats ← category_rows
                        → map_<split>_merge_config  → <split>/merged_rows  ← category_rows (all configured categories)
 ```
 
@@ -14,6 +14,14 @@ The three mapping keys are under `datasets/`. Category rows and counts are
 partitioned by registration and **category**, not by risk. Multiple risk
 branches for `CAT-2`, for example, all enter a single `CAT-2` partition.
 Each merged table has just the registration partition.
+
+**Reading the lineage color:** the native graph counts every registered dataset
+key, including datasets with no split sources. At the category level it counts
+the Cartesian product of dataset and category keys. A partially materialized
+node therefore does not, by itself, mean a configured split is missing. In the
+Partitions tab, select the dataset and compare its materializations with the
+categories declared for that split. Do not backfill unrelated registrations to
+change the aggregate color.
 
 ### Declare the inputs
 
@@ -58,9 +66,19 @@ preserved. A row must name the declared category, optionally followed by a
 display description. A header-only file is a valid empty table; a missing file,
 bad digest, or malformed row is not an empty result.
 
-`label_counts` contains `(category, label, value, count)` rows: one histogram
-per selected label, **not** a joint histogram of risk × severity × class. Each
-histogram sums to the category row count. `merged_rows` concatenates categories
+`stats` replaces `label_counts`. Its Pydantic JSON output contains `total_rows`
+and `marginal_counts`, an ordered list of `{category, label, value, count}`
+objects. There is one histogram per selected label, **not** a joint histogram
+of risk × severity × class. Each histogram sums to `total_rows`. A header-only
+category produces `{"total_rows": 0, "marginal_counts": []}`. Open
+`/assets/train/stats?view=data` or `/assets/test/stats?view=data` and select a
+persisted category partition to inspect its values and declared schema.
+To materialize just the new stats from an existing category table, use
+`python3 scripts/stack.py train-load CAT-6 --dataset <registration-id> --stats-only`
+(or `test-load`). This does not fetch CSVs or rewrite the category or merged tables.
+
+`category_rows` and `merged_rows` have the same strict nine-string-column
+schema; the merge validates the category tables it consumes. `merged_rows` concatenates categories
 in lexical category-ID order. It requires a materialized table matching the
 current source list for **every** configured category; a removed category is not
 included. Tables use the registration's existing Parquet object storage.
