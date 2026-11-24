@@ -165,7 +165,7 @@ def full_dataset_member_input(context: InputContext) -> _MergedInput:
 
 @asset(
     key=FULL_DATASET_KEY,
-    group_name="codebench",
+    group_name="dataset_merge",
     partitions_def=StaticPartitionsDefinition([CODEBENCH_DATASET_ID]),
     io_manager_key=_CONFIG_IO,
     dagster_type=FULL_DATASET_TYPE,
