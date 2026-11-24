@@ -23,7 +23,9 @@ from codebench_pipeline.rules_contracts import (
 from codebench_pipeline.rules_corpus import Corpus
 from codebench_pipeline.rules_engine import BashguardClient, evaluate_package, finalize_batch
 from codebench_pipeline.rules_similarity import (
+    FINISH_JUSTIFICATION_LIMIT,
     CaptureBatch,
+    CaptureClosure,
     CaptureDecision,
     CapturedRule,
     DedupResult,
@@ -127,11 +129,24 @@ def _capture_batch(agent: RuleAgent, train: _Train, batch: CaptureBatch) -> Capt
         justification = FinishInput.model_validate_json(arguments).justification
         return Feedback(recorded=tuple(entry.package.rule.id for entry in accepted))
 
+    def closure(codes: tuple[str, ...]) -> CaptureClosure:
+        covered = {row_id for entry in accepted for hit in entry.singleton.hit_sets for row_id in hit.row_ids}
+        return CaptureClosure(
+            batch_id=batch.id, accepted_rule_ids=tuple(entry.package.rule.id for entry in accepted),
+            uncovered_row_ids=tuple(row.id for row in batch.rows if row.id not in covered), diagnostic_codes=codes,
+        )
+
     run = Conversation(
         prompt=SAFETY_PROMPT + " Capture narrowly supported rules for this category and token neighborhood. "
         "Use add_rule with next_rule_id; acceptance evaluates all train categories, not just this batch. "
-        "Finish with a justification that explains any commands you could not cover.",
+        f"Finish with a brief justification (at most {FINISH_JUSTIFICATION_LIMIT} characters) "
+        "that says what remains uncovered.",
         payload=batch, terminal="finish", turns=_CAPTURE_TURNS,
+        closing_task="Acknowledge only the supplied batch outcome. Give one short, nonblank justification "
+        f"(at most {FINISH_JUSTIFICATION_LIMIT} characters) stating whether any rows remain uncovered. "
+        "It is valid to report that no rule was recorded and the batch is uncovered. "
+        "Do not invent rule IDs, evidence, or reasons.",
+        acknowledgement=closure,
         tools=(
             AgentTool("add_rule", "Evaluate a package and record it only if it passes.", Package, add_rule),
             AgentTool("page_evaluation", "Read a train-only receipt page.", PageInput, evidence.page),
@@ -230,6 +245,8 @@ class _JudgeBatch:
             "There is no obligation to preserve old tests or coverage. If keeping all, submit empty add/drop lists "
             "with your reason. New packages need fresh IDs using new_id_prefixes and a per-category 01, 02, ... suffix.",
             payload=payload, terminal="finalize", turns=_JUDGE_TURNS,
+            closing_task="Submit the actual add/drop diff and your evidence-based justification. "
+            "Use explicit drop_ids and add lists; submit two empty lists only if you justify keeping every rule.",
             tools=(
                 AgentTool("evaluate_rule", "Evaluate a package read-only on its fixtures and full train.", Package, evaluate),
                 AgentTool("page_evaluation", "Read a train-only receipt page.", PageInput, self.evidence.page),

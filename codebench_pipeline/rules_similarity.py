@@ -31,6 +31,7 @@ _WORDS = re.compile(r"[^\W_]+")
 _TOKENS = re.compile(r"[A-Za-z0-9_./-]+|[^\w\s]")
 _BATCH_SIZE: Final = 16
 JUDGE_WIDTH: Final = 4
+FINISH_JUSTIFICATION_LIMIT: Final = 280
 
 
 class AgentFailure(ConfigArtifact):
@@ -89,10 +90,11 @@ def review_examples(receipts: tuple[EvaluationReceipt, ...]) -> tuple[EvaluatedR
 
 
 class FinishInput(ConfigArtifact):
+    justification: str = Field(pattern=r"\S", min_length=1, max_length=FINISH_JUSTIFICATION_LIMIT)
+
+
+class DiffInput(ConfigArtifact):
     justification: str = Field(pattern=r"\S", max_length=2000)
-
-
-class DiffInput(FinishInput):
     drop_ids: tuple[str, ...] = Field(max_length=JUDGE_WIDTH)
     add: tuple[Package, ...] = Field(max_length=JUDGE_WIDTH)
 
@@ -103,6 +105,13 @@ class CaptureBatch(ConfigArtifact):
     rows: tuple[CorpusRow, ...]
     sources: tuple[CorpusSource, ...]
     next_rule_id: str
+
+
+class CaptureClosure(ConfigArtifact):
+    batch_id: str
+    accepted_rule_ids: tuple[str, ...]
+    uncovered_row_ids: tuple[str, ...]
+    diagnostic_codes: tuple[str, ...]
 
 
 def capture_batches(train: Corpus, category: Category | None = None) -> tuple[CaptureBatch, ...]:

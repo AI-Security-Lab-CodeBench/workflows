@@ -8,6 +8,7 @@ from pathlib import Path
 from urllib.error import HTTPError
 
 import httpx2
+import pytest
 from pydantic import JsonValue, TypeAdapter
 
 from codebench_pipeline.model_config import ModelConfig
@@ -85,7 +86,7 @@ def _agent(steps: Iterator[Step], observed: list[_Request] | None = None) -> Rul
         request = _Request.model_validate_json(raw)
         assert url == "https://model.test/v1/chat/completions" and key is None and timeout == 30
         assert request.chat_template_kwargs == {"enable_thinking": False}
-        assert request.model == _MODEL and request.temperature == 0 and request.max_completion_tokens == 8192
+        assert request.model == _MODEL and request.temperature == 0
         assert not request.parallel_tool_calls and not request.stream
         requests.append(request)
         name, args = next(steps)
@@ -327,16 +328,130 @@ def test_capture_turn_budget_forces_terminal_and_records_exhaustion() -> None:
     train = _train("pwd -P")
 
     def steps() -> Iterator[Step]:
-        for _ in range(8):
+        for _ in range(9):
             yield "page_evaluation", {"receipt": 42}
 
     result = capture_rules(_agent(steps(), requests), train, _client(calls), category="CAT-6")
     batch = result.batches[0]
     assert not result.complete and batch.run.status == "exhausted" and batch.justification is None
-    assert len(requests) == len(batch.run.request_sha256) == 8 and not calls
+    assert len(requests) == len(batch.run.request_sha256) == 9 and not calls
+    assert requests[-2].tool_choice == "required"
     assert requests[-1].tool_choice == {"type": "function", "function": {"name": "finish"}}
-    assert tuple(item.code for item in batch.run.diagnostics) == ("unknown_receipt",) * 7 + ("unknown_tool",)
-    assert tuple(item.turn for item in batch.run.failures) == tuple(range(1, 9))
+    assert len(requests[-1].tools) == 1
+    assert tuple(item.code for item in batch.run.diagnostics) == ("unknown_receipt",) * 7 + ("unknown_tool",) * 2
+    assert tuple(item.turn for item in batch.run.failures) == tuple(range(1, 10))
+
+
+@pytest.mark.parametrize(("response_body", "diagnostic"), [
+    (b"discarded" * 6000, "response_too_large"),
+    (b"discarded synthetic-key-never-echo", "response_sensitive"),
+    (b'{"id":"cut","model":"qwen38-27b-fp8","choices":[{"index":0,"finish_reason":"length",'
+     b'"message":{"role":"assistant","tool_calls":[{"id":"cut-call","type":"function","function":'
+     b'{"name":"finish","arguments":"{\\"justification\\":\\"Do not accept this truncated turn.\\"}"}}]}}]}',
+     "output_limit"),
+])
+def test_capture_retries_invalid_finish_using_only_closure_state(response_body: bytes, diagnostic: str) -> None:
+    train = _train("pwd -P", "pwd -L")
+    requests: list[_Request] = []
+    evaluations: list[_EvaluatorInput] = []
+    rule_id = capture_batches(train)[0].next_rule_id
+    valid = _package("pwd -P", rule_id)
+    why = "The logical form is not covered."
+    failure: Step = ("page_evaluation", {"receipt": 42})
+    steps: tuple[Step, ...] = (
+        ("add_rule", valid), *((failure,) * 6),
+        ("finish", {"justification": why}),
+    )
+    script = _agent(iter(steps))
+
+    def request(url: str, raw: bytes, key: str | None, timeout: float) -> HTTPResponse:
+        requests.append(_Request.model_validate_json(raw))
+        assert key == "synthetic-key-never-echo"
+        if len(requests) == 8:
+            return HTTPResponse(response_body, None)
+        response = script.request(url, raw, None, timeout)
+        if len(requests) == 9:
+            return replace(response, body=response.body.replace(b'"tool_calls", "message"', b'"stop", "message"'))
+        return response
+
+    agent = replace(script, request=request, api_key="synthetic-key-never-echo")
+    result = capture_rules(agent, train, _client(evaluations))
+
+    batch = result.batches[0]
+    assert result.complete, batch.run.diagnostics
+    assert batch.justification == why and result.packages == (valid,)
+    assert len(evaluations) == 1 and batch.rules[0].singleton.corpus_digest == train.digest
+    assert [d.code for d in batch.run.diagnostics] == ["unknown_receipt"] * 6 + [diagnostic]
+    assert "synthetic-key-never-echo" not in result.model_dump_json()
+    first, retry = requests[-2:]
+    assert first.tool_choice == "required"
+    assert retry.tool_choice == {"type": "function", "function": {"name": "finish"}}
+    assert first.tools == retry.tools and len(retry.tools) == 1
+    assert first.max_completion_tokens == retry.max_completion_tokens < requests[0].max_completion_tokens
+    payload = first.messages[-1].content
+    assert payload is not None
+    summary = _JSON.validate_json(payload)
+    assert summary["accepted_rule_ids"] == [rule_id] and summary["uncovered_row_ids"] == ["train:1"]
+    assert summary["diagnostic_codes"] == ["unknown_receipt"]
+    assert all(_GUIDE not in (message.content or "") and message.role != "tool" for message in retry.messages)
+    assert all("synthetic-key-never-echo" not in (message.content or "") for message in retry.messages)
+
+
+def test_capture_can_acknowledge_empty_batch_on_first_closure_call() -> None:
+    train = _train("pwd -P")
+    requests: list[_Request] = []
+    wait: Step = ("page_evaluation", {"receipt": 42})
+    why = "No rule was recorded; the batch remains uncovered."
+    steps: tuple[Step, ...] = (*((wait,) * 7), ("finish", FinishInput(justification=why)))
+
+    result = capture_rules(_agent(iter(steps), requests), train, _client([]))
+
+    (batch,) = result.batches
+    assert result.complete and not batch.rules and batch.justification == why
+    assert len(requests) == 8 and requests[-1].tool_choice == "required" and len(requests[-1].tools) == 1
+    state = requests[-1].messages[-1].content
+    assert state is not None
+    summary = _JSON.validate_json(state)
+    assert summary["accepted_rule_ids"] == [] and summary["uncovered_row_ids"] == ["train:0"]
+
+
+def test_judge_closure_rejects_empty_justification_then_evaluates_actual_diff() -> None:
+    train = _train("pwd -P")
+    requests: list[_Request] = []
+    evaluations: list[_EvaluatorInput] = []
+    client = _client(evaluations)
+    first = _package("pwd -P", "cat-6.capture-0001-01")
+    second = _package("pwd -P", "cat-6.capture-0001-02")
+    capture_steps: tuple[Step, ...] = (
+        ("add_rule", first), ("add_rule", second), ("finish", {"justification": "Compare duplicates."}),
+    )
+    captured = capture_rules(_agent(iter(capture_steps)), train, client)
+    fresh = _package("pwd -P", "cat-6.judge-0001-01")
+    why = "Consolidate both duplicates; the retained fixture checks the same train behavior."
+    wait: Step = ("page_evaluation", {"receipt": 1})
+    steps: tuple[Step, ...] = (
+        *((wait,) * 6),
+        ("finalize", {"drop_ids": [], "add": [], "justification": " "}),
+        ("finalize", {
+            "drop_ids": [first.rule.id, second.rule.id], "add": [_JSON.validate_json(fresh.model_dump_json())],
+            "justification": why,
+        }),
+    )
+
+    result = deduplicate_rules(_agent(iter(steps), requests), train, client, captured)
+
+    (decision,) = result.decisions
+    receipt = decision.finalized
+    assert result.complete and receipt is not None and result.packages == (fresh,)
+    assert receipt.submission.drop == (first.rule.id, second.rule.id) and receipt.submission.justification == why
+    assert all(item.corpus_digest == train.digest for item in (*receipt.additions, receipt.combined))
+    assert [item.code for item in decision.run.diagnostics] == ["tool_input"]
+    closure, repair = requests[-2:]
+    assert closure.tool_choice == "required"
+    assert repair.tool_choice == {"type": "function", "function": {"name": "finalize"}}
+    assert closure.tools == repair.tools and len(repair.tools) == 1
+    assert repair.max_completion_tokens == requests[0].max_completion_tokens == 8192
+    assert closure.messages[:2] == repair.messages[:2] == requests[0].messages
 
 
 def test_provider_rejection_reports_status_without_echo_and_preserves_later_batches() -> None:
