@@ -2,6 +2,7 @@ package policy
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 
@@ -10,6 +11,14 @@ import (
 )
 
 func (e *Engine) Classify(ctx context.Context, source string, facts Context) (Result, error) {
+	result, err := e.ClassifyWithDiagnostics(ctx, source, facts)
+	if _, ok := errors.AsType[*RuntimeError](err); ok {
+		return result, nil
+	}
+	return result, err
+}
+
+func (e *Engine) ClassifyWithDiagnostics(ctx context.Context, source string, facts Context) (Result, error) {
 	result := Result{
 		Status: "abstain", Basis: "literal_cli_form", BundleSHA256: e.hash,
 		RuleIDs: []string{}, Rationales: []string{}, Sources: []string{}, Reasons: []string{},
@@ -54,7 +63,11 @@ func (e *Engine) Classify(ctx context.Context, source string, facts Context) (Re
 		})
 		if err != nil || types.IsError(value) || types.IsUnknown(value) {
 			result.Reasons = []string{"rule_evaluation_error:" + compiled.rule.ID}
-			return result, nil
+			message := fmt.Sprint(value)
+			if err != nil {
+				message = err.Error()
+			}
+			return result, &RuntimeError{RuleID: compiled.rule.ID, Detail: message}
 		}
 		if value == types.True {
 			matches = append(matches, compiled.rule)

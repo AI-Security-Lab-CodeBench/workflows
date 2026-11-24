@@ -1,0 +1,5 @@
+FROM scratch
+COPY --chmod=0555 bashguard-http /bashguard-http
+USER 65532:65532
+EXPOSE 8080
+ENTRYPOINT ["/bashguard-http"]

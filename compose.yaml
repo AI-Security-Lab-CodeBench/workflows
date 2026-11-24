@@ -68,6 +68,24 @@ services:
     <<: *app
     command: ["dagster-daemon", "run", "-w", "/opt/codebench/config/workspace.yaml"]
 
+  bashguard:
+    image: ${CODEBENCH_BASHGUARD_IMAGE:-codebench/bashguard:unconfigured}
+    pull_policy: never
+    labels: *runtime-labels
+    restart: unless-stopped
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - backend
+    healthcheck:
+      test: ["CMD", "/bashguard-http", "-healthcheck"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+
   ingress:
     image: codebench/ingress:isolated-v1
     pull_policy: never

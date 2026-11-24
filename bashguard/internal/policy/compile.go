@@ -28,6 +28,10 @@ type Engine struct {
 	hash  string
 }
 
+func (e *Engine) BundleSHA256() string {
+	return e.hash
+}
+
 func Compile(data []byte) (*Engine, error) {
 	if len(data) > 1<<20 {
 		return nil, fmt.Errorf("%w: bundle exceeds 1 MiB", ErrRules)
@@ -77,45 +81,61 @@ func Compile(data []byte) (*Engine, error) {
 		seen[rule.ID] = true
 		ast, issues := env.Compile(rule.When)
 		if issues.Err() != nil {
-			return nil, fmt.Errorf("%w: %s: %v", ErrRules, rule.ID, issues.Err())
+			return nil, &RuleError{RuleID: rule.ID, Field: "when", Detail: issues.Err().Error()}
 		}
 		if !ast.OutputType().IsExactType(cel.BoolType) {
-			return nil, fmt.Errorf("%w: %s must return bool", ErrRules, rule.ID)
+			return nil, &RuleError{RuleID: rule.ID, Field: "when", Detail: "must return bool"}
 		}
 		program, err := env.Program(ast, cel.CostLimit(10000), cel.InterruptCheckFrequency(32))
 		if err != nil {
-			return nil, fmt.Errorf("%w: %s: %v", ErrRules, rule.ID, err)
+			return nil, &RuleError{RuleID: rule.ID, Field: "when", Detail: err.Error()}
 		}
 		engine.rules = append(engine.rules, compiledRule{rule, program})
 	}
 	return engine, nil
 }
 
+var (
+	categoryCodePattern = regexp.MustCompile(`^CAT-[1-9][0-9]*$`)
+	riskCodePattern     = regexp.MustCompile(`^CAT-[1-9][0-9]*\.[1-9][0-9]*$`)
+)
+
 func validateRule(rule Rule, seen map[string]bool) error {
-	category := regexp.MustCompile(`^CAT-[1-9][0-9]* .+$`)
-	risk := regexp.MustCompile(`^CAT-[1-9][0-9]*\.[1-9][0-9]* .+$`)
 	if !slices.Contains([]string{"", "simple", "ast"}, rule.Scope) {
-		return fmt.Errorf("%w: %s scope must be simple or ast", ErrRules, rule.ID)
+		return &RuleError{RuleID: rule.ID, Field: "scope", Detail: "must be simple or ast"}
 	}
-	if rule.ID == "" || seen[rule.ID] || len(rule.When) == 0 || len(rule.When) > 8192 {
-		return fmt.Errorf("%w: missing/duplicate id or expression size", ErrRules)
+	if rule.ID == "" || seen[rule.ID] {
+		return &RuleError{RuleID: rule.ID, Field: "id", Detail: "missing or duplicate rule ID"}
 	}
-	categoryCode := strings.SplitN(rule.Labels.Category, " ", 2)[0]
-	if !category.MatchString(rule.Labels.Category) || !risk.MatchString(rule.Labels.Risk) ||
-		!strings.HasPrefix(rule.Labels.Risk, categoryCode+".") {
-		return fmt.Errorf("%w: %s category/risk", ErrRules, rule.ID)
+	if len(rule.When) == 0 || len(rule.When) > 8192 {
+		return &RuleError{RuleID: rule.ID, Field: "when", Detail: "expression length must be 1..8192 bytes"}
 	}
-	if !slices.Contains([]string{"critical", "high", "medium", "low"}, rule.Labels.Severity) ||
-		!slices.Contains([]string{"allow", "deny", "ask"}, rule.Labels.Action) {
-		return fmt.Errorf("%w: %s severity/action", ErrRules, rule.ID)
+	categoryCode, categoryName, categoryHasName := strings.Cut(rule.Labels.Category, " ")
+	if !categoryCodePattern.MatchString(categoryCode) ||
+		(categoryHasName && (strings.TrimSpace(categoryName) == "" || strings.ContainsRune(categoryName, '\n'))) {
+		return &RuleError{RuleID: rule.ID, Field: "labels.category", Detail: "expected a canonical category code with an optional display name"}
 	}
-	if strings.TrimSpace(rule.Rationale) == "" || len(rule.Sources) == 0 {
-		return fmt.Errorf("%w: %s needs rationale and sources", ErrRules, rule.ID)
+	riskCode, riskName, riskHasName := strings.Cut(rule.Labels.Risk, " ")
+	if !riskCodePattern.MatchString(riskCode) || !strings.HasPrefix(riskCode, categoryCode+".") ||
+		(riskHasName && (strings.TrimSpace(riskName) == "" || strings.ContainsRune(riskName, '\n'))) {
+		return &RuleError{RuleID: rule.ID, Field: "labels.risk", Detail: "expected a canonical risk code under the category with an optional display name"}
+	}
+	if !slices.Contains([]string{"critical", "high", "medium", "low"}, rule.Labels.Severity) {
+		return &RuleError{RuleID: rule.ID, Field: "labels.severity", Detail: "must be critical, high, medium, or low"}
+	}
+	if !slices.Contains([]string{"allow", "deny", "ask"}, rule.Labels.Action) {
+		return &RuleError{RuleID: rule.ID, Field: "labels.action", Detail: "must be allow, deny, or ask"}
+	}
+	if strings.TrimSpace(rule.Rationale) == "" {
+		return &RuleError{RuleID: rule.ID, Field: "rationale", Detail: "must not be blank"}
+	}
+	if len(rule.Sources) == 0 {
+		return &RuleError{RuleID: rule.ID, Field: "sources", Detail: "at least one source is required"}
 	}
 	for _, source := range rule.Sources {
 		u, err := url.Parse(source)
 		if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil {
-			return fmt.Errorf("%w: %s invalid source URL", ErrRules, rule.ID)
+			return &RuleError{RuleID: rule.ID, Field: "sources", Detail: "source must be an HTTPS URL without credentials"}
 		}
 	}
 	return nil

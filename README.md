@@ -6,10 +6,17 @@ See [pipeline orchestration](docs/architecture/pipeline.md) and [how commands be
 
 Use the `codebench` project on the designated Docker Engine. The webserver and
 daemon run the **same application image**; the native UI, pipeline and business
-configuration are built into it. PostgreSQL and MinIO run in the same project.
+configuration are built into it. PostgreSQL, MinIO and the pinned Bashguard
+evaluator run in the same project.
 There are no source checkouts or Docker sockets mounted into the containers.
 
 For a **fresh installation**, start from a clean checkout of the intended commit:
+
+Load the retained evaluator image onto the designated engine first, or build it
+using the [Bashguard packaging instructions](bashguard/HTTP.md#offline-image-packaging-and-replay).
+Set `CODEBENCH_BASHGUARD_IMAGE` to that image in `.env`. The rules registration
+pins the expected executable digest separately; changing a Compose image is
+not authorization to use a new evaluator for an existing experiment.
 
 ```sh
 cp .env.example .env
