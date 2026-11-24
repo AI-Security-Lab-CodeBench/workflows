@@ -56,6 +56,42 @@ For additional Keenable organizations, put numbered `KEENABLE_API_KEY_N` entries
 in the private pipeline env file; use the same `KEENABLE_ORG`/`KEENABLE_ORG_N` label
 only for keys that share an organization's quota.
 
+### Roll out a reader fix without changing pipeline state
+
+- Publish from the intended repository identity. A temporary clone inherits
+  neither the checkout's local SSH command nor its author settings. Check
+  `git var GIT_AUTHOR_IDENT` before committing and `git show -s --format=fuller`
+  before pushing. Use the authorized `CodeBench-workflows` SSH configuration;
+  do not copy private keys or change global Git settings. Verify the commit
+  on `origin/master` before building.
+- Build the clean published revision with an immutable `codebench/app:<sha>`
+  tag. If the rootless builder cannot fetch dependencies, the existing cached
+  packaging engine can **build and save the image only**. Load it into the
+  rootless engine and compare `docker image inspect -f '{{.Id}}'` on both
+  engines. Never start Compose services on the packaging engine.
+- From the recorded release directory, use `docker compose -p codebench
+  --env-file "$deployment_env"` on the production engine. Run `exec -T webserver
+  python -m codebench_pipeline.dataset_cli check-idle` before replacing workers.
+  Set only `CODEBENCH_APP_IMAGE` in the private deployment env file, then run
+  `up --no-build --no-deps --force-recreate --wait webserver daemon` with the
+  same Compose prefix. Confirm both containers use the verified image. Do not
+  use `prepare` or `unsynced` for this rollout: they also change pipeline state.
+
+### Verify the reader, not just the materialization
+
+Open `/assets/<asset-key>?view=data` **without** a `partition` parameter.
+Confirm the Data tab discovers the persisted partition, selects it, and shows
+the expected total and actual row cells (or the empty-table state for a known
+zero-row output). For split merges, check **both** `train/merged_rows` and
+`test/merged_rows`. Record the partition and counts; keep row contents out of Git.
+
+If storage has rows but the tab says “No persisted partitions,” inspect the
+page's same-origin `POST /codebench/api/artifacts/partitions` response. An empty
+list is a discovery problem, not proof that the data is gone. Check the exact
+asset key, partition shape and producing I/O manager in `DatasetArtifactCatalog`
+before rematerializing anything. Cover discovery **and** a row query in the
+affected synthetic E2E: a Parquet read or an asset-group screenshot tests neither.
+
 ## Verify a change
 
 - Run **only affected E2E scenarios**, including affected downstream consumers:
