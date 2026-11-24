@@ -9,7 +9,9 @@ from codebench_pipeline.rules_contracts import (
     EvaluatedRow,
     EvaluationError,
     EvaluationReceipt,
+    Gold,
     Labels,
+    ModifyGold,
     Other,
 )
 from codebench_pipeline.rules_corpus import Corpus
@@ -17,6 +19,7 @@ from codebench_pipeline.typed_config import ConfigArtifact
 
 Outcome = Literal["correct", "wrong", "abstain", "error"]
 Axis = Literal["category", "risk", "severity", "action"]
+type ScoredDecision = tuple[Gold, Labels | None, Outcome]
 
 
 class OutcomeMetrics(ConfigArtifact):
@@ -45,7 +48,7 @@ class ClassMetrics(ConfigArtifact):
 
 
 class ConfusionCell(ConfigArtifact):
-    expected: Labels
+    expected: Gold
     actual: Labels | None
     outcome: Outcome
     count: int
@@ -132,19 +135,23 @@ def _summary(rows: tuple[EvaluatedRow, ...]) -> OutcomeMetrics:
     )
 
 
-def _decisions(rows: tuple[EvaluatedRow, ...]) -> tuple[tuple[Labels, Labels | None, Outcome], ...]:
-    decisions: list[tuple[Labels, Labels | None, Outcome]] = []
+def _decisions(rows: tuple[EvaluatedRow, ...]) -> tuple[ScoredDecision, ...]:
+    decisions: list[ScoredDecision] = []
     for row in rows:
-        if not isinstance(row.expected, Labels):
-            raise EvaluationError(
-                Diagnostic(code="corpus_gold", message="Expected complete corpus gold labels")
-            )
-        actual = row.actual if row.error is None and isinstance(row.actual, Labels) else None
-        decisions.append((row.expected, actual, _outcome(row)))
+        match row.expected:
+            case Labels() | ModifyGold() as gold:
+                actual = row.actual if row.error is None and isinstance(row.actual, Labels) else None
+                decisions.append((gold, actual, _outcome(row)))
+                continue
+            case Other():
+                raise EvaluationError(
+                    Diagnostic(code="corpus_gold", message="Expected complete corpus gold labels")
+                )
+        assert_never(row.expected)
     return tuple(decisions)
 
 
-def _label(labels: Labels, axis: Axis) -> str:
+def _label(labels: Gold, axis: Axis) -> str:
     match axis:
         case "category":
             return labels.category
@@ -157,7 +164,7 @@ def _label(labels: Labels, axis: Axis) -> str:
     assert_never(axis)
 
 
-def _classes(rows: tuple[tuple[Labels, Labels | None, Outcome], ...]) -> tuple[ClassMetrics, ...]:
+def _classes(rows: tuple[ScoredDecision, ...]) -> tuple[ClassMetrics, ...]:
     metrics: list[ClassMetrics] = []
     axes: tuple[Axis, ...] = ("category", "risk", "severity", "action")
     for axis in axes:
@@ -190,7 +197,7 @@ def _classes(rows: tuple[tuple[Labels, Labels | None, Outcome], ...]) -> tuple[C
     return tuple(metrics)
 
 
-def _confusion(rows: tuple[tuple[Labels, Labels | None, Outcome], ...]) -> tuple[ConfusionCell, ...]:
+def _confusion(rows: tuple[ScoredDecision, ...]) -> tuple[ConfusionCell, ...]:
     counts = Counter(rows)
     return tuple(
         ConfusionCell(expected=gold, actual=actual, outcome=outcome, count=counts[gold, actual, outcome])

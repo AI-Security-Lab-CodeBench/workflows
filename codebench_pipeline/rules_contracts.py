@@ -15,17 +15,27 @@ Action = Literal["allow", "ask", "deny"]
 Split = Literal["train", "test"]
 
 
-class Labels(ConfigArtifact):
+class _LabelAxes(ConfigArtifact):
     category: Category
     risk: Risk
     severity: Severity
-    action: Action
 
     @model_validator(mode="after")
     def risk_belongs_to_category(self) -> Self:
         if not self.risk.startswith(f"{self.category}."):
             raise PydanticCustomError("risk_category", "Risk must belong to its category")
         return self
+
+
+class Labels(_LabelAxes):
+    action: Action
+
+
+class ModifyGold(_LabelAxes):
+    action: Literal["modify"]
+
+
+type Gold = Labels | ModifyGold
 
 
 class Other(ConfigArtifact):
@@ -141,7 +151,7 @@ class NativeFailure(ConfigArtifact):
 
 class EvaluatedRow(ConfigArtifact):
     input: EvaluationInput
-    expected: Decision
+    expected: Gold | Other
     actual: Decision | None
     reasons: tuple[str, ...]
     rule_ids: tuple[str, ...]
@@ -151,7 +161,7 @@ class EvaluatedRow(ConfigArtifact):
     error: Diagnostic | None = None
 
     @classmethod
-    def from_native(cls, pair: tuple[EvaluationInput, Decision], native: NativeRow) -> Self:
+    def from_native(cls, pair: tuple[EvaluationInput, Gold | Other], native: NativeRow) -> Self:
         input_row, expected = pair
         result = native.result
         error = native.error

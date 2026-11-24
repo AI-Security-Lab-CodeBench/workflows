@@ -146,13 +146,13 @@ def test_rules_pipeline(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None
     blobs: dict[str, bytes] = {}
     completion = CaptureCompletion(_complete, _MODEL)
 
-    def split(number: int, commands: dict[str, str]) -> TrainConfig:
+    def split(number: int, commands: dict[str, str], *, modify: str | None = None) -> TrainConfig:
         sources = []
         for category in sorted(set(commands.values())):
             number += 1
             commit = f"{number:040x}"
             rows = "".join(
-                f"{command},,,low,{category},{category}.1,fixture,,allow\n"
+                f"{command},,,low,{category},{category}.1,fixture,,{'modify' if command == modify else 'allow'}\n"
                 for command in commands if commands[command] == category
             )
             data = ("command,description,util,severity,category,risk,source,seed,class\n" + rows).encode()
@@ -183,7 +183,7 @@ def test_rules_pipeline(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None
                     "inference_mode": "plain", "reasoning_effort": "none", "capacity": None,
                 }),
             }),
-            "train": split(0, _TRAIN), "test": split(10, _TEST),
+            "train": split(0, _TRAIN), "test": split(10, _TEST, modify="whoami"),
         })
         DatasetRegistry(tmp_path).register(spec)
         register_dataset_partitions(instance, spec)
@@ -254,8 +254,8 @@ def _assert_public_metrics(instance: DagsterInstance, home: Path, definitions: D
         assert discovery.status_code == 200
         partitions = ArtifactPartitions.model_validate_json(discovery.content).partitions
         assert partitions == ("codebench",)
-        response = client.post(
-            "/artifacts/data", headers=headers, json={"asset_key": key, "partition_key": partitions[0]},
+        response = client.post("/artifacts/data", headers=headers,
+            json={"asset_key": key, "partition_key": partitions[0], "query": {"limit": 100}},
         )
         assert response.status_code == 200
         private = client.post(
@@ -264,11 +264,12 @@ def _assert_public_metrics(instance: DagsterInstance, home: Path, definitions: D
         assert private.status_code == 200 and not ArtifactPartitions.model_validate_json(private.content).partitions
     result = ArtifactTable.model_validate_json(response.content)
     assert result.data_schema.source == "declared"
-    cells = {(row.values["cohort"], row.values["axis"], row.values["metric"]): row.values["value"]
-             for row in result.page.rows}
-    assert cells["overall", "outcome", "correct"] == 1
-    assert cells["overall", "outcome", "abstain"] == 2
-    assert cells["overall", "overlap", "rows"] == 1
+    cells = {(row.values["cohort"], row.values["axis"], row.values["label"], row.values["metric"]):
+             row.values["value"] for row in result.page.rows}
+    assert cells["overall", "outcome", "", "correct"] == 1
+    assert cells["overall", "outcome", "", "abstain"] == 2
+    assert cells["overall", "overlap", "", "rows"] == 1
+    assert cells["overall", "action", "modify", "support"] == 1
     event = instance.get_latest_materialization_event(RULES_EVAL_KEY)
     assert event is not None and event.asset_materialization is not None
     chart = event.asset_materialization.metadata["Outcome distribution"]

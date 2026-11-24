@@ -5,7 +5,7 @@ from pandas import DataFrame
 from pydantic import TypeAdapter
 
 from codebench_pipeline.models import Digest
-from codebench_pipeline.rules_contracts import Category, Labels, Split
+from codebench_pipeline.rules_contracts import Category, Gold, Labels, ModifyGold, Split
 from codebench_pipeline.storage import IntegrityError
 from codebench_pipeline.train_config import TrainSource
 from codebench_pipeline.typed_config import ConfigArtifact
@@ -17,7 +17,7 @@ _LABELS = TypeAdapter(tuple[str, str, str, str, str])
 class CorpusRow(ConfigArtifact):
     id: str
     command: str
-    gold: Labels
+    gold: Gold
 
     @property
     def command_sha256(self) -> str:
@@ -67,12 +67,14 @@ def build_corpus(frame: DataFrame, *, split: Split, digest: str) -> Corpus:
         frame.loc[:, ["command", "category", "risk", "severity", "class"]].itertuples(index=False, name=None)
     ):
         command, category, risk, severity, action = _LABELS.validate_python(raw, strict=True)
-        gold = Labels.model_validate(
+        action = action.strip().lower()
+        model = ModifyGold if split == "test" and action == "modify" else Labels
+        gold = model.model_validate(
             {
                 "category": category.split(maxsplit=1)[0] if category.strip() else "",
                 "risk": risk.split(maxsplit=1)[0] if risk.strip() else "",
                 "severity": severity.strip().lower(),
-                "action": action.strip().lower(),
+                "action": action,
             }
         )
         rows.append(CorpusRow(id=f"{split}:{digest}:{index}", command=command, gold=gold))
