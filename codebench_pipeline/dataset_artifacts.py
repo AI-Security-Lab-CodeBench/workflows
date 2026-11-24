@@ -25,6 +25,7 @@ from codebench_pipeline.config_assets import (
     CONFIG_DIRECTORY,
     GLOBAL_CONFIG,
     PARTITIONED_RUN_CONFIGS,
+    PRIVATE_RULES_RUN_ARTIFACTS,
     SINGLETON_RUN_CONFIGS,
     SPLIT_CATEGORY_CONFIGS,
     ConfigRunIOManager,
@@ -43,12 +44,14 @@ from codebench_pipeline.dataset_identity import CODEBENCH_DATASET_ID
 from codebench_pipeline.dataset_registry import DatasetRegistry
 from codebench_pipeline.human_review_store import HumanReviewStore
 from codebench_pipeline.object_store import StorageConfig
+from codebench_pipeline.rules_artifacts import RULES_EVAL_KEY
 from codebench_pipeline.storage import IntegrityError
 
 SPLITS: Final = ("train", "test")
 SPLIT_CATEGORY_TABLES: Final = frozenset((split, "category_rows") for split in SPLITS)
 SPLIT_MERGE_TABLES: Final = frozenset((split, "merged_rows") for split in SPLITS)
 SPLIT_TABLES: Final = SPLIT_CATEGORY_TABLES | SPLIT_MERGE_TABLES
+_RULES_EVAL: Final = tuple(RULES_EVAL_KEY.path)
 CONFIG_KEYS: Final = frozenset(
     tuple(key.path)
     for key in (
@@ -77,6 +80,8 @@ class DatasetArtifactCatalog:
         self.registry = DatasetRegistry(home)
 
     def partitions(self, key: ArtifactKey) -> ArtifactPartitions:
+        if key.asset_key in PRIVATE_RULES_RUN_ARTIFACTS:
+            return ArtifactPartitions(asset_key=key.asset_key, partitions=())
         partitions: list[str] = []
         active = self._split_partitions(key.asset_key)
         candidates = (
@@ -98,11 +103,13 @@ class DatasetArtifactCatalog:
         if key in SPLIT_CATEGORY_TABLES or key in SPLIT_CATEGORY_CONFIGS:
             split = key[1].split("_")[1] if key[0] == "datasets" else key[0]
             return set(self.instance.get_dynamic_partitions(f"{CODEBENCH_DATASET_ID}_{split}_categories"))
-        if key in SPLIT_MERGE_TABLES or key in SINGLETON_RUN_CONFIGS:
+        if key in SPLIT_MERGE_TABLES or key in SINGLETON_RUN_CONFIGS or key == _RULES_EVAL:
             return {CODEBENCH_DATASET_ID}
         return None
 
     def resolve(self, target: ArtifactTarget) -> ArtifactBinding | RunConfigBinding:
+        if target.asset_key in PRIVATE_RULES_RUN_ARTIFACTS:
+            raise DatasetViewError("not_found", "No public artifact binding")
         active = self._split_partitions(target.asset_key)
         if target.partition_key is None or (
             target.asset_key[0] != "datasets" if active is None else target.partition_key not in active
@@ -226,7 +233,7 @@ class DatasetArtifactCatalog:
                         state = release.publication_state
             return ArtifactBinding(storage, reference, state)
 
-        if is_latest and target.asset_key not in SPLIT_TABLES:
+        if is_latest and target.asset_key not in SPLIT_TABLES and target.asset_key != _RULES_EVAL:
             if ArtifactCurrentness(self.home, self.instance).stale(latest, reference):
                 state = "stale"
         return ArtifactBinding(storage, reference, state)
@@ -245,7 +252,7 @@ class DatasetArtifactCatalog:
             ) from error
         try:
             key = tuple(record.asset_key.path) if record.asset_key is not None else ()
-            if key in SPLIT_TABLES:
+            if key in SPLIT_TABLES or key == _RULES_EVAL:
                 revision = materialization_registration(record)
                 if revision is None:
                     raise IntegrityError("Split output has no producing registration")

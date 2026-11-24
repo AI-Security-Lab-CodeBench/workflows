@@ -59,6 +59,9 @@ from codebench_pipeline.labeling_runtime import LabelingRuntime
 from codebench_pipeline.repository_legacy import PreparedCaptureCache
 from codebench_pipeline.review_assets import human_assets
 from codebench_pipeline.review_inputs import REVIEW_INPUT_MANAGER, review_input_manager
+from codebench_pipeline.rules_artifacts import rules_capture_inputs, rules_corpus_input
+from codebench_pipeline.rules_assets import RULES_ASSETS, RULES_JOB_SELECTIONS
+from codebench_pipeline.rules_settings import rules_mappings, rules_registration_asset
 from codebench_pipeline.stage_descriptions import describe_stage
 from codebench_pipeline.stage_implementation import ImplementationSource
 from codebench_pipeline.storage import IntegrityError, fingerprint
@@ -151,6 +154,8 @@ def build_definitions(home: Path) -> Definitions:
     config_io = ConfigRunIOManager(home=str(home))
     config_definitions = configuration_assets(home)
     config_assets = AssetSelection.assets(*config_definitions, category_rules)
+    rules_registration = rules_registration_asset()
+    rules_mapping_assets = rules_mappings()
     assets = [
         definition.map_asset_specs(describe_stage)
         for definition in [
@@ -163,7 +168,8 @@ def build_definitions(home: Path) -> Definitions:
         ]
     ]
     _require_scoped_configuration_edges(
-        [*config_definitions, *TRAIN_MAPPINGS], [*assets, *TRAIN_TABLES, bashguard_syntax_audit]
+        [*config_definitions, *TRAIN_MAPPINGS, rules_registration, *rules_mapping_assets],
+        [*assets, *TRAIN_TABLES, bashguard_syntax_audit, *RULES_ASSETS],
     )
 
     def partition_config(key: str) -> dict[str, JsonValue]:
@@ -262,6 +268,9 @@ def build_definitions(home: Path) -> Definitions:
             *TRAIN_MAPPINGS,
             *TRAIN_TABLES,
             full_dataset,
+            rules_registration,
+            *rules_mapping_assets,
+            *RULES_ASSETS,
         ],
         jobs=[
             job,
@@ -273,6 +282,10 @@ def build_definitions(home: Path) -> Definitions:
             bashguard_audit_job(),
             *TRAIN_JOBS,
             build_full_dataset_job,
+            *(
+                UnresolvedAssetJobDefinition(name=name, selection=selection)
+                for name, selection in RULES_JOB_SELECTIONS.items()
+            ),
         ],
         sensors=[
             AutomationConditionSensorDefinition(
@@ -308,6 +321,9 @@ def build_definitions(home: Path) -> Definitions:
             TRAIN_TABLE_IO: dataset_storage_io(home, review=False, dataset_id=CODEBENCH_DATASET_ID),
             "train_partition_inputs": train_partition_inputs,
             "full_dataset_member_input": full_dataset_member_input,
+            "rules_capture_inputs": rules_capture_inputs,
+            "rules_corpus_input": rules_corpus_input,
+            "rules_model_environment": ResourceDefinition(resource_fn=lambda: os.environ.__getitem__, config_schema={}),
             "dataset_io_manager": dataset_storage_io(home),
             REVIEW_INPUT_MANAGER: review_input_manager,
         },

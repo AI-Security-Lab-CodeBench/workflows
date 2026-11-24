@@ -95,7 +95,13 @@ SPLIT_CATEGORY_CONFIGS: Final = frozenset((split, "stats") for split in ("train"
 SINGLETON_RUN_CONFIGS: Final = frozenset({("codebench", "full_dataset")}) | frozenset(
     tuple(mapping_key(f"{split}_merge").path) for split in ("train", "test")
 )
-PARTITIONED_RUN_CONFIGS: Final = SPLIT_CATEGORY_CONFIGS | SINGLETON_RUN_CONFIGS
+PRIVATE_RULES_RUN_ARTIFACTS: Final = frozenset(
+    ("codebench", name)
+    for name in ("rules_registration", "rules_capture", "rules_dedup", "rules_finalize")
+) | frozenset(
+    tuple(mapping_key(name).path) for name in ("rules_capture", "rules_dedup", "rules_finalize", "rules_eval")
+)
+PARTITIONED_RUN_CONFIGS: Final = SPLIT_CATEGORY_CONFIGS | SINGLETON_RUN_CONFIGS | PRIVATE_RULES_RUN_ARTIFACTS
 
 
 def collection_mapping_key(branch: Branch, stage: str) -> AssetKey:
@@ -131,7 +137,7 @@ def configured_selection(stages: Iterable[AssetKey]) -> list[AssetKey]:
 
 
 @cache
-def _contract_type(contract: type[ConfigArtifact]) -> PythonObjectDagsterType:
+def mapping_type(contract: type[ConfigArtifact]) -> PythonObjectDagsterType:
     return PythonObjectDagsterType(python_type=contract, name=contract.__name__)
 
 
@@ -139,7 +145,7 @@ def mapped_input(
     scope: str, contract: type[ConfigArtifact], *, input_manager_key: str | None = None
 ) -> AssetIn:
     return AssetIn(
-        key=mapping_key(scope), dagster_type=_contract_type(contract), input_manager_key=input_manager_key
+        key=mapping_key(scope), dagster_type=mapping_type(contract), input_manager_key=input_manager_key
     )
 
 
@@ -182,8 +188,19 @@ class ConfigRunIOManager(ConfigurableIOManager):
         path = self.run_output_path(context.run_id, context.asset_key, _run_output_partition(context))
         path.parent.mkdir(parents=True, exist_ok=True)
         payload = obj.model_dump_json(by_alias=True).encode()
-        path.write_bytes(payload)
+        if tuple(context.asset_key.path) in PRIVATE_RULES_RUN_ARTIFACTS:
+            self.write_private(path, payload)
+        else:
+            path.write_bytes(payload)
         _record_config_digest(context, payload)
+
+    @staticmethod
+    def write_private(path: Path, payload: bytes) -> None:
+        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(descriptor, "wb") as stream:
+            os.fchmod(stream.fileno(), 0o600)
+            stream.write(payload)
 
     def load_input(self, context: InputContext) -> BaseModel | None:
         if context.asset_key == CONFIG_DIRECTORY:
@@ -213,6 +230,11 @@ class ConfigRunIOManager(ConfigurableIOManager):
         self, context: InputContext, contract: type[Contract]
     ) -> Contract:
         return contract.model_validate_json(self._upstream_payload(context), strict=True)
+
+    def materialized_scope[Contract: ConfigArtifact](
+        self, record: EventLogRecord, contract: type[Contract]
+    ) -> Contract:
+        return contract.model_validate_json(self._read_materialized(record), strict=True)
 
     def _upstream_payload(self, context: InputContext) -> bytes:
         upstream = context.upstream_output
@@ -357,7 +379,7 @@ def configuration_assets(home: Path, *, authoring_root: Path | None = None) -> l
             partitions_def=DATASET_PARTITIONS,
             group_name=FINALIZATION_GROUPS[scope] if group_name is None else group_name,
             io_manager_key="config_run_io_manager",
-            dagster_type=_contract_type(contract),
+            dagster_type=mapping_type(contract),
             ins=inputs,
             description=(
                 f"**How it works:** Project {input_description} into "

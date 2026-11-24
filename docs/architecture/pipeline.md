@@ -3,6 +3,40 @@
 For independent category-partitioned imports that do not run collection or labeling,
 see [Loading pinned train and test splits](split-loading.md).
 
+### Teaching Bashguard rules
+
+The `dataset_merge` group is the presentation group for `codebench/full_dataset`;
+the underlying train and test members retain their separate identities. The rules
+branch learns from train and scores a frozen bundle on test. Running it does not
+require collection, relabeling, or approval of an existing review queue.
+
+| Stage | Data available | Decision |
+| --- | --- | --- |
+| `rules_capture` | Similar examples from one training category; full train for checking a proposed rule | Propose specific CEL predicates and positive and negative fixtures. Keep the rule package and its evaluation evidence together. |
+| `rules_dedup` | Captured packages and train evidence | Nominate similar rules and rules sharing hits. The judge can inspect evaluations and submit a justified add/drop diff. A rewrite is a fresh rule, not an in-place change. |
+| `rules_finalize` | Deduplicated packages | Freeze the native bundle and packaged fixtures. No model sees the holdout during finalization. |
+| `rules_eval` | Frozen bundle and the test member | Measure wrong predictions, abstentions, failures, coverage and exact-label accuracy. An uncovered category or an undefined metric is not evidence of perfect precision. |
+
+The rule-authoring guide and the evaluator executable are independently pinned:
+the former determines what the agents see; the latter determines what their
+rules do. A successful batch response must match both the requested evaluator
+identity and the submitted bundle digest. The pipeline owns the data and scoring;
+[the internal Bashguard service](../../bashguard/HTTP.md) only parses and
+classifies the commands sent to it. Errors, including CEL syntax diagnostics,
+are learning feedback, not negative matches. A fixture expecting `other` means
+the rule must decline to label that example. The judge can justify removing a
+retired rule's tests; every addition is evaluated anew. None of these decisions
+may consult the held-out report.
+
+Run the four manual jobs with `python -m codebench_pipeline.dataset_cli` in
+the deployed worker. First `rules-register --config - --sha256 <digest>`
+reads a private registration from standard input; hash the exact bytes you
+send. Then run `rules-capture --category <category>` once for each selected
+training category, `rules-learn` for deduplication and finalization, and
+`rules-eval` for the frozen bundle. These jobs do not enable a sensor. Inspect
+`codebench/rules_eval` in Dagster for the held-out result, not the train scores
+returned by the author's tools.
+
 CodeBench builds a labeled dataset of shell commands from source material. A released row must be traceable to the text it came from, the evidence for its label, and the decision that admitted it. Commands are data throughout: no stage executes a collected command.
 
 ```text

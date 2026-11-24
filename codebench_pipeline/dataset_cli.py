@@ -90,6 +90,20 @@ def main() -> None:
         "test-merge": "merge_test_data",
         "full-dataset": "build_full_dataset",
     }
+    rules_jobs = {
+        "rules-register": "register_rules",
+        "rules-capture": "capture_rules",
+        "rules-learn": "learn_rules",
+        "rules-eval": "evaluate_rules",
+    }
+    for name in rules_jobs:
+        command = subcommands.add_parser(name, help="Run a manual Bashguard rules job.")
+        command.add_argument("--home", type=Path, default=DEFAULT_HOME)
+        if name == "rules-register":
+            command.add_argument("--config", default="-", help="Read the private rules registration from a path or stdin.")
+            command.add_argument("--sha256", required=True, help="Expected SHA-256 of the private registration bytes.")
+        if name == "rules-capture":
+            command.add_argument("--category", required=True, help="Selected train category partition.")
     split_commands = {
         "configure-splits": splits,
         **{name: subcommands.add_parser(name) for name in split_jobs},
@@ -151,6 +165,24 @@ def main() -> None:
         if name in {"attest-release", "revoke-release"}:
             control.add_argument("--proposal", required=True)
     args = parser.parse_args()
+    if args.action in rules_jobs:
+        job_name = rules_jobs[args.action]
+        partition = args.category if args.action == "rules-capture" else CODEBENCH_DATASET_ID
+        job = build_definitions(args.home).resolve_job_def(job_name)
+        run_config: dict[str, object] = {}
+        if args.action == "rules-register":
+            payload = sys.stdin.buffer.read() if args.config == "-" else Path(args.config).read_bytes()
+            run_config = {
+                "ops": {
+                    "codebench__rules_registration": {
+                        "config": {"registration_json": payload.decode("utf-8"), "expected_sha256": args.sha256}
+                    }
+                }
+            }
+        with dataset_instance(args.home) as instance:
+            result = job.execute_in_process(instance=instance, partition_key=partition, run_config=run_config)
+        print(json.dumps({"job": job_name, "partition": partition, "run_id": result.run_id}))
+        return
     if args.action == "configure-splits":
         sections = SplitSections.model_validate_json(sys.stdin.buffer.read())
         registry = DatasetRegistry(args.home)
