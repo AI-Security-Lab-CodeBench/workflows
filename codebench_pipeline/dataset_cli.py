@@ -4,13 +4,14 @@ import sys
 from pathlib import Path
 from typing import Literal, TypedDict, overload
 
-from dagster import AssetKey, DagsterRunStatus, MultiPartitionKey, RunsFilter
+from dagster import AssetKey, DagsterRunStatus, RunsFilter
 from pydantic import TypeAdapter
 
 from codebench_pipeline.config_assets import GLOBAL_CONFIG, mapping_key
 from codebench_pipeline.dataset_branches import HISTORICAL_PROCESSING_STAGES
 from codebench_pipeline.dataset_config import load_build_config
 from codebench_pipeline.dataset_dependencies import KNOWN_STAGES
+from codebench_pipeline.dataset_identity import CODEBENCH_DATASET_ID
 from codebench_pipeline.dataset_registry import DatasetRegistry
 from codebench_pipeline.dataset_run import refresh_registered_configuration, run_registered
 from codebench_pipeline.definitions import DEFAULT_HOME, build_definitions, dataset_run_config
@@ -82,18 +83,20 @@ def main() -> None:
     splits = subcommands.add_parser(
         "configure-splits", help="Replace both split sections from JSON on stdin."
     )
-    splits.add_argument("--dataset", required=True)
-    splits.add_argument("--home", type=Path, default=DEFAULT_HOME)
     split_jobs = {
         "train-load": "load_train_category",
         "train-merge": "merge_train_data",
         "test-load": "load_test_category",
         "test-merge": "merge_test_data",
+        "full-dataset": "build_full_dataset",
     }
-    for name in split_jobs:
-        command = subcommands.add_parser(name)
+    split_commands = {
+        "configure-splits": splits,
+        **{name: subcommands.add_parser(name) for name in split_jobs},
+    }
+    for name, command in split_commands.items():
         command.add_argument("--home", type=Path, default=DEFAULT_HOME)
-        command.add_argument("--dataset", required=True)
+        command.add_argument("--dataset", choices=(CODEBENCH_DATASET_ID,), default=CODEBENCH_DATASET_ID)
         if name.endswith("-load"):
             command.add_argument("--category", required=True, help="Category partition, e.g. CAT-3")
             command.add_argument(
@@ -151,7 +154,9 @@ def main() -> None:
     if args.action == "configure-splits":
         sections = SplitSections.model_validate_json(sys.stdin.buffer.read())
         registry = DatasetRegistry(args.home)
-        spec = registry.get(args.dataset).model_copy(update={"train": sections.train, "test": sections.test})
+        spec = registry.get(CODEBENCH_DATASET_ID).model_copy(
+            update={"train": sections.train, "test": sections.test}
+        )
         registry.register(spec)
         with dataset_instance(args.home) as instance:
             register_dataset_partitions(instance, spec)
@@ -163,11 +168,7 @@ def main() -> None:
         return
     if args.action in split_jobs:
         category_job = args.action.endswith("-load")
-        partition = (
-            MultiPartitionKey({"dataset": args.dataset, "category": args.category})
-            if category_job
-            else str(args.dataset)
-        )
+        partition = str(args.category) if category_job else CODEBENCH_DATASET_ID
         job_name = split_jobs[args.action]
         job = build_definitions(args.home).resolve_job_def(job_name)
         with dataset_instance(args.home) as instance:

@@ -1,5 +1,4 @@
 from pathlib import Path
-from typing import cast
 
 import pandas as pd
 from dagster import Field, InitResourceContext, InputContext, IOManagerDefinition, OutputContext, String
@@ -8,7 +7,7 @@ from pydantic import BaseModel
 
 from codebench_pipeline.category_rules import CategoryRules
 from codebench_pipeline.dagster_table_metadata import MetadataSink
-from codebench_pipeline.dataframe_io import AssetSnapshot, DataFrameIOManager
+from codebench_pipeline.dataframe_io import AssetReference, AssetSnapshot, DataFrameIOManager
 from codebench_pipeline.dataset_branches import DECLARED_SOURCE_STAGES, FINALIZATION_STAGES
 from codebench_pipeline.dataset_dependencies import review_evidence_stages
 from codebench_pipeline.dataset_registry import DatasetRegistry
@@ -24,6 +23,23 @@ from codebench_pipeline.storage import IntegrityError
 class StorageBinding(BaseModel):
     registered_revision: Digest | None = None
     review_token: str | None = None
+
+
+def _record_registration(context: MetadataSink, revision: Digest) -> None:
+    context.add_output_metadata({TABLE_REGISTRATION_METADATA: revision})
+
+
+class SplitDatasetTableIO(DataFrameIOManager):
+    """Record the canonical registration actually used to publish a split table."""
+
+    def record_output(
+        self, context: OutputContext, obj: pd.DataFrame | CategoryRules, reference: AssetReference
+    ) -> None:
+        revision = self.registered_revision
+        if revision is None:
+            raise IntegrityError("Split output requires a pinned registration")
+        _record_registration(context, revision)
+        super().record_output(context, obj, reference)
 
 
 class RegisteredDatasetTableIO(DataFrameIOManager):
@@ -91,9 +107,7 @@ class RegisteredDatasetTableIO(DataFrameIOManager):
                     tx.invalidate(partition, "Upstream asset reference changed")
                 self.publish_reference(context, reference)
         if admission is not None:
-            cast(MetadataSink, context).add_output_metadata(
-                {TABLE_REGISTRATION_METADATA: admission.registration_digest}
-            )
+            _record_registration(context, admission.registration_digest)
         self.record_output(context, value, reference)
 
     def _check_admission(
@@ -134,9 +148,9 @@ class RegisteredDatasetTableIO(DataFrameIOManager):
 
 
 def dataset_storage_io(
-    home: Path, *, review: bool = True, multipartition_dimension: str | None = None
+    home: Path, *, review: bool = True, dataset_id: str | None = None
 ) -> IOManagerDefinition:
-    """Bind a run's partition to its registered object store."""
+    """Bind an explicit dataset or the run's partition to its registered object store."""
     registry = DatasetRegistry(home)
     review_home = str(home.resolve()) if review else None
     fields = {"registered_revision": Field(String, is_required=False)}
@@ -145,19 +159,21 @@ def dataset_storage_io(
 
     def bind(context: InitResourceContext) -> DataFrameIOManager:
         run = context.dagster_run
-        partition = run.tags.get(PARTITION_NAME_TAG) if run is not None else None
-        if multipartition_dimension is not None and run is not None:
-            partition = run.tags.get(f"dagster/partition/{multipartition_dimension}", partition)
+        partition = dataset_id or (run.tags.get(PARTITION_NAME_TAG) if run is not None else None)
         if partition is None:
             raise IntegrityError("Dataset storage requires a dataset partition")
         settings = StorageBinding.model_validate(context.resource_config)
         revision = settings.registered_revision or registry.current_revision(partition)
-        manager_type = RegisteredDatasetTableIO if review else DataFrameIOManager
+        manager_type = DataFrameIOManager
+        if review:
+            manager_type = RegisteredDatasetTableIO
+        elif dataset_id is not None:
+            manager_type = SplitDatasetTableIO
         manager = manager_type(
             storage=registry.storage(partition, revision=revision),
             review_home=review_home,
             review_token=settings.review_token,
-            registered_revision=revision if review else None,
+            registered_revision=revision if review or dataset_id is not None else None,
         )
         if review:
             manager.bind_review_store(

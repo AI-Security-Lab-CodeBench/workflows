@@ -3,6 +3,7 @@ from typing import Final, Literal, assert_never
 
 import pandas as pd
 from dagster import (
+    AllPartitionMapping,
     AssetExecutionContext,
     AssetIn,
     AssetKey,
@@ -13,10 +14,10 @@ from dagster import (
     Dict,
     DynamicPartitionsDefinition,
     InputContext,
-    MultiPartitionsDefinition,
-    MultiToSingleDimensionPartitionMapping,
     Output,
     PythonObjectDagsterType,
+    SpecificPartitionsPartitionMapping,
+    StaticPartitionsDefinition,
     asset,
     input_manager,
 )
@@ -29,11 +30,10 @@ from codebench_pipeline.config_assets import (
     REGISTERED_CONFIG_TYPE,
     RegisteredConfig,
     mapping_key,
-    registered_input,
 )
 from codebench_pipeline.dataframe_io import DataFrameIOManager, materialized_reference
-from codebench_pipeline.dataset_asset_types import DATASET_PARTITIONS
 from codebench_pipeline.dataset_config import DatasetBuildSpec
+from codebench_pipeline.dataset_identity import CODEBENCH_DATASET_ID
 from codebench_pipeline.input_provenance import current_materialization
 from codebench_pipeline.split_schema import SplitRowsTable
 from codebench_pipeline.storage import IntegrityError, fingerprint
@@ -49,7 +49,7 @@ from codebench_pipeline.typed_config import ConfigArtifact
 
 Split = Literal["train", "test"]
 _SPLITS: Final[tuple[Split, ...]] = ("train", "test")
-DATASET_DIM: Final = MultiToSingleDimensionPartitionMapping(partition_dimension_name="dataset")
+_MERGE_PARTITIONS: Final = StaticPartitionsDefinition([CODEBENCH_DATASET_ID])
 TRAIN_TABLE_IO: Final = "train_table_io"
 
 
@@ -69,18 +69,23 @@ def _split_config(config: RegisteredConfig | DatasetBuildSpec, split: Split) -> 
     assert_never(split)
 
 
-def _category_dimension(split: Split) -> str:
-    return f"{split}_categories"
+def _category_partitions_name(split: Split) -> str:
+    return f"{CODEBENCH_DATASET_ID}_{split}_categories"
 
 
 def register_dataset_partitions(instance: DagsterInstance, spec: DatasetBuildSpec) -> None:
     instance.add_dynamic_partitions("dataset_builds", [spec.dataset_id])
+    if spec.dataset_id != CODEBENCH_DATASET_ID:
+        return
     for split in _SPLITS:
         config = _split_config(spec, split)
-        if config is not None and config.sources:
-            instance.add_dynamic_partitions(
-                _category_dimension(split), sorted({source.category for source in config.sources})
-            )
+        name = _category_partitions_name(split)
+        desired: set[str] = {source.category for source in config.sources} if config is not None else set()
+        current = set(instance.get_dynamic_partitions(name))
+        if additions := sorted(desired - current):
+            instance.add_dynamic_partitions(name, additions)
+        for category in sorted(current - desired):
+            instance.delete_dynamic_partition(name, category)
 
 
 def _output[T: ConfigArtifact](value: T) -> Output[T]:
@@ -93,8 +98,10 @@ _MERGE_TYPE = PythonObjectDagsterType(MergeSettings, name="TrainMergeSettings")
 _STATS_TYPE = PythonObjectDagsterType(SplitStats, name="SplitStats")
 _ROWS_TYPE = pandera_schema_to_dagster_type(SplitRowsTable)
 _CATEGORY_ROWS_TYPE = Dict[str, _ROWS_TYPE]
-_CATEGORY_CONFIG = AssetIn(
-    key=GLOBAL_CONFIG, dagster_type=REGISTERED_CONFIG_TYPE, partition_mapping=DATASET_DIM
+_SPLIT_CONFIG = AssetIn(
+    key=GLOBAL_CONFIG,
+    dagster_type=REGISTERED_CONFIG_TYPE,
+    partition_mapping=SpecificPartitionsPartitionMapping([CODEBENCH_DATASET_ID]),
 )
 
 
@@ -103,9 +110,8 @@ def train_partition_inputs(context: InputContext) -> dict[str, DataFrame[SplitRo
     manager = context.resources.train_table_io
     if not isinstance(manager, DataFrameIOManager):
         raise IntegrityError("Category merge requires registered dataset storage")
-    partitions = context.asset_partitions_def
-    if not isinstance(partitions, MultiPartitionsDefinition):
-        raise IntegrityError("Category merge requires multipartitioned category rows")
+    if not isinstance(context.asset_partitions_def, DynamicPartitionsDefinition):
+        raise IntegrityError("Category merge requires dynamically partitioned category rows")
     frames: dict[str, DataFrame[SplitRowsTable]] = {}
     for key in sorted(context.asset_partition_keys):
         record = current_materialization(context.instance, context.asset_key, key)
@@ -114,21 +120,16 @@ def train_partition_inputs(context: InputContext) -> dict[str, DataFrame[SplitRo
             snapshot = manager.read_planned_output(context.asset_key, key, reference.digest)
             if not isinstance(snapshot.value, pd.DataFrame):
                 raise IntegrityError("Expected a category table")
-            category = partitions.get_partition_key_from_str(key).keys_by_dimension["category"]
-            frames[category] = SplitRowsTable.validate(snapshot.value)
+            frames[key] = SplitRowsTable.validate(snapshot.value)
     return frames
 
 
 def _split_assets(split: Split) -> _SplitAssets:
-    partitions = MultiPartitionsDefinition(
-        {
-            "dataset": DATASET_PARTITIONS,
-            "category": DynamicPartitionsDefinition(name=_category_dimension(split)),
-        }
-    )
+    partitions = DynamicPartitionsDefinition(name=_category_partitions_name(split))
     rows_key = AssetKey([split, "category_rows"])
     sources_attr = f"{split}_sources"
     digest_attr = f"{sources_attr}_digest"
+    consumption = "model training" if split == "train" else "held-out model evaluation"
 
     def configured(registered: RegisteredConfig) -> TrainConfig:
         config = _split_config(registered, split)
@@ -137,7 +138,7 @@ def _split_assets(split: Split) -> _SplitAssets:
         return config
 
     def category_sources(context: AssetExecutionContext, config: TrainConfig) -> CategorySources:
-        category = partitions.get_partition_key_from_str(context.partition_key).keys_by_dimension["category"]
+        category = context.partition_key
         sources = config.sources_by_category().get(category)
         if sources is None:
             raise IntegrityError(f"No {split} sources configured for {category}")
@@ -155,7 +156,7 @@ def _split_assets(split: Split) -> _SplitAssets:
         group_name=split,
         io_manager_key="config_run_io_manager",
         dagster_type=_SOURCE_TYPE,
-        ins={"registered": _CATEGORY_CONFIG},
+        ins={"registered": _SPLIT_CONFIG},
     )
     def load_config(context: AssetExecutionContext, registered: RegisteredConfig) -> Output[CategorySources]:
         return _output(category_sources(context, configured(registered)))
@@ -166,7 +167,7 @@ def _split_assets(split: Split) -> _SplitAssets:
         group_name=split,
         io_manager_key="config_run_io_manager",
         dagster_type=_COUNT_TYPE,
-        ins={"registered": _CATEGORY_CONFIG},
+        ins={"registered": _SPLIT_CONFIG},
     )
     def count_config(context: AssetExecutionContext, registered: RegisteredConfig) -> Output[CountSettings]:
         config = configured(registered)
@@ -175,11 +176,11 @@ def _split_assets(split: Split) -> _SplitAssets:
 
     @asset(
         key=mapping_key(f"{split}_merge"),
-        partitions_def=DATASET_PARTITIONS,
+        partitions_def=_MERGE_PARTITIONS,
         group_name=split,
         io_manager_key="config_run_io_manager",
         dagster_type=_MERGE_TYPE,
-        ins={"registered": registered_input()},
+        ins={"registered": _SPLIT_CONFIG},
     )
     def merge_config(registered: RegisteredConfig) -> Output[MergeSettings]:
         sources = configured(registered).sources_by_category()
@@ -216,15 +217,17 @@ def _split_assets(split: Split) -> _SplitAssets:
 
     @asset(
         key=AssetKey([split, "merged_rows"]),
-        partitions_def=DATASET_PARTITIONS,
+        partitions_def=_MERGE_PARTITIONS,
         group_name=split,
+        description=f"Full {split} dataset for {consumption}, containing rows from all configured "
+        "categories in the single CodeBench partition.",
         io_manager_key=TRAIN_TABLE_IO,
         dagster_type=_ROWS_TYPE,
         ins={
             "categories": AssetIn(
                 key=rows_key,
                 dagster_type=_CATEGORY_ROWS_TYPE,
-                partition_mapping=DATASET_DIM,
+                partition_mapping=AllPartitionMapping(),
                 input_manager_key="train_partition_inputs",
             ),
             "settings": AssetIn(key=merge_config.key, dagster_type=_MERGE_TYPE),

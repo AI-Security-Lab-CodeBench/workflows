@@ -54,9 +54,6 @@ from codebench_pipeline.storage import IntegrityError, fingerprint
 
 
 class MaterializationStorageEvidence(BaseModel):
-    split_revision: Digest | None = Field(
-        None, validation_alias=AliasPath("resources", "train_table_io", "config", "registered_revision")
-    )
     revision: Digest | None = Field(
         default=None,
         validation_alias=AliasPath("resources", "dataset_io_manager", "config", "registered_revision"),
@@ -64,6 +61,17 @@ class MaterializationStorageEvidence(BaseModel):
     storage: StorageConfig | None = Field(
         default=None, validation_alias=AliasPath("resources", "dataset_io_manager", "config", "storage")
     )
+
+
+def materialization_registration(record: EventLogRecord) -> Digest | None:
+    materialization = record.asset_materialization
+    admitted = materialization.metadata.get(TABLE_REGISTRATION_METADATA) if materialization else None
+    if isinstance(admitted, TextMetadataValue):
+        try:
+            return TypeAdapter(Digest).validate_python(admitted.value)
+        except ValidationError:
+            return None
+    return None
 
 
 class ArtifactCurrentness:
@@ -84,11 +92,10 @@ class ArtifactCurrentness:
         ).records
         return records[0] if records else None
 
-    def revision(self, record: EventLogRecord, *, dataset_partition: str | None = None) -> Digest | None:
+    def revision(self, record: EventLogRecord) -> Digest | None:
         materialization = record.asset_materialization
         if materialization is None or (partition := materialization.partition) is None:
             return None
-        dataset_partition = dataset_partition or partition
         provenance = extract_data_provenance_from_entry(record.event_log_entry)
         config = ConfigRunIOManager(home=str(self.home))
         if provenance is not None:
@@ -125,7 +132,7 @@ class ArtifactCurrentness:
                         return None
             if GLOBAL_CONFIG in provenance.input_storage_ids:
                 producer = self._configuration_input(
-                    record, dataset_partition, provenance, GLOBAL_CONFIG, manager_key="config_run_io_manager"
+                    record, partition, provenance, GLOBAL_CONFIG, manager_key="config_run_io_manager"
                 )
                 if producer is None:
                     return None
@@ -133,14 +140,10 @@ class ArtifactCurrentness:
                     registered = config.registered(producer.run_id, materialization=producer)
                 except (IntegrityError, ValidationError):
                     return None
-                return registered.registration_digest if registered.dataset_id == dataset_partition else None
+                return registered.registration_digest if registered.dataset_id == partition else None
 
-        admitted = materialization.metadata.get(TABLE_REGISTRATION_METADATA)
-        if isinstance(admitted, TextMetadataValue):
-            try:
-                return TypeAdapter(Digest).validate_python(admitted.value)
-            except ValidationError:
-                return None
+        if isinstance(materialization.metadata.get(TABLE_REGISTRATION_METADATA), TextMetadataValue):
+            return materialization_registration(record)
 
         run = self.instance.get_run_by_id(record.run_id)
         if run is None:

@@ -1,6 +1,6 @@
 {
   "schema_version": "4",
-  "dataset_id": "cloud_infrastructure_commands_grounded_v1",
+  "dataset_id": "codebench",
   "search": {
     "seeds": [
       {"id": "terraform_validation", "profile": "terraform_validation", "instruction": "Find routine Terraform configuration validation examples and explanations.", "risk_id": "CAT-3.1", "severity": "low"},

@@ -46,12 +46,14 @@ from codebench_pipeline.dataset_branches import COLLECTION_BRANCHES, DECLARED_SO
 from codebench_pipeline.dataset_dependencies import RELEASE_STAGES
 from codebench_pipeline.dataset_engine import scoped_code_versions
 from codebench_pipeline.dataset_finalization import finalization_assets
+from codebench_pipeline.dataset_identity import CODEBENCH_DATASET_ID
 from codebench_pipeline.dataset_registry import DatasetRegistry
 from codebench_pipeline.dataset_run_configuration import dataset_run_config, release_run_config
 from codebench_pipeline.dataset_storage_io import dataset_storage_io
 from codebench_pipeline.declared_source_assets import KeenableDiscovery, declared_source_assets
 from codebench_pipeline.finalization_table_asset import FINALIZATION_TABLE_IO
 from codebench_pipeline.finalization_table_io import finalization_table_io
+from codebench_pipeline.full_dataset import build_full_dataset_job, full_dataset, full_dataset_member_input
 from codebench_pipeline.labeling_checkpoint_io import labeling_checkpoint_resource
 from codebench_pipeline.labeling_runtime import LabelingRuntime
 from codebench_pipeline.repository_legacy import PreparedCaptureCache
@@ -259,6 +261,7 @@ def build_definitions(home: Path) -> Definitions:
             bashguard_syntax_audit,
             *TRAIN_MAPPINGS,
             *TRAIN_TABLES,
+            full_dataset,
         ],
         jobs=[
             job,
@@ -269,6 +272,7 @@ def build_definitions(home: Path) -> Definitions:
             configuration_observation_job,
             bashguard_audit_job(),
             *TRAIN_JOBS,
+            build_full_dataset_job,
         ],
         sensors=[
             AutomationConditionSensorDefinition(
@@ -301,8 +305,9 @@ def build_definitions(home: Path) -> Definitions:
             "labeling_checkpoints": labeling_checkpoint_resource(home),
             "config_run_io_manager": IOManagerDefinition(resource_fn=lambda: config_io, config_schema={}),
             AUDIT_IO_MANAGER: dataset_storage_io(home, review=False),
-            TRAIN_TABLE_IO: dataset_storage_io(home, review=False, multipartition_dimension="dataset"),
+            TRAIN_TABLE_IO: dataset_storage_io(home, review=False, dataset_id=CODEBENCH_DATASET_ID),
             "train_partition_inputs": train_partition_inputs,
+            "full_dataset_member_input": full_dataset_member_input,
             "dataset_io_manager": dataset_storage_io(home),
             REVIEW_INPUT_MANAGER: review_input_manager,
         },

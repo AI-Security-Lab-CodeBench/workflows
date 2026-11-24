@@ -89,6 +89,15 @@ def mapping_key(scope: str) -> AssetKey:
     return AssetKey(["datasets", f"map_{scope}_config"])
 
 
+SPLIT_CATEGORY_CONFIGS: Final = frozenset((split, "stats") for split in ("train", "test")) | frozenset(
+    tuple(mapping_key(f"{split}_{scope}").path) for split in ("train", "test") for scope in ("load", "counts")
+)
+SINGLETON_RUN_CONFIGS: Final = frozenset({("codebench", "full_dataset")}) | frozenset(
+    tuple(mapping_key(f"{split}_merge").path) for split in ("train", "test")
+)
+PARTITIONED_RUN_CONFIGS: Final = SPLIT_CATEGORY_CONFIGS | SINGLETON_RUN_CONFIGS
+
+
 def collection_mapping_key(branch: Branch, stage: str) -> AssetKey:
     return mapping_key(collection_operation(branch, stage).mapping_scope)
 
@@ -149,13 +158,28 @@ def _record_config_digest(context: MetadataSink, payload: bytes) -> None:
     context.add_output_metadata({"codebench/config_digest": sha256(payload)})
 
 
+def _run_output_partition(context: InputContext | OutputContext) -> str | None:
+    if tuple(context.asset_key.path) in PARTITIONED_RUN_CONFIGS and context.has_asset_partitions:
+        return context.asset_partition_key
+    return None
+
+
 class ConfigRunIOManager(ConfigurableIOManager):
     """Read config from its producing run, or the partition's observed directory."""
 
     home: str
 
+    def run_output_path(self, run_id: str, key: AssetKey, partition: str | None) -> Path:
+        if tuple(key.path) not in PARTITIONED_RUN_CONFIGS:
+            return Path(self.home, "configuration-runs", run_id, *key.path)
+        if partition is None:
+            raise IntegrityError("Partitioned configuration requires an asset partition")
+        return Path(
+            self.home, "configuration-runs", run_id, "partitions", sha256(partition.encode()), *key.path
+        )
+
     def handle_output(self, context: OutputContext, obj: BaseModel) -> None:
-        path = Path(self.home, "configuration-runs", context.run_id, *context.asset_key.path)
+        path = self.run_output_path(context.run_id, context.asset_key, _run_output_partition(context))
         path.parent.mkdir(parents=True, exist_ok=True)
         payload = obj.model_dump_json(by_alias=True).encode()
         path.write_bytes(payload)
@@ -193,7 +217,9 @@ class ConfigRunIOManager(ConfigurableIOManager):
     def _upstream_payload(self, context: InputContext) -> bytes:
         upstream = context.upstream_output
         if upstream is None:
-            return self._read_run_output(context.step_context.run_id, context.asset_key)
+            return self._read_run_output(
+                context.step_context.run_id, context.asset_key, _run_output_partition(context)
+            )
         from codebench_pipeline.finalization_cache_reuse import materialization_attempt_succeeded
 
         record = input_materialization(context)
@@ -219,8 +245,8 @@ class ConfigRunIOManager(ConfigurableIOManager):
             self._read_run_output(run_id, CONFIG_DIRECTORY), strict=True
         )
 
-    def _read_run_output(self, run_id: str, key: AssetKey) -> bytes:
-        path = Path(self.home, "configuration-runs", run_id, *key.path)
+    def _read_run_output(self, run_id: str, key: AssetKey, partition: str | None = None) -> bytes:
+        path = self.run_output_path(run_id, key, partition)
         try:
             return path.read_bytes()
         except FileNotFoundError as error:
@@ -233,7 +259,7 @@ class ConfigRunIOManager(ConfigurableIOManager):
         materialization = record.asset_materialization
         if materialization is None:
             raise IntegrityError("Configuration producer has no materialization")
-        payload = self._read_run_output(record.run_id, materialization.asset_key)
+        payload = self._read_run_output(record.run_id, materialization.asset_key, materialization.partition)
         if materialization.metadata.get("codebench/config_digest") != TextMetadataValue(sha256(payload)):
             raise IntegrityError("Persisted configuration differs from its producer evidence")
         return payload

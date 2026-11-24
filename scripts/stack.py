@@ -10,7 +10,6 @@ from time import monotonic
 from uuid import uuid4
 
 ROOT = Path(__file__).resolve().parents[1]
-DATASET = "cloud_infrastructure_commands_grounded_v1"
 WORKSPACE = "/opt/codebench/config/workspace.yaml"
 WAIT = ["--wait", "--wait-timeout", "120"]
 
@@ -100,6 +99,9 @@ def e2e(compose: list[str], node: str) -> None:
 
 
 def main() -> None:
+    sys.path.insert(0, str(ROOT))
+    from codebench_pipeline.dataset_identity import CODEBENCH_DATASET_ID
+
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--env-file", type=Path, default=ROOT / ".env", help="Compose deployment settings")
     commands = parser.add_subparsers(dest="action", required=True)
@@ -116,7 +118,7 @@ def main() -> None:
         "unsynced", help="Refresh settings and enable build automation (can label)"
     )
     for action in (through, unsynced):
-        action.add_argument("--dataset", default=DATASET)
+        action.add_argument("--dataset", default=CODEBENCH_DATASET_ID)
     commands.add_parser("e2e", help="Run one affected pytest node using a disposable database").add_argument(
         "node"
     )
@@ -124,10 +126,10 @@ def main() -> None:
         "configure-splits", help="Register pinned train and test inputs from private JSON"
     )
     configure.add_argument("manifest", type=Path)
-    configure.add_argument("--dataset", default=DATASET)
-    for action in ("train-load", "test-load", "train-merge", "test-merge"):
+    configure.add_argument("--dataset", choices=(CODEBENCH_DATASET_ID,), default=CODEBENCH_DATASET_ID)
+    for action in ("train-load", "test-load", "train-merge", "test-merge", "full-dataset"):
         split = commands.add_parser(action)
-        split.add_argument("--dataset", default=DATASET)
+        split.add_argument("--dataset", choices=(CODEBENCH_DATASET_ID,), default=CODEBENCH_DATASET_ID)
         if action.endswith("-load"):
             split.add_argument("category")
             split.add_argument("--stats-only", action="store_true", help="Compute stats from persisted rows.")
@@ -164,7 +166,7 @@ def main() -> None:
         run(*cli, "check-idle")
         run(*compose, "up", "--no-deps", "--force-recreate", *WAIT, "webserver", "daemon")
         run(*cli, "register", "--config", "business-configs/datasets/cat3.json")
-        run(*cli, "build", "--dataset", DATASET, "--force", "--prepare-only")
+        run(*cli, "build", "--dataset", CODEBENCH_DATASET_ID, "--force", "--prepare-only")
     elif args.action == "stages":
         run(*cli, "stages")
     elif args.action == "through":
@@ -178,7 +180,7 @@ def main() -> None:
     elif args.action == "configure-splits":
         with args.manifest.open("rb") as manifest:
             subprocess.run([*cli, "configure-splits", "--dataset", args.dataset], stdin=manifest, check=True)
-    elif args.action in {"train-load", "test-load", "train-merge", "test-merge"}:
+    elif args.action in {"train-load", "test-load", "train-merge", "test-merge", "full-dataset"}:
         category = ["--category", args.category] if args.action.endswith("-load") else []
         if category and args.stats_only:
             category.append("--stats-only")

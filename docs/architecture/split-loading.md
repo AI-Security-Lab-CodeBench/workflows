@@ -10,18 +10,36 @@ datasets/global_config → map_<split>_load_config   → <split>/category_rows
                        → map_<split>_merge_config  → <split>/merged_rows  ← category_rows (all configured categories)
 ```
 
-The three mapping keys are under `datasets/`. Category rows and counts are
-partitioned by registration and **category**, not by risk. Multiple risk
-branches for `CAT-2`, for example, all enter a single `CAT-2` partition.
-Each merged table has just the registration partition.
+CodeBench is one dataset (`codebench`). Each split has its own configured
+category partitions, named `CAT-N`. The three mapping keys are under `datasets/`.
+Other registrations do not contribute categories or add a dataset axis to the
+split graph. Risk labels are data, not partition keys.
 
-**Reading the lineage color:** the native graph counts every registered dataset
-key, including datasets with no split sources. At the category level it counts
-the Cartesian product of dataset and category keys. A partially materialized
-node therefore does not, by itself, mean a configured split is missing. In the
-Partitions tab, select the dataset and compare its materializations with the
-categories declared for that split. Do not backfill unrelated registrations to
-change the aggregate color.
+**Full datasets for downstream jobs:** use `train/merged_rows` for training
+and `test/merged_rows` for held-out evaluation. Each is a single typed table
+at the `codebench` key, with **no category dimension**. Consumers do not need
+to enumerate categories. Each merge requires every configured category in its
+own split, rejects missing or stale inputs, and never depends on the other split.
+The Data tab shows the complete split row count and allows paging its rows.
+
+`codebench/full_dataset` is the downstream, model-facing dataset. It bundles
+the two completed merges as **separate named members**, `train` and `test`.
+Build it with `python3 scripts/stack.py full-dataset` after both merges.
+In a downstream Python asset taking a `FullDatasetBundle`, call
+`bundle.train.load()` for fitting and `bundle.test.load()` for held-out
+evaluation. Each call returns a schema-validated DataFrame from that member's
+immutable Parquet reference; publishing the bundle does not duplicate the rows.
+For a Dagster consumer, declare the input as
+`AssetIn(key=FULL_DATASET_KEY, dagster_type=FULL_DATASET_TYPE)` and annotate
+the argument `bundle: FullDatasetBundle`. All three names come from
+`codebench_pipeline.full_dataset`.
+The Data tab displays each member's row count, reference and producing run.
+Retain those objects when retaining a bundle. If the registration changes,
+refresh the affected categories and both merge receipts before republishing.
+
+A green partitioned node means Dagster recorded materializations for its
+configured keys. Changing a source pin on an existing key still requires a new
+load of that category before merging. Do not seed status with synthetic events.
 
 ### Declare the inputs
 
@@ -36,7 +54,7 @@ The loader does not discover branches, run repository scripts, or execute comman
 Put the sections directly in the dataset bundle, or keep a private JSON file with
 just the two sections. A private manifest keeps non-public policy and data out
 of Git. The following commands operate inside the **existing Compose stack**;
-they do not launch local workers. Start with a registered dataset. The configure
+they do not launch local workers. Start with the registered `codebench` configuration. The configure
 command replaces both sections, retains the other registered settings, and
 materializes `datasets/global_config`. As with any registration change, use the
 normal review workflow if the original dataset has an active review snapshot.
@@ -51,10 +69,10 @@ for category in CAT-1 CAT-2 CAT-4 CAT-5 CAT-6 CAT-7; do
   python3 scripts/stack.py test-load "$category" || exit 1
 done
 python3 scripts/stack.py test-merge
+python3 scripts/stack.py full-dataset
 ```
 
-Pass `--dataset <registration-id>` to any of these commands to select a
-non-default registration. Reapply the private manifest if another operation
+The split commands target `codebench`. Reapply the private manifest if another operation
 replaces the registration with a bundle that omits the sections.
 
 ### What is preserved
@@ -74,7 +92,7 @@ category produces `{"total_rows": 0, "marginal_counts": []}`. Open
 `/assets/train/stats?view=data` or `/assets/test/stats?view=data` and select a
 persisted category partition to inspect its values and declared schema.
 To materialize just the new stats from an existing category table, use
-`python3 scripts/stack.py train-load CAT-6 --dataset <registration-id> --stats-only`
+`python3 scripts/stack.py train-load CAT-6 --stats-only`
 (or `test-load`). This does not fetch CSVs or rewrite the category or merged tables.
 
 `category_rows` and `merged_rows` have the same strict nine-string-column

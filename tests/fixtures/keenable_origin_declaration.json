@@ -1,6 +1,6 @@
 {
   "schema_version": "3",
-  "dataset_id": "cloud_infrastructure_commands_grounded_v1",
+  "dataset_id": "codebench",
   "generation": "cat3-keenable-community-cases-v2",
   "budget": {"search_calls": 5, "origin_calls": 23},
   "search_plan": {

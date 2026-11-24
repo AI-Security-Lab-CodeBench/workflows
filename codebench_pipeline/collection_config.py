@@ -14,6 +14,7 @@ from pydantic import (
 from pydantic_core import PydanticCustomError
 
 from codebench_pipeline.dataset_branches import Branch
+from codebench_pipeline.dataset_identity import CODEBENCH_DATASET_ID
 from codebench_pipeline.inference_capacity import ScopedCapacityConfig
 from codebench_pipeline.keenable_policy import (
     CurrentKeenableDeclaration,
@@ -305,4 +306,4 @@ class DeclaredSourceStageConfig(TypedConfig, ConfigArtifact):
         return self.repository_config.branch_digest(self.branch)
 
 
-CAT3_DATASET_ID: Final = "cloud_infrastructure_commands_grounded_v1"
+CAT3_DATASET_ID: Final = CODEBENCH_DATASET_ID

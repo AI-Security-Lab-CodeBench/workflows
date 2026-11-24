@@ -1,5 +1,5 @@
 {
-  "dataset_id": "cloud_infrastructure_commands_grounded_v1",
+  "dataset_id": "codebench",
   "category_id": "CAT-3",
   "revision_label": "cat3-collection",
   "merge": {
