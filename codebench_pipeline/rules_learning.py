@@ -9,12 +9,14 @@ from codebench_pipeline.rules_agents import (
     Conversation,
     Feedback,
     RuleAgent,
+    TerminalRecovery,
     TrainEvidence,
 )
 from codebench_pipeline.rules_contracts import (
     Category,
     Diagnostic,
     EvaluationError,
+    EvaluationReceipt,
     FinalizeError,
     FinalizeReceipt,
     FinalizeSubmission,
@@ -28,10 +30,12 @@ from codebench_pipeline.rules_similarity import (
     CaptureClosure,
     CaptureDecision,
     CapturedRule,
+    CaptureRecoveryReason,
     DedupResult,
     DiffInput,
     FinishInput,
     JudgeCandidate,
+    JudgeClosure,
     JudgeDecision,
     JudgeInput,
     JudgePair,
@@ -68,7 +72,7 @@ class CaptureResult(ConfigArtifact):
 
     @property
     def finished_batches(self) -> int:
-        return sum(item.run.status == "finished" for item in self.batches)
+        return sum(item.run.status == "finished" and bool((item.justification or "").strip()) for item in self.batches)
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,10 +96,77 @@ class _Train:
             ))
 
 
-def _capture_batch(agent: RuleAgent, train: _Train, batch: CaptureBatch) -> CaptureDecision:
+def _capture_failure(receipt: EvaluationReceipt) -> str | None:
+    if not receipt.fixtures_passed:
+        return "fixture_mismatch"
+    if any(row.error is not None for row in receipt.rows):
+        return "train_error"
+    if any(row.rule_ids and not row.passed for row in receipt.rows):
+        return "wrong_match"
+    return None if any(row.rule_ids for row in receipt.rows) else "no_train_hits"
+
+
+def _closure(batch: CaptureBatch, accepted: tuple[CapturedRule, ...], codes: tuple[str, ...]) -> CaptureClosure:
+    covered = {row_id for entry in accepted for hit in entry.singleton.hit_sets for row_id in hit.row_ids}
+    abstained = tuple(row.id for row in batch.rows if row.id not in covered)
+    return CaptureClosure(
+        batch_id=batch.id, accepted_rule_ids=tuple(entry.package.rule.id for entry in accepted),
+        uncovered_row_ids=abstained, diagnostic_codes=codes, validated_rule_count=len(accepted),
+        covered_row_count=len(batch.rows) - len(abstained), abstained_row_count=len(abstained),
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class _CaptureWork:
+    batch: CaptureBatch
+    previous: CaptureDecision | None = None
+
+    def replay(self, train: _Train) -> None:
+        previous = self.previous
+        if previous is None:
+            return
+        batch = self.batch
+        if (
+            previous.batch_id != batch.id or previous.row_ids != tuple(row.id for row in batch.rows)
+            or (previous.descriptor_sha256 is not None and previous.descriptor_sha256 != batch.descriptor_sha256)
+        ):
+            raise EvaluationError(Diagnostic(code="capture_resume_batch", message="Pinned batch descriptor changed"))
+        for index, entry in enumerate(previous.rules, 1):
+            rule = entry.package.rule
+            if rule.id != f"{batch.id}-{index:02d}" or rule.labels.category != batch.category:
+                raise EvaluationError(Diagnostic(code="capture_resume_rule", message="Pinned rule identity changed"))
+            train.authorize(entry.package)
+            receipt = evaluate_package(train.client, entry.package, train.corpus)
+            if _capture_failure(receipt) or receipt != entry.singleton:
+                raise EvaluationError(Diagnostic(
+                    code="capture_resume_receipt", rule_id=rule.id, message="Pinned rule gate or receipt changed",
+                ))
+        if previous.run.status == "finished":
+            slate = _closure(batch, previous.rules, ())
+            if (
+                not previous.run.request_sha256 or not (previous.justification or "").strip()
+                or (previous.recovery_reason is not None
+                    and (previous.recovery_reason != slate.reason or previous.justification != slate.narrative))
+            ):
+                raise EvaluationError(Diagnostic(
+                    code="capture_resume_closure", message="Pinned finished batch lacks a valid terminal decision",
+                ))
+
+
+class _NoArguments(ConfigArtifact):
+    pass
+
+
+def _capture_batch(agent: RuleAgent, train: _Train, work: _CaptureWork) -> CaptureDecision:
+    batch, previous = work.batch, work.previous
+    if previous is not None and previous.run.status == "finished":
+        return previous.model_copy(update={"descriptor_sha256": batch.descriptor_sha256})
     evidence = TrainEvidence()
-    accepted: list[CapturedRule] = []
+    accepted = list(previous.rules) if previous is not None else []
+    prior_runs = () if previous is None else (*previous.prior_runs, previous.run)
+    prior_codes = tuple(failure.diagnostic.code for attempt in prior_runs for failure in attempt.failures)
     justification: str | None = None
+    reason: CaptureRecoveryReason | None = None
 
     def add_rule(arguments: str) -> Feedback:
         package = Package.model_validate_json(arguments)
@@ -109,11 +180,7 @@ def _capture_batch(agent: RuleAgent, train: _Train, batch: CaptureBatch) -> Capt
         train.authorize(package)
         receipt = evaluate_package(train.client, package, train.corpus)
         view = evidence.record(receipt)
-        if view.fixture_failures or view.train_wrong_matches or view.train_errors or not view.train_matches:
-            code = (
-                "fixture_mismatch" if view.fixture_failures else
-                "train_error" if view.train_errors else "wrong_match" if view.train_wrong_matches else "no_train_hits"
-            )
+        if code := _capture_failure(receipt):
             return Feedback(
                 diagnostic=Diagnostic(
                     code=code, phase="gate", rule_id=rule.id,
@@ -130,11 +197,21 @@ def _capture_batch(agent: RuleAgent, train: _Train, batch: CaptureBatch) -> Capt
         return Feedback(recorded=tuple(entry.package.rule.id for entry in accepted))
 
     def closure(codes: tuple[str, ...]) -> CaptureClosure:
-        covered = {row_id for entry in accepted for hit in entry.singleton.hit_sets for row_id in hit.row_ids}
-        return CaptureClosure(
-            batch_id=batch.id, accepted_rule_ids=tuple(entry.package.rule.id for entry in accepted),
-            uncovered_row_ids=tuple(row.id for row in batch.rows if row.id not in covered), diagnostic_codes=codes,
-        )
+        return _closure(batch, tuple(accepted), tuple(dict.fromkeys((*prior_codes, *codes))))
+
+    def recover(codes: tuple[str, ...]) -> TerminalRecovery:
+        slate = closure(codes)
+
+        def select(arguments: str) -> Feedback:
+            nonlocal justification, reason
+            _NoArguments.model_validate_json(arguments)
+            reason = slate.reason
+            justification = slate.narrative
+            return Feedback(recorded=slate.accepted_rule_ids)
+
+        return TerminalRecovery(slate, AgentTool(
+            slate.reason.value, f"Close the batch with this evidenced finding: {slate.narrative}", _NoArguments, select,
+        ))
 
     run = Conversation(
         prompt=SAFETY_PROMPT + " Capture narrowly supported rules for this category and token neighborhood. "
@@ -147,23 +224,38 @@ def _capture_batch(agent: RuleAgent, train: _Train, batch: CaptureBatch) -> Capt
         "It is valid to report that no rule was recorded and the batch is uncovered. "
         "Do not invent rule IDs, evidence, or reasons.",
         acknowledgement=closure,
+        recovery=recover,
         tools=(
             AgentTool("add_rule", "Evaluate a package and record it only if it passes.", Package, add_rule),
             AgentTool("page_evaluation", "Read a train-only receipt page.", PageInput, evidence.page),
             AgentTool("finish", "Record why you are done with this neighborhood.", FinishInput, finish),
         ),
-    ).run(agent)
+    ).run(agent, recover_only=bool(accepted))
     return CaptureDecision(
         batch_id=batch.id, row_ids=tuple(row.id for row in batch.rows), justification=justification,
-        rules=tuple(accepted), run=run,
+        rules=tuple(accepted), run=run, descriptor_sha256=batch.descriptor_sha256,
+        recovery_reason=reason, prior_runs=prior_runs,
     )
 
 
 def capture_rules(
     agent: RuleAgent, train: Corpus, client: BashguardClient, *, category: Category | None = None,
+    resume: CaptureResult | None = None,
 ) -> CaptureResult:
     execution = _Train(train, client)
-    batches = tuple(_capture_batch(agent, execution, batch) for batch in capture_batches(train, category))
+    plan = capture_batches(train, category)
+    if resume is None:
+        work = tuple(_CaptureWork(batch) for batch in plan)
+    else:
+        if (
+            resume.corpus_digest != train.digest or resume.runtime_version != client.runtime_version
+            or len(resume.batches) != len(plan)
+        ):
+            raise EvaluationError(Diagnostic(code="capture_resume_lineage", message="Pinned capture scope or lineage changed"))
+        work = tuple(_CaptureWork(batch, previous) for batch, previous in zip(plan, resume.batches, strict=True))
+        for item in work:
+            item.replay(execution)
+    batches = tuple(_capture_batch(agent, execution, item) for item in work)
     return CaptureResult(corpus_digest=train.digest, runtime_version=client.runtime_version, batches=batches)
 
 
@@ -187,9 +279,8 @@ class _JudgeBatch:
             receipt = evaluate_package(train.client, package, train.corpus)
             return Feedback(receipts=(self.evidence.record(receipt),), examples=review_examples((receipt,)))
 
-        def finalize(arguments: str) -> Feedback:
+        def apply_diff(diff: DiffInput) -> Feedback:
             nonlocal finalized
-            diff = DiffInput.model_validate_json(arguments)
             if not set(diff.drop_ids).issubset(ids):
                 raise EvaluationError(Diagnostic(code="drop_scope", phase="validate", field="drop_ids",
                                                  message="Only the explicitly nominated IDs can be dropped."))
@@ -221,6 +312,13 @@ class _JudgeBatch:
                 receipts=tuple(self.evidence.record(item) for item in (*receipt.additions, receipt.combined)),
             )
 
+        def finalize(arguments: str) -> Feedback:
+            return apply_diff(DiffInput.model_validate_json(arguments))
+
+        def keep_rules(arguments: str) -> Feedback:
+            choice = FinishInput.model_validate_json(arguments)
+            return apply_diff(DiffInput(drop_ids=(), add=(), justification=choice.justification))
+
         payload = JudgeInput(
             candidates=tuple(JudgeCandidate(
                 package=entry.package, singleton=self.evidence.record(entry.singleton)
@@ -236,10 +334,21 @@ class _JudgeBatch:
             new_id_prefixes=tuple(prefixes.values()),
             sources=tuple(source for source in train.corpus.sources if source.category in categories),
         )
+
+        def recover(codes: tuple[str, ...]) -> TerminalRecovery:
+            return TerminalRecovery(
+                JudgeClosure(nominations=payload.nominations, diagnostic_codes=codes),
+                AgentTool(
+                    "keep_rules", "Explicitly propose keeping every nominated rule with a short evidence-based "
+                    "justification. If a change is warranted or the evidence is insufficient, do not call this tool. "
+                    "No unresolved edit, fixture or drop is implicitly accepted.", FinishInput, keep_rules,
+                ),
+            )
+
         run = Conversation(
             prompt=SAFETY_PROMPT + " Judge nominated rules, treating similarity as a hint, not proof. Compare complete "
             "label tuples and inspect shared and unique train hits; nominations only show up to three IDs per "
-            "hit set, and singleton receipt pages hold the full evidence. Read-only evaluate_rule cannot modify "
+            "hit set, and singleton receipt pages (kind=matches) hold all matching rows. Read-only evaluate_rule cannot modify "
             "anything. Submit one atomic finalize with drop_ids, fresh add packages, and a justification. Explain "
             "each drop, any old tests left behind, and why any unique coverage is intentionally relinquished. "
             "There is no obligation to preserve old tests or coverage. If keeping all, submit empty add/drop lists "
@@ -247,6 +356,7 @@ class _JudgeBatch:
             payload=payload, terminal="finalize", turns=_JUDGE_TURNS,
             closing_task="Submit the actual add/drop diff and your evidence-based justification. "
             "Use explicit drop_ids and add lists; submit two empty lists only if you justify keeping every rule.",
+            recovery=recover,
             tools=(
                 AgentTool("evaluate_rule", "Evaluate a package read-only on its fixtures and full train.", Package, evaluate),
                 AgentTool("page_evaluation", "Read a train-only receipt page.", PageInput, self.evidence.page),

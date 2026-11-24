@@ -17,6 +17,7 @@ from codebench_pipeline.rules_agents import Feedback, RuleAgent
 from codebench_pipeline.rules_contracts import (
     Bundle,
     Diagnostic,
+    EvaluationError,
     EvaluationInput,
     Fixture,
     Labels,
@@ -413,6 +414,161 @@ def test_capture_can_acknowledge_empty_batch_on_first_closure_call() -> None:
     assert state is not None
     summary = _JSON.validate_json(state)
     assert summary["accepted_rule_ids"] == [] and summary["uncovered_row_ids"] == ["train:0"]
+
+
+_TRUNCATED = HTTPResponse(
+    b'{"id":"cut","model":"qwen38-27b-fp8","choices":[{"index":0,"finish_reason":"length",'
+    b'"message":{"role":"assistant"}}]}', None,
+)
+
+
+@pytest.mark.parametrize("accept_recovery", [True, False])
+def test_double_truncated_capture_closes_only_with_supported_native_reason(accept_recovery: bool) -> None:
+    train = _train("pwd -P", "pwd -L")
+    evaluations: list[_EvaluatorInput] = []
+    batch_id = capture_batches(train)[0].id
+    valid = tuple(_package("pwd -P", f"{batch_id}-{index:02d}") for index in range(1, 6))
+    wait: Step = ("page_evaluation", {"receipt": 42})
+    terminal = "finish_with_abstentions" if accept_recovery else "finish_all_covered"
+    steps: tuple[Step, ...] = (*(("add_rule", package) for package in valid), wait, wait, (terminal, {}))
+    script = _agent(iter(steps))
+    attempts: list[_Request] = []
+
+    def request(url: str, raw: bytes, key: str | None, timeout: float) -> HTTPResponse:
+        attempts.append(_Request.model_validate_json(raw))
+        if len(attempts) in (8, 9):
+            return _TRUNCATED
+        return script.request(url, raw, key, timeout)
+
+    result = capture_rules(replace(script, request=request), train, _client(evaluations))
+
+    (batch,) = result.batches
+    assert result.complete is accept_recovery
+    assert result.packages == valid and len(evaluations) == 5
+    assert [d.code for d in batch.run.diagnostics if d.code == "output_limit"] == ["output_limit"] * 2
+    assert len(attempts) == 10
+    if accept_recovery:
+        assert batch.justification == "Retained 5 validated rule(s); covered 1 row(s) and abstained on 1 row(s)."
+    else:
+        assert batch.justification is None and batch.run.diagnostics[-1].code == "unknown_tool"
+
+
+@pytest.mark.parametrize("tamper", [None, "order", "descriptor", "receipt", "terminal"])
+def test_capture_resume_replays_pins_and_only_requests_unfinished_closure(tamper: str | None) -> None:
+    train = _train("pwd -P", *(f"pwd -Q{index:02}" for index in range(15)), "pwd -Z")
+    first_batch, second_batch = capture_batches(train)
+    first = _package("pwd -P", first_batch.next_rule_id)
+    second = _package("pwd -Z", second_batch.next_rule_id).model_copy(update={
+        "tests": (Fixture(command="pwd -Z", expected=_GOLD), Fixture(command="pwd -L", expected=Other())),
+    })
+    initial: tuple[Step, ...] = (
+        ("add_rule", first), ("finish", {"justification": "Leave the Q forms uncovered."}), ("add_rule", second),
+    )
+    original_requests: list[_Request] = []
+    script = _agent(iter(initial), original_requests)
+
+    def interrupted(url: str, raw: bytes, key: str | None, timeout: float) -> HTTPResponse:
+        if len(original_requests) == 3:
+            raise HTTPError(url, 503, "Offline", Message(), BytesIO())
+        return script.request(url, raw, key, timeout)
+
+    previous = capture_rules(replace(script, request=interrupted), train, _client([]))
+    done, unfinished = previous.batches
+    assert not previous.complete and previous.finished_batches == 1 and previous.packages == (first, second)
+    selected_batches = previous.batches
+    match tamper:
+        case "order":
+            selected_batches = (done.model_copy(update={"row_ids": done.row_ids[::-1]}), unfinished)
+        case "descriptor":
+            selected_batches = (done.model_copy(update={"descriptor_sha256": "c" * 64}), unfinished)
+        case "receipt":
+            entry = unfinished.rules[0]
+            forged = entry.model_copy(update={"singleton": entry.singleton.model_copy(update={"bundle_sha256": "d" * 64})})
+            selected_batches = (done, unfinished.model_copy(update={"rules": (forged,)}))
+        case "terminal":
+            selected_batches = (done.model_copy(update={"justification": None}), unfinished)
+        case None:
+            selected_batches = (done.model_copy(update={"descriptor_sha256": None}), unfinished)
+        case unexpected:
+            pytest.fail(f"Unexpected test case: {unexpected}")
+    evidence = previous.model_copy(update={"batches": selected_batches})
+    calls: list[_EvaluatorInput] = []
+    requests: list[_Request] = []
+    recovery: tuple[Step, ...] = (("finish_all_covered", {}),)
+    agent = _agent(iter(recovery), requests)
+    if tamper is not None:
+        with pytest.raises(EvaluationError, match={
+            "order": "capture_resume_batch", "descriptor": "capture_resume_batch",
+            "receipt": "capture_resume_receipt", "terminal": "capture_resume_closure",
+        }[tamper]):
+            capture_rules(agent, train, _client(calls), resume=evidence)
+        assert not requests
+        return
+
+    result = capture_rules(agent, train, _client(calls), resume=evidence)
+
+    assert result.complete and result.packages == (first, second)
+    assert tuple(call.bundle.rules for call in calls) == ((first.rule,), (second.rule,))
+    (request,) = requests
+    slate = request.messages[-1].content
+    assert slate is not None
+    assert _JSON.validate_json(slate)["diagnostic_codes"] == ["provider_http"]
+    assert result.batches[0] == done
+    assert result.batches[1].prior_runs == (unfinished.run,)
+    assert result.batches[1].justification == "Retained 1 validated rule(s); covered 1 row(s) and abstained on 0 row(s)."
+
+
+@pytest.mark.parametrize(("justification", "diagnostic"), [
+    ("Both candidates match the sole observed form; retain them rather than assume broader equivalence.", None),
+    (" ", "tool_input"),
+])
+def test_judge_truncation_requires_explicit_justified_keep_and_combined_gate(
+    justification: str, diagnostic: str | None,
+) -> None:
+    train = _train("pwd -P", "pwd -L")
+    evaluations: list[_EvaluatorInput] = []
+    client = _client(evaluations)
+    first = _package("pwd -P", "cat-6.capture-0001-01")
+    second = _package("pwd -P", "cat-6.capture-0001-02")
+    author: tuple[Step, ...] = (
+        ("add_rule", first), ("add_rule", second), ("finish", {"justification": "Compare duplicate hits."}),
+    )
+    captured = capture_rules(_agent(iter(author)), train, client)
+    observed: list[_Request] = []
+    page: Step = ("page_evaluation", {"receipt": 1, "kind": "matches", "limit": 1})
+
+    def steps() -> Iterator[Step]:
+        yield page
+        evidence = _feedback(observed[-1]).page
+        assert evidence is not None and tuple(row.id for row in evidence.rows) == ("train:0",)
+        assert evidence.total == 1 and evidence.next_offset is None
+        yield from (page,) * 5
+        yield "keep_rules", {"justification": justification}
+
+    script = _agent(steps(), observed)
+    attempts: list[_Request] = []
+
+    def request(url: str, raw: bytes, key: str | None, timeout: float) -> HTTPResponse:
+        attempts.append(_Request.model_validate_json(raw))
+        if len(attempts) in (7, 8):
+            return _TRUNCATED
+        return script.request(url, raw, key, timeout)
+
+    result = deduplicate_rules(replace(script, request=request), train, client, captured)
+
+    (decision,) = result.decisions
+    assert result.packages == captured.packages
+    assert [d.code for d in decision.run.diagnostics] == (
+        ["output_limit", "output_limit"] + ([] if diagnostic is None else [diagnostic])
+    )
+    assert result.complete is (diagnostic is None)
+    if diagnostic is None:
+        assert decision.finalized is not None and decision.finalized.submission.justification == justification
+        assert not decision.finalized.submission.add and not decision.finalized.submission.drop
+        assert tuple(call.bundle.rules for call in evaluations) == ((first.rule,), (second.rule,), (first.rule, second.rule))
+        assert not decision.finalized.combined.fixtures
+    else:
+        assert len(evaluations) == 2 and decision.finalized is None
 
 
 def test_judge_closure_rejects_empty_justification_then_evaluates_actual_diff() -> None:

@@ -114,8 +114,13 @@ class TrainEvidence:
         if page.receipt > len(self.receipts):
             raise EvaluationError(Diagnostic(code="unknown_receipt", message="Use a receipt from this conversation"))
         receipt = self.receipts[page.receipt - 1]
-        rows = receipt.page(offset=page.offset, limit=page.limit, kind=page.kind)
-        total = len(receipt.fixtures if page.kind == "fixtures" else receipt.rows)
+        if page.kind == "matches":
+            matches = tuple(row for row in receipt.rows if row.rule_ids)
+            rows = matches[page.offset:page.offset + page.limit]
+            total = len(matches)
+        else:
+            rows = receipt.page(offset=page.offset, limit=page.limit, kind=page.kind)
+            total = len(receipt.fixtures if page.kind == "fixtures" else receipt.rows)
         return Feedback(page=EvidencePage(
             receipt=page.receipt, kind=page.kind, offset=page.offset, total=total,
             next_offset=page.offset + len(rows) if page.offset + len(rows) < total else None, rows=rows,
@@ -139,6 +144,12 @@ class _State(TypedDict):
 
 
 @dataclass(frozen=True, slots=True)
+class TerminalRecovery:
+    evidence: ConfigArtifact
+    tool: AgentTool
+
+
+@dataclass(frozen=True, slots=True)
 class Conversation:
     prompt: str
     payload: ConfigArtifact
@@ -147,8 +158,9 @@ class Conversation:
     turns: int
     closing_task: str
     acknowledgement: Callable[[tuple[str, ...]], ConfigArtifact] | None = None
+    recovery: Callable[[tuple[str, ...]], TerminalRecovery] | None = None
 
-    def run(self, agent: RuleAgent) -> AgentRun:
+    def run(self, agent: RuleAgent, *, recover_only: bool = False) -> AgentRun:
         messages: list[JsonValue] = [
             {"role": "system", "content": self.prompt + "\nPinned authoring guide:\n" + agent.guide},
             {"role": "user", "content": self.payload.model_dump_json()},
@@ -159,6 +171,7 @@ class Conversation:
         status: Literal["finished", "exhausted", "context_limit", "endpoint_error", "request_too_large"] = "exhausted"
         repair: str | None = None
         last_turn = self.turns + 1
+        recovery_turn = last_turn + 1
         endpoint = agent.model.base_url
         if endpoint is None:
             raise EvaluationError(Diagnostic(code="agent_profile", message="Missing plain endpoint"))
@@ -170,22 +183,32 @@ class Conversation:
             nonlocal repair
             failed(turn, Diagnostic(code=code, message=message, phase="inference"))
             repair = message
-            return Command(update={"turn": turn}, goto="complete" if turn < last_turn else END)
+            recover = turn == last_turn and code == "output_limit" and self.recovery is not None
+            return Command(update={"turn": turn}, goto="complete" if turn < last_turn or recover else END)
 
         def complete_turn(state: _State) -> Command[str]:
             nonlocal repair, status
             turn = state["turn"] + 1
             closing = turn >= self.turns
             ack = self.acknowledgement if closing else None
+            codes = tuple(dict.fromkeys(failure.diagnostic.code for failure in failures))
+            recovery = self.recovery(codes) if turn == recovery_turn and self.recovery is not None else None
+            terminal = self.terminal if recovery is None else recovery.tool.name
+            offered = (
+                self.tools if not closing else (tools[self.terminal],)
+            ) if recovery is None else (recovery.tool,)
+            if recovery is not None:
+                tools[terminal] = recovery.tool
             tool_choice: JsonValue = (
-                {"type": "function", "function": {"name": self.terminal}} if turn == last_turn else "required"
+                "auto" if recovery is not None else
+                {"type": "function", "function": {"name": terminal}} if turn == last_turn else "required"
             )
             body = {
                 "model": agent.model.model,
-                "tools": [tools[self.terminal].schema()] if closing else [tool.schema() for tool in self.tools],
+                "tools": [tool.schema() for tool in offered],
                 "tool_choice": tool_choice, "parallel_tool_calls": False, "stream": False,
-                "max_completion_tokens": min(agent.model.max_output_tokens, _ACK_TOKENS) if ack is not None
-                else agent.model.max_output_tokens,
+                "max_completion_tokens": min(agent.model.max_output_tokens, _ACK_TOKENS)
+                if ack is not None or recovery is not None else agent.model.max_output_tokens,
                 "temperature": agent.model.temperature,
                 "chat_template_kwargs": {"enable_thinking": False},
             }
@@ -194,9 +217,15 @@ class Conversation:
                 if closing else "", repair,
             )))
             while True:
-                if ack is not None:
-                    codes = tuple(dict.fromkeys(failure.diagnostic.code for failure in failures))
-                    request_messages: list[JsonValue] = [
+                request_messages: list[JsonValue]
+                if recovery is not None:
+                    request_messages = [
+                        {"role": "system", "content": "Use only the supplied train evidence. "
+                         "Call the offered native tool only if its outcome is justified. Do not invent evidence."},
+                        {"role": "user", "content": recovery.evidence.model_dump_json()},
+                    ]
+                elif ack is not None:
+                    request_messages = [
                         {"role": "system", "content": instruction},
                         {"role": "user", "content": ack(codes).model_dump_json()},
                     ]
@@ -205,7 +234,7 @@ class Conversation:
                 raw = json.dumps({**body, "messages": request_messages},
                                  ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode()
                 if len(raw) > agent.max_request_bytes:
-                    if ack is None and len(messages) > 4:
+                    if recovery is None and ack is None and len(messages) > 4:
                         del messages[2:4]
                         continue
                     status = "request_too_large"
@@ -225,7 +254,7 @@ class Conversation:
                         diagnostic = provider_rejection(exc)
                     failed(turn, diagnostic)
                     is_context_limit = diagnostic.code == "provider_context_limit"
-                    if is_context_limit and ack is None and len(messages) > 4:
+                    if is_context_limit and recovery is None and ack is None and len(messages) > 4:
                         del messages[2:-2]
                         continue
                     status = "context_limit" if is_context_limit else "endpoint_error"
@@ -258,7 +287,7 @@ class Conversation:
             if choice.finish_reason not in {"stop", "tool_calls"} or len(choice.message.tool_calls) != 1:
                 return retry(turn, "incomplete_turn", "Return exactly one complete native function call.")
             call = choice.message.tool_calls[0]
-            if call.function.name not in tools or (closing and call.function.name != self.terminal):
+            if not any(tool.name == call.function.name for tool in offered):
                 return retry(turn, "unknown_tool", "Call only a tool offered in this turn.")
             repair = None
             messages.append(_JSON.validate_python(
@@ -286,18 +315,21 @@ class Conversation:
                 failed(turn, result.diagnostic)
                 if turn >= self.turns:
                     repair = f"The last submission failed with {result.diagnostic.code}. Correct it."
-            elif name == self.terminal:
+            elif name == self.terminal or turn == recovery_turn:
                 status = "finished"
             messages.append({
                 "role": "tool", "tool_call_id": call.id, "content": result.model_dump_json(),
             })
-            return Command(goto=END if status == "finished" or turn == last_turn else "complete")
+            return Command(goto=END if status == "finished" or turn >= last_turn else "complete")
 
         graph = StateGraph[_State, None, _State, _State](_State, input_schema=_State, output_schema=_State)
         graph.add_node("complete", complete_turn, destinations=("complete", "tools", END))
         graph.add_node("tools", tool_turn, destinations=("complete", END))
         graph.add_edge(START, "complete")
-        graph.compile().invoke({"turn": 0, "call": None}, config={"recursion_limit": 2 * last_turn + 1})
+        graph.compile().invoke(
+            {"turn": last_turn if recover_only else 0, "call": None},
+            config={"recursion_limit": 2 * recovery_turn + 1},
+        )
         return AgentRun(
             model=agent.model.model, backend_revision=agent.backend_revision, guide_sha256=agent.guide_sha256,
             request_sha256=tuple(hashes), status=status, failures=tuple(failures),

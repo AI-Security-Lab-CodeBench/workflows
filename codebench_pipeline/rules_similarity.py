@@ -1,5 +1,7 @@
 import re
 from collections import Counter
+from enum import StrEnum
+from hashlib import sha256
 from itertools import combinations, pairwise
 from math import ceil, sqrt
 from typing import Final, Literal
@@ -52,9 +54,12 @@ class AgentRun(ConfigArtifact):
         return tuple(failure.diagnostic for failure in self.failures)
 
 
+type EvidenceKind = Literal["fixtures", "rows", "matches"]
+
+
 class PageInput(ConfigArtifact):
     receipt: int = Field(ge=1)
-    kind: Literal["fixtures", "rows"] = "rows"
+    kind: EvidenceKind = "rows"
     offset: int = Field(default=0, ge=0)
     limit: int = Field(default=3, ge=1, le=5)
 
@@ -74,7 +79,7 @@ class ReceiptView(ConfigArtifact):
 
 class EvidencePage(ConfigArtifact):
     receipt: int
-    kind: Literal["fixtures", "rows"]
+    kind: EvidenceKind
     offset: int
     total: int
     next_offset: int | None
@@ -106,12 +111,40 @@ class CaptureBatch(ConfigArtifact):
     sources: tuple[CorpusSource, ...]
     next_rule_id: str
 
+    @property
+    def descriptor_sha256(self) -> Digest:
+        return sha256(self.model_dump_json().encode()).hexdigest()
+
+
+class CaptureRecoveryReason(StrEnum):
+    ALL_COVERED = "finish_all_covered"
+    WITH_ABSTENTIONS = "finish_with_abstentions"
+    NO_VALIDATED_RULES = "finish_without_validated_rules"
+
 
 class CaptureClosure(ConfigArtifact):
     batch_id: str
     accepted_rule_ids: tuple[str, ...]
     uncovered_row_ids: tuple[str, ...]
     diagnostic_codes: tuple[str, ...]
+    validated_rule_count: int
+    covered_row_count: int
+    abstained_row_count: int
+
+    @property
+    def reason(self) -> CaptureRecoveryReason:
+        if not self.accepted_rule_ids:
+            return CaptureRecoveryReason.NO_VALIDATED_RULES
+        return (
+            CaptureRecoveryReason.WITH_ABSTENTIONS if self.uncovered_row_ids else CaptureRecoveryReason.ALL_COVERED
+        )
+
+    @property
+    def narrative(self) -> str:
+        return (
+            f"Retained {self.validated_rule_count} validated rule(s); covered {self.covered_row_count} row(s) "
+            f"and abstained on {self.abstained_row_count} row(s)."
+        )
 
 
 def capture_batches(train: Corpus, category: Category | None = None) -> tuple[CaptureBatch, ...]:
@@ -148,6 +181,9 @@ class CaptureDecision(ConfigArtifact):
     justification: str | None
     rules: tuple[CapturedRule, ...]
     run: AgentRun
+    descriptor_sha256: Digest | None = None
+    recovery_reason: CaptureRecoveryReason | None = None
+    prior_runs: tuple[AgentRun, ...] = ()
 
 
 class Nomination(ConfigArtifact):
@@ -189,6 +225,11 @@ class JudgeInput(ConfigArtifact):
     nominations: tuple[JudgePair, ...]
     new_id_prefixes: tuple[str, ...]
     sources: tuple[CorpusSource, ...]
+
+
+class JudgeClosure(ConfigArtifact):
+    nominations: tuple[JudgePair, ...]
+    diagnostic_codes: tuple[str, ...]
 
 
 class JudgeDecision(ConfigArtifact):
