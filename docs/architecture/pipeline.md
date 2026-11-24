@@ -12,10 +12,14 @@ require collection, relabeling, or approval of an existing review queue.
 
 | Stage | Data available | Decision |
 | --- | --- | --- |
-| `rules_capture` | Similar examples from one training category; full train for checking a proposed rule | Propose specific CEL predicates and positive and negative fixtures. Keep the rule package and its evaluation evidence together. |
-| `rules_dedup` | Captured packages and train evidence | Nominate similar rules and rules sharing hits. The judge can inspect evaluations and submit a justified add/drop diff. A rewrite is a fresh rule, not an in-place change. |
-| `rules_finalize` | Deduplicated packages | Freeze the native bundle and packaged fixtures. No model sees the holdout during finalization. |
+| `rules_capture` | One partition of `train/category_rows` | Propose specific CEL predicates and positive and negative fixtures. Require a correct hit, passing fixtures and no wrong matches or evaluator errors on that category. |
+| `rules_dedup` | Selected category captures and pinned `train/merged_rows` | Replay every captured package on full train before nominating similar rules and rules sharing hits. A failed replay blocks learning. The judge can inspect full-train evidence and submit a justified add/drop diff. A rewrite is a fresh rule, not an in-place change. |
+| `rules_finalize` | Deduplicated packages and pinned `train/merged_rows` | Replay the complete surviving bundle on full train and freeze it without consulting the holdout. |
 | `rules_eval` | Frozen bundle and the test member | Measure wrong predictions, abstentions, failures, coverage and exact-label accuracy. An uncovered category or an undefined metric is not evidence of perfect precision. |
+| `rules_eval_report` | Held-out aggregate metrics only | Publish an interactive HTML summary without model calls or row-level data. |
+
+The trained cohort includes every selected training category, even if no
+learned rule survived for that category.
 
 The rule-authoring guide and the evaluator executable are independently pinned:
 the former determines what the agents see; the latter determines what their
@@ -28,14 +32,35 @@ the rule must decline to label that example. The judge can justify removing a
 retired rule's tests; every addition is evaluated anew. None of these decisions
 may consult the held-out report.
 
-Run the four manual jobs with `python -m codebench_pipeline.dataset_cli` in
-the deployed worker. First `rules-register --config - --sha256 <digest>`
-reads a private registration from standard input; hash the exact bytes you
-send. Then run `rules-capture --category <category>` once for each selected
-training category, `rules-learn` for deduplication and finalization, and
-`rules-eval` for the frozen bundle. These jobs do not enable a sensor. Inspect
-`codebench/rules_eval` in Dagster for the held-out result, not the train scores
-returned by the author's tools.
+Run these manual jobs with `python -m codebench_pipeline.dataset_cli` in the
+worker. They do not enable a sensor.
+
+1. Use `rules-register --config - --sha256 <digest>` to register private JSON
+   from standard input; hash the exact file bytes you send. The registration
+   supplies `categories`, `runtime` (`base_url`, `version`) and `prompt_guide`
+   (`path: "guide.json"`, `sha256`). The CLI reads the packaged guide and submits
+   it with the registration. The asset verifies both digests and the guide
+   schema without opening a file. Inference settings and category
+   source manifests come from the existing dataset registration.
+2. Materialize `train/category_rows` for each selected category using
+   `train-load --category <category>`, then run `rules-capture --category
+   <category>` for that category. Capture needs neither merge nor split pin.
+   It binds to the category's verified source manifest and the content digest
+   of its materialized table. Changes to other categories or merged split pins
+   do not invalidate an otherwise unchanged capture. Captures and failed runs
+   made before category isolation must be rerun rather than reused.
+3. Before `rules-learn`, materialize the train merge and register its `train`
+   pin (`digest`, `row_count`) in the same registration JSON. Before `rules-eval`,
+   materialize the test merge and add its separate `test` pin in the same shape.
+   If both pins are already known, register them up front. Learning and
+   evaluation still fail closed if a required pin is absent or mismatched.
+4. Inspect `codebench/rules_eval` for the held-out metrics and
+   `codebench/rules_eval_report` for the standalone report. Neither is an
+   input to learning.
+
+The assets and their configuration mappers are grouped under `rules`; stage
+tags distinguish registration, capture, deduplication, finalization and
+evaluation without changing existing asset keys.
 
 CodeBench builds a labeled dataset of shell commands from source material. A released row must be traceable to the text it came from, the evidence for its label, and the decision that admitted it. Commands are data throughout: no stage executes a collected command.
 

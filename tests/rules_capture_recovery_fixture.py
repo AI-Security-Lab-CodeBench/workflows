@@ -70,9 +70,10 @@ def exercise_capture_resume(
     definitions = build_definitions(home)
     job = definitions.resolve_job_def("capture_rules")
     manager = ConfigRunIOManager(home=str(home))
-    registered = manager.materialized_scope(
+    registered_rules = manager.materialized_scope(
         current_configuration_record(instance, RULES_REGISTRATION, CODEBENCH_DATASET_ID), RegisteredRules,
-    ).registration
+    )
+    registered = registered_rules.registration
 
     def register(runtime_origin: str) -> None:
         payload = registered.model_copy(update={
@@ -82,6 +83,7 @@ def exercise_capture_resume(
             instance=instance, partition_key=CODEBENCH_DATASET_ID,
             run_config={"ops": {"codebench__rules_registration": {"config": {
                 "registration_json": payload, "expected_sha256": sha256(payload.encode()).hexdigest(),
+                "guide_json": registered_rules.guide,
             }}}},
         ).success
 

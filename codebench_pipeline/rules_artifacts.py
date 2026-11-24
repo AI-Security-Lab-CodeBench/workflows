@@ -15,6 +15,7 @@ from dagster import (
 )
 from dagster._core.execution.stats import StepEventStatus
 from dagster._core.storage.tags import PARTITION_NAME_TAG
+from dagster_pandera import pandera_schema_to_dagster_type
 from pandera.typing import DataFrame, Series
 from pydantic import BaseModel, ValidationError
 
@@ -47,8 +48,9 @@ RULES_EVIDENCE_DIGEST: Final = "codebench/private_evidence_digest"
 
 
 class RulesCaptureArtifact(ConfigArtifact):
-    pins: LearningPins
     category: str
+    sources_digest: Digest
+    guide_sha256: Digest
     inference_digest: Digest
     result: CaptureResult
 
@@ -70,18 +72,28 @@ def rules_corpus_input(context: InputContext) -> Corpus:
     tables = context.resources.train_table_io
     if not isinstance(tables, DataFrameIOManager) or tables.registered_revision is None:
         raise IntegrityError("Rules inputs require registered split storage")
+    record = input_materialization(context)
+    if record is None:
+        raise IntegrityError("Rules inputs require a materialized split table")
     split: Split
     match context.asset_key.path:
+        case ["train", "category_rows"]:
+            reference = materialized_reference(context.instance, record)
+            frame = tables.read_version(reference)
+            if not isinstance(frame, pd.DataFrame):
+                raise IntegrityError("The pinned train category input is not a table")
+            return build_corpus(
+                SplitRowsTable.validate(frame), split="train", digest=reference.digest,
+                category=context.asset_partition_key,
+            )
         case ["train", "merged_rows"]:
             split = "train"
         case ["test", "merged_rows"]:
             split = "test"
         case _:
-            raise IntegrityError("Rules inputs must be a declared merged split")
-    record = input_materialization(context)
+            raise IntegrityError("Rules inputs must be a declared split table")
     if (
-        record is None
-        or (materialization := record.asset_materialization) is None
+        (materialization := record.asset_materialization) is None
         or materialization.metadata.get(TABLE_REGISTRATION_METADATA)
         != TextMetadataValue(tables.registered_revision)
     ):
@@ -91,7 +103,7 @@ def rules_corpus_input(context: InputContext) -> Corpus:
         raise IntegrityError("Rules split I/O requires the pinned rules registration")
     configuration = current_configuration_record(context.instance, RULES_REGISTRATION, CODEBENCH_DATASET_ID)
     registration = manager.materialized_scope(configuration, RegisteredRules).registration
-    pin = registration.train if split == "train" else registration.test
+    pin = registration.require_pin(split)
     reference = materialized_reference(context.instance, record)
     if reference.digest != pin.digest:
         raise IntegrityError(f"Rules run requires the registered {split} snapshot")
@@ -132,6 +144,9 @@ class RulesMetricsTable(pa.DataFrameModel):
         ordered = True
 
 
+RULES_METRICS_TYPE: Final = pandera_schema_to_dagster_type(RulesMetricsTable)
+
+
 def aggregate_holdout(metrics: HeldOutMetrics) -> DataFrame[RulesMetricsTable]:
     measurements: list[tuple[str, str, str, str, int | float | None]] = [
         ("overall", "overlap", "", "rows", metrics.contaminated_rows),
@@ -153,18 +168,19 @@ def aggregate_holdout(metrics: HeldOutMetrics) -> DataFrame[RulesMetricsTable]:
             (cohort, "outcome", "", "coverage", summary.coverage),
             (cohort, "outcome", "", "recall", summary.recall),
         ))
-    for item in metrics.classes:
-        measurements.extend((
-            ("overall", item.axis, item.value, "support", item.support),
-            ("overall", item.axis, item.value, "negative_support", item.negative_support),
-            ("overall", item.axis, item.value, "predicted", item.predicted),
-            ("overall", item.axis, item.value, "true_positive", item.true_positive),
-            ("overall", item.axis, item.value, "false_positive", item.false_positive),
-            ("overall", item.axis, item.value, "precision", item.precision),
-            ("overall", item.axis, item.value, "coverage", item.coverage),
-            ("overall", item.axis, item.value, "recall", item.recall),
-            ("overall", item.axis, item.value, "fpr", item.fpr),
-        ))
+    for cohort, classes in (("overall", metrics.classes), *metrics.cohort_classes.items()):
+        for item in classes:
+            measurements.extend((
+                (cohort, item.axis, item.value, "support", item.support),
+                (cohort, item.axis, item.value, "negative_support", item.negative_support),
+                (cohort, item.axis, item.value, "predicted", item.predicted),
+                (cohort, item.axis, item.value, "true_positive", item.true_positive),
+                (cohort, item.axis, item.value, "false_positive", item.false_positive),
+                (cohort, item.axis, item.value, "precision", item.precision),
+                (cohort, item.axis, item.value, "coverage", item.coverage),
+                (cohort, item.axis, item.value, "recall", item.recall),
+                (cohort, item.axis, item.value, "fpr", item.fpr),
+            ))
     frame = pd.DataFrame(measurements, columns=["cohort", "axis", "label", "metric", "value"])
     frame["value"] = frame["value"].astype("float64")
     return RulesMetricsTable.validate(frame)
@@ -239,7 +255,7 @@ def load_capture_attempt(
         prior_settings = manager.materialized_scope(mappings[0], RulesCaptureSettings)
     except ValidationError:
         raise IntegrityError("Capture resume source settings are malformed") from None
-    if prior_settings != settings or sha256(settings.agent.guide.encode()) != settings.pins.guide_sha256:
+    if prior_settings != settings or sha256(settings.agent.guide.encode()) != settings.guide_sha256:
         raise IntegrityError("Capture resume source settings differ from the registered capture inputs")
 
     path = manager.run_output_path(run_id, context.asset_key, partition)
@@ -262,11 +278,10 @@ def load_capture_attempt(
         raise IntegrityError("Capture resume evidence is missing, unreadable, or malformed") from None
     if (
         not result.batches or result.complete
-        or result.corpus_digest != settings.pins.train.digest
         or result.runtime_version != settings.runtime.version
         or any(
             (batch.run.model, batch.run.backend_revision, batch.run.guide_sha256)
-            != (settings.agent.model.model, settings.agent.backend_revision, settings.pins.guide_sha256)
+            != (settings.agent.model.model, settings.agent.backend_revision, settings.guide_sha256)
             for batch in result.batches
         )
     ):

@@ -7,6 +7,8 @@ import httpx2
 import pandas as pd
 import pytest
 from dagster import AssetKey
+from jsonschema import Draft202012Validator
+from jsonschema.protocols import Validator
 from pydantic import ValidationError
 from test_declared_dataset_graph import fixture_spec
 
@@ -17,7 +19,7 @@ from codebench_pipeline.artifact_views import (
     ArtifactQuery,
     ArtifactTable,
 )
-from codebench_pipeline.config_assets import GLOBAL_CONFIG
+from codebench_pipeline.config_assets import GLOBAL_CONFIG, SINGLETON_RUN_CONFIGS, SPLIT_CATEGORY_CONFIGS
 from codebench_pipeline.dataframe_io import DataFrameIOManager
 from codebench_pipeline.dataset_artifacts import DatasetArtifactCatalog
 from codebench_pipeline.dataset_cli import main
@@ -27,6 +29,8 @@ from codebench_pipeline.full_dataset import FullDatasetBundle
 from codebench_pipeline.runtime_instance import dataset_instance
 from codebench_pipeline.train_assets import register_dataset_partitions
 from codebench_pipeline.train_config import SplitSections, TrainConfig, TrainSource
+
+_VALIDATOR: type[Validator] = Draft202012Validator
 
 
 def test_train_loading(tmp_path: Path) -> None:
@@ -117,6 +121,21 @@ def test_train_loading(tmp_path: Path) -> None:
         cli("test-load", "--category", "CAT-5")
         cli("test-merge")
         cli("full-dataset")
+
+        for keys, partition in ((SPLIT_CATEGORY_CONFIGS, "CAT-3"), (SINGLETON_RUN_CONFIGS, "codebench")):
+            for key in sorted(keys):
+                assert partition in viewer.partitions(ArtifactKey(asset_key=key)).partitions, key
+                result = viewer.query(ArtifactQuery(asset_key=key, partition_key=partition))
+                assert isinstance(result, ArtifactJSON), key
+                assert result.data_schema.source == "declared", key
+                schema = result.data_schema.schema_
+                Draft202012Validator.check_schema(schema)
+                properties = schema["properties"]
+                assert isinstance(properties, dict)
+                assert set(result.value) <= set(properties), key
+                validator = _VALIDATOR(schema)
+                assert validator.is_valid(result.value), key
+                assert not validator.is_valid("{}"), key
 
         def full_dataset() -> FullDatasetBundle:
             request = ArtifactKey(asset_key=("codebench", "full_dataset"))

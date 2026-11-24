@@ -2,14 +2,18 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Final
 
-from dagster import AssetKey, AssetRecordsFilter, DagsterInstance, EventLogRecord, TextMetadataValue
+from dagster import AssetKey, AssetRecordsFilter, DagsterInstance, EventLogRecord
 from dagster._core.definitions.data_version import extract_data_version_from_entry
 from pydantic import ValidationError
 
-from codebench_pipeline.artifact_currentness import (
-    ArtifactCurrentness,
-    MaterializationStorageEvidence,
-    materialization_registration,
+from codebench_pipeline.artifact_currentness import ArtifactCurrentness
+from codebench_pipeline.artifact_storage_binding import (
+    REGISTERED_TABLES,
+    RULES_TABLES,
+    SPLIT_CATEGORY_TABLES,
+    SPLIT_MERGE_TABLES,
+    record_binding,
+    text_metadata,
 )
 from codebench_pipeline.artifact_views import (
     ArtifactBinding,
@@ -33,7 +37,6 @@ from codebench_pipeline.config_assets import (
     mapping_key,
 )
 from codebench_pipeline.data_view_models import DatasetViewError
-from codebench_pipeline.dataframe_io import AssetReference
 from codebench_pipeline.dataset_branches import (
     FINALIZATION_STAGES,
     annotation_stage_id,
@@ -42,16 +45,12 @@ from codebench_pipeline.dataset_branches import (
 )
 from codebench_pipeline.dataset_identity import CODEBENCH_DATASET_ID
 from codebench_pipeline.dataset_registry import DatasetRegistry
+from codebench_pipeline.finalization_cache_reuse import materialization_attempt_succeeded
 from codebench_pipeline.human_review_store import HumanReviewStore
-from codebench_pipeline.object_store import StorageConfig
-from codebench_pipeline.rules_artifacts import RULES_EVAL_KEY
+from codebench_pipeline.rules_artifact_reader import RULES_CAPTURE_KEYS, RULES_RUN_CONTRACTS, RulesRunBinding
+from codebench_pipeline.rules_settings import CAPTURE_PARTITIONS, RULES_CONFIG_IO
 from codebench_pipeline.storage import IntegrityError
 
-SPLITS: Final = ("train", "test")
-SPLIT_CATEGORY_TABLES: Final = frozenset((split, "category_rows") for split in SPLITS)
-SPLIT_MERGE_TABLES: Final = frozenset((split, "merged_rows") for split in SPLITS)
-SPLIT_TABLES: Final = SPLIT_CATEGORY_TABLES | SPLIT_MERGE_TABLES
-_RULES_EVAL: Final = tuple(RULES_EVAL_KEY.path)
 CONFIG_KEYS: Final = frozenset(
     tuple(key.path)
     for key in (
@@ -65,12 +64,6 @@ CONFIG_KEYS: Final = frozenset(
 )
 
 
-def text_metadata(record: EventLogRecord, key: str) -> str | None:
-    materialization = record.asset_materialization
-    value = materialization.metadata.get(key) if materialization is not None else None
-    return value.text if isinstance(value, TextMetadataValue) else None
-
-
 class DatasetArtifactCatalog:
     """Bind dataset storage to the generic artifact viewer without resolving business inputs."""
 
@@ -80,7 +73,7 @@ class DatasetArtifactCatalog:
         self.registry = DatasetRegistry(home)
 
     def partitions(self, key: ArtifactKey) -> ArtifactPartitions:
-        if key.asset_key in PRIVATE_RULES_RUN_ARTIFACTS:
+        if key.asset_key in PRIVATE_RULES_RUN_ARTIFACTS and key.asset_key not in RULES_RUN_CONTRACTS:
             return ArtifactPartitions(asset_key=key.asset_key, partitions=())
         partitions: list[str] = []
         active = self._split_partitions(key.asset_key)
@@ -100,15 +93,17 @@ class DatasetArtifactCatalog:
         return ArtifactPartitions(asset_key=key.asset_key, partitions=tuple(partitions))
 
     def _split_partitions(self, key: tuple[str, ...]) -> set[str] | None:
+        if key in RULES_CAPTURE_KEYS:
+            return set(CAPTURE_PARTITIONS.get_partition_keys(dynamic_partitions_store=self.instance))
         if key in SPLIT_CATEGORY_TABLES or key in SPLIT_CATEGORY_CONFIGS:
             split = key[1].split("_")[1] if key[0] == "datasets" else key[0]
             return set(self.instance.get_dynamic_partitions(f"{CODEBENCH_DATASET_ID}_{split}_categories"))
-        if key in SPLIT_MERGE_TABLES or key in SINGLETON_RUN_CONFIGS or key == _RULES_EVAL:
+        if key in SPLIT_MERGE_TABLES | SINGLETON_RUN_CONFIGS | RULES_TABLES or key in RULES_RUN_CONTRACTS:
             return {CODEBENCH_DATASET_ID}
         return None
 
-    def resolve(self, target: ArtifactTarget) -> ArtifactBinding | RunConfigBinding:
-        if target.asset_key in PRIVATE_RULES_RUN_ARTIFACTS:
+    def resolve(self, target: ArtifactTarget) -> ArtifactBinding | RunConfigBinding | RulesRunBinding:
+        if target.asset_key in PRIVATE_RULES_RUN_ARTIFACTS and target.asset_key not in RULES_RUN_CONTRACTS:
             raise DatasetViewError("not_found", "No public artifact binding")
         active = self._split_partitions(target.asset_key)
         if target.partition_key is None or (
@@ -119,6 +114,16 @@ class DatasetArtifactCatalog:
             asset_key=AssetKey(target.asset_key), asset_partitions=[target.partition_key]
         )
         records = self.instance.fetch_materializations(records_filter, limit=1).records
+        if contract := RULES_RUN_CONTRACTS.get(target.asset_key):
+            if records and (digest := text_metadata(records[0], "codebench/config_digest")) is not None:
+                manager = ConfigRunIOManager(home=str(self.home))
+                path = manager.run_output_path(records[0].run_id, records_filter.asset_key, target.partition_key)
+                if path.is_file() and materialization_attempt_succeeded(
+                    self.instance, records[0], output_name="result", retry_number="native",
+                    manager_keys=frozenset({RULES_CONFIG_IO}),
+                ):
+                    return RulesRunBinding(path, digest, contract)
+            raise DatasetViewError("not_materialized", "This rules asset has no persisted output")
         if target.asset_key in CONFIG_KEYS or target.asset_key in PARTITIONED_RUN_CONFIGS:
             directory = target.asset_key == tuple(CONFIG_DIRECTORY.path)
             observations: Sequence[EventLogRecord] = (
@@ -173,8 +178,8 @@ class DatasetArtifactCatalog:
                     "not_materialized", "No materialization identifies the selected snapshot"
                 )
 
-        binding = self.record_binding(target.partition_key, selected[0])
-        if any(self.record_binding(target.partition_key, record) != binding for record in selected[1:]):
+        binding = record_binding(self.home, self.instance, selected[0])
+        if any(record_binding(self.home, self.instance, record) != binding for record in selected[1:]):
             raise DatasetViewError(
                 "not_materialized", "The selected snapshot has conflicting storage bindings"
             )
@@ -233,51 +238,7 @@ class DatasetArtifactCatalog:
                         state = release.publication_state
             return ArtifactBinding(storage, reference, state)
 
-        if is_latest and target.asset_key not in SPLIT_TABLES and target.asset_key != _RULES_EVAL:
+        if is_latest and target.asset_key not in REGISTERED_TABLES:
             if ArtifactCurrentness(self.home, self.instance).stale(latest, reference):
                 state = "stale"
         return ArtifactBinding(storage, reference, state)
-
-    def record_binding(self, partition: str, record: EventLogRecord) -> tuple[StorageConfig, AssetReference]:
-        try:
-            reference = AssetReference.model_validate(
-                {
-                    "format": text_metadata(record, "codebench/storage_format"),
-                    "digest": text_metadata(record, "codebench/content_digest"),
-                }
-            )
-        except ValidationError as error:
-            raise DatasetViewError(
-                "not_materialized", "The materialization does not identify immutable bytes"
-            ) from error
-        try:
-            key = tuple(record.asset_key.path) if record.asset_key is not None else ()
-            if key in SPLIT_TABLES or key == _RULES_EVAL:
-                revision = materialization_registration(record)
-                if revision is None:
-                    raise IntegrityError("Split output has no producing registration")
-                storage = self.registry.storage(CODEBENCH_DATASET_ID, revision=revision)
-            else:
-                run = self.instance.get_run_by_id(record.run_id)
-                if run is None:
-                    raise IntegrityError("No persisted run identifies this artifact's storage")
-                evidence = MaterializationStorageEvidence.model_validate(run.run_config)
-                revision, inline = evidence.revision, evidence.storage
-                if inline is None:
-                    revision = revision or ArtifactCurrentness(self.home, self.instance).revision(record)
-                    if revision is None:
-                        raise IntegrityError("Missing storage binding")
-                    storage = self.registry.storage(partition, revision=revision)
-                elif revision is None and {"backend", "prefix"} <= inline.model_fields_set:
-                    storage = inline
-                    if storage.backend == "local" and "local_root" not in inline.model_fields_set:
-                        raise IntegrityError("Missing local root")
-                else:
-                    raise IntegrityError("Missing or conflicting storage binding")
-            if storage.backend == "local" and not Path(storage.local_root).is_absolute():
-                raise IntegrityError("Relative local root has no recorded base")
-        except (FileNotFoundError, IntegrityError, ValueError) as error:
-            raise DatasetViewError(
-                "not_materialized", "The materializing run has no usable storage binding"
-            ) from error
-        return storage, reference

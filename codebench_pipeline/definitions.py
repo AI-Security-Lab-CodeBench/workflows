@@ -61,7 +61,7 @@ from codebench_pipeline.review_assets import human_assets
 from codebench_pipeline.review_inputs import REVIEW_INPUT_MANAGER, review_input_manager
 from codebench_pipeline.rules_artifacts import rules_capture_inputs, rules_corpus_input
 from codebench_pipeline.rules_assets import RULES_ASSETS, RULES_JOB_SELECTIONS
-from codebench_pipeline.rules_settings import rules_mappings, rules_registration_asset
+from codebench_pipeline.rules_settings import rules_mappings, rules_registration
 from codebench_pipeline.stage_descriptions import describe_stage
 from codebench_pipeline.stage_implementation import ImplementationSource
 from codebench_pipeline.storage import IntegrityError, fingerprint
@@ -154,7 +154,6 @@ def build_definitions(home: Path) -> Definitions:
     config_io = ConfigRunIOManager(home=str(home))
     config_definitions = configuration_assets(home)
     config_assets = AssetSelection.assets(*config_definitions, category_rules)
-    rules_registration = rules_registration_asset()
     rules_mapping_assets = rules_mappings()
     assets = [
         definition.map_asset_specs(describe_stage)

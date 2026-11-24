@@ -2,6 +2,13 @@
 
 See [pipeline orchestration](docs/architecture/pipeline.md) and [how commands become release rows](docs/architecture/algorithms.md).
 
+In Dagster, open the **rules** asset group to follow capture through evaluation.
+The `codebench/rules_eval` Data tab contains the raw metrics. On the
+`codebench/rules_eval_report` materialization, **Open interactive report** opens
+the standalone charts; its Data tab also records the browser path, storage URI,
+and SHA-256. The report is served from the registered dataset store without
+making the bucket public.
+
 ## Run the single Compose stack
 
 Use the `codebench` project on the designated Docker Engine. The webserver and

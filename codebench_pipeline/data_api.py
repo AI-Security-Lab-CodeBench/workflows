@@ -2,7 +2,7 @@ import logging
 from collections.abc import Sequence
 from typing import Final, assert_never
 
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, TypeAdapter, ValidationError
 from starlette.applications import Starlette
 from starlette.concurrency import run_in_threadpool
 from starlette.exceptions import HTTPException
@@ -15,7 +15,10 @@ from starlette.routing import Route
 from codebench_pipeline.artifact_views import ArtifactDataService, ArtifactKey, ArtifactQuery
 from codebench_pipeline.data_view_models import DatasetQueryRequest, DatasetViewError
 from codebench_pipeline.data_views import DatasetDataService
+from codebench_pipeline.dataset_identity import CODEBENCH_DATASET_ID
 from codebench_pipeline.human_review import HumanReviewError, ReviewPartition, review_artifact_id
+from codebench_pipeline.models import Digest
+from codebench_pipeline.object_store import ObjectStore
 from codebench_pipeline.review_api_models import (
     CompletionRequest,
     DecisionRequest,
@@ -27,6 +30,7 @@ from codebench_pipeline.review_api_models import (
     ReviewQueryRequest,
 )
 from codebench_pipeline.review_stages import ReviewRegistration, ReviewStageList, annotation_stage
+from codebench_pipeline.rules_report_document import read_report
 from codebench_pipeline.table_query import QueryModel, TableQueryError
 
 MAX_BODY_BYTES: Final = 64 * 1024
@@ -278,8 +282,31 @@ def make_dataset_api(
             headers={"Content-Disposition": 'attachment; filename="commands.csv"'},
         )
 
+    async def rules_report(request: Request) -> Response:
+        if data is None:
+            raise HTTPException(404)
+        if request.query_params:
+            raise HTTPException(422)
+        digest = TypeAdapter(Digest).validate_python(request.path_params["digest"])
+        registry = data.registry
+
+        def document() -> bytes:
+            store = ObjectStore.from_environment(registry.storage(CODEBENCH_DATASET_ID))
+            return read_report(store, digest)
+
+        try:
+            payload = await run_in_threadpool(document)
+        except FileNotFoundError as error:
+            raise HTTPException(404) from error
+        return Response(payload, media_type="text/html", headers={
+            "Content-Security-Policy": "sandbox allow-scripts; default-src 'none'; script-src 'unsafe-inline'; "
+                                       "style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+            "Referrer-Policy": "no-referrer",
+        })
+
     return Starlette(
         routes=[
+            Route("/reports/rules-eval/{digest}.html", rules_report, methods=["GET"]),
             Route("/datasets", datasets, methods=["GET"]),
             Route("/review-stages", review_stages, methods=["GET"]),
             Route("/data/{stage:path}", table, methods=["POST"]),

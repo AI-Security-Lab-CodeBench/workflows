@@ -29,6 +29,7 @@ from codebench_pipeline.category_rules import CategoryRules
 from codebench_pipeline.config_assets import (
     CONFIG_DIRECTORY,
     GLOBAL_CONFIG,
+    PARTITIONED_RUN_CONFIGS,
     REGISTERED_CONFIG_TYPE,
     ConfigRunIOManager,
 )
@@ -45,7 +46,10 @@ from codebench_pipeline.dataset_config import DatasetBuildSpec
 from codebench_pipeline.dataset_registry import DatasetRegistry
 from codebench_pipeline.definitions import build_definitions, dataset_run_config
 from codebench_pipeline.object_store import ObjectStore, StorageConfig, sha256
+from codebench_pipeline.rules_artifacts import RulesMetricsTable
+from codebench_pipeline.rules_report_asset import RulesReportTable
 from codebench_pipeline.runtime_instance import dataset_instance
+from codebench_pipeline.split_schema import SplitRowsTable
 from codebench_pipeline.stage_configuration import ConfigArtifact
 from codebench_pipeline.storage import IntegrityError
 from codebench_pipeline.table_query import TableQuery, TableQueryError
@@ -145,7 +149,10 @@ class ArtifactSchemaTests(unittest.TestCase):
 
     def check_inventory(self, definitions: Definitions, spec: DatasetBuildSpec) -> None:
         reverse_types = {value.key: model for model, value in TABLE_TYPES.items()}
+        reverse_types.update({model.__name__: model for model in (SplitRowsTable, RulesMetricsTable, RulesReportTable)})
         config_keys: list[AssetKey] = []
+        partitioned_configs: set[tuple[str, ...]] = set()
+        graph = definitions.resolve_asset_graph()
         for definition in definitions.assets or ():
             assert isinstance(definition, AssetsDefinition)
             for key in definition.keys:
@@ -156,7 +163,12 @@ class ArtifactSchemaTests(unittest.TestCase):
                         if key == CONFIG_DIRECTORY:
                             self.assertIs(dtype.typing_type, ConfigDirectorySnapshot)
                             continue
-                        config_keys.append(key)
+                        path = tuple(key.path)
+                        if path in PARTITIONED_RUN_CONFIGS:
+                            partitioned_configs.add(path)
+                        else:
+                            self.assertEqual(graph.get(key).partitions_def, graph.get(GLOBAL_CONFIG).partitions_def)
+                            config_keys.append(key)
                         if key == GLOBAL_CONFIG:
                             self.assertEqual(dtype, REGISTERED_CONFIG_TYPE)
                         else:
@@ -185,6 +197,7 @@ class ArtifactSchemaTests(unittest.TestCase):
                     Draft202012Validator.check_schema(schema)
                     self.assertEqual(response.snapshot_id, reference.digest)
 
+        self.assertEqual(partitioned_configs, PARTITIONED_RUN_CONFIGS)
         with DagsterInstance.ephemeral() as instance:
             instance.add_dynamic_partitions("dataset_builds", [spec.dataset_id])
             run = definitions.resolve_job_def("refresh_dataset_configuration").execute_in_process(

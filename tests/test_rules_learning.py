@@ -284,7 +284,8 @@ def test_judge_rejects_old_ids_and_reruns_replacement_after_readonly_preview() -
         yield "finalize", {"drop_ids": [second.rule.id], "add": [_JSON.validate_json(fresh.model_dump_json())],
                            "justification": why}
 
-    result = deduplicate_rules(_agent(steps(), requests), train, client, capture)
+    calls.clear()
+    result = deduplicate_rules(_agent(steps(), requests), train, client, (capture,))
     decision = result.decisions[0].finalized
     assert result.complete and decision is not None and result.packages == (first, fresh)
     assert decision.submission == type(decision.submission)(drop=(second.rule.id,), add=(fresh,), justification=why)
@@ -295,11 +296,33 @@ def test_judge_rejects_old_ids_and_reruns_replacement_after_readonly_preview() -
     keep_steps: tuple[Step, ...] = (("finalize", {
         "drop_ids": [], "add": [], "justification": "Keep both interpretations pending better evidence.",
     }),)
-    kept = deduplicate_rules(_agent(iter(keep_steps)), train, client, capture)
+    kept = deduplicate_rules(_agent(iter(keep_steps)), train, client, (capture,))
     no_change = kept.decisions[0].finalized
     assert kept.complete and kept.packages == capture.packages and no_change is not None
     assert not no_change.submission.drop and not no_change.submission.add
     assert no_change.submission.justification == "Keep both interpretations pending better evidence."
+
+
+def test_dedup_rejects_category_rule_that_mislabels_other_train_category() -> None:
+    category = _train("pwd -P")
+    client = _client([])
+    package = _package("pwd -P", capture_batches(category)[0].next_rule_id)
+    author: tuple[Step, ...] = (
+        ("add_rule", package), ("finish", {"justification": "Covered the literal."}),
+    )
+    captured = capture_rules(_agent(iter(author)), category, client)
+    conflicting = CorpusRow(
+        id="train:1", command="pwd -P",
+        gold=Labels(category="CAT-7", risk="CAT-7.1", severity="low", action="allow"),
+    )
+    train = Corpus(split="train", digest="b" * 64, rows=(*category.rows, conflicting), sources=category.sources)
+    requests: list[_Request] = []
+
+    with pytest.raises(EvaluationError, match="wrong_match") as failure:
+        deduplicate_rules(_agent(iter(()), requests), train, client, (captured,))
+    assert captured.packages == (package,)
+    assert failure.value.diagnostic.rule_id == package.rule.id
+    assert not requests
 
 
 def test_nominations_union_distinct_tuple_semantics_and_singleton_evidence() -> None:
@@ -554,7 +577,8 @@ def test_judge_truncation_requires_explicit_justified_keep_and_combined_gate(
             return _TRUNCATED
         return script.request(url, raw, key, timeout)
 
-    result = deduplicate_rules(replace(script, request=request), train, client, captured)
+    evaluations.clear()
+    result = deduplicate_rules(replace(script, request=request), train, client, (captured,))
 
     (decision,) = result.decisions
     assert result.packages == captured.packages
@@ -594,7 +618,7 @@ def test_judge_closure_rejects_empty_justification_then_evaluates_actual_diff() 
         }),
     )
 
-    result = deduplicate_rules(_agent(iter(steps), requests), train, client, captured)
+    result = deduplicate_rules(_agent(iter(steps), requests), train, client, (captured,))
 
     (decision,) = result.decisions
     receipt = decision.finalized

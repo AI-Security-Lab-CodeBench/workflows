@@ -13,18 +13,16 @@ from dagster import (
     MetadataValue,
     Output,
     PythonObjectDagsterType,
-    SpecificPartitionsPartitionMapping,
     asset,
 )
-from dagster_pandera import pandera_schema_to_dagster_type
 from pandera.typing import DataFrame
 
 from codebench_pipeline.config_assets import mapped_input, mapping_key
-from codebench_pipeline.dataset_identity import CODEBENCH_DATASET_ID
 from codebench_pipeline.rules_agents import RuleAgent
 from codebench_pipeline.rules_artifacts import (
     RULES_EVAL_KEY,
     RULES_EVIDENCE_DIGEST,
+    RULES_METRICS_TYPE,
     FinalizedRules,
     RulesCaptureArtifact,
     RulesDedupArtifact,
@@ -37,15 +35,16 @@ from codebench_pipeline.rules_artifacts import (
 from codebench_pipeline.rules_contracts import Bundle
 from codebench_pipeline.rules_corpus import Corpus
 from codebench_pipeline.rules_engine import BashguardClient, evaluate_corpus
-from codebench_pipeline.rules_learning import CaptureResult, capture_rules, deduplicate_rules
+from codebench_pipeline.rules_learning import capture_rules, deduplicate_rules
 from codebench_pipeline.rules_metrics import TrainFingerprint, score_holdout
+from codebench_pipeline.rules_report_asset import rules_eval_report
 from codebench_pipeline.rules_settings import (
     CAPTURE_PARTITIONS,
     RULES_CONFIG_IO,
+    RULES_GROUP,
     RULES_PARTITIONS,
     RULES_REGISTRATION,
     AgentSettings,
-    LearningPins,
     RulesCaptureSettings,
     RulesDedupSettings,
     RulesEvalSettings,
@@ -70,12 +69,11 @@ class RulesCaptureConfig(Config):
     resume_run: str | None = None
 
 
-def _corpus_input(split: Split, *, per_category: bool = False) -> AssetIn:
+def _corpus_input(split: Split) -> AssetIn:
     return AssetIn(
         key=AssetKey([split, "merged_rows"]),
         dagster_type=_CORPUS_TYPE,
         input_manager_key="rules_corpus_input",
-        partition_mapping=SpecificPartitionsPartitionMapping([CODEBENCH_DATASET_ID]) if per_category else None,
     )
 
 
@@ -84,14 +82,14 @@ def _require_corpus(corpus: Corpus, pin: SplitPin, split: Split) -> None:
         raise IntegrityError(f"Rules run requires the registered {split} snapshot and row count")
 
 
-def _agent(context: AssetExecutionContext, settings: AgentSettings, pins: LearningPins) -> RuleAgent:
+def _agent(context: AssetExecutionContext, settings: AgentSettings, guide_sha256: str) -> RuleAgent:
     credential: Callable[[str], str] = context.resources.rules_model_environment
     key = settings.model.api_key_env
     return RuleAgent(
         model=settings.model,
         backend_revision=settings.backend_revision,
         guide=settings.guide,
-        guide_sha256=pins.guide_sha256,
+        guide_sha256=guide_sha256,
         max_request_bytes=settings.max_request_bytes,
         api_key=credential(key) if key is not None else None,
     )
@@ -99,28 +97,33 @@ def _agent(context: AssetExecutionContext, settings: AgentSettings, pins: Learni
 
 @asset(
     key=_CAPTURE_KEY,
-    group_name="rules_capture",
+    group_name=RULES_GROUP,
+    tags={"stage": "rules_capture"},
     partitions_def=CAPTURE_PARTITIONS,
     io_manager_key=RULES_CONFIG_IO,
     required_resource_keys={"rules_model_environment", RULES_CONFIG_IO},
     dagster_type=_CAPTURE_TYPE,
     ins={
         "settings": mapped_input("rules_capture", RulesCaptureSettings),
-        "train": _corpus_input("train", per_category=True),
+        "train": AssetIn(
+            key=AssetKey(["train", "category_rows"]), dagster_type=_CORPUS_TYPE,
+            input_manager_key="rules_corpus_input",
+        ),
     },
 )
 def rules_capture(
     context: AssetExecutionContext, config: RulesCaptureConfig, settings: RulesCaptureSettings, train: Corpus,
 ) -> Output[RulesCaptureArtifact]:
-    """Teach one category while gating each learned rule on the entire pinned train split."""
-    _require_corpus(train, settings.pins.train, "train")
+    """Teach one category and gate each learned rule on that category's pinned rows."""
+    if train.sources_digest != settings.sources_digest:
+        raise IntegrityError("Rules capture requires the configured train category sources")
     source = config.resume_run
     resume = load_capture_attempt(context, settings, source) if source is not None else None
     client = BashguardClient(settings.runtime.base_url, settings.runtime.version)
     result = capture_rules(
-        _agent(context, settings.agent, settings.pins), train, client, category=settings.category, resume=resume,
+        _agent(context, settings.agent, settings.guide_sha256), train, client, category=settings.category, resume=resume,
     )
-    if not result.batches or not result.complete:
+    if not result.complete:
         digest = record_rules_evidence(context, result)
         failures = sorted({
             diagnostic.code for batch in result.batches for diagnostic in batch.run.diagnostics
@@ -131,11 +134,12 @@ def rules_capture(
         )
     return Output(
         RulesCaptureArtifact(
-            pins=settings.pins, category=settings.category, inference_digest=settings.agent.inference_digest,
+            category=settings.category, sources_digest=settings.sources_digest, guide_sha256=settings.guide_sha256,
+            inference_digest=settings.agent.inference_digest,
             result=result,
         ),
         metadata={
-            "rules": len(result.packages), "batches": len(result.batches), "train digest": train.digest,
+            "rules": len(result.packages), "batches": len(result.batches), "category digest": train.digest,
             **({"resumed from run": source} if source is not None else {}),
         },
     )
@@ -143,7 +147,8 @@ def rules_capture(
 
 @asset(
     key=_DEDUP_KEY,
-    group_name="rules_dedup",
+    group_name=RULES_GROUP,
+    tags={"stage": "rules_dedup"},
     partitions_def=RULES_PARTITIONS,
     io_manager_key=RULES_CONFIG_IO,
     required_resource_keys={"rules_model_environment", RULES_CONFIG_IO},
@@ -171,20 +176,18 @@ def rules_dedup(
     selected = tuple(captures[category] for category in settings.pins.categories)
     if any(
         item.category != category
-        or item.pins != settings.pins
+        or item.sources_digest != settings.category_sources_digests[category]
+        or item.guide_sha256 != settings.pins.guide_sha256
         or item.inference_digest != settings.agent.inference_digest
-        or item.result.corpus_digest != train.digest
         or item.result.runtime_version != settings.runtime.version
         for category, item in zip(settings.pins.categories, selected, strict=True)
     ):
-        raise IntegrityError("Capture partitions disagree with the pinned train, guide, runtime or model")
-    captured = CaptureResult(
-        corpus_digest=train.digest, runtime_version=settings.runtime.version,
-        batches=tuple(batch for item in selected for batch in item.result.batches),
-    )
+        raise IntegrityError("Capture partitions disagree with the pinned category sources, guide, runtime or model")
     client = BashguardClient(settings.runtime.base_url, settings.runtime.version)
-    result = deduplicate_rules(_agent(context, settings.agent, settings.pins), train, client, captured)
-    if result.remaining_nominations or any(decision.finalized is None for decision in result.decisions):
+    result = deduplicate_rules(
+        _agent(context, settings.agent, settings.pins.guide_sha256), train, client, tuple(item.result for item in selected)
+    )
+    if not result.complete:
         record_rules_evidence(context, result)
         raise IntegrityError("Dedup did not finalize every nominated batch")
     return Output(
@@ -195,7 +198,8 @@ def rules_dedup(
 
 @asset(
     key=_FINAL_KEY,
-    group_name="rules_finalize",
+    group_name=RULES_GROUP,
+    tags={"stage": "rules_finalize"},
     partitions_def=RULES_PARTITIONS,
     io_manager_key=RULES_CONFIG_IO,
     required_resource_keys={RULES_CONFIG_IO},
@@ -228,7 +232,7 @@ def rules_finalize(
     return Output(
         FinalizedRules(
             pins=settings.pins, bundle=bundle, bundle_sha256=receipt.bundle_sha256,
-            training=TrainFingerprint.from_corpus(train, categories=tuple(sorted({rule.labels.category for rule in bundle.rules}))),
+            training=TrainFingerprint.from_corpus(train, categories=settings.pins.categories),
         ),
         metadata={"rules": len(bundle.rules), "bundle digest": receipt.bundle_sha256},
     )
@@ -236,11 +240,12 @@ def rules_finalize(
 
 @asset(
     key=RULES_EVAL_KEY,
-    group_name="rules_eval",
+    group_name=RULES_GROUP,
+    tags={"stage": "rules_eval"},
     partitions_def=RULES_PARTITIONS,
     io_manager_key=TRAIN_TABLE_IO,
     required_resource_keys={RULES_CONFIG_IO},
-    dagster_type=pandera_schema_to_dagster_type(RulesMetricsTable),
+    dagster_type=RULES_METRICS_TYPE,
     ins={
         "settings": mapped_input("rules_eval", RulesEvalSettings),
         "test": _corpus_input("test"),
@@ -279,12 +284,12 @@ def rules_eval(
     )
 
 
-RULES_ASSETS: Final = (rules_capture, rules_dedup, rules_finalize, rules_eval)
+RULES_ASSETS: Final = (rules_capture, rules_dedup, rules_finalize, rules_eval, rules_eval_report)
 RULES_JOB_SELECTIONS: Final = {
     "register_rules": AssetSelection.assets(RULES_REGISTRATION),
     "capture_rules": AssetSelection.assets(mapping_key("rules_capture"), rules_capture),
     "learn_rules": AssetSelection.assets(
         mapping_key("rules_dedup"), mapping_key("rules_finalize"), rules_dedup, rules_finalize
     ),
-    "evaluate_rules": AssetSelection.assets(mapping_key("rules_eval"), rules_eval),
+    "evaluate_rules": AssetSelection.assets(mapping_key("rules_eval"), rules_eval, rules_eval_report),
 }

@@ -12,6 +12,7 @@ import pytest
 from dagster import DagsterInstance, Definitions, MarkdownMetadataValue
 from pydantic import JsonValue
 from rules_capture_recovery_fixture import CaptureCompletion, exercise_capture_resume
+from rules_report_http_fixture import assert_report_document
 from starlette.testclient import TestClient
 from test_declared_dataset_graph import fixture_spec
 
@@ -29,8 +30,8 @@ from codebench_pipeline.train_config import TrainConfig, TrainSource
 _GUIDE = Path(__file__).resolve().parents[2] / "business-configs/bashguard/guide.json"
 _RUNTIME = f"sha256:{'a' * 64}"
 _MODEL = "synthetic/qwen"
-_TRAIN = {"pwd": "CAT-3", "date": "CAT-4"}
-_TEST = {"pwd": "CAT-3", "pwd -L": "CAT-3", "whoami": "CAT-5"}
+_TRAIN = {"pwd": "CAT-3", "date": "CAT-4", "echo train": "CAT-6"}
+_TEST = {"pwd": "CAT-3", "pwd -L": "CAT-3", "whoami": "CAT-5", "echo held": "CAT-6"}
 
 
 def _labels(category: str) -> dict[str, str]:
@@ -84,7 +85,7 @@ def _complete(request: dict) -> dict:
     assert request["model"] == _MODEL
     assert request["chat_template_kwargs"] == {"enable_thinking": False}
     assert "Bashguard authoring reference, guide schema bashguard-guide/v1" in messages[0]["content"]
-    assert all(command not in json.dumps(messages[1:]) for command in ("pwd -L", "whoami"))
+    assert all(command not in json.dumps(messages[1:]) for command in ("pwd -L", "whoami", "echo held"))
     if "next_rule_id" not in batch:
         tool = "finalize"
         arguments = {
@@ -94,7 +95,7 @@ def _complete(request: dict) -> dict:
     else:
         category = batch["category"]
         command = batch["rows"][0]["command"]
-        if len(messages) == 2 or (category == "CAT-3" and len(messages) == 4):
+        if category != "CAT-6" and (len(messages) == 2 or (category == "CAT-3" and len(messages) == 4)):
             tool = "add_rule"
             rule_id = batch["next_rule_id"] if len(messages) == 2 else json.loads(messages[-1]["content"])["next_rule_id"]
             arguments = {
@@ -185,7 +186,8 @@ def test_rules_pipeline(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None
             }),
             "train": split(0, _TRAIN), "test": split(10, _TEST, modify="whoami"),
         })
-        DatasetRegistry(tmp_path).register(spec)
+        registry = DatasetRegistry(tmp_path)
+        registry.register(spec)
         register_dataset_partitions(instance, spec)
         monkeypatch.setattr("codebench_pipeline.repository_tree._repository_client", lambda: repository)
         definitions = build_definitions(tmp_path)
@@ -197,24 +199,50 @@ def test_rules_pipeline(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None
             )
 
         assert run("refresh_dataset_configuration").success
-        for category in sorted(set(_TRAIN.values())):
-            assert run("load_train_category", category).success
+        assert run("load_train_category", "CAT-3").success
+        assert spec.train is not None
+        revised = split(20, {"date": "CAT-4"}).sources[0]
+        spec = spec.model_copy(update={"train": TrainConfig(sources=[
+            revised if source.category == "CAT-4" else source for source in spec.train.sources
+        ])})
+        registry.register(spec)
+        definitions = build_definitions(tmp_path)
+        assert run("refresh_dataset_configuration").success
+
+        registration = {
+            "runtime": {"base_url": services.origin, "version": _RUNTIME},
+            "prompt_guide": {"path": "guide.json", "sha256": sha256(_GUIDE.read_bytes()).hexdigest()},
+            "categories": sorted(set(_TRAIN.values())),
+        }
+
+        def register(**pins: dict[str, str | int]) -> None:
+            payload = json.dumps({**registration, **pins})
+            assert run("register_rules", run_config={"ops": {"codebench__rules_registration": {"config": {
+                "registration_json": payload, "expected_sha256": sha256(payload.encode()).hexdigest(),
+                "guide_json": _GUIDE.read_bytes().decode(),
+            }}}}).success
+
+        register()
+        assert run("capture_rules", "CAT-3").success
+        assert completion.requests == 3
+        assert {
+            row["command"]
+            for path, request in services.calls if path == "/v1/evaluate"
+            for row in request["rows"] if row["id"].startswith("train:")
+        } == {"pwd"}
+
+        assert run("load_train_category", "CAT-4").success
+        assert run("load_train_category", "CAT-6").success
         assert run("merge_train_data").success
         train = manager.reference_at(["train", "merged_rows"], "codebench")
         for category in sorted(set(_TEST.values())):
             assert run("load_test_category", category).success
         assert run("merge_test_data").success
         test = manager.reference_at(["test", "merged_rows"], "codebench")
-        payload = json.dumps({
-            "runtime": {"base_url": services.origin, "version": _RUNTIME},
-            "prompt_guide": {"path": "guide.json", "sha256": sha256(_GUIDE.read_bytes()).hexdigest()},
-            "categories": sorted(set(_TRAIN.values())),
-            "train": {"digest": train.digest, "row_count": len(_TRAIN)},
-            "test": {"digest": test.digest, "row_count": len(_TEST)},
-        })
-        assert run("register_rules", run_config={"ops": {"codebench__rules_registration": {"config": {
-            "registration_json": payload, "expected_sha256": sha256(payload.encode()).hexdigest(),
-        }}}}).success
+        register(
+            train={"digest": train.digest, "row_count": len(_TRAIN)},
+            test={"digest": test.digest, "row_count": len(_TEST)},
+        )
         allowed_snapshot = train.digest
         read_version = DataFrameIOManager.read_version
 
@@ -224,16 +252,16 @@ def test_rules_pipeline(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None
             return read_version(storage, reference)
 
         monkeypatch.setattr(DataFrameIOManager, "read_version", read_pinned)
-        assert run("capture_rules", "CAT-3").success
         assert not run("learn_rules", raise_on_error=False).success
         assert completion.requests == 3
         exercise_capture_resume(tmp_path, instance, completion, monkeypatch)
+        assert run("capture_rules", "CAT-6").success
         capture_requests = completion.requests
         assert run("learn_rules").success
         assert completion.requests == capture_requests + 1
         for path, request in services.calls:
             if path == "/v1/evaluate":
-                assert {row["command"] for row in request["rows"]}.isdisjoint({"pwd -L", "whoami"})
+                assert {row["command"] for row in request["rows"]}.isdisjoint({"pwd -L", "whoami", "echo held"})
         services.calls.clear()
         allowed_snapshot = test.digest
         assert run("evaluate_rules").success
@@ -242,6 +270,7 @@ def test_rules_pipeline(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None
         assert {row["command"] for row in request["rows"]} == _TEST.keys()
         assert len(request["bundle"]["rules"]) == 2
         _assert_public_metrics(instance, tmp_path, definitions)
+        assert_report_document(tmp_path, instance, manager)
 
 
 def _assert_public_metrics(instance: DagsterInstance, home: Path, definitions: Definitions) -> None:
@@ -255,19 +284,28 @@ def _assert_public_metrics(instance: DagsterInstance, home: Path, definitions: D
         partitions = ArtifactPartitions.model_validate_json(discovery.content).partitions
         assert partitions == ("codebench",)
         response = client.post("/artifacts/data", headers=headers,
-            json={"asset_key": key, "partition_key": partitions[0], "query": {"limit": 100}},
+            json={"asset_key": key, "partition_key": partitions[0], "query": {"limit": 200}},
         )
         assert response.status_code == 200
-        private = client.post(
-            "/artifacts/partitions", headers=headers, json={"asset_key": ["codebench", "rules_capture"]},
-        )
-        assert private.status_code == 200 and not ArtifactPartitions.model_validate_json(private.content).partitions
+        capture = ["codebench", "rules_capture"]
+        discovery = client.post("/artifacts/partitions", headers=headers, json={"asset_key": capture})
+        assert discovery.status_code == 200
+        assert ArtifactPartitions.model_validate_json(discovery.content).partitions == ("CAT-3", "CAT-4", "CAT-6")
+        captured = client.post("/artifacts/data", headers=headers, json={
+            "asset_key": capture, "partition_key": "CAT-3", "query": {"limit": 10},
+        })
+        assert captured.status_code == 200
+        assert {row.values["rule_id"] for row in ArtifactTable.model_validate_json(captured.content).page.rows} == {
+            "cat-3.capture-0001-01", "cat-3.capture-0001-02",
+        }
     result = ArtifactTable.model_validate_json(response.content)
     assert result.data_schema.source == "declared"
     cells = {(row.values["cohort"], row.values["axis"], row.values["label"], row.values["metric"]):
              row.values["value"] for row in result.page.rows}
     assert cells["overall", "outcome", "", "correct"] == 1
-    assert cells["overall", "outcome", "", "abstain"] == 2
+    assert cells["overall", "outcome", "", "abstain"] == 3
+    assert cells["trained", "outcome", "", "support"] == 3
+    assert cells["unseen", "outcome", "", "support"] == 1
     assert cells["overall", "overlap", "", "rows"] == 1
     assert cells["overall", "action", "modify", "support"] == 1
     event = instance.get_latest_materialization_event(RULES_EVAL_KEY)

@@ -17,6 +17,7 @@ from codebench_pipeline.dataframe_io import AssetReference, read_frame
 from codebench_pipeline.human_review import HumanReviewError
 from codebench_pipeline.models import Digest
 from codebench_pipeline.object_store import ObjectStore, StorageConfig, sha256
+from codebench_pipeline.rules_artifact_reader import RulesRunBinding, read_rules_table
 from codebench_pipeline.storage import IntegrityError
 from codebench_pipeline.table_query import QueryModel, TablePage, TableQuery, TableQueryError, query_table
 
@@ -74,7 +75,7 @@ class RunConfigBinding:
 class ArtifactCatalog(Protocol):
     def partitions(self, key: ArtifactKey) -> ArtifactPartitions: ...
 
-    def resolve(self, target: ArtifactTarget) -> ArtifactBinding | RunConfigBinding: ...
+    def resolve(self, target: ArtifactTarget) -> ArtifactBinding | RunConfigBinding | RulesRunBinding: ...
 
 
 class ArtifactDataService:
@@ -89,6 +90,15 @@ class ArtifactDataService:
 
     def query(self, request: ArtifactQuery) -> ArtifactTable | ArtifactJSON:
         binding = self.catalog.resolve(request)
+        if isinstance(binding, RulesRunBinding):
+            page, schema = read_rules_table(binding, request.snapshot_id, request.query)
+            return ArtifactTable(
+                asset_key=request.asset_key,
+                partition_key=request.partition_key,
+                snapshot_id=binding.digest,
+                page=page,
+                data_schema=schema,
+            )
         if not isinstance(binding, ArtifactBinding):
             query = request.query
             if query.search or query.filters or query.sort or query.offset:

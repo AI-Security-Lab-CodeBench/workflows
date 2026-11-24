@@ -29,7 +29,7 @@ from codebench_pipeline.dataset_identity import CODEBENCH_DATASET_ID
 from codebench_pipeline.model_config import ModelConfig
 from codebench_pipeline.models import Digest
 from codebench_pipeline.object_store import sha256
-from codebench_pipeline.rules_contracts import Category
+from codebench_pipeline.rules_contracts import Category, Split
 from codebench_pipeline.storage import IntegrityError, fingerprint, open_directory, open_regular_file
 from codebench_pipeline.typed_config import ConfigArtifact
 
@@ -37,6 +37,7 @@ RULES_REGISTRATION: Final = AssetKey(["codebench", "rules_registration"])
 RULES_PARTITIONS: Final = StaticPartitionsDefinition([CODEBENCH_DATASET_ID])
 CAPTURE_PARTITIONS: Final = DynamicPartitionsDefinition(name=f"{CODEBENCH_DATASET_ID}_train_categories")
 RULES_CONFIG_IO: Final = "config_run_io_manager"
+RULES_GROUP: Final = "rules"
 _DEFAULT_CONFIGURATION: Final = Path(__file__).resolve().parents[1] / "business-configs" / "bashguard"
 _MAX_CONFIG_BYTES: Final = 1024 * 1024
 
@@ -75,14 +76,22 @@ class RulesRegistration(ConfigArtifact):
     runtime: RulesRuntime
     prompt_guide: GuidePin
     categories: tuple[Category, ...] = Field(min_length=1)
-    train: SplitPin
-    test: SplitPin
+    train: SplitPin | None = None
+    test: SplitPin | None = None
 
     @model_validator(mode="after")
     def require_distinct_partitions(self) -> Self:
-        if len(set(self.categories)) != len(self.categories) or self.train.digest == self.test.digest:
+        if len(set(self.categories)) != len(self.categories) or (
+            self.train is not None and self.test is not None and self.train.digest == self.test.digest
+        ):
             raise IntegrityError("Rules registration requires distinct categories and split digests")
         return self
+
+    def require_pin(self, split: Split) -> SplitPin:
+        pin = self.train if split == "train" else self.test
+        if pin is None:
+            raise IntegrityError(f"Register the merged {split} digest and row count before running this stage")
+        return pin
 
 
 class PromptGuide(ConfigArtifact):
@@ -118,14 +127,16 @@ class AgentSettings(ConfigArtifact):
 
 
 class RulesCaptureSettings(ConfigArtifact):
-    pins: LearningPins
     category: Category
+    sources_digest: Digest
+    guide_sha256: Digest
     runtime: RulesRuntime
     agent: AgentSettings
 
 
 class RulesDedupSettings(ConfigArtifact):
     pins: LearningPins
+    category_sources_digests: dict[Category, Digest]
     runtime: RulesRuntime
     agent: AgentSettings
 
@@ -144,42 +155,42 @@ class RulesEvalSettings(ConfigArtifact):
 class RulesRegistrationConfig(Config):
     expected_sha256: Digest
     registration_json: str
+    guide_json: str
 
 
-def _read_pinned(directory: Path, name: str, expected: str) -> bytes:
-    with open_directory(directory) as handle, open_regular_file(handle, name) as stream:
+def read_rules_guide() -> str:
+    with open_directory(_DEFAULT_CONFIGURATION) as handle, open_regular_file(handle, "guide.json") as stream:
         content = stream.read(_MAX_CONFIG_BYTES + 1)
-    if len(content) > _MAX_CONFIG_BYTES or sha256(content) != expected:
-        raise IntegrityError(f"Rules configuration digest mismatch: {name}")
-    return content
+    if len(content) > _MAX_CONFIG_BYTES:
+        raise IntegrityError("Rules guide exceeds the registration size limit")
+    return content.decode("utf-8")
 
 
-def rules_registration_asset(directory: Path = _DEFAULT_CONFIGURATION) -> AssetsDefinition:
-    @asset(
-        key=RULES_REGISTRATION,
-        partitions_def=RULES_PARTITIONS,
-        group_name="configuration",
-        io_manager_key=RULES_CONFIG_IO,
-        dagster_type=_REGISTERED_RULES_TYPE,
-    )
-    def rules_registration(config: RulesRegistrationConfig) -> Output[RegisteredRules]:
-        """Verify the standalone rules registration and shared guide before publishing either."""
-        payload = config.registration_json.encode()
-        if len(payload) > _MAX_CONFIG_BYTES or sha256(payload) != config.expected_sha256:
-            raise IntegrityError("Rules registration digest mismatch")
-        registration = RulesRegistration.model_validate_json(payload)
-        guide_pin = registration.prompt_guide
-        guide = _read_pinned(directory, guide_pin.path, guide_pin.sha256).decode("utf-8")
-        PromptGuide.model_validate_json(guide)
-        value = RegisteredRules(registration=registration, digest=config.expected_sha256, guide=guide)
-        return Output(value, data_version=DataVersion(fingerprint(value.model_dump_json())))
-
-    return rules_registration
+@asset(
+    key=RULES_REGISTRATION,
+    partitions_def=RULES_PARTITIONS,
+    group_name=RULES_GROUP,
+    tags={"stage": "rules_registration"},
+    io_manager_key=RULES_CONFIG_IO,
+    dagster_type=_REGISTERED_RULES_TYPE,
+)
+def rules_registration(config: RulesRegistrationConfig) -> Output[RegisteredRules]:
+    """Verify the submitted rules registration and shared guide before publishing either."""
+    payload = config.registration_json.encode()
+    if len(payload) > _MAX_CONFIG_BYTES or sha256(payload) != config.expected_sha256:
+        raise IntegrityError("Rules registration digest mismatch")
+    registration = RulesRegistration.model_validate_json(payload)
+    guide = config.guide_json.encode()
+    if len(guide) > _MAX_CONFIG_BYTES or sha256(guide) != registration.prompt_guide.sha256:
+        raise IntegrityError(f"Rules configuration digest mismatch: {registration.prompt_guide.path}")
+    PromptGuide.model_validate_json(guide)
+    value = RegisteredRules(registration=registration, digest=config.expected_sha256, guide=config.guide_json)
+    return _output(value)
 
 
 def _pins(registration: RulesRegistration) -> LearningPins:
     return LearningPins(
-        train=registration.train,
+        train=registration.require_pin("train"),
         categories=tuple(sorted(registration.categories)),
         runtime_version=registration.runtime.version,
         guide_sha256=registration.prompt_guide.sha256,
@@ -207,6 +218,13 @@ def _output[T: ConfigArtifact](value: T) -> Output[T]:
     return Output(value, data_version=DataVersion(fingerprint(value.model_dump_json())))
 
 
+def _category_source_digests(config: RegisteredConfig, categories: tuple[Category, ...]) -> dict[Category, Digest]:
+    sources = config.train.sources_by_category() if config.train is not None else {}
+    if missing := set(categories) - sources.keys():
+        raise IntegrityError(f"No pinned train sources configured for: {', '.join(sorted(missing))}")
+    return {category: sources[category].digest for category in categories}
+
+
 def rules_mappings() -> list[AssetsDefinition]:
     category_mapping = SpecificPartitionsPartitionMapping([CODEBENCH_DATASET_ID])
     capture_inputs = {
@@ -221,7 +239,8 @@ def rules_mappings() -> list[AssetsDefinition]:
 
     @asset(
         key=mapping_key("rules_capture"),
-        group_name="rules_capture",
+        group_name=RULES_GROUP,
+        tags={"stage": "rules_capture"},
         partitions_def=CAPTURE_PARTITIONS,
         io_manager_key=RULES_CONFIG_IO,
         dagster_type=mapping_type(RulesCaptureSettings),
@@ -233,14 +252,17 @@ def rules_mappings() -> list[AssetsDefinition]:
         rules = registered.registration
         if context.partition_key not in rules.categories:
             raise IntegrityError("Capture partition is not selected by the pinned rules registration")
+        category = context.partition_key
         return _output(RulesCaptureSettings(
-            pins=_pins(rules), category=context.partition_key, runtime=rules.runtime,
+            category=category, sources_digest=_category_source_digests(global_config, (category,))[category],
+            guide_sha256=rules.prompt_guide.sha256, runtime=rules.runtime,
             agent=_agent(global_config, registered),
         ))
 
     @asset(
         key=mapping_key("rules_dedup"),
-        group_name="rules_dedup",
+        group_name=RULES_GROUP,
+        tags={"stage": "rules_dedup"},
         partitions_def=RULES_PARTITIONS,
         io_manager_key=RULES_CONFIG_IO,
         dagster_type=mapping_type(RulesDedupSettings),
@@ -254,12 +276,14 @@ def rules_mappings() -> list[AssetsDefinition]:
     def dedup_settings(registered: RegisteredRules, global_config: RegisteredConfig) -> Output[RulesDedupSettings]:
         rules = registered.registration
         return _output(RulesDedupSettings(
-            pins=_pins(rules), runtime=rules.runtime, agent=_agent(global_config, registered),
+            pins=_pins(rules), category_sources_digests=_category_source_digests(global_config, rules.categories),
+            runtime=rules.runtime, agent=_agent(global_config, registered),
         ))
 
     @asset(
         key=mapping_key("rules_finalize"),
-        group_name="rules_finalize",
+        group_name=RULES_GROUP,
+        tags={"stage": "rules_finalize"},
         partitions_def=RULES_PARTITIONS,
         io_manager_key=RULES_CONFIG_IO,
         dagster_type=mapping_type(RulesFinalizeSettings),
@@ -271,7 +295,8 @@ def rules_mappings() -> list[AssetsDefinition]:
 
     @asset(
         key=mapping_key("rules_eval"),
-        group_name="rules_eval",
+        group_name=RULES_GROUP,
+        tags={"stage": "rules_eval"},
         partitions_def=RULES_PARTITIONS,
         io_manager_key=RULES_CONFIG_IO,
         dagster_type=mapping_type(RulesEvalSettings),
@@ -279,6 +304,6 @@ def rules_mappings() -> list[AssetsDefinition]:
     )
     def eval_settings(registered: RegisteredRules) -> Output[RulesEvalSettings]:
         rules = registered.registration
-        return _output(RulesEvalSettings(pins=_pins(rules), test=rules.test, runtime=rules.runtime))
+        return _output(RulesEvalSettings(pins=_pins(rules), test=rules.require_pin("test"), runtime=rules.runtime))
 
     return [capture_settings, dedup_settings, finalize_settings, eval_settings]

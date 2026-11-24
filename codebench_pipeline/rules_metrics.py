@@ -78,6 +78,7 @@ class HeldOutMetrics(ConfigArtifact):
     trained: OutcomeMetrics
     unseen: OutcomeMetrics
     classes: tuple[ClassMetrics, ...]
+    cohort_classes: dict[Literal["uncontaminated", "trained", "unseen"], tuple[ClassMetrics, ...]]
     confusion: tuple[ConfusionCell, ...]
 
 
@@ -262,5 +263,10 @@ def score_holdout(receipt: EvaluationReceipt, train: TrainFingerprint) -> HeldOu
         trained=_summary(tuple(known)),
         unseen=_summary(tuple(unseen)),
         classes=_classes(decisions),
+        cohort_classes={
+            "uncontaminated": _classes(_decisions(tuple(clean))),
+            "trained": _classes(_decisions(tuple(known))),
+            "unseen": _classes(_decisions(tuple(unseen))),
+        },
         confusion=_confusion(decisions),
     )

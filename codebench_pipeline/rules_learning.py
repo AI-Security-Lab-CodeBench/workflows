@@ -215,7 +215,7 @@ def _capture_batch(agent: RuleAgent, train: _Train, work: _CaptureWork) -> Captu
 
     run = Conversation(
         prompt=SAFETY_PROMPT + " Capture narrowly supported rules for this category and token neighborhood. "
-        "Use add_rule with next_rule_id; acceptance evaluates all train categories, not just this batch. "
+        "Use add_rule with next_rule_id; acceptance evaluates the supplied train corpus, not just this batch. "
         f"Finish with a brief justification (at most {FINISH_JUSTIFICATION_LIMIT} characters) "
         "that says what remains uncovered.",
         payload=batch, terminal="finish", turns=_CAPTURE_TURNS,
@@ -367,15 +367,27 @@ class _JudgeBatch:
 
 
 def deduplicate_rules(
-    agent: RuleAgent, train: Corpus, client: BashguardClient, capture: CaptureResult,
+    agent: RuleAgent, train: Corpus, client: BashguardClient, captures: tuple[CaptureResult, ...],
 ) -> DedupResult:
-    if train.split != "train" or capture.corpus_digest != train.digest or capture.runtime_version != client.runtime_version:
-        raise EvaluationError(Diagnostic(code="capture_lineage", message="Dedup requires the same train and evaluator"))
-    if not capture.complete:
+    if train.split != "train" or any(item.runtime_version != client.runtime_version for item in captures):
+        raise EvaluationError(Diagnostic(code="capture_lineage", message="Dedup requires train and the same evaluator"))
+    if not captures or any(not item.complete for item in captures):
         raise EvaluationError(Diagnostic(code="capture_incomplete", message="Cannot deduplicate unfinished capture"))
-    nominations = nominate_rules(capture.rules)
-    originals = {entry.package.rule.id: entry for entry in capture.rules}
-    base = capture.packages
+    execution = _Train(train, client)
+    candidates: list[CapturedRule] = []
+    for capture in captures:
+        for package in capture.packages:
+            execution.authorize(package)
+            receipt = evaluate_package(client, package, train)
+            if code := _capture_failure(receipt):
+                raise EvaluationError(Diagnostic(
+                    code=code, phase="gate", rule_id=package.rule.id,
+                    message="Captured rule failed replay on the full pinned train split.",
+                ))
+            candidates.append(CapturedRule(package=package, singleton=receipt))
+    nominations = nominate_rules(tuple(candidates))
+    originals = {entry.package.rule.id: entry for entry in candidates}
+    base = tuple(entry.package for entry in candidates)
     pending: tuple[Nomination, ...] = nominations
     decisions: list[JudgeDecision] = []
     while pending and len(decisions) < _MAX_JUDGE_BATCHES:
@@ -386,7 +398,7 @@ def deduplicate_rules(
         ids, pairs = judge_group(pending)
         decision = _JudgeBatch(
             f"judge-{len(decisions) + 1:04d}", tuple(originals[key] for key in sorted(ids)), pairs, base,
-        ).run(agent, _Train(train, client))
+        ).run(agent, execution)
         decisions.append(decision)
         if decision.finalized is not None:
             base = decision.finalized.packages

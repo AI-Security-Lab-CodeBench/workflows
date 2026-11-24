@@ -19,6 +19,7 @@ from codebench_pipeline.definitions import DEFAULT_HOME, build_definitions, data
 from codebench_pipeline.guarded_publication_controls import Action
 from codebench_pipeline.guarded_publication_runtime import preview_proposal, update_publication_control
 from codebench_pipeline.models import Digest
+from codebench_pipeline.rules_settings import read_rules_guide
 from codebench_pipeline.runtime_instance import dataset_instance
 from codebench_pipeline.stage_configuration import stage_configs
 from codebench_pipeline.train_assets import register_dataset_partitions
@@ -177,7 +178,11 @@ def main() -> None:
             run_config = {
                 "ops": {
                     "codebench__rules_registration": {
-                        "config": {"registration_json": payload.decode("utf-8"), "expected_sha256": args.sha256}
+                        "config": {
+                            "registration_json": payload.decode("utf-8"),
+                            "expected_sha256": args.sha256,
+                            "guide_json": read_rules_guide(),
+                        }
                     }
                 }
             }
