@@ -4,6 +4,7 @@ from dataclasses import replace
 from email.message import Message
 from hashlib import sha256
 from io import BytesIO
+from pathlib import Path
 from urllib.error import HTTPError
 
 import httpx2
@@ -147,6 +148,73 @@ def _package(command: str, rule_id: str, rationale: str = "physical directory pa
         rule=NativeRule(id=rule_id, when=command, labels=_GOLD, rationale=rationale, sources=(_SOURCE,)),
         tests=(Fixture(command="pwd -P", expected=_GOLD), Fixture(command="pwd -L", expected=Other())),
     )
+
+
+def test_first_capture_request_presents_full_shipped_guide_with_8192_output_tokens() -> None:
+    guide_bytes = (Path(__file__).resolve().parents[1] / "business-configs/bashguard/guide.json").read_bytes()
+    guide = guide_bytes.decode("utf-8")
+    requests: list[_Request] = []
+    script = _agent(iter((("finish", FinishInput(justification="Synthetic examples reviewed.")),)), requests)
+    agent = replace(script, guide=guide, guide_sha256=sha256(guide_bytes).hexdigest())
+    train = _train(*(f"pwd -P {index}" for index in range(16)))
+
+    result = capture_rules(agent, train, _client([]))
+
+    assert result.complete, result.batches[0].run.diagnostics
+    (request,) = requests
+    system, batch = request.messages
+    assert system.role == "system" and system.content is not None
+    assert system.content.partition("\nPinned authoring guide:\n")[2].encode() == guide_bytes
+    assert batch.content is not None
+    assert _JSON.validate_json(batch.content)["rows"] == [
+        _JSON.validate_json(row.model_dump_json()) for row in capture_batches(train)[0].rows
+    ]
+    assert request.max_completion_tokens == 8192 and request.tool_choice == "required" and request.tools
+
+
+def test_capture_retries_provider_context_rejection_without_losing_latest_tool_pair() -> None:
+    train = _train("pwd -P")
+    rule_id = capture_batches(train)[0].next_rule_id
+    steps: tuple[Step, ...] = (
+        ("add_rule", _package("syntax error", rule_id)),
+        ("page_evaluation", {"receipt": 42}),
+        ("finish", FinishInput(justification="No valid rules were proposed.")),
+    )
+    script = _agent(iter(steps))
+    attempts: list[bytes] = []
+
+    def request(url: str, raw: bytes, key: str | None, timeout: float) -> HTTPResponse:
+        attempts.append(raw)
+        if len(attempts) == 3:
+            raise HTTPError(url, 400, "Bad request", Message(), BytesIO(b"maximum context length"))
+        return script.request(url, raw, key, timeout)
+
+    result = capture_rules(replace(script, request=request), train, _client([]))
+
+    run = result.batches[0].run
+    assert result.complete, run.diagnostics
+    _, _, rejected_raw, retried_raw = attempts
+    rejected, retried = (_Request.model_validate_json(raw) for raw in (rejected_raw, retried_raw))
+    assert len(retried_raw) < len(rejected_raw)
+    assert retried == rejected.model_copy(update={"messages": rejected.messages[:2] + rejected.messages[-2:]})
+    feedback = retried.messages[-1].content
+    assert feedback is not None
+    diagnostic = Feedback.model_validate_json(feedback).diagnostic
+    assert diagnostic is not None and diagnostic.code == "unknown_receipt"
+    assert run.request_sha256 == tuple(sha256(raw).hexdigest() for raw in attempts)
+    assert [(failure.turn, failure.diagnostic.code) for failure in run.failures] == [
+        (1, "cel_compile"), (2, "unknown_receipt"), (3, "provider_context_limit"),
+    ]
+
+
+def test_capture_reports_transport_cap_separately_without_contacting_provider() -> None:
+    agent = replace(_agent(iter(())), max_request_bytes=1024)
+
+    result = capture_rules(agent, _train("pwd -P"), _client([]))
+
+    run = result.batches[0].run
+    assert not result.complete and not run.request_sha256
+    assert run.status == "request_too_large" and run.diagnostics[0].code == "request_too_large"
 
 
 def test_capture_repairs_native_compile_and_fixture_failures_from_next_model_request() -> None:
