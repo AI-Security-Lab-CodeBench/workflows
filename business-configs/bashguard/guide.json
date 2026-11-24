@@ -1,0 +1,164 @@
+{
+  "instructions": "Bashguard authoring reference, guide schema bashguard-guide/v1. Use only with the separately pinned Bashguard runtime. The registration verifies SHA-256 of these exact UTF-8 bytes before sharing this object with capture and dedup. Record guide digest, runtime build identity, API schema version and compiled bundle digest separately. On a missing artifact or pin mismatch, stop; do not infer, upgrade, or fall back to another evaluator. The native dialect described here is bundle version 1, with cel-go v0.30.0 and mvdan Bash syntax v3.14.1. Versions of those dependencies do not substitute for the immutable runtime build identity.\n\nNative rule contract. The strict native bundle is {\"version\":1,\"rules\":[...]}; there must be 1..128 rules and at most 1 MiB of JSON. Each rule contains unique nonempty id, scope (simple or ast; empty or omitted means simple), when (CEL expression, 1..8192 bytes, statically bool), labels, nonblank rationale and at least one HTTPS source URL with host and no credentials. Native labels are the full tuple category, risk, severity, action. Category is CAT-N and risk CAT-N.M under that category (positive numbers, no leading zeroes); each may have an optional display name separated by a space. Use the canonical strings provided by the applicable catalog consistently: engine equality compares the entire string tuple, not just the codes. Severity is critical/high/medium/low and action is allow/ask/deny. `other` is an upstream category/risk-disposition where applicable, not a native label or wildcard. For unsupported forms, missing evidence, or an unrepresentable label tuple, do not invent one: leave the rule unmatched. A valid HTTPS string is not proof: real rules must cite evidence supporting the specific command form and decision; keep rationale narrow. The example CAT-3/CAT-3.1 codes and severity/action are synthetic output tokens, not a claim that the toy commands fall under that taxonomy. The example manuals are command/language provenance only, not evidence for those label choices.\n\nObservation and eligibility. Input is inert Bash source plus explicit context; nothing is executed, including expansions and command substitutions. No access to filesystem state, aliases, shell options, exit status, executable identities, environment variables, or gold labels. `simple` runs only for one ordinary top-level foreground CallExpr with a command word, no negation, background, coprocess, disown, assignment or redirection, and entirely static words. Static decoding handles literal text, ordinary single/double quotes and escapes; parameter/command/arithmetic and other expansion nodes, dollar-quotes, unquoted glob/brace/tilde markers and CR words are not static. Wrappers and qualified executable paths are not resolved. Prefer exact normalized argv for this scope; do not infer flags, ordering, implicit defaults or option aliases beyond the evidence. `ast` runs on any successfully parsed input within limits, including structurally ineligible simple inputs; `argv` is then empty when simple-ineligible. AST matches prove syntax, not that the form runs or has a particular effect. Check where an expression occurs (e.g. top level versus quoted data, a branch, a function or a nested substitution); inspect wrappers, statement flags and neighboring nodes before accepting a match.\n\nCEL bindings are case-sensitive. `source:string` is raw input; `argv:list<string>` is quote/escape-decoded for eligible input only. `calls:list<analyze.Call>` contains all parsed CallExprs in walk order, including nested calls. `.Start/.End:int` are byte bounds and `.Words:list<analyze.Word>` contains `.Start/.End:int`, `.Raw/.Value:string`, `.Static:bool`; use Value only after checking Static, and link calls by source positions when using a specific AST node. `nodes:list<analyze.Node>` contains `.ID/.Parent/.Start/.End:int`, `.Kind/.Operator:string`; IDs index both node lists and root Parent is -1. Bounds are zero-based, end-exclusive byte offsets, not character indexes. `ast:syntax.File` is the typed parsed root, and `ast_nodes:list<dyn>` holds native parser nodes in the same order as `nodes`. `context:policy.Context` has `.Environment:string` (empty, unknown, production, nonproduction) and `.Approval:string` (empty, unknown, granted, not_granted). Omitted context fields are empty, not known negatives. Match a known fact by explicit equality; do not treat `!= 'production'` as proof of nonproduction or `!= 'granted'` as proof of refusal. Do not infer context from command spelling or training labels.\n\nNative AST. Fields are exported Go names, not typed JSON keys. Common paths: `ast.Stmts`, `ast.Last`; Stmt has `.Cmd`, `.Redirs`, `.Comments`, `.Negated`, `.Background`, `.Coprocess`, `.Disown`; CallExpr has `.Args`, `.Assigns`; Word has `.Parts`; Lit has `.Value`; BinaryCmd has `.X`, `.Y`, `.Op`, `.OpPos`; Redirect has `.Word`, `.Op`; DblQuoted has `.Parts`; CmdSubst has `.Stmts`. Inspect the pinned `syntax` structs and Bashguard's ast_types.go for the actual type inventory; use `-mode analyze` on synthetic source to inspect structure, not to infer CEL member types from serialized JSON. A registered `syntax.T(dyn) -> syntax.T` checks the runtime type, it does not coerce. E.g. `type(s.Cmd) == syntax.CallExpr && syntax.CallExpr(s.Cmd).Args.size() > 0`. Do not construct AST objects. `kind(dyn) -> string`, `operator(dyn) -> string`, `start(dyn) -> int` and `end(dyn) -> int` require a parsed node; start/end also need a valid position. `operator` exposes Bash tokens for supported kinds (binary commands, redirects, substitutions, selected parameter/arithmetic nodes), or empty when there is no supported operator; do not compare typed enum fields to JSON token strings. `offset(syntax.Pos) -> int` requires a valid position. `node.parent() -> dyn` returns the immediate parent or null at root; `node.children() -> list<dyn>` returns direct children in walk order (empty on a leaf). Both need a node from this parse; no null or fabricated receivers, no recursive descendant helper. Use standard CEL `size`, `type`, `has`, `exists`, `all`, `filter`, `map`, `&&`, `||`, `!`, `?:`, and `cel.bind(name, value, body)` for scoped locals. Check bounds before indexing, presence before reading optional fields, and type before casting dynamic fields. Do not use JSON-path selectors, shell syntax, Python `and`/`or`, arbitrary custom helpers, or hidden navigation bindings.\n\nLimits and outcomes. Source is at most 64 KiB, valid UTF-8 without NUL; parser AST limits are 256 depth and 32768 nodes. CEL parser expression-size limit is 8192, recursion limit 64 and runtime cost limit 10000 per rule; the CLI sets a one-second classification deadline per request. Prefer bounded structural checks; avoid repeated full walks and nested scans. CLI takes strict JSONL requests (id optional, command required and nonblank, optional context; scanner cap 1 MiB). The classifier evaluates eligible rules; matches with identical full tuples can coexist, reporting all matching IDs and rationales and unique sources. Disagreeing tuples abstain with `conflicting_rules` and no labels or matching IDs. A successful match returns `matched`, full labels and `literal_cli_form` or `bash_ast` basis. A clean negative is `abstain/no_proven_rule`, with no labels or matching IDs and possibly simple-ineligibility reasons. Parse/input errors, cost/runtime failures, cancellation and conflicts are not clean negatives. A runtime issue aborts classification of the row (even if another rule would match); native CLI returns `abstain/rule_evaluation_error:<id>` and can exit zero, without exposing the evaluator's detailed runtime diagnostic. The service tool should relay the native detail where available, not invent detail or a source position.\n\nCapture workflow. Draft a narrow predicate from a deterministic neighborhood in the permitted train member and source documentation. Submit the complete native rule separately from fixtures. Use direct and harmless structural near misses: wrong utility/verb/value/flags, quoted data, nesting, wrappers, dynamic words and missing context as applicable. Compare the exact label tuple for positives and demand clean `no_proven_rule` for negatives. Use paginated full-train receipts with stable row IDs and preserve distinct rows even when command strings repeat. Scoring metadata stays separate from evaluator input and never borrow holdout rows. Prefer an honest abstention to guessing. Explain the evidence and observed failures, not estimated precision outside the evaluated rows.\n\nFeedback to both agents. Read the tool message before proposing another change: distinguish rule validation, CEL syntax (including native position/caret where supplied), CEL type/output, command or context validation, source parse failure, runtime/cost failure, cancellation, conflict, fixture mismatch, genuine abstention, and evaluator version/service failures. A compile failure is not scored. For execution ask for rule ID, phase, field (when applicable), native diagnostic if available, expected versus actual status/tuple/reason, counts and pageable train-only evidence. Fix the named syntax/type error before scoring; guard the specific runtime access rather than counting its error as a negative. Use false-positive rows to narrow the actual structural predicate, rerun existing positives and new negatives, and reread the receipt. Validate reported runtime pin, bundle hash and receipt completeness. Missing or mismatched receipt identity is not evidence of behavior.\n\nDedup judge workflow. Preview candidates through read-only evaluation and paginated receipts. Text embeddings and overlap of singleton hit sets propose pairs, not equivalence: compare full tuples, row IDs and differences in both directions. Zero hits or matching command text alone is not evidence. Keep rules with materially distinct coverage or decisions when justified; record why each keep/drop/add is warranted, including lost coverage or tests and why omitted old tests are not carried forward. There is no modify operation or mandatory inherited-test/old-coverage gate. Submit one atomic finalize diff with rule IDs to drop and full new rule/test packages to add under fresh IDs, with justification for the exact diff. Every addition must pass mandatory deterministic evaluation of its own tests and the pinned full train set regardless of previews; compile the resulting bundle together to check the joint gate and investigate conflicts. Failed finalization leaves the batch unchanged. Do not silently truncate or accept an empty release. This finalizes a dedup batch, not the global final bundle; the holdout is unavailable to both agents.\n\nFew-shot schema bashguard-guide/v1. The top-level object has exactly instructions:string and examples:array. Each example has id:string, scenario:string and steps:array, optionally decision. Steps have globally unique id, a complete native rule object, tests:array and expected_tool_response; optional repair describes the next attempt. Each test has request (native JSONL object with stable id) and expected (desired projection of the native result: status, basis, rule_ids, reasons, and labels only for a match). expected_tool_response has kind, exit_code, stderr_contains (list of required CLI diagnostic substrings) and mismatches (test-ID to actual result projection, empty for no fixture mismatch); target and observed differ only at an explicitly listed mismatch. Native output also includes provenance and bundle_sha256. These are portable teaching receipts, not a service wire format or a claim of actual agent execution. The optional decision has keep_rule_ids and drop_rule_ids (baseline native IDs), add_step_ids (references to new rule/tests packages), and justification; expand references to new packages for finalize. Only each step's rule goes inside a native version-1 bundle; tests and teaching metadata stay outside it. Replay with `bash bashguard/qa/verify_prompt_guide_v1.sh` from the checkout or by absolute path. It builds the candidate native CLI offline, sends only these fixture strings, and never executes them.",
+  "examples": [
+    {
+      "id": "simple-syntax-repair",
+      "scenario": "Capture an exact normalized argv form. A broken CEL list never reaches scoring; repair it and test the nearby variants.",
+      "steps": [
+        {
+          "id": "pwd-syntax-draft",
+          "rule": {
+            "id": "guide.pwd-physical",
+            "scope": "simple",
+            "when": "argv == ['pwd', '-P'",
+            "labels": {"category":"CAT-3","risk":"CAT-3.1","severity":"low","action":"allow"},
+            "rationale": "Synthetic fixture for an exact physical-directory argv form; labels are test tokens.",
+            "sources": ["https://www.gnu.org/software/coreutils/manual/html_node/pwd-invocation.html"]
+          },
+          "tests": [],
+          "expected_tool_response": {"kind":"cel_syntax","exit_code":1,"stderr_contains":["guide.pwd-physical when", "<input>:1:21:", "Syntax error:", "^"],"mismatches":{}},
+          "repair": "Close the list at the end of when. Keep exact argv equality so -L, extra options and quoted data are not accepted."
+        },
+        {
+          "id": "pwd-repaired",
+          "rule": {
+            "id": "guide.pwd-physical",
+            "scope": "simple",
+            "when": "argv == ['pwd', '-P']",
+            "labels": {"category":"CAT-3","risk":"CAT-3.1","severity":"low","action":"allow"},
+            "rationale": "Synthetic fixture for an exact physical-directory argv form; labels are test tokens.",
+            "sources": ["https://www.gnu.org/software/coreutils/manual/html_node/pwd-invocation.html"]
+          },
+          "tests": [
+            {"request":{"id":"pwd-exact","command":"pwd -P"},"expected":{"status":"matched","basis":"literal_cli_form","rule_ids":["guide.pwd-physical"],"reasons":[],"labels":{"category":"CAT-3","risk":"CAT-3.1","severity":"low","action":"allow"}}},
+            {"request":{"id":"pwd-decoded","command":"p'wd' \"-P\""},"expected":{"status":"matched","basis":"literal_cli_form","rule_ids":["guide.pwd-physical"],"reasons":[],"labels":{"category":"CAT-3","risk":"CAT-3.1","severity":"low","action":"allow"}}},
+            {"request":{"id":"pwd-logical","command":"pwd -L"},"expected":{"status":"abstain","basis":"literal_cli_form","rule_ids":[],"reasons":["no_proven_rule"]}},
+            {"request":{"id":"pwd-extra","command":"pwd -P --help"},"expected":{"status":"abstain","basis":"literal_cli_form","rule_ids":[],"reasons":["no_proven_rule"]}},
+            {"request":{"id":"pwd-quoted-data","command":"printf '%s' 'pwd -P'"},"expected":{"status":"abstain","basis":"literal_cli_form","rule_ids":[],"reasons":["no_proven_rule"]}},
+            {"request":{"id":"pwd-dynamic","command":"pwd \"$STYLE\""},"expected":{"status":"abstain","basis":"literal_cli_form","rule_ids":[],"reasons":["no_proven_rule","nonliteral_word"]}}
+          ],
+          "expected_tool_response": {"kind":"passed","exit_code":0,"stderr_contains":[],"mismatches":{}}
+        }
+      ]
+    },
+    {
+      "id": "ast-narrowing-and-dedup",
+      "scenario": "A pipeline predicate overmatches a different literal toy word. Narrow by statement structure and decoded arguments, then justify an add/drop diff rather than mutating a rule in place.",
+      "steps": [
+        {
+          "id": "pipe-broad-preview",
+          "rule": {
+            "id": "guide.any-pipe-draft",
+            "scope": "ast",
+            "when": "nodes.exists(n, n.Kind == 'BinaryCmd' && n.Operator == '|')",
+            "labels": {"category":"CAT-3","risk":"CAT-3.1","severity":"low","action":"allow"},
+            "rationale": "Intentionally overbroad toy draft: the pipe token alone does not prove its operand forms.",
+            "sources": ["https://www.gnu.org/software/bash/manual/html_node/Pipelines.html"]
+          },
+          "tests": [
+            {"request":{"id":"pipe-broad-positive","command":"printf toy | cat"},"expected":{"status":"matched","basis":"bash_ast","rule_ids":["guide.any-pipe-draft"],"reasons":[],"labels":{"category":"CAT-3","risk":"CAT-3.1","severity":"low","action":"allow"}}},
+            {"request":{"id":"pipe-broad-false-positive","command":"printf other | cat"},"expected":{"status":"abstain","basis":"literal_cli_form","rule_ids":[],"reasons":["no_proven_rule","requires_ordinary_simple_command"]}}
+          ],
+          "expected_tool_response": {
+            "kind": "fixture_mismatch",
+            "exit_code": 0,
+            "stderr_contains": [],
+            "mismatches": {
+              "pipe-broad-false-positive":{"status":"matched","basis":"bash_ast","rule_ids":["guide.any-pipe-draft"],"reasons":[],"labels":{"category":"CAT-3","risk":"CAT-3.1","severity":"low","action":"allow"}}
+            }
+          },
+          "repair": "Require one top-level foreground literal `printf toy | cat` pipeline with exact operands. Retest the discovered near miss plus quoted, nested and dynamic forms."
+        },
+        {
+          "id": "pipe-narrow-replacement",
+          "rule": {
+            "id": "guide.toy-pipe",
+            "scope": "ast",
+            "when": "ast.Stmts.size() == 1 && type(ast.Stmts[0].Cmd) == syntax.BinaryCmd && cel.bind(top, ast.Stmts[0], cel.bind(pipe, syntax.BinaryCmd(top.Cmd), operator(pipe) == '|' && pipe.parent() == top && [top, pipe.X, pipe.Y].all(s, !s.Negated && !s.Background && !s.Coprocess && !s.Disown && s.Redirs.size() == 0) && type(pipe.X.Cmd) == syntax.CallExpr && type(pipe.Y.Cmd) == syntax.CallExpr && syntax.CallExpr(pipe.X.Cmd).Assigns.size() == 0 && syntax.CallExpr(pipe.Y.Cmd).Assigns.size() == 0 && calls.size() == 2 && calls[0].Start == start(pipe.X.Cmd) && calls[1].Start == start(pipe.Y.Cmd) && calls.all(c, c.Words.all(w, w.Static)) && calls[0].Words.map(w, w.Value) == ['printf', 'toy'] && calls[1].Words.map(w, w.Value) == ['cat']))",
+            "labels": {"category":"CAT-3","risk":"CAT-3.1","severity":"low","action":"allow"},
+            "rationale": "Synthetic fixture for a top-level foreground pipeline with two exact static call forms; labels are test tokens.",
+            "sources": ["https://www.gnu.org/software/bash/manual/html_node/Pipelines.html"]
+          },
+          "tests": [
+            {"request":{"id":"pipe-exact","command":"printf toy | cat"},"expected":{"status":"matched","basis":"bash_ast","rule_ids":["guide.toy-pipe"],"reasons":[],"labels":{"category":"CAT-3","risk":"CAT-3.1","severity":"low","action":"allow"}}},
+            {"request":{"id":"pipe-layout","command":"# toy fixture\nprintf 'toy'|cat # same form"},"expected":{"status":"matched","basis":"bash_ast","rule_ids":["guide.toy-pipe"],"reasons":[],"labels":{"category":"CAT-3","risk":"CAT-3.1","severity":"low","action":"allow"}}},
+            {"request":{"id":"pipe-other-word","command":"printf other | cat"},"expected":{"status":"abstain","basis":"literal_cli_form","rule_ids":[],"reasons":["no_proven_rule","requires_ordinary_simple_command"]}},
+            {"request":{"id":"pipe-other-op","command":"printf toy && cat"},"expected":{"status":"abstain","basis":"literal_cli_form","rule_ids":[],"reasons":["no_proven_rule","requires_ordinary_simple_command"]}},
+            {"request":{"id":"pipe-quoted-data","command":"printf '%s' 'printf toy | cat'"},"expected":{"status":"abstain","basis":"literal_cli_form","rule_ids":[],"reasons":["no_proven_rule"]}},
+            {"request":{"id":"pipe-nested","command":"(printf toy | cat)"},"expected":{"status":"abstain","basis":"literal_cli_form","rule_ids":[],"reasons":["no_proven_rule","requires_ordinary_simple_command"]}},
+            {"request":{"id":"pipe-background","command":"printf toy | cat &"},"expected":{"status":"abstain","basis":"literal_cli_form","rule_ids":[],"reasons":["no_proven_rule","requires_ordinary_simple_command"]}},
+            {"request":{"id":"pipe-dynamic","command":"printf \"$TOY\" | cat"},"expected":{"status":"abstain","basis":"literal_cli_form","rule_ids":[],"reasons":["no_proven_rule","requires_ordinary_simple_command"]}}
+          ],
+          "expected_tool_response": {"kind":"passed","exit_code":0,"stderr_contains":[],"mismatches":{}}
+        }
+      ],
+      "decision": {
+        "keep_rule_ids": ["guide.pwd-physical"],
+        "drop_rule_ids": ["guide.any-pipe-draft"],
+        "add_step_ids": ["pipe-narrow-replacement"],
+        "justification": "Keep the exact pwd rule: the singleton fixture hits are distinct even though the tuples are equal. Drop the generic pipe draft: it also matched the observed wrong operand, which must abstain. Add the fresh exact-pipe ID with its own structural tests. The old preview package need not be kept: both of its command cases are covered by the replacement, with a clean negative required for the wrong operand. Deliberately give up generic-pipeline hit coverage. This is the proposed no-modify diff; the live gate still requires each added package's fixtures, the pinned full train evaluation, and joint compilation."
+      }
+    },
+    {
+      "id": "type-runtime-and-context",
+      "scenario": "Separate compile-time output-type rejection, a runtime bounds failure, and deliberate abstention on missing facts.",
+      "steps": [
+        {
+          "id": "context-type-draft",
+          "rule": {
+            "id": "guide.context-printf",
+            "scope": "simple",
+            "when": "argv.size()",
+            "labels": {"category":"CAT-3","risk":"CAT-3.1","severity":"low","action":"allow"},
+            "rationale": "Synthetic argv and context fixture; labels are test tokens.",
+            "sources": ["https://www.gnu.org/software/bash/manual/html_node/Bash-Builtins.html"]
+          },
+          "tests": [],
+          "expected_tool_response": {"kind":"cel_type","exit_code":1,"stderr_contains":["guide.context-printf when: must return bool"],"mismatches":{}},
+          "repair": "Return a boolean comparison. A subscript alone is not safe on shorter eligible argv."
+        },
+        {
+          "id": "context-runtime-draft",
+          "rule": {
+            "id": "guide.context-printf",
+            "scope": "simple",
+            "when": "context.Environment == 'nonproduction' && context.Approval == 'granted' && argv[1] == 'toy' && argv[0] == 'printf'",
+            "labels": {"category":"CAT-3","risk":"CAT-3.1","severity":"low","action":"allow"},
+            "rationale": "Intentionally unsafe subscript in a toy draft; context values are supplied facts.",
+            "sources": ["https://www.gnu.org/software/bash/manual/html_node/Bash-Builtins.html"]
+          },
+          "tests": [
+            {"request":{"id":"context-runtime-short","command":"printf","context":{"environment":"nonproduction","approval":"granted"}},"expected":{"status":"abstain","basis":"literal_cli_form","rule_ids":[],"reasons":["no_proven_rule"]}}
+          ],
+          "expected_tool_response": {
+            "kind": "runtime_error",
+            "exit_code": 0,
+            "stderr_contains": [],
+            "mismatches": {
+              "context-runtime-short":{"status":"abstain","basis":"literal_cli_form","rule_ids":[],"reasons":["rule_evaluation_error:guide.context-printf"]}
+            }
+          },
+          "repair": "Use exact list equality to remove the unsafe subscript. Keep explicit positive checks for both context facts; omitted or unknown does not mean granted or nonproduction."
+        },
+        {
+          "id": "context-runtime-repaired",
+          "rule": {
+            "id": "guide.context-printf",
+            "scope": "simple",
+            "when": "argv == ['printf', 'toy'] && context.Environment == 'nonproduction' && context.Approval == 'granted'",
+            "labels": {"category":"CAT-3","risk":"CAT-3.1","severity":"low","action":"allow"},
+            "rationale": "Synthetic fixture for exact argv with two explicitly supplied facts; labels are test tokens.",
+            "sources": ["https://www.gnu.org/software/bash/manual/html_node/Bash-Builtins.html"]
+          },
+          "tests": [
+            {"request":{"id":"context-known","command":"printf toy","context":{"environment":"nonproduction","approval":"granted"}},"expected":{"status":"matched","basis":"literal_cli_form","rule_ids":["guide.context-printf"],"reasons":[],"labels":{"category":"CAT-3","risk":"CAT-3.1","severity":"low","action":"allow"}}},
+            {"request":{"id":"context-short-clean-negative","command":"printf","context":{"environment":"nonproduction","approval":"granted"}},"expected":{"status":"abstain","basis":"literal_cli_form","rule_ids":[],"reasons":["no_proven_rule"]}},
+            {"request":{"id":"context-omitted","command":"printf toy"},"expected":{"status":"abstain","basis":"literal_cli_form","rule_ids":[],"reasons":["no_proven_rule"]}},
+            {"request":{"id":"context-explicitly-unknown","command":"printf toy","context":{"environment":"nonproduction","approval":"unknown"}},"expected":{"status":"abstain","basis":"literal_cli_form","rule_ids":[],"reasons":["no_proven_rule"]}}
+          ],
+          "expected_tool_response": {"kind":"passed","exit_code":0,"stderr_contains":[],"mismatches":{}}
+        }
+      ]
+    }
+  ]
+}
