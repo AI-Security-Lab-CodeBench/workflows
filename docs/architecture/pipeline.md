@@ -1,5 +1,8 @@
 # CodeBench pipeline architecture
 
+For independent category-partitioned imports that do not run collection or labeling,
+see [Loading pinned train and test splits](split-loading.md).
+
 CodeBench builds a labeled dataset of shell commands from source material. A released row must be traceable to the text it came from, the evidence for its label, and the decision that admitted it. Commands are data throughout: no stage executes a collected command.
 
 ```text

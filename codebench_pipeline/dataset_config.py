@@ -19,6 +19,7 @@ from codebench_pipeline.discovery_config import DiscoveryOptions
 from codebench_pipeline.model_config import ModelConfig
 from codebench_pipeline.models import Identifier
 from codebench_pipeline.object_store import StorageConfig
+from codebench_pipeline.train_config import TrainConfig
 from codebench_pipeline.typed_config import ConfigArtifact, TypedConfig
 
 
@@ -162,6 +163,16 @@ class DatasetBuildSpec(StrictStageConfig):
     review: ReviewConfig | None = None
     publication: PublicationConfig
     storage: StorageConfig
+    train: TrainConfig | None = Field(default=None, exclude_if=lambda value: value is None)
+    test: TrainConfig | None = Field(default=None, exclude_if=lambda value: value is None)
+
+    @model_validator(mode="after")
+    def distinct_split_inputs(self) -> "DatasetBuildSpec":
+        if self.train and self.test:
+            train_files = {source.sha256 for source in self.train.sources}
+            if any(source.sha256 in train_files for source in self.test.sources):
+                raise ValueError("The same pinned CSV cannot be in both train and test")
+        return self
 
     @property
     def has_declared_collection(self) -> bool:

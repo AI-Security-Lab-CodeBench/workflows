@@ -21,6 +21,8 @@ class Options(argparse.Namespace):
     dataset: str
     stage: str
     node: str
+    manifest: Path
+    category: str
 
 
 def output(*args: str) -> str:
@@ -117,6 +119,16 @@ def main() -> None:
     commands.add_parser("e2e", help="Run one affected pytest node using a disposable database").add_argument(
         "node"
     )
+    configure = commands.add_parser(
+        "configure-splits", help="Register pinned train and test inputs from private JSON"
+    )
+    configure.add_argument("manifest", type=Path)
+    configure.add_argument("--dataset", default=DATASET)
+    for action in ("train-load", "test-load", "train-merge", "test-merge"):
+        split = commands.add_parser(action)
+        split.add_argument("--dataset", default=DATASET)
+        if action.endswith("-load"):
+            split.add_argument("category")
     args = parser.parse_args(namespace=Options())
     if args.action == "status":
         run("docker", "ps", "--all", "--filter", "label=com.docker.compose.project=codebench")
@@ -161,6 +173,12 @@ def main() -> None:
         run(*sensor, "start", "-w", WORKSPACE, "dataset_build_requests")
     elif args.action == "e2e":
         e2e(compose, args.node)
+    elif args.action == "configure-splits":
+        with args.manifest.open("rb") as manifest:
+            subprocess.run([*cli, "configure-splits", "--dataset", args.dataset], stdin=manifest, check=True)
+    elif args.action in {"train-load", "test-load", "train-merge", "test-merge"}:
+        category = ["--category", args.category] if args.action.endswith("-load") else []
+        run(*cli, args.action, "--dataset", args.dataset, *category)
 
 
 if __name__ == "__main__":

@@ -49,6 +49,7 @@ from codebench_pipeline.release_stage_settings import (
     ReviewQueueConfig,
 )
 from codebench_pipeline.storage import IntegrityError, fingerprint
+from codebench_pipeline.train_config import TrainConfig
 from codebench_pipeline.typed_config import ConfigArtifact, TypedConfig
 
 
@@ -196,6 +197,9 @@ class DeclaredGlobalConfig(ConfigArtifact):
             return operation.project(self.source_config(operation.branch))
         return self.project_keenable_candidates(self.rules)
 
+    train: TrainConfig | None = Field(default=None, exclude_if=lambda value: value is None)
+    test: TrainConfig | None = Field(default=None, exclude_if=lambda value: value is None)
+
     def project_keenable_candidates(self, rules: CategoryRules) -> KeenableCandidateSettings:
         return KeenableCandidateSettings.project(self.source_config("keenable"), rules, self.scopes.discovery)
 
@@ -237,6 +241,8 @@ class DeclaredGlobalConfig(ConfigArtifact):
             registration_digest=fingerprint(spec.model_dump_json()),
             config_directory=spec.config_directory if directory is None else directory,
             rules=spec.rules,
+            train=spec.train,
+            test=spec.test,
             scopes=DeclaredScopes(
                 existing_datasets=collection_asset_settings(spec, "dataset"),
                 documentation_crawl=collection_asset_settings(spec, "documentation"),

@@ -13,6 +13,7 @@ from codebench_pipeline.human_review_store import HumanReviewStore
 from codebench_pipeline.release_runner import ReleaseRunner
 from codebench_pipeline.runtime_instance import dataset_instance
 from codebench_pipeline.storage import exclusive
+from codebench_pipeline.train_assets import register_dataset_partitions
 
 BuildStatus = Literal[
     "prepared",
@@ -59,9 +60,9 @@ class BuildOutcome(BaseModel):
 
 
 def refresh_registered_configuration(dataset_id: str, home: Path) -> str:
-    DatasetRegistry(home).get(dataset_id)
+    spec = DatasetRegistry(home).get(dataset_id)
     with dataset_instance(home) as instance:
-        instance.add_dynamic_partitions("dataset_builds", [dataset_id])
+        register_dataset_partitions(instance, spec)
         result = (
             build_definitions(home)
             .resolve_job_def("refresh_dataset_configuration")
@@ -78,7 +79,7 @@ def run_registered(dataset_id: str, home: Path, *, prepare_only: bool = False) -
     spec = DatasetRegistry(home).get(dataset_id)
     job_name = "prepare_dataset" if prepare_only else "build_dataset"
     with exclusive(home / "build-locks" / f"{spec.dataset_id}.lock"), dataset_instance(home) as instance:
-        instance.add_dynamic_partitions("dataset_builds", [spec.dataset_id])
+        register_dataset_partitions(instance, spec)
         result = (
             build_definitions(home)
             .resolve_job_def(job_name)

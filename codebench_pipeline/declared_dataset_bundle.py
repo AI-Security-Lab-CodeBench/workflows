@@ -35,6 +35,7 @@ from codebench_pipeline.models import Identifier
 from codebench_pipeline.object_store import StorageConfig
 from codebench_pipeline.repository_branch_config import RepositoryBranchDeclaration
 from codebench_pipeline.storage import IntegrityError
+from codebench_pipeline.train_config import TrainConfig
 
 
 def compile_directory(
@@ -140,6 +141,8 @@ class DeclaredDatasetBundle(StrictStageConfig):
     merge: CollectionMergeConfig = CollectionMergeConfig()
     review: DeclaredReview = DeclaredReview()
     release: DeclaredRelease = DeclaredRelease()
+    train: TrainConfig | None = Field(default=None, exclude_if=lambda value: value is None)
+    test: TrainConfig | None = Field(default=None, exclude_if=lambda value: value is None)
 
     def resolve(
         self,
@@ -220,4 +223,6 @@ class DeclaredDatasetBundle(StrictStageConfig):
             ),
             storage=storage,
             declared_collection=collection,
+            train=self.train,
+            test=self.test,
         )

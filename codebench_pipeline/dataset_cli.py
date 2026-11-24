@@ -1,11 +1,13 @@
 import argparse
 import json
+import sys
 from pathlib import Path
 from typing import Literal, TypedDict, overload
 
-from dagster import AssetKey, DagsterRunStatus, RunsFilter
+from dagster import AssetKey, DagsterRunStatus, MultiPartitionKey, RunsFilter
 from pydantic import TypeAdapter
 
+from codebench_pipeline.config_assets import GLOBAL_CONFIG
 from codebench_pipeline.dataset_branches import HISTORICAL_PROCESSING_STAGES
 from codebench_pipeline.dataset_config import load_build_config
 from codebench_pipeline.dataset_dependencies import KNOWN_STAGES
@@ -17,6 +19,8 @@ from codebench_pipeline.guarded_publication_runtime import preview_proposal, upd
 from codebench_pipeline.models import Digest
 from codebench_pipeline.runtime_instance import dataset_instance
 from codebench_pipeline.stage_configuration import stage_configs
+from codebench_pipeline.train_assets import register_dataset_partitions
+from codebench_pipeline.train_config import SplitSections
 from codebench_pipeline.viewer import launch_ui, preview_asset
 
 
@@ -75,6 +79,23 @@ def main() -> None:
         description="Build category-configured datasets as typed DataFrame assets."
     )
     subcommands = parser.add_subparsers(dest="action", required=True)
+    splits = subcommands.add_parser(
+        "configure-splits", help="Replace both split sections from JSON on stdin."
+    )
+    splits.add_argument("--dataset", required=True)
+    splits.add_argument("--home", type=Path, default=DEFAULT_HOME)
+    split_jobs = {
+        "train-load": "load_train_category",
+        "train-merge": "merge_train_data",
+        "test-load": "load_test_category",
+        "test-merge": "merge_test_data",
+    }
+    for name in split_jobs:
+        command = subcommands.add_parser(name)
+        command.add_argument("--home", type=Path, default=DEFAULT_HOME)
+        command.add_argument("--dataset", required=True)
+        if name.endswith("-load"):
+            command.add_argument("--category", required=True, help="Category partition, e.g. CAT-3")
     for name in ("stages", "through", "check-idle"):
         command = subcommands.add_parser(name)
         command.add_argument("--home", type=Path, default=DEFAULT_HOME)
@@ -124,6 +145,32 @@ def main() -> None:
         if name in {"attest-release", "revoke-release"}:
             control.add_argument("--proposal", required=True)
     args = parser.parse_args()
+    if args.action == "configure-splits":
+        sections = SplitSections.model_validate_json(sys.stdin.buffer.read())
+        registry = DatasetRegistry(args.home)
+        spec = registry.get(args.dataset).model_copy(update={"train": sections.train, "test": sections.test})
+        registry.register(spec)
+        with dataset_instance(args.home) as instance:
+            register_dataset_partitions(instance, spec)
+            job = build_definitions(args.home).resolve_job_def("refresh_dataset_configuration")
+            result = job.execute_in_process(
+                instance=instance, partition_key=spec.dataset_id, asset_selection=[GLOBAL_CONFIG]
+            )
+        print(json.dumps({"dataset": spec.dataset_id, "configuration_run_id": result.run_id}))
+        return
+    if args.action in split_jobs:
+        category_job = args.action.endswith("-load")
+        partition = (
+            MultiPartitionKey({"dataset": args.dataset, "category": args.category})
+            if category_job
+            else str(args.dataset)
+        )
+        job_name = split_jobs[args.action]
+        job = build_definitions(args.home).resolve_job_def(job_name)
+        with dataset_instance(args.home) as instance:
+            result = job.execute_in_process(instance=instance, partition_key=partition)
+        print(json.dumps({"job": job_name, "partition": partition, "run_id": result.run_id}))
+        return
     if args.action == "check-idle":
         finished = {DagsterRunStatus.SUCCESS, DagsterRunStatus.FAILURE, DagsterRunStatus.CANCELED}
         with dataset_instance(args.home) as instance:
@@ -209,7 +256,7 @@ def main() -> None:
         if args.action == "register":
             DatasetRegistry(home).register(spec)
             with dataset_instance(home) as instance:
-                instance.add_dynamic_partitions("dataset_builds", [spec.dataset_id])
+                register_dataset_partitions(instance, spec)
         print(json.dumps({"valid": True, "dataset": spec.dataset_id, "category": spec.rules.category_id}))
 
 

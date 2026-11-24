@@ -60,6 +60,13 @@ from codebench_pipeline.review_inputs import REVIEW_INPUT_MANAGER, review_input_
 from codebench_pipeline.stage_descriptions import describe_stage
 from codebench_pipeline.stage_implementation import ImplementationSource
 from codebench_pipeline.storage import IntegrityError, fingerprint
+from codebench_pipeline.train_assets import (
+    TRAIN_JOBS,
+    TRAIN_MAPPINGS,
+    TRAIN_TABLE_IO,
+    TRAIN_TABLES,
+    train_partition_inputs,
+)
 
 DEFAULT_HOME = Path(os.environ.get("CODEBENCH_HOME", ".codebench-datasets")).resolve()
 
@@ -153,7 +160,9 @@ def build_definitions(home: Path) -> Definitions:
             *finalization_assets(),
         ]
     ]
-    _require_scoped_configuration_edges(config_definitions, [*assets, bashguard_syntax_audit])
+    _require_scoped_configuration_edges(
+        [*config_definitions, *TRAIN_MAPPINGS], [*assets, *TRAIN_TABLES, bashguard_syntax_audit]
+    )
 
     def partition_config(key: str) -> dict[str, JsonValue]:
         return TypeAdapter(dict[str, JsonValue]).validate_python(
@@ -248,6 +257,8 @@ def build_definitions(home: Path) -> Definitions:
         assets=[
             *(definition.map_asset_specs(automate) for definition in [*config_definitions, *assets]),
             bashguard_syntax_audit,
+            *TRAIN_MAPPINGS,
+            *TRAIN_TABLES,
         ],
         jobs=[
             job,
@@ -257,6 +268,7 @@ def build_definitions(home: Path) -> Definitions:
             configuration_job,
             configuration_observation_job,
             bashguard_audit_job(),
+            *TRAIN_JOBS,
         ],
         sensors=[
             AutomationConditionSensorDefinition(
@@ -289,6 +301,8 @@ def build_definitions(home: Path) -> Definitions:
             "labeling_checkpoints": labeling_checkpoint_resource(home),
             "config_run_io_manager": IOManagerDefinition(resource_fn=lambda: config_io, config_schema={}),
             AUDIT_IO_MANAGER: dataset_storage_io(home, review=False),
+            TRAIN_TABLE_IO: dataset_storage_io(home, review=False, multipartition_dimension="dataset"),
+            "train_partition_inputs": train_partition_inputs,
             "dataset_io_manager": dataset_storage_io(home),
             REVIEW_INPUT_MANAGER: review_input_manager,
         },

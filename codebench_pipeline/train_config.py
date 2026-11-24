@@ -1,0 +1,81 @@
+from pathlib import PureWindowsPath
+from typing import Annotated, Final, Literal
+
+from pydantic import Field, field_validator
+from pydantic_core import PydanticCustomError
+
+from codebench_pipeline.models import Digest
+from codebench_pipeline.repository_config import Commit, check_path
+from codebench_pipeline.storage import IntegrityError
+from codebench_pipeline.typed_config import ConfigArtifact
+
+TrainGroupColumn = Literal["risk", "severity", "class"]
+_DEFAULT_GROUP_BY: Final[tuple[TrainGroupColumn, ...]] = ("risk", "severity", "class")
+
+
+class TrainSource(ConfigArtifact):
+    repository: Annotated[
+        str,
+        Field(
+            pattern=r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?/"
+            r"[A-Za-z0-9_.-]*[A-Za-z0-9_-][A-Za-z0-9_.-]*$"
+        ),
+    ]
+    branch: str = Field(min_length=1)
+    commit: Commit
+    path: str
+    category: Annotated[str, Field(pattern=r"^CAT-[1-9][0-9]*$")]
+    sha256: Digest
+
+    @field_validator("branch")
+    @classmethod
+    def branch_ref(cls, value: str) -> str:
+        if (
+            value == "@"
+            or value.startswith("-")
+            or value.endswith(".")
+            or ".." in value
+            or "@{" in value
+            or any(
+                char.isspace() or ord(char) < 32 or ord(char) == 127 or char in "~^:?*[\\" for char in value
+            )
+            or any(not part or part.startswith(".") or part.endswith(".lock") for part in value.split("/"))
+        ):
+            raise PydanticCustomError("train_branch", "Expected a Git branch name")
+        return value
+
+    @field_validator("path")
+    @classmethod
+    def repository_path(cls, value: str) -> str:
+        try:
+            check_path(value)
+        except IntegrityError as error:
+            raise PydanticCustomError("train_path", "Expected a safe relative repository path") from error
+        if PureWindowsPath(value).drive or ".git" in value.casefold().split("/"):
+            raise PydanticCustomError("train_path", "Expected a safe relative repository path")
+        return value
+
+
+class TrainConfig(ConfigArtifact):
+    sources: list[TrainSource]
+    group_by: list[TrainGroupColumn] = Field(default_factory=lambda: list(_DEFAULT_GROUP_BY), min_length=1)
+
+    @field_validator("sources")
+    @classmethod
+    def distinct_sources(cls, value: list[TrainSource]) -> list[TrainSource]:
+        identities = {(source.repository.casefold(), source.commit, source.path) for source in value}
+        if len(identities) != len(value):
+            raise PydanticCustomError("train_sources", "Train sources must name distinct pinned files")
+        return value
+
+    @field_validator("group_by")
+    @classmethod
+    def distinct_group_columns(cls, value: list[TrainGroupColumn]) -> list[TrainGroupColumn]:
+        if len(set(value)) != len(value):
+            raise PydanticCustomError("train_group_by", "Train grouping columns must be distinct")
+        return value
+
+
+class SplitSections(ConfigArtifact):
+    train: TrainConfig
+    test: TrainConfig

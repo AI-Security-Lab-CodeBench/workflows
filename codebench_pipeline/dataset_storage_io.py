@@ -133,7 +133,9 @@ class RegisteredDatasetTableIO(DataFrameIOManager):
         return snapshot
 
 
-def dataset_storage_io(home: Path, *, review: bool = True) -> IOManagerDefinition:
+def dataset_storage_io(
+    home: Path, *, review: bool = True, multipartition_dimension: str | None = None
+) -> IOManagerDefinition:
     """Bind a run's partition to its registered object store."""
     registry = DatasetRegistry(home)
     review_home = str(home.resolve()) if review else None
@@ -144,6 +146,8 @@ def dataset_storage_io(home: Path, *, review: bool = True) -> IOManagerDefinitio
     def bind(context: InitResourceContext) -> DataFrameIOManager:
         run = context.dagster_run
         partition = run.tags.get(PARTITION_NAME_TAG) if run is not None else None
+        if multipartition_dimension is not None and run is not None:
+            partition = run.tags.get(f"dagster/partition/{multipartition_dimension}", partition)
         if partition is None:
             raise IntegrityError("Dataset storage requires a dataset partition")
         settings = StorageBinding.model_validate(context.resource_config)
