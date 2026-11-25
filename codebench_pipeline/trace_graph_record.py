@@ -17,6 +17,8 @@ type _ReceiptNumber = Annotated[int, Field(ge=1, le=2**31 - 1)]
 type _RuleId = Annotated[str, Field(pattern=r"^cat-[1-9][0-9]{0,8}\.(capture|judge)-[0-9]{4,9}-[0-9]{2,9}$")]
 type _BusinessOutcome = Literal["produced", "rejected", "abstained", "returned"]
 type _Execution = Literal["ok", "error"]
+type _TraceAction = LlmName | _RecordedToolName
+type _RecordedToolName = ToolName | Literal["propose_candidate"]
 
 
 class _GraphMetadata(BaseModel):
@@ -65,7 +67,7 @@ class _LlmCall(_MeasuredCall):
 
 class _ToolCall(_MeasuredCall):
     kind: Literal["tool"]
-    name: ToolName
+    name: _RecordedToolName
     label: ClassVar[str] = "Tool"
 
 
@@ -92,7 +94,7 @@ class _Identifiers(TypedDict, total=False):
 
 
 class CallSummary(_Identifiers, total=False):
-    action: LlmName | ToolName
+    action: _TraceAction
     execution_status: _Execution
     business_outcome: _BusinessOutcome
     count: int
@@ -100,10 +102,10 @@ class CallSummary(_Identifiers, total=False):
 
 
 class GroupSummary(_Identifiers, total=False):
-    actions: list[LlmName | ToolName]
+    actions: list[_TraceAction]
     execution_status: _Execution
     business_outcomes: list[_BusinessOutcome]
-    result_counts: dict[LlmName | ToolName, list[int]]
+    result_counts: dict[_TraceAction, list[int]]
     calls: list[CallSummary]
     call_count: int
     node_count: int
@@ -197,7 +199,7 @@ def describe_group(nodes: Sequence[Node], status: _Execution, cycle_count: int |
     if results:
         outcomes: dict[_BusinessOutcome, None] = dict.fromkeys(result.status for result in results)
         summary["business_outcomes"] = list(outcomes)
-    counts: dict[LlmName | ToolName, list[int]] = {}
+    counts: dict[_TraceAction, list[int]] = {}
     for call in calls:
         if call.result is not None and call.result.count is not None:
             counts.setdefault(call.name, []).append(call.result.count)

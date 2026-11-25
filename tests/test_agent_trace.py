@@ -33,11 +33,31 @@ from codebench_pipeline.keenable_policy import CurrentKeenableDeclaration, Keena
 from codebench_pipeline.keenable_transport import DirectResponse, Request
 from codebench_pipeline.openai_transport import HTTPResponse
 from codebench_pipeline.rules_learning import capture_rules, deduplicate_rules
+from codebench_pipeline.trace_graph_record import describe_group, parse_graph
 from codebench_pipeline.trace_payloads import PAYLOAD_DIR
 
 _PREFIX = "CODEBENCH_GRAPH_V1 "
 _PRIVATE = "synthetic-private-observation"
 _JSON = TypeAdapter(dict[str, JsonValue])
+
+
+def test_historical_candidate_trace_retains_accepted_rule_metadata() -> None:
+    rule_id = "cat-6.capture-0001-01"
+    timing = {"start_ns": 1, "end_ns": 2, "status": "ok"}
+    graph = parse_graph(_PREFIX + json.dumps({
+        **timing, "graph": "rules_capture", "id": "12345678123442348234123456789012",
+        "nodes": [{
+            **timing, "name": "tools", "calls": [{
+                **timing, "kind": "tool", "name": "propose_candidate",
+                "result": {"status": "produced", "accepted_rule_ids": [rule_id], "count": 1},
+            }],
+        }],
+    }))
+
+    assert graph is not None
+    summary = describe_group(graph.nodes, graph.status)
+    assert summary["accepted_rule_ids"] == [rule_id]
+    assert summary["result_counts"] == {"propose_candidate": [1]}
 
 
 def _node_calls(node: JsonValue) -> list[tuple[JsonValue, JsonValue, JsonValue]]:

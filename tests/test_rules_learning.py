@@ -35,6 +35,7 @@ from codebench_pipeline.rules_contracts import (
     Labels,
     NativeRule,
     Other,
+    Package,
 )
 from codebench_pipeline.rules_corpus import Corpus, CorpusRow
 from codebench_pipeline.rules_engine import evaluate_package
@@ -202,15 +203,27 @@ def test_capture_grounding_uses_shared_provider_without_raw_inputs(
     assert len(calls) == 3
 
 
-def test_capture_proposes_reviewed_codec_shape_without_memorizing_inputs() -> None:
+def test_capture_records_the_package_authored_by_the_model_from_masked_evidence() -> None:
     train = _train("base64 -w 513 private-input.bin", "base64 -w 623 another-source.csv",
                    "base64 --unknown private-input.bin")
     calls: list[_EvaluatorInput] = []
     requests: list[_Request] = []
+    authored = Package(
+        rule=NativeRule(
+            id=_FIRST_RULE, when="argv.size() == 4 && argv[1] == '-w' && argv[0] == 'base64'",
+            labels=_GOLD, rationale="Encode one input file with an explicit wrap width.", sources=(_SOURCE,),
+        ),
+        tests=(
+            Fixture(command="base64 -w 24 notes.txt", expected=_GOLD),
+            Fixture(command="base64 -w 88 sample.csv", expected=_GOLD),
+            Fixture(command="base64 -w 24 notes.txt > output.txt", expected=Other()),
+        ),
+    )
 
     def matches(rule: NativeRule, command: str) -> bool:
         words = command.split()
-        return (rule.capture_guarded and rule.capture_allow_shapes == (("base64", "-w", "@decimal", ""),)
+        return (rule.when == authored.rule.when
+                and rule.capture_guarded and rule.capture_allow_shapes == (("base64", "-w", "@decimal", ""),)
                 and len(words) == 4 and words[:2] == ["base64", "-w"] and words[2].isdecimal())
 
     def steps() -> Iterator[Step]:
@@ -218,13 +231,17 @@ def test_capture_proposes_reviewed_codec_shape_without_memorizing_inputs() -> No
         assert payload is not None and all(
             value not in payload for value in ("private-input.bin", "another-source.csv", "513", "623")
         )
-        candidates = _JSON.validate_json(payload)["candidates"]
-        assert isinstance(candidates, list) and len(candidates) == 1
-        candidate = candidates[0]
-        assert isinstance(candidate, dict) and candidate["supporting_rows"] == ["train:0", "train:1"]
-        yield "propose_candidate", {
-            "candidate_id": candidate["id"], "source": _SOURCE, "rationale": "Encode one input with a wrap width.",
-        }
+        batch = _JSON.validate_json(payload)
+        assert "candidates" not in batch and batch["next_rule_id"] == authored.rule.id
+        functions = [tool["function"] for tool in requests[-1].tools]
+        assert {function["name"] for function in functions if isinstance(function, dict)} == {"add_rule", "finish"}
+        yield "add_rule", authored.model_copy(update={"tests": (
+            authored.tests[0], authored.tests[1].model_copy(update={"expected": Other()}),
+        )})
+        rejected = _feedback(requests[-1])
+        assert rejected.diagnostic is not None and rejected.diagnostic.code == "fixture_mismatch"
+        assert rejected.next_rule_id == authored.rule.id and not rejected.recorded
+        yield "add_rule", authored
         evaluation = _feedback(requests[-1])
         assert evaluation.recorded == (_FIRST_RULE,) and evaluation.receipts[0].train_matches == 2
         yield "finish", {"justification": "1"}
@@ -236,15 +253,19 @@ def test_capture_proposes_reviewed_codec_shape_without_memorizing_inputs() -> No
 
     assert result.complete and result.batches[0].justification == "Only the bounded wrap form is supported."
     (package,) = result.packages
-    assert package.rule.when == "argv.size() == 4 && argv[0] == 'base64' && argv[1] == '-w'"
-    assert {row.command.split()[2] for row in calls[0].rows if row.id.startswith("fixture:")} == {"12", "76"}
-    assert {row.command for call in calls[1:] for row in call.rows} == {
+    assert package == authored.model_copy(update={"rule": authored.rule.model_copy(update={
+        "capture_allow_shapes": (("base64", "-w", "@decimal", ""),), "capture_guarded": True,
+    })})
+    assert tuple(row.command for row in calls[1].rows if row.id.startswith("fixture:")) == tuple(
+        fixture.command for fixture in authored.tests
+    )
+    assert {row.command for call in calls[2:] for row in call.rows} == {
         f"base64 -w {width} {filename}" for width in ("513", "623")
         for filename in ("codebench-probe-notes.txt", "codebench-probe-record.csv")
     }
 
 
-def test_capture_rejects_ast_candidate_that_disagrees_with_reviewed_train() -> None:
+def test_capture_rejects_model_rule_with_wrong_train_match_and_pages_masked_feedback() -> None:
     ask = _GOLD.model_copy(update={"action": "ask"})
     train = _train(": > first.txt", ": > second.txt", ": > conflicting.txt")
     train = train.model_copy(update={"rows": (*(
@@ -258,14 +279,30 @@ def test_capture_rejects_ast_candidate_that_disagrees_with_reviewed_train() -> N
             "eligible": False, "nodes": (NativeNode(id=0, parent=-1, kind="Redirect", operator=">", start=2, end=8),),
         })})
     requests: list[_Request] = []
+    proposed = Package(
+        rule=NativeRule(
+            id=_FIRST_RULE, scope="ast", when="nodes.exists(n, n.Kind == 'Redirect' && n.Operator == '>')",
+            labels=ask, rationale="Ask before a shell output redirection.", sources=(_SOURCE,),
+        ),
+        tests=(
+            Fixture(command=": > rehearsal.txt", expected=ask),
+            Fixture(command=": < rehearsal.txt", expected=Other()),
+        ),
+    )
 
     def steps() -> Iterator[Step]:
-        yield "propose_candidate", {
-            "candidate_id": "candidate-1", "source": _SOURCE, "rationale": "Check the reviewed output redirection.",
-        }
+        yield "add_rule", proposed
         feedback = _feedback(requests[-1])
         assert feedback.diagnostic is not None and feedback.diagnostic.code == "wrong_match"
-        assert feedback.receipts[0].train_wrong_matches == 1
+        assert feedback.next_rule_id == _FIRST_RULE and not feedback.recorded
+        (receipt,) = feedback.receipts
+        assert receipt.train_wrong_matches == 1 and receipt.fixture_failures == 0
+        yield "page_evaluation", {"receipt": receipt.receipt, "kind": "matches", "offset": 2, "limit": 1}
+        page = _feedback(requests[-1]).page
+        assert page is not None
+        (row,) = page.rows
+        assert row.id == train.rows[2].id and row.input.command == "[masked train command]"
+        assert row.expected == _GOLD and row.actual == ask
         yield "finish", {"justification": "The same redirect occurs under a conflicting label."}
 
     result = capture_rules(

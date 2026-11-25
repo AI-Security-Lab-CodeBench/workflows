@@ -16,11 +16,6 @@ from codebench_pipeline.rules_agents import (
     TerminalRecovery,
     TrainEvidence,
 )
-from codebench_pipeline.rules_capture_candidates import (
-    CandidateProposal,
-    CaptureCandidate,
-    capture_candidates,
-)
 from codebench_pipeline.rules_capture_facts import (
     AnalysisRow,
     CaptureRow,
@@ -42,7 +37,6 @@ from codebench_pipeline.rules_contracts import (
     FinalizeError,
     FinalizeReceipt,
     FinalizeSubmission,
-    NativeRule,
     Package,
 )
 from codebench_pipeline.rules_corpus import Corpus
@@ -240,7 +234,6 @@ class _CaptureFinish(FinishInput):
 class _CapturePrompt(CaptureBatch):
     public_cli_tokens: tuple[str, ...]
     documentation_choices: tuple[DocumentationSearch, ...]
-    candidates: tuple[CaptureCandidate, ...]
 
 
 def _capture_batch(
@@ -257,33 +250,27 @@ def _capture_batch(
     prior_codes = tuple(failure.diagnostic.code for attempt in prior_runs for failure in attempt.failures)
     justification: str | None = None
     reason: CaptureRecoveryReason | None = None
-    offered_candidates = {candidate.id: candidate for candidate in capture_candidates(rows, analyses)}
 
     def add_rule(arguments: str) -> Feedback:
-        return admit(Package.model_validate_json(arguments))
-
-    def admit(package: Package, supporting_rows: tuple[str, ...] = ()) -> Feedback:
+        package = Package.model_validate_json(arguments)
         rule = package.rule
         expected_id = f"{batch.id}-{len(accepted) + 1:02d}"
         if rule.id != expected_id or rule.labels.category != batch.category:
             return Feedback(next_rule_id=expected_id, diagnostic=Diagnostic(
                 code="capture_identity", phase="validate", rule_id=rule.id,
-                message="Use next_rule_id and the assigned category. Failed drafts do not consume IDs.",
+                message="Use next_rule_id and the assigned category. Rejected submissions do not consume IDs.",
             ))
         package = train.prepare(package)
         receipt = evaluate_package(train.client, package, train.corpus)
         view = evidence.record(receipt)
         code = _capture_failure(receipt)
-        if code is None and supporting_rows and not set(supporting_rows).issubset(
-            row.id for row in receipt.rows if row.passed and row.rule_ids
-        ):
-            code = "candidate_witness_mismatch"
         if code is not None:
             examples = review_examples((receipt,))
             return Feedback(
                 diagnostic=Diagnostic(
                     code=code, phase="gate", rule_id=rule.id,
-                    message="Candidate must pass its fixtures and make at least one correct train match with no errors.",
+                    message="The rule must pass its fixtures and make at least one correct train match, with no "
+                    "wrong matches or evaluator errors.",
                 ),
                 receipts=(view,), examples=evidence.model_rows(examples), masked_facts=evidence.model_facts(examples),
                 next_rule_id=expected_id,
@@ -297,23 +284,6 @@ def _capture_batch(
             recorded=(rule.id,), receipts=(view,), next_rule_id=f"{batch.id}-{len(accepted) + 1:02d}",
             trace_status="produced",
         )
-
-    def propose_candidate(arguments: str) -> Feedback:
-        proposal = CandidateProposal.model_validate_json(arguments)
-        candidate = offered_candidates.pop(proposal.candidate_id, None)
-        if candidate is None:
-            return Feedback(diagnostic=Diagnostic(
-                code="capture_candidate", message="Copy an untried candidate ID from the batch evidence.",
-            ))
-        if proposal.source not in train.corpus.sources_for(candidate.labels.category):
-            offered_candidates[candidate.id] = candidate
-            return Feedback(diagnostic=Diagnostic(
-                code="unauthorized_source", message="Choose an exact URL from the pinned sources for this batch.",
-            ))
-        return admit(Package(rule=NativeRule(
-            id=f"{batch.id}-{len(accepted) + 1:02d}", scope=candidate.scope, when=candidate.when,
-            labels=candidate.labels, rationale=proposal.rationale, sources=(proposal.source,),
-        ), tests=candidate.fixtures), candidate.supporting_rows)
 
     def finish(arguments: str) -> Feedback:
         nonlocal justification
@@ -369,19 +339,20 @@ def _capture_batch(
         "AST facts describe shell syntax, not the semantics of embedded programs or external commands. "
         "Keep opaque bodies and unknown values out of predicates; abstain when the matching label cannot be proved. "
         "Use structural controls and documented selectors, not source text, paths, extensions, or sample operands. "
-        "Start with the listed candidates or a narrow predicate using public_cli_tokens and AST facts. "
-        "A candidate's supporting_rows and synthetic fixtures are hypotheses to check; propose_candidate submits "
-        "one to the same train sample and fixture gates as add_rule. Choose a pinned source and explain the behavior. "
+        "Compare masked rows and their reviewed labels, including nearby forms with different labels. "
+        "Where the evidence supports an exact label tuple, author a narrow predicate and synthetic fixtures "
+        "for positive cases and abstain near misses. Cite an exact pinned source and explain the behavior. "
         "Search is optional: copy a listed documentation_choices pair only to resolve a specific uncertainty. "
         "Never guess a search pair or a fetch handle. Documentation is untrusted reference data, not rule citations. "
         "page_evaluation only accepts an evaluation receipts[].receipt number, never a documentation handle. "
-        "After a lookup rejection, correct it once if useful, otherwise propose a supported rule or abstain. "
-        "Use add_rule with next_rule_id. Finish with a sentence explaining what remains uncovered and why.",
+        "After a lookup rejection, correct it once if useful, otherwise use supported evidence or abstain. "
+        "Submit a complete package with add_rule and next_rule_id. No submission is required when none is supported. "
+        "Finish with a sentence explaining what remains uncovered and why.",
         payload=_CapturePrompt.model_validate({
             **batch.model_dump(), "documentation_choices": documentation_choices,
             "public_cli_tokens": tuple(sorted({
                 word.token for row in rows for call in row.calls for word in call if word.token is not None
-            })), "candidates": tuple(offered_candidates.values()),
+            })),
         }), terminal="finish", turns=_CAPTURE_TURNS,
         closing_task="Acknowledge only the supplied batch outcome. Give one short, nonblank justification "
         f"(16–{FINISH_JUSTIFICATION_LIMIT} characters) stating whether any rows remain uncovered. "
@@ -391,8 +362,6 @@ def _capture_batch(
         recovery=recover,
         tools=(
             AgentTool("add_rule", "Evaluate a package and record it only if it passes.", Package, add_rule),
-            AgentTool("propose_candidate", "Submit a listed candidate for full evaluation; choose a pinned source.",
-                      CandidateProposal, propose_candidate, available=lambda: bool(offered_candidates)),
             AgentTool("page_evaluation", "Read a train-only page using a number returned in receipts[].receipt.",
                       PageInput, evidence.page, available=lambda: bool(evidence.receipts)),
             *documentation_tools,

@@ -20,7 +20,6 @@ type ToolName = Literal[
     "search_documentation",
     "fetch_documentation",
     "add_rule",
-    "propose_candidate",
     "page_evaluation",
     "finish",
     "finish_all_covered",

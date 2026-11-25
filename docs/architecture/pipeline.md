@@ -96,7 +96,7 @@ require collection, relabeling, or approval of an existing review queue.
 | Stage | Data available | Decision |
 | --- | --- | --- |
 | `rules_train_sample`, `rules_test_sample` | Their own persisted `train/merged_rows` or `test/merged_rows` | Materialize one private, stratified sample per split. Store only aggregate lineage metadata in Dagster. |
-| `rules_capture` | One category projection of `rules_train_sample` | Propose specific CEL predicates and positive and negative fixtures. Require a correct hit, passing fixtures and no wrong matches or evaluator errors on that projection. |
+| `rules_capture` | Masked evidence from one category projection of `rules_train_sample` | Compare reviewed labels and submit model-authored packages through `add_rule` only. Require a correct hit, passing fixtures and no wrong matches or evaluator errors on that projection. A batch may finish without a rule. |
 | `rules_dedup` | Selected category captures and `rules_train_sample` | Replay every captured package on the global train sample before nominating similar rules and rules sharing hits. A failed replay blocks learning. The judge can inspect sampled train evidence and submit a justified add/drop diff. A rewrite is a fresh rule, not an in-place change. |
 | `rules_finalize` | Deduplicated packages and `rules_train_sample` | Replay the complete surviving bundle on the global train sample and freeze it without consulting the holdout. |
 | `rules_eval` | Frozen bundle, train sample lineage metadata, and `rules_test_sample` | Score only the holdout sample. Measure wrong predictions, abstentions, failures, coverage and exact-label accuracy. An uncovered category or an undefined metric is not evidence of perfect precision. |
@@ -126,7 +126,9 @@ worker. They do not enable a sensor.
    new evaluator and packaged guide identities. Use the evaluator executable's
    SHA-256 with its `sha256:` prefix and the plain SHA-256 of
    `business-configs/bashguard/guide.json`. Omit an override only when its
-   identity is unchanged. Migration refuses to overwrite a different approved
+   identity is unchanged. Direct-only capture changes the packaged guide;
+   approve its new SHA-256 even if the evaluator version is unchanged.
+   Migration refuses to overwrite a different approved
    policy. For initial setup or intentional changes use
    `rules-register --config - --sha256 <digest>` with private JSON on standard
    input; hash the exact file bytes you send. The policy supplies `categories`,

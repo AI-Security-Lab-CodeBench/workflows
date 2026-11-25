@@ -5,8 +5,12 @@ train commands. Capture groups rows by native shell node kinds and masked
 argument roles. Train prompts and receipt pages expose ordered roles, recognized
 public CLI selectors and AST node relationships, not raw command strings,
 filenames, unknown values or embedded programs. Syntax is not evidence of an
-operation's behavior. A learned allow must have a supported simple-call shape
-in both reviewed train data and positive fixtures. Its native guard restricts
+operation's behavior. The model compares masked rows and reviewed labels,
+then submits its own predicate and synthetic fixtures as one `add_rule`
+package when the evidence supports it. Capture supplies no prewritten packages
+for the batch and can finish with uncovered rows. A learned allow must have a
+supported simple-call shape in both reviewed train data and positive fixtures.
+Its native guard restricts
 matching to those shapes, including executable, recognized selectors and
 operand roles. An opaque embedded program cannot be allowed. Capture and
 dedup additions both set `capture_guarded`, which activates the checked CEL
