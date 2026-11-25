@@ -80,7 +80,7 @@ def register_dataset_partitions(instance: DagsterInstance, spec: DatasetBuildSpe
     for split in _SPLITS:
         config = _split_config(spec, split)
         name = _category_partitions_name(split)
-        desired: set[str] = {source.category for source in config.sources} if config is not None else set()
+        desired: set[str] = set(config.sources_by_category()) if config is not None else set()
         current = set(instance.get_dynamic_partitions(name))
         if additions := sorted(desired - current):
             instance.add_dynamic_partitions(name, additions)

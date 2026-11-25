@@ -19,6 +19,7 @@ from codebench_pipeline.repository_tree import RepositoryLocation, fetch_reposit
 from codebench_pipeline.split_schema import SplitRowsTable
 from codebench_pipeline.storage import IntegrityError
 from codebench_pipeline.train_config import SplitMarginalCount, SplitStats, TrainGroupColumn
+from codebench_pipeline.train_config import TrainSource as ConfiguredTrainSource
 
 TRAIN_COLUMNS: Final = (
     "command",
@@ -58,7 +59,7 @@ def load_train_category(
     *,
     fetch_bytes: Callable[[str, int], bytes] = fetch_repository_bytes,
 ) -> DataFrame[SplitRowsTable]:
-    """Read one category in source/record order; fetch_bytes receives the pinned URL and byte cap."""
+    """Validate pinned CSVs and select one category in source/record order."""
     categories = {source.category for source in sources}
     if len(categories) > 1 or any(not _CATEGORY_ID.fullmatch(category) for category in categories):
         raise IntegrityError("Training sources must belong to one canonical category")
@@ -66,6 +67,8 @@ def load_train_category(
     rows: list[list[str]] = []
     category_column = TRAIN_COLUMNS.index("category")
     for source in sources:
+        allowed = source.categories if isinstance(source, ConfiguredTrainSource) else None
+        allowed_categories = set(allowed) if allowed is not None else {source.category}
         _REPOSITORY_NAME.validate_python(source.repository, strict=True)
         _COMMIT.validate_python(source.commit, strict=True)
         check_path(source.path)
@@ -82,9 +85,11 @@ def load_train_category(
             for number, row in enumerate(records, start=2):
                 if len(row) != len(TRAIN_COLUMNS):
                     raise IntegrityError(f"Training CSV record {number} has incorrect width: {url}")
-                if row[category_column].partition(" ")[0] != source.category:
+                category = row[category_column].partition(" ")[0]
+                if category not in allowed_categories:
                     raise IntegrityError(f"Training CSV record {number} has the wrong category: {url}")
-                rows.append(row)
+                if category == source.category:
+                    rows.append(row)
         except (UnicodeError, csv.Error) as error:
             raise IntegrityError(f"Training CSV is not readable UTF-8 CSV: {url}") from error
 

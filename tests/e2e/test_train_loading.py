@@ -28,7 +28,7 @@ from codebench_pipeline.definitions import build_definitions
 from codebench_pipeline.full_dataset import FullDatasetBundle
 from codebench_pipeline.runtime_instance import dataset_instance
 from codebench_pipeline.train_assets import register_dataset_partitions
-from codebench_pipeline.train_config import SplitSections, TrainConfig, TrainSource
+from codebench_pipeline.train_config import MixedTrainSource, SplitSections, TrainConfig, TrainSource
 
 _VALIDATOR: type[Validator] = Draft202012Validator
 
@@ -37,25 +37,32 @@ def test_train_loading(tmp_path: Path) -> None:
     header = b"command,description,util,severity,category,risk,source,seed,class\n"
     blobs: dict[str, bytes] = {}
 
-    def source(number: int, category: str, rows: bytes) -> TrainSource:
+    def source(number: int, category: str | list[str], rows: bytes) -> TrainSource | MixedTrainSource:
         commit = f"{number:040x}"
         data = header + rows
         blobs[f"/fixture/data/{commit}/commands.csv"] = data
-        return TrainSource(
-            repository="fixture/data",
-            branch=f"feat/data_{number}",
-            commit=commit,
-            path="commands.csv",
-            category=category,
-            sha256=sha256(data).hexdigest(),
-        )
+        pin = {
+            "repository": "fixture/data",
+            "branch": f"feat/data_{number}",
+            "commit": commit,
+            "path": "commands.csv",
+            "sha256": sha256(data).hexdigest(),
+        }
+        match category:
+            case str():
+                return TrainSource(category=category, **pin)
+            case list():
+                return MixedTrainSource(categories=category, **pin)
 
     a = source(1, "CAT-3", b"pwd,,,low,CAT-3,CAT-3.1,fixture,,allow\n")
-    b = source(2, "CAT-3", b"ls,,,low,CAT-3 demo,CAT-3.2,fixture,,allow\n")
-    c = source(3, "CAT-4", b"date,,,low,CAT-4,CAT-4.1,fixture,,allow\n")
+    b = source(
+        2,
+        ["CAT-3", "CAT-4"],
+        b"date,,,low,CAT-4,CAT-4.1,synthetic,,allow\nls,,,low,CAT-3 demo,CAT-3.2,synthetic,,allow\n",
+    )
     held = source(4, "CAT-3", b"whoami,,,low,CAT-3,CAT-3.2,fixture,,ask\n")
     empty = source(6, "CAT-5", b"")
-    train = TrainConfig(sources=[c, a, b])
+    train = TrainConfig(sources=[a, b])
     test = TrainConfig(sources=[held, empty])
     spec = fixture_spec(tmp_path).model_copy(update={"train": train, "test": test})
     registry = DatasetRegistry(tmp_path)
@@ -190,6 +197,10 @@ def test_train_loading(tmp_path: Path) -> None:
         assert empty_stats.value == {"total_rows": 0, "marginal_counts": []}
         assert table("train", "merged_rows", spec.dataset_id)["command"].tolist() == ["pwd", "ls", "date"]
         assert table("test", "merged_rows", spec.dataset_id)["command"].tolist() == ["whoami"]
+        for key in (p3, p4):
+            persisted = table("train", "category_rows", key)
+            pins = persisted.attrs["train_sources"]
+            assert pins[-1] == {**b.model_dump(), "category": key}
         for split, commands in (("train", ["pwd", "ls", "date"]), ("test", ["whoami"])):
             asset_key = (split, "merged_rows")
             assert viewer.partitions(ArtifactKey(asset_key=asset_key)).partitions == (spec.dataset_id,)
@@ -203,7 +214,7 @@ def test_train_loading(tmp_path: Path) -> None:
         merge_train.execute_in_process(instance=instance, partition_key=spec.dataset_id)
         assert manager.reference_at(key, spec.dataset_id) == digest
         revised = source(5, "CAT-3", b"echo,,,low,CAT-3,CAT-3.1,fixture,,allow\n")
-        registry.register(spec.model_copy(update={"train": TrainConfig(sources=[revised, c])}))
+        registry.register(spec.model_copy(update={"train": TrainConfig(sources=[revised, b])}))
         config_job.execute_in_process(
             instance=instance, partition_key=spec.dataset_id, asset_selection=[GLOBAL_CONFIG]
         )
@@ -214,7 +225,7 @@ def test_train_loading(tmp_path: Path) -> None:
         assert manager.reference_at(key, spec.dataset_id) == digest
         cli("train-load", "--category", "CAT-3")
         cli("train-merge")
-        assert table("train", "merged_rows", spec.dataset_id)["command"].tolist() == ["echo", "date"]
+        assert table("train", "merged_rows", spec.dataset_id)["command"].tolist() == ["echo", "ls", "date"]
         assert table("test", "merged_rows", spec.dataset_id)["command"].tolist() == ["whoami"]
         assert original.train.load()["command"].tolist() == ["pwd", "ls", "date"]
         build_bundle = defs.resolve_job_def("build_full_dataset")
@@ -224,7 +235,7 @@ def test_train_loading(tmp_path: Path) -> None:
         cli("test-merge")
         cli("full-dataset")
         current = full_dataset()
-        assert current.train.load()["command"].tolist() == ["echo", "date"]
+        assert current.train.load()["command"].tolist() == ["echo", "ls", "date"]
         assert current.test.load()["command"].tolist() == ["whoami"]
         assert current.train.reference != original.train.reference
         assert current.test.reference == original.test.reference

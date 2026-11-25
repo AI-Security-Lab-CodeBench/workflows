@@ -15,7 +15,7 @@ from pydantic import ValidationError
 from codebench_pipeline.dataframe_io import frame_bytes, read_frame
 from codebench_pipeline.storage import IntegrityError
 from codebench_pipeline.train_assets import TRAIN_TABLES
-from codebench_pipeline.train_config import SplitStats
+from codebench_pipeline.train_config import MixedTrainSource, SplitStats, TrainConfig
 from codebench_pipeline.train_tables import load_train_category, merge_train_categories, train_stats
 
 HEADER = ["command", "description", "util", "severity", "category", "risk", "source", "seed", "class"]
@@ -63,6 +63,49 @@ class TrainTablesTests(unittest.TestCase):
         )
 
         assert_frame_equal(result, pd.DataFrame([ROW, exact, ROW, last], columns=HEADER))
+
+    def test_mixed_source_load_rejects_undeclared_category_in_any_partition(self) -> None:
+        for value in ("CAT-5 Unexpected", "CAT-4.1 Detail"):
+            with self.subTest(category=value):
+                body = csv_bytes(ROW, [*ROW[:4], value, *ROW[5:]])
+                mixed = MixedTrainSource(
+                    repository="example/training",
+                    branch="feature",
+                    commit=SHA,
+                    path="mixed.csv",
+                    sha256=sha256(body).hexdigest(),
+                    categories=["CAT-3", "CAT-4"],
+                )
+                sources = TrainConfig(sources=[mixed]).sources_by_category()
+                with self.assertRaisesRegex(IntegrityError, "wrong category"):
+                    load_train_category(sources["CAT-3"].sources, fetch_bytes=lambda _url, _limit: body)
+
+    def test_split_manifest_requires_one_valid_category_declaration(self) -> None:
+        pin = {
+            "repository": "example/training",
+            "branch": "feature",
+            "commit": SHA,
+            "path": "mixed.csv",
+            "sha256": "b" * 64,
+        }
+        declarations: tuple[dict[str, str | list[str]], ...] = (
+            {},
+            {"category": "CAT-3", "categories": ["CAT-3", "CAT-4"]},
+            {"categories": []},
+            {"categories": ["CAT-3", "CAT-3"]},
+            {"categories": ["CAT-03"]},
+        )
+        for declaration in declarations:
+            with self.subTest(declaration=declaration), self.assertRaises(ValidationError):
+                TrainConfig.model_validate({"sources": [{**pin, **declaration}]})
+        with self.assertRaisesRegex(ValidationError, "distinct pinned files"):
+            TrainConfig.model_validate(
+                {"sources": [{**pin, "category": "CAT-3"}, {**pin, "categories": ["CAT-3", "CAT-4"]}]}
+            )
+        legacy = {**pin, "category": "CAT-3"}
+        config = TrainConfig.model_validate({"sources": [legacy]})
+        self.assertEqual(config.model_dump()["sources"], [legacy])
+        self.assertEqual(config.sources_by_category()["CAT-3"].model_dump(), {"sources": [legacy]})
 
     def test_load_rejects_invalid_content_even_when_csv_can_be_read(self) -> None:
         valid = csv_bytes(ROW)

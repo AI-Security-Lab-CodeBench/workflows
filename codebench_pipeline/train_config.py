@@ -1,8 +1,8 @@
 from collections import defaultdict
 from pathlib import PureWindowsPath
-from typing import Annotated, Final, Literal
+from typing import Annotated, Final, Literal, Self, assert_never
 
-from pydantic import Field, field_validator
+from pydantic import AfterValidator, Field, field_validator, model_validator
 from pydantic_core import PydanticCustomError
 
 from codebench_pipeline.models import Digest
@@ -15,7 +15,16 @@ SplitCategory = Annotated[str, Field(pattern=r"^CAT-[1-9][0-9]*$")]
 _DEFAULT_GROUP_BY: Final[tuple[TrainGroupColumn, ...]] = ("risk", "severity", "class")
 
 
-class TrainSource(ConfigArtifact):
+def _distinct_categories(value: list[SplitCategory]) -> list[SplitCategory]:
+    if len(set(value)) != len(value):
+        raise PydanticCustomError("train_categories", "Train categories must be distinct")
+    return value
+
+
+_CategoryList = Annotated[list[SplitCategory], Field(min_length=1), AfterValidator(_distinct_categories)]
+
+
+class _TrainSourcePin(ConfigArtifact):
     repository: Annotated[
         str,
         Field(
@@ -26,8 +35,6 @@ class TrainSource(ConfigArtifact):
     branch: str = Field(min_length=1)
     commit: Commit
     path: str
-    category: SplitCategory
-    sha256: Digest
 
     @field_validator("branch")
     @classmethod
@@ -58,6 +65,23 @@ class TrainSource(ConfigArtifact):
         return value
 
 
+class TrainSource(_TrainSourcePin):
+    category: SplitCategory
+    sha256: Digest
+    categories: _CategoryList | None = Field(default=None, exclude_if=lambda value: value is None)
+
+    @model_validator(mode="after")
+    def partition_belongs_to_source(self) -> Self:
+        if self.categories is not None and self.category not in self.categories:
+            raise PydanticCustomError("train_categories", "Partition category must belong to the source")
+        return self
+
+
+class MixedTrainSource(_TrainSourcePin):
+    sha256: Digest
+    categories: _CategoryList
+
+
 class CategorySources(ConfigArtifact):
     sources: list[TrainSource]
 
@@ -67,12 +91,14 @@ class CategorySources(ConfigArtifact):
 
 
 class TrainConfig(ConfigArtifact):
-    sources: list[TrainSource]
+    sources: list[TrainSource | MixedTrainSource]
     group_by: list[TrainGroupColumn] = Field(default_factory=lambda: list(_DEFAULT_GROUP_BY), min_length=1)
 
     @field_validator("sources")
     @classmethod
-    def distinct_sources(cls, value: list[TrainSource]) -> list[TrainSource]:
+    def distinct_sources(cls, value: list[TrainSource | MixedTrainSource]) -> list[TrainSource | MixedTrainSource]:
+        if any(isinstance(source, TrainSource) and source.categories is not None for source in value):
+            raise PydanticCustomError("train_categories", "Declare only one of category or categories")
         identities = {(source.repository.casefold(), source.commit, source.path) for source in value}
         if len(identities) != len(value):
             raise PydanticCustomError("train_sources", "Train sources must name distinct pinned files")
@@ -88,7 +114,25 @@ class TrainConfig(ConfigArtifact):
     def sources_by_category(self) -> dict[str, CategorySources]:
         groups: defaultdict[str, list[TrainSource]] = defaultdict(list)
         for source in self.sources:
-            groups[source.category].append(source)
+            match source:
+                case TrainSource():
+                    groups[source.category].append(source)
+                    continue
+                case MixedTrainSource():
+                    for category in source.categories:
+                        groups[category].append(
+                            TrainSource(
+                                repository=source.repository,
+                                branch=source.branch,
+                                commit=source.commit,
+                                path=source.path,
+                                sha256=source.sha256,
+                                category=category,
+                                categories=source.categories,
+                            )
+                        )
+                    continue
+            assert_never(source)
         return {category: CategorySources(sources=sources) for category, sources in groups.items()}
 
 

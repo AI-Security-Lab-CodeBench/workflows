@@ -46,14 +46,34 @@ load of that category before merging. Do not seed status with synthetic events.
 Each section has a `sources` array and an optional `group_by` array (default
 `["risk", "severity", "class"]`). Each source names the GitHub `repository`
 (`owner/repo`), explicit `branch`, full 40-character `commit`, repository-relative
-CSV `path`, stable `category` (`CAT-N`) and the 64-character `sha256` of the
-exact file bytes. Branch is provenance: the loader requests **the commit**, never
+CSV `path`, and the 64-character `sha256` of the exact file bytes. Use `category`
+(`CAT-N`) for a single-category CSV, or use `categories` (a nonempty array of
+distinct `CAT-N` IDs) for a mixed CSV. Do not set both or declare the same file
+once per category. A mixed source creates one partition per declared category
+and retains the full file pin and category list in each partition's provenance.
+Branch is provenance: the loader requests **the commit**, never
 the moving branch head. Update both pins deliberately when adopting a new revision.
 The loader does not discover branches, run repository scripts, or execute commands.
 
 Put the sections directly in the dataset bundle, or keep a private JSON file with
 just the two sections. A private manifest keeps non-public policy and data out
-of Git. The following commands operate inside the **existing Compose stack**;
+of Git. For the v0 synthetic experiment, replace `train.sources` with this
+single entry and retain the currently registered `test` section unchanged:
+
+```json
+{
+  "repository": "SfBalaba/code_guard_benchmark",
+  "branch": "feat/generation-pipeline",
+  "commit": "93c90562accccf1b77740c2b2681c46000e6f30d",
+  "path": "generation-pipeline/runs/v0/dataset.csv",
+  "sha256": "065e72c6fed7c1e53841a2a35b90095404ca4b9aee6f74691b2008552c48c2b6",
+  "categories": ["CAT-1", "CAT-5"]
+}
+```
+
+This pin has 274 CAT-1 rows and 612 CAT-5 rows; after loading both
+categories the merged train table should contain 886 rows.
+The following commands operate inside the **existing Compose stack**;
 they do not launch local workers. Start with the registered `codebench` configuration. The configure
 command replaces both sections, retains the other registered settings, and
 materializes `datasets/global_config`. As with any registration change, use the
@@ -80,8 +100,11 @@ replaces the registration with a bundle that omits the sections.
 CSV headers must be `command,description,util,severity,category,risk,source,seed,class`,
 in that order. Input bytes must match their digest. All nine values remain
 strings; source order, record order, duplicate rows, and empty strings are
-preserved. A row must name the declared category, optionally followed by a
-display description. A header-only file is a valid empty table; a missing file,
+preserved within a category partition. A row must name a declared category,
+optionally followed by a display description. For a mixed source, the loader
+validates the entire file before returning only rows for the current partition;
+an undeclared category fails the load even if its row would not be selected.
+A header-only file is a valid empty table; a missing file,
 bad digest, or malformed row is not an empty result.
 
 `stats` replaces `label_counts`. Its Pydantic JSON output contains `total_rows`
