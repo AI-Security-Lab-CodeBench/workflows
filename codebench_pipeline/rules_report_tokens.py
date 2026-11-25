@@ -13,6 +13,10 @@ TOKENS = """:root {
   --wash: #e1ede4;
   --focus: #1559b3;
   --track: #e7ece6;
+  --outcome-correct: var(--accent);
+  --outcome-wrong: #a23d35;
+  --outcome-abstain: #7e651c;
+  --outcome-error: #45558e;
   --s1: 0.25rem;
   --s2: 0.5rem;
   --s3: 0.75rem;
@@ -51,6 +55,9 @@ TOKENS = """:root {
     --wash: #293f34;
     --focus: #90c2ff;
     --track: #30453a;
+    --outcome-wrong: #f1a399;
+    --outcome-abstain: #e6c568;
+    --outcome-error: #abaeea;
   }
 }
 """
