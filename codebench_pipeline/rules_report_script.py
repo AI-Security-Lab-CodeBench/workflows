@@ -7,6 +7,7 @@ const category = document.getElementById("category");
 const breakdown = document.getElementById("breakdown");
 const cohorts = ["overall", "uncontaminated", "trained", "unseen"];
 const axes = ["category", "risk", "severity", "action"];
+const outcomes = ["correct", "wrong", "abstain", "error"];
 const metrics = [
   "recall", "precision", "coverage", "fpr", "support", "correct", "wrong",
   "abstain", "error", "predicted", "negative_support", "true_positive", "false_positive",
@@ -60,9 +61,14 @@ function ordered(values, preferred) {
   return first.concat([...unique].sort(collator.compare));
 }
 
-function options(select, values, { all, label = title } = {}) {
-  if (all) select.add(new Option(all, ""));
-  for (const value of values) select.add(new Option(label(value), value));
+function options(select, values, { all, unavailable = "Not available" } = {}) {
+  const previous = select.value;
+  const choices = values.map((value) => new Option(title(value), value));
+  if (values.length && all) choices.unshift(new Option(all, ""));
+  if (!choices.length) choices.push(new Option(unavailable, ""));
+  select.replaceChildren(...choices);
+  if (choices.some((option) => option.value === previous)) select.value = previous;
+  select.disabled = !values.length;
 }
 
 function node(tag, text, style) {
@@ -80,30 +86,45 @@ function format(value, ratio) {
   return percent.format(value);
 }
 
-function bar(value, maximum) {
+function graphicTrack(className) {
   const graphic = document.createElementNS(svg, "svg");
-  graphic.setAttribute("class", "bar");
+  graphic.setAttribute("class", className);
   graphic.setAttribute("aria-hidden", "true");
   graphic.setAttribute("viewBox", "0 0 1000 10");
   graphic.setAttribute("preserveAspectRatio", "none");
-  const fill = document.createElementNS(svg, "rect");
-  fill.setAttribute("width", String(maximum > 0 ? value / maximum * 1000 : 0));
-  fill.setAttribute("height", "10");
-  graphic.append(fill);
   return graphic;
 }
 
-function chart(id, axisRows, { visible, describe }) {
+function segment(start, end) {
+  const fill = document.createElementNS(svg, "rect");
+  fill.setAttribute("x", String(start * 1000));
+  fill.setAttribute("width", String((end - start) * 1000));
+  fill.setAttribute("height", "10");
+  return fill;
+}
+
+function bar(value, maximum) {
+  const graphic = graphicTrack("bar");
+  graphic.append(segment(0, value / maximum));
+  return graphic;
+}
+
+function chart(id, { visible, describe, empty, ratio, maximum }) {
   const region = document.getElementById(id);
   if (!visible.length) {
-    region.replaceChildren(node("p", "No values for this selection. Try another filter.", "empty"));
+    region.replaceChildren(node("p", empty, "empty"));
     return;
   }
-  const ratio = ratios.has(metric.value);
-  const maximum = axisRows.reduce((max, row) => Math.max(max, row.value ?? 0), ratio ? 1 : 0);
-  const scale = maximum
-    ? node("p", `Bar scale: ${format(0, ratio)} to ${format(maximum, ratio)}`, "scale")
-    : null;
+  const hasDefined = visible.some((row) => row.value !== null);
+  const showBars = hasDefined && maximum > 0;
+  const scale = node("div", "", "scale");
+  if (showBars) {
+    const ticks = node("div", "", "scale-ticks");
+    for (const value of ratio ? [0, 0.5, 1] : [0, maximum]) ticks.append(node("span", format(value, ratio)));
+    scale.append(node("p", ratio ? "Rate scale" : "Shared count scale"), ticks);
+  } else {
+    scale.append(node("p", hasDefined ? "All measured values are zero." : "No defined values to plot."));
+  }
   const list = node("ul", "", "bars");
   list.setAttribute("role", "list");
   for (const row of visible) {
@@ -114,19 +135,71 @@ function chart(id, axisRows, { visible, describe }) {
       node("span", format(row.value, ratio), row.value === null ? "value undefined" : "value"),
     );
     item.append(reading);
-    if (row.value !== null) item.append(bar(row.value, maximum));
+    if (showBars && row.value !== null) item.append(bar(row.value, maximum));
     list.append(item);
   }
-  region.replaceChildren(...(scale ? [scale, list] : [list]));
+  region.replaceChildren(scale, list);
 }
 
 function selectedCohort(row) {
   return !cohort.value || row.cohort === cohort.value;
 }
 
-function selectedCategory(row) {
-  return category.disabled || !category.value || row.label === category.value
-    || (row.axis === "risk" && row.label.startsWith(`${category.value}.`));
+function distributionRow(name, measurements) {
+  const value = (key) => measurements.get(key);
+  const text = (key) => measurements.has(key) ? format(value(key), false) : "Missing";
+  const support = value("support");
+  const values = outcomes.map(value);
+  const item = node("li");
+  const reading = node("div", "", "reading");
+  reading.append(node("strong", title(name)), node("span", `Support: ${text("support")}`, "value"));
+  item.append(reading);
+  let note;
+  if (![support, ...values].every(Number.isSafeInteger)) {
+    note = "Cannot plot: support or some outcome counts are unavailable.";
+  } else if (values.reduce((total, count) => total + count, 0) !== support) {
+    note = "Cannot plot: outcome counts do not add up to support.";
+  } else if (support === 0) {
+    note = "No evaluated rows in this cohort.";
+  } else {
+    const stack = graphicTrack("outcome-stack");
+    let offset = 0;
+    outcomes.forEach((key, index) => {
+      const amount = values[index];
+      if (amount === 0) return;
+      const fill = segment(offset / support, (offset + amount) / support);
+      fill.setAttribute("class", `outcome-${key}`);
+      stack.append(fill);
+      offset += amount;
+    });
+    item.append(stack);
+  }
+  if (note) item.append(node("p", note, "note"));
+  const counts = node("dl", "", "outcome-counts");
+  for (const key of outcomes) {
+    const pair = node("div", "", `outcome-${key}`);
+    pair.append(node("dt", title(key)), node("dd", text(key)));
+    counts.append(pair);
+  }
+  item.append(counts);
+  return item;
+}
+
+function renderDistribution(cohortOrder) {
+  const region = document.getElementById("distribution");
+  const visible = cohortOrder.filter((name) => selectedCohort({ cohort: name }) && outcomeGroups.has(name));
+  if (!visible.length) {
+    region.replaceChildren(node("p", "No outcome counts for this selection.", "note"));
+    return;
+  }
+  const list = node("ul", "", "bars");
+  list.setAttribute("role", "list");
+  for (const name of visible) list.append(distributionRow(name, outcomeGroups.get(name)));
+  region.replaceChildren(list);
+}
+
+function categoryOf(row) {
+  return row.axis === "risk" ? row.label.split(".")[0] : row.label;
 }
 
 function overlapReport(overlap) {
@@ -142,30 +215,52 @@ function overlapReport(overlap) {
 
 const explorerRows = rows.filter((row) => row.axis !== "overlap");
 const overlapRows = rows.filter((row) => row.axis === "overlap");
-const classRows = explorerRows.filter((row) => row.axis !== "outcome");
-const cohortOrder = ordered(explorerRows.map((row) => row.cohort), cohorts);
-const axisOrder = ordered(classRows.map((row) => row.axis), axes);
+const outcomeGroups = new Map();
+for (const row of explorerRows) {
+  if (row.axis !== "outcome") continue;
+  if (!outcomeGroups.has(row.cohort)) outcomeGroups.set(row.cohort, new Map());
+  outcomeGroups.get(row.cohort).set(row.metric, row.value);
+}
 
 function render() {
-  category.disabled = !category.options[1] || !["category", "risk"].includes(breakdown.value);
   document.getElementById("metric-note").textContent = definitions.get(metric.value) ?? "";
   const measurements = explorerRows.filter((row) => row.metric === metric.value);
+  const ratio = ratios.has(metric.value);
+  const maximum = ratio ? 1 : measurements.reduce((max, row) => Math.max(max, row.value ?? 0), 0);
+  const cohortOrder = ordered([...outcomeGroups.keys(), ...measurements.map((row) => row.cohort)], cohorts);
+  options(cohort, cohortOrder, { all: "All cohorts" });
+  renderDistribution(cohortOrder);
+  const scopedClasses = measurements.filter((row) => row.axis !== "outcome" && selectedCohort(row));
+  options(breakdown, ordered(scopedClasses.map((row) => row.axis), axes));
   const outcomeRows = measurements.filter((row) => row.axis === "outcome")
     .sort((a, b) => cohortOrder.indexOf(a.cohort) - cohortOrder.indexOf(b.cohort));
   const byClass = measurements.filter((row) => row.axis === breakdown.value)
     .sort((a, b) => collator.compare(a.label, b.label)
       || cohortOrder.indexOf(a.cohort) - cohortOrder.indexOf(b.cohort));
+  const scopedBreakdown = byClass.filter(selectedCohort);
+  const hasCategories = ["category", "risk"].includes(breakdown.value);
+  options(category, hasCategories ? ordered(scopedBreakdown.map(categoryOf), []) : [],
+    { all: "All categories", unavailable: "Not applicable" });
   const visibleOutcomes = outcomeRows.filter(selectedCohort);
-  const visibleClasses = byClass.filter((row) => selectedCohort(row) && selectedCategory(row));
-  const classTitle = breakdown.value ? `${title(breakdown.value)} breakdown` : "Class breakdown";
+  const visibleClasses = scopedBreakdown.filter((row) => !category.value || categoryOf(row) === category.value);
+  const classTitle = breakdown.value ? `${title(breakdown.value)} breakdown` : "Label breakdown";
   document.getElementById("class-title").textContent = classTitle;
-  document.getElementById("class-note").textContent = category.disabled
-    ? "This breakdown is not filtered by category."
-    : "Based on the selected label dimension, not the complete label.";
-  chart("outcomes", outcomeRows, { visible: visibleOutcomes, describe: (row) => title(row.cohort) });
-  chart("classes", byClass, {
+  document.getElementById("class-note").textContent = hasCategories
+    ? "Categories shown are available for the selected metric, cohort and breakdown."
+    : "The category filter applies only to category and risk breakdowns.";
+  chart("outcomes", {
+    visible: visibleOutcomes,
+    describe: (row) => title(row.cohort),
+    empty: outcomeRows.length ? "No complete-label results for this cohort." : "Not measured for complete labels.",
+    ratio,
+    maximum,
+  });
+  chart("classes", {
     visible: visibleClasses,
     describe: (row) => !cohort.value ? `${title(row.label)} · ${title(row.cohort)}` : title(row.label),
+    empty: "No breakdown results for this metric and cohort.",
+    ratio,
+    maximum,
   });
   document.getElementById("status").textContent =
     `${title(metric.value)}: ${visibleOutcomes.length} cohort results, ${visibleClasses.length} breakdown results.`;
@@ -173,20 +268,14 @@ function render() {
 
 overlapReport(overlapRows);
 if (explorerRows.length) {
-  options(metric, ordered(explorerRows.map((row) => row.metric), metrics));
-  options(cohort, cohortOrder, {
-    all: "All cohorts",
-    label: (value) => value === "trained" || value === "unseen"
-      ? title(value).split(" ")[0]
-      : title(value),
-  });
-  options(category, ordered(classRows.flatMap((row) => {
-    if (row.axis === "category") return [row.label];
-    if (row.axis === "risk") return [row.label.split(".")[0]];
-    return [];
-  }), []), { all: "All categories" });
-  options(breakdown, axisOrder);
-  breakdown.disabled = !axisOrder.length;
+  const metricOrder = ordered(explorerRows.map((row) => row.metric), metrics);
+  const positive = new Set(explorerRows.filter((row) => row.value > 0).map((row) => row.metric));
+  const defined = new Set(explorerRows.filter((row) => row.value !== null).map((row) => row.metric));
+  const defaults = ordered(metricOrder, ["recall", "precision", "coverage", "support"]);
+  options(metric, metricOrder);
+  metric.value = defaults.find((value) => positive.has(value))
+    ?? metricOrder.find((value) => defined.has(value))
+    ?? metricOrder[0];
   for (const select of [metric, cohort, category, breakdown]) select.addEventListener("change", render);
   render();
   document.getElementById("explorer").hidden = false;

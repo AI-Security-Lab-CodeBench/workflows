@@ -6,6 +6,8 @@ from html.parser import HTMLParser
 
 import pandas as pd
 from pandera.typing import DataFrame
+from rules_report_http_fixture import synthetic_report
+from starlette.testclient import TestClient
 
 from codebench_pipeline.rules_artifacts import RulesMetricsTable
 from codebench_pipeline.rules_report import render_rules_report
@@ -73,3 +75,26 @@ class RulesReportTest(unittest.TestCase):
             digest = hashlib.sha256(document.inline[tag].encode("utf-8")).digest()
             self.assertEqual(directives[f"{tag}-src"], f"'sha256-{base64.b64encode(digest).decode()}'")
         self.assertEqual(document.external, [])
+
+    def test_served_report_preserves_content_address_and_offline_sandbox(self) -> None:
+        payload = render_rules_report(metrics_table(
+            ("overall", "outcome", "", "support", 120),
+        )).encode("utf-8")
+        with (
+            synthetic_report(payload, 18753) as (app, path),
+            TestClient(app, base_url="http://127.0.0.1:18753") as client,
+        ):
+            response = client.get(path)
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.content, payload)
+            self.assertTrue(response.headers["content-type"].startswith("text/html"))
+            self.assertEqual(response.headers["referrer-policy"], "no-referrer")
+            directives = dict(part.strip().split(" ", 1) for part in response.headers[
+                "content-security-policy"
+            ].split(";"))
+            self.assertEqual(directives["sandbox"], "allow-scripts")
+            for directive in ("default-src", "base-uri", "form-action", "frame-ancestors"):
+                self.assertEqual(directives[directive], "'none'")
+            self.assertEqual(client.get(f"{path}?metric=support").status_code, 422)
+            digest = hashlib.sha256(payload).hexdigest()
+            self.assertEqual(client.get(path.replace(digest, "0" * 64)).status_code, 404)

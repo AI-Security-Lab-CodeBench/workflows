@@ -20,17 +20,22 @@ MARKUP = Template("""<!doctype html>
     <section id="explorer" aria-labelledby="explorer-title" hidden>
       <h2 id="explorer-title">Explore metrics</h2>
       <div class="filters">
-        <label for="metric">Metric<select id="metric" class="primary"></select></label>
-        <label for="cohort">Cohort<select id="cohort"></select></label>
-        <label for="category">Category<select id="category"></select></label>
+        <label for="metric" class="filter-wide">Metric<select id="metric" class="primary"></select></label>
+        <label for="cohort" class="filter-wide">Cohort<select id="cohort"></select></label>
         <label for="breakdown">Breakdown<select id="breakdown"></select></label>
+        <label for="category">Category<select id="category" aria-describedby="class-note"></select></label>
       </div>
       <p id="metric-note" class="note"></p>
       <div id="status" class="visually-hidden" role="status"></div>
+      <section class="panel distribution" aria-labelledby="distribution-title">
+        <h3 id="distribution-title">Outcome distribution</h3>
+        <p class="note">Each bar represents 100% of that cohort’s evaluated rows. Only the cohort filter changes this chart.</p>
+        <div id="distribution"></div>
+      </section>
       <div class="comparisons">
         <section class="panel" aria-labelledby="outcome-title">
           <h3 id="outcome-title">Cohort outcomes</h3>
-          <p class="note">Exact matches on the complete label, regardless of category filter.</p>
+          <p class="note">Exact full-label results. Breakdown and category filters do not apply here.</p>
           <div id="outcomes"></div>
         </section>
         <section class="panel" aria-labelledby="class-title">

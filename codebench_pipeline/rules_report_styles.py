@@ -68,8 +68,49 @@ select:focus-visible { outline: var(--focus-width) solid var(--focus); outline-o
   padding: clamp(var(--s4), 3vw, var(--s6));
 }
 .panel > .note, #overlap > .note { margin-block-start: var(--s2); }
+.distribution { margin-block-start: var(--s5); }
+#distribution { margin-block-start: var(--s3); }
+.outcome-stack {
+  display: block;
+  inline-size: 100%;
+  block-size: var(--s5);
+  border-radius: var(--s1);
+  overflow: hidden;
+}
+.outcome-correct { --outcome-color: var(--outcome-correct); }
+.outcome-wrong { --outcome-color: var(--outcome-wrong); }
+.outcome-abstain { --outcome-color: var(--outcome-abstain); }
+.outcome-error { --outcome-color: var(--outcome-error); }
+.outcome-stack rect { fill: var(--outcome-color); }
+.outcome-counts {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: var(--s2) var(--s4);
+  margin: var(--s2) 0 0;
+  font-size: var(--small);
+}
+.outcome-counts dt::before {
+  content: "";
+  display: inline-block;
+  inline-size: var(--s2);
+  block-size: var(--s2);
+  margin-inline-end: var(--s1);
+  border-radius: var(--s1);
+  background: var(--outcome-color);
+}
 .scale, .empty { margin-block-start: var(--s4); }
-.scale { font-size: var(--small); border-block-end: var(--stroke) solid var(--line); padding-block-end: var(--s2); }
+.scale {
+  font-size: var(--small);
+  border-block-end: var(--stroke) solid var(--edge);
+  padding-block-end: var(--s2);
+}
+.scale-ticks {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--s2);
+  margin-block-start: var(--s1);
+  overflow-wrap: anywhere;
+}
 .bars { list-style: none; padding: 0; margin: 0; }
 .bars li {
   display: grid;
@@ -92,10 +133,11 @@ select:focus-visible { outline: var(--focus-width) solid var(--focus); outline-o
 .bar {
   display: block;
   inline-size: 100%;
-  block-size: var(--s2);
+  block-size: var(--s3);
   color: var(--accent);
   background: var(--track);
   border-radius: var(--s1);
+  overflow: hidden;
 }
 .bar rect { fill: currentColor; }
 .notice, #overlap { padding-block-start: var(--s4); border-block-start: var(--stroke) solid var(--edge); }
@@ -115,6 +157,10 @@ dd { margin: 0; }
   main { padding-block: var(--s6); }
   .filters { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .comparisons { grid-template-columns: minmax(0, 1fr); gap: var(--s4); }
+}
+@media (max-width: 30rem) {
+  .filter-wide { grid-column: 1 / -1; }
+  .outcome-counts { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 @media (max-width: 22rem) {
   .filters { grid-template-columns: minmax(0, 1fr); }
