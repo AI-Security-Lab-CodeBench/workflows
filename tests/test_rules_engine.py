@@ -10,12 +10,14 @@ from pydantic import ValidationError
 from codebench_pipeline.rules_contracts import (
     Bundle,
     Diagnostic,
+    EmptyLearnedBundle,
     EvaluationError,
     EvaluationInput,
     FinalizeError,
     FinalizeSubmission,
     Fixture,
     Labels,
+    LearnedBundle,
     NativeEvaluation,
     NativeFailure,
     NativeResult,
@@ -37,7 +39,7 @@ _SOURCE = "https://example.test/synthetic-policy"
 
 class _Request(ConfigArtifact):
     required_runtime_version: str
-    bundle: Bundle
+    bundle: LearnedBundle
     rows: tuple[EvaluationInput, ...]
 
 
@@ -248,6 +250,18 @@ def test_finalize_does_not_inherit_old_fixtures_or_preserve_old_coverage() -> No
     assert receipt.packages == (keep, add)
     assert tuple(row.input.command for row in receipt.combined.fixtures) == ("pwd -L",)
     assert receipt.combined.rows[1].actual == Other()
+
+
+def test_finalize_replays_train_when_judge_drops_the_last_rule() -> None:
+    package = Package(rule=_rule(), tests=(Fixture(command="pwd -P", expected=_GOLD),))
+    diff = FinalizeSubmission(drop=(package.rule.id,), justification="Retire the last rule")
+
+    receipt = finalize_batch(_client(), (package,), diff, _train("pwd -P", "pwd -L"))
+
+    assert receipt.packages == () and isinstance(receipt.bundle, EmptyLearnedBundle)
+    assert tuple(row.input.command for row in receipt.combined.rows) == ("pwd -P", "pwd -L")
+    assert all(row.actual == Other() and row.reasons == ("no_proven_rule",) for row in receipt.combined.rows)
+    assert receipt.combined.gate_failure() is None
 
 
 def test_heldout_metrics_distinguish_overlap_errors_and_unsupported_precision() -> None:

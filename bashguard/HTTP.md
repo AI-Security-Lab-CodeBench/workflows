@@ -23,6 +23,10 @@ on the internal `backend` network. It has no published port or credentials.
   such as `CAT-6` and `CAT-6.1`, optionally followed by a space and a nonblank
   display name. The risk's category prefix must match; label text is returned
   as provided.
+- A completed learning run with zero surviving rules uses
+  `{"version":1,"kind":"empty_learned","rules":[]}`. This bundle produces
+  `no_proven_rule` for valid inputs; parser and context errors are still
+  reported separately. Ordinary bundles must still contain at least one rule.
 - Success is `{"runtime_version":"sha256:…","bundle_sha256":"…","results":[{"id":"row-1","result":{…}}]}`.
   Each submitted row gets one result in input order. `result` is the native
   classification result. Per-row failures also carry an `error` object,
@@ -39,7 +43,7 @@ on the internal `backend` network. It has no published port or credentials.
   source position and caret. `503` means capacity or the batch time limit was
   reached; no partial batch is returned.
 
-The limits are 2 MiB per request, 1 MiB and 1–128 rules per bundle, 1–128 rows,
+The limits are 2 MiB per request, 1 MiB and at most 128 rules per bundle, 1–128 rows,
 unique nonblank row IDs of at most 256 bytes, and nonblank commands of at most
 64 KiB. There are at most four active evaluation requests, a 30-second
 compile/evaluation budget checked between rows, and a one-second evaluation

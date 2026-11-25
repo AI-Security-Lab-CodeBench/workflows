@@ -29,7 +29,7 @@ from codebench_pipeline.input_provenance import (
 )
 from codebench_pipeline.models import Digest
 from codebench_pipeline.object_store import sha256
-from codebench_pipeline.rules_contracts import Bundle
+from codebench_pipeline.rules_contracts import LearnedBundle
 from codebench_pipeline.rules_corpus import Corpus, build_corpus
 from codebench_pipeline.rules_learning import CaptureResult, DedupResult
 from codebench_pipeline.rules_metrics import HeldOutMetrics, TrainFingerprint
@@ -62,7 +62,7 @@ class RulesDedupArtifact(ConfigArtifact):
 
 class FinalizedRules(ConfigArtifact):
     pins: LearningPins
-    bundle: Bundle
+    bundle: LearnedBundle
     bundle_sha256: Digest
     training: TrainFingerprint
 

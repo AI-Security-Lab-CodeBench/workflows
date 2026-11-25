@@ -36,7 +36,10 @@ func Compile(data []byte) (*Engine, error) {
 	if len(data) > 1<<20 {
 		return nil, fmt.Errorf("%w: bundle exceeds 1 MiB", ErrRules)
 	}
-	var bundle Bundle
+	var bundle struct {
+		Bundle
+		Kind json.RawMessage `json:"kind"`
+	}
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&bundle); err != nil {
@@ -45,6 +48,15 @@ func Compile(data []byte) (*Engine, error) {
 	var trailing json.RawMessage
 	if err := decoder.Decode(&trailing); err != io.EOF {
 		return nil, fmt.Errorf("%w: trailing JSON", ErrRules)
+	}
+	if len(bundle.Kind) != 0 {
+		var kind string
+		if err := json.Unmarshal(bundle.Kind, &kind); err != nil || kind != "empty_learned" ||
+			bundle.Version != 1 || bundle.Rules == nil || len(bundle.Rules) != 0 {
+			return nil, fmt.Errorf("%w: expected version 1 empty_learned with an explicit empty rules array", ErrRules)
+		}
+		digest := sha256.Sum256(data)
+		return &Engine{hash: hex.EncodeToString(digest[:])}, nil
 	}
 	if bundle.Version != 1 || len(bundle.Rules) == 0 || len(bundle.Rules) > 128 {
 		return nil, fmt.Errorf("%w: version must be 1 with 1..128 rules", ErrRules)

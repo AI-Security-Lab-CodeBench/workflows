@@ -33,9 +33,8 @@ from codebench_pipeline.rules_artifacts import (
     record_rules_evidence,
 )
 from codebench_pipeline.rules_capture_grounding import CaptureGrounding
-from codebench_pipeline.rules_contracts import Bundle
 from codebench_pipeline.rules_corpus import Corpus
-from codebench_pipeline.rules_engine import BashguardClient, evaluate_corpus
+from codebench_pipeline.rules_engine import BashguardClient, evaluate_corpus, freeze_learned_bundle
 from codebench_pipeline.rules_learning import capture_rules, deduplicate_rules
 from codebench_pipeline.rules_metrics import TrainFingerprint, score_holdout
 from codebench_pipeline.rules_registration_config import SplitPin
@@ -239,7 +238,7 @@ def rules_finalize(
         or dedup.result.runtime_version != settings.runtime.version
     ):
         raise IntegrityError("Dedup output disagrees with the pinned training lineage")
-    bundle = Bundle(rules=tuple(package.rule for package in dedup.result.packages))
+    bundle = freeze_learned_bundle(dedup.result.packages)
     receipt = evaluate_corpus(BashguardClient(settings.runtime.base_url, settings.runtime.version), bundle, train)
     record_rules_evidence(context, receipt)
     if receipt.gate_failure() is not None:

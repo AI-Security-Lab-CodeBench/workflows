@@ -12,6 +12,7 @@ from codebench_pipeline.rules_capture_facts import AnalysisBatch, AnalysisRow, f
 from codebench_pipeline.rules_contracts import (
     Bundle,
     Diagnostic,
+    EmptyLearnedBundle,
     EvaluatedRow,
     EvaluationError,
     EvaluationInput,
@@ -21,6 +22,7 @@ from codebench_pipeline.rules_contracts import (
     FinalizeSubmission,
     Fixture,
     HitSet,
+    LearnedBundle,
     NativeEvaluation,
     NativeFailure,
     NativeRow,
@@ -65,7 +67,7 @@ class BashguardClient:
     runtime_version: str
     transport: httpx2.BaseTransport | None = None
 
-    def evaluate(self, bundle: Bundle, rows: tuple[EvaluationInput, ...]) -> tuple[NativeRow, ...]:
+    def evaluate(self, bundle: LearnedBundle, rows: tuple[EvaluationInput, ...]) -> tuple[NativeRow, ...]:
         """Send only evaluation inputs, with byte-exact pinned rules in every bounded request."""
         if not rows or len({row.id for row in rows}) != len(rows):
             raise EvaluationError(
@@ -184,7 +186,7 @@ class BashguardClient:
 
 @dataclass(frozen=True, slots=True)
 class _Evaluation:
-    bundle: Bundle
+    bundle: LearnedBundle
     corpus: Corpus
     tests: tuple[Fixture, ...] = ()
 
@@ -238,8 +240,14 @@ def require_filename_invariance(
         ))
 
 
-def evaluate_corpus(client: BashguardClient, bundle: Bundle, corpus: Corpus) -> EvaluationReceipt:
+def evaluate_corpus(client: BashguardClient, bundle: LearnedBundle, corpus: Corpus) -> EvaluationReceipt:
     return _Evaluation(bundle, corpus).run(client)
+
+
+def freeze_learned_bundle(packages: tuple[Package, ...]) -> LearnedBundle:
+    if not packages:
+        return EmptyLearnedBundle(kind="empty_learned", rules=())
+    return Bundle(rules=tuple(package.rule for package in packages))
 
 
 @dataclass(frozen=True, slots=True)
@@ -267,10 +275,10 @@ class _Finalize:
             tuple(package for package in self.base if package.rule.id not in drops) + self.submission.add
         )
         try:
-            bundle = Bundle(rules=tuple(package.rule for package in packages))
+            bundle = freeze_learned_bundle(packages)
         except ValidationError as exc:
             raise FinalizeError(
-                Diagnostic(code="finalize_bundle", message="Bundle must have 1..128 rules")
+                Diagnostic(code="finalize_bundle", message="Bundle must have at most 128 distinct rules")
             ) from exc
         additions: list[EvaluationReceipt] = []
         try:

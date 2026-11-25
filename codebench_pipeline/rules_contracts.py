@@ -96,6 +96,15 @@ class Bundle(ConfigArtifact):
         return rules
 
 
+class EmptyLearnedBundle(ConfigArtifact):
+    version: Literal[1] = 1
+    kind: Literal["empty_learned"]
+    rules: tuple[()]
+
+
+type LearnedBundle = Bundle | EmptyLearnedBundle
+
+
 class EvaluationInput(ConfigArtifact):
     id: str
     command: str
@@ -252,7 +261,7 @@ class FinalizeSubmission(ConfigArtifact):
 class FinalizeReceipt(ConfigArtifact):
     submission: FinalizeSubmission
     packages: tuple[Package, ...]
-    bundle: Bundle
+    bundle: LearnedBundle
     additions: tuple[EvaluationReceipt, ...]
     combined: EvaluationReceipt
 
