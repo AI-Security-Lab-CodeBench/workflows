@@ -1,3 +1,4 @@
+from subprocess import CalledProcessError
 from unittest import TestCase
 from unittest.mock import patch
 
@@ -24,6 +25,42 @@ class StackSafetyTests(TestCase):
         ):
             stack.main()
         run.assert_not_called()
+
+    def test_mlflow_volume_without_project_labels_blocks_start(self) -> None:
+        def docker_output(*args: str) -> str:
+            if args[:3] == ("docker", "volume", "ls") and "name=^codebench_mlflow-data$" in args:
+                return "codebench_mlflow-data"
+            return ""
+
+        with (
+            patch("sys.argv", ["stack.py", "up"]),
+            patch.object(stack, "output", side_effect=docker_output),
+            patch.object(stack, "run") as run,
+            self.assertRaisesRegex(SystemExit, "Refusing unmarked codebench resource codebench_mlflow-data"),
+        ):
+            stack.main()
+        run.assert_not_called()
+
+    def test_up_starts_production_even_when_mlflow_is_unhealthy(self) -> None:
+        production_started = False
+
+        def docker_output(*args: str) -> str:
+            return "webserver\ningress\nmlflow" if "--services" in args else ""
+
+        def docker_run(*args: str) -> None:
+            nonlocal production_started
+            if "mlflow" in args:
+                raise CalledProcessError(1, args)
+            production_started = True
+
+        with (
+            patch("sys.argv", ["stack.py", "up"]),
+            patch.object(stack, "output", side_effect=docker_output),
+            patch.object(stack, "run", side_effect=docker_run),
+            self.assertRaises(CalledProcessError),
+        ):
+            stack.main()
+        self.assertTrue(production_started)
 
     def test_directory_is_not_an_e2e_selector(self) -> None:
         with patch.object(stack, "run") as run, self.assertRaisesRegex(SystemExit, "one pytest node"):

@@ -36,9 +36,13 @@ def run(*args: str, timeout: float | None = None) -> None:
 def require_managed_project() -> None:
     selector = "label=com.docker.compose.project=codebench"
     label = '{{.Label "io.codebench.runtime"}}'
-    for command, field in ((["ps", "--all"], "{{.Names}}"), (["volume", "ls"], "{{.Name}}")):
+    for command, field, resource_filter in (
+        (["ps", "--all"], "{{.Names}}", selector),
+        (["volume", "ls"], "{{.Name}}", selector),
+        (["volume", "ls"], "{{.Name}}", "name=^codebench_mlflow-data$"),
+    ):
         template = f"{field} {label}"
-        for row in output("docker", *command, "--filter", selector, "--format", template).splitlines():
+        for row in output("docker", *command, "--filter", resource_filter, "--format", template).splitlines():
             if not row.endswith(" isolated-v1"):
                 raise SystemExit(
                     f"Refusing unmarked codebench resource {row.split()[0]}. No automatic cutover."
@@ -51,6 +55,14 @@ def require_clean_revision() -> None:
         *git, "rev-parse", "origin/master"
     ):
         raise SystemExit("Build from a clean checkout at the published origin/master revision.")
+
+
+def build_missing_images(compose: list[str], services: list[str]) -> None:
+    images = set(output(*compose, "config", "--images", *services).splitlines())
+    local_images = output("docker", "image", "ls", "--format", "{{.Repository}}:{{.Tag}}").splitlines()
+    if images.difference(local_images):
+        require_clean_revision()
+        run(*compose, "build", *services)
 
 
 def e2e(compose: list[str], node: str) -> None:
@@ -152,21 +164,24 @@ def main() -> None:
     cli = [*compose, "exec", "-T", "webserver", "python", "-m", "codebench_pipeline.dataset_cli"]
     sensor = [*compose, "exec", "-T", "webserver", "dagster", "sensor"]
     if args.action == "up":
-        images = set(output(*compose, "config", "--images").splitlines())
-        if images.difference(
-            output("docker", "image", "ls", "--format", "{{.Repository}}:{{.Tag}}").splitlines()
-        ):
-            require_clean_revision()
-            run(*compose, "build")
-        run(*compose, "up", "--no-build", "--no-recreate", *WAIT)
+        services = [
+            service for service in output(*compose, "config", "--services").splitlines() if service != "mlflow"
+        ]
+        build_missing_images(compose, services)
+        run(*compose, "up", "--no-build", "--no-recreate", *WAIT, *services)
+        build_missing_images(compose, ["mlflow"])
+        run(*compose, "up", "--no-build", "--no-recreate", *WAIT, "mlflow")
     elif args.action == "prepare":
         require_clean_revision()
-        run(*compose, "build", "webserver", "daemon")
+        run(*compose, "build", "webserver", "daemon", "ingress")
         run(*sensor, "stop", "-w", WORKSPACE, "dataset_build_requests")
         run(*cli, "check-idle")
         run(*compose, "up", "--no-deps", "--force-recreate", *WAIT, "webserver", "daemon")
+        run(*compose, "up", "--no-build", "--no-deps", *WAIT, "ingress")
         run(*cli, "register", "--config", "business-configs/datasets/cat3.json")
         run(*cli, "build", "--dataset", CODEBENCH_DATASET_ID, "--force", "--prepare-only")
+        run(*compose, "build", "mlflow")
+        run(*compose, "up", "--no-build", *WAIT, "mlflow")
     elif args.action == "stages":
         run(*cli, "stages")
     elif args.action == "through":

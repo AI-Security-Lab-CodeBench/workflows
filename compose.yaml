@@ -30,6 +30,7 @@ x-app: &app
     PGPASSWORD: ${CODEBENCH_REVIEW_DATABASE_PASSWORD:?Set the review database application password}
     AWS_SHARED_CREDENTIALS_FILE: /run/codebench-s3/credentials
     AWS_ENDPOINT_URL_S3: http://minio:9000
+    MLFLOW_TRACKING_URI: http://mlflow:5000
   volumes:
     - type: volume
       source: dataset-data
@@ -87,7 +88,7 @@ services:
       retries: 3
 
   ingress:
-    image: codebench/ingress:isolated-v1
+    image: codebench/ingress:isolated-v2
     pull_policy: never
     build:
       context: deploy
@@ -103,6 +104,7 @@ services:
       - no-new-privileges:true
     ports:
       - "127.0.0.1:3041:3041"
+      - "127.0.0.1:5000:5000"
     networks:
       - frontend
       - backend
@@ -139,6 +141,52 @@ services:
       interval: 5s
       timeout: 3s
       retries: 24
+
+  mlflow:
+    image: codebench/mlflow:3.18.0-isolated-v1
+    pull_policy: never
+    build:
+      context: deploy
+      dockerfile: mlflow.Dockerfile
+    labels: *runtime-labels
+    init: true
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    command:
+      - mlflow
+      - server
+      - --host=0.0.0.0
+      - --port=5000
+      - --workers=1
+      - --allowed-hosts=mlflow:5000,localhost:5000,127.0.0.1:5000
+      - --backend-store-uri=sqlite:////var/lib/mlflow/state/tracking.db
+      - --serve-artifacts
+      - --artifacts-destination=/var/lib/mlflow/state/artifacts
+    networks:
+      - backend
+    volumes:
+      - mlflow-data:/var/lib/mlflow
+    healthcheck:
+      test:
+        - CMD
+        - python3
+        - -c
+        - |-
+          from urllib.request import Request, urlopen
+          request = Request("http://127.0.0.1:5000/api/2.0/mlflow/experiments/search",
+                            data=b'{"max_results": 1}', headers={"Content-Type": "application/json"})
+          with urlopen(request, timeout=3) as response:
+              response.read()
+      interval: 5s
+      timeout: 4s
+      retries: 12
+      start_period: 30s
 
   minio:
     image: *minio-image
@@ -237,4 +285,6 @@ volumes:
   minio-admin:
     labels: *runtime-labels
   minio-client:
+    labels: *runtime-labels
+  mlflow-data:
     labels: *runtime-labels
