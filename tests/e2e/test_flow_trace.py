@@ -32,6 +32,9 @@ from codebench_pipeline.keenable import KeenableCollection, load_declaration
 from codebench_pipeline.keenable_planner import SearchPlanner
 from codebench_pipeline.openai_transport import HTTPResponse
 from codebench_pipeline.trace_projection import GRAPH_PREFIX, project_run
+from tests.e2e.flow_trace_expectations import assert_span_tree
+from tests.e2e.flow_trace_rules_fixture import RULE_PAYLOAD_SENTINELS, exercise_rules_agents
+from tests.rules_learning_fixture import SOURCE as RULES_SOURCE
 from tests.test_batch_labeling import QUOTE, URL, batch_config, live_mcp_fixture, remote_model, row_retrieval
 from tests.test_dataset_rules import make_candidate, make_rules
 from tests.test_keenable import DECLARATION, result
@@ -47,12 +50,17 @@ _PAGES: Final = (
     f"https://operator.example/{_PAGE_MARKER}/unexpected-output",
     f"https://operator.example/{_PAGE_MARKER}/quoting",
 )
-_SENTINELS: Final = (_MODEL_KEY, _GROUNDING_KEY, _SEARCH_KEY, *_ROW_IDS, _COMMAND, _PAGE_MARKER, QUOTE, URL)
-_SHAPE: Final = Counter(
-    {
-        ("label_rows", "labeler", ("complete", "tools", "complete", "tools", "complete", "tools")): 2,
-        ("plan_discovery", "keenable_planner", ("choose", "search", "choose", "search", "choose")): 1,
-    }
+_SENTINELS: Final = (
+    _MODEL_KEY,
+    _GROUNDING_KEY,
+    _SEARCH_KEY,
+    *_ROW_IDS,
+    _COMMAND,
+    _PAGE_MARKER,
+    QUOTE,
+    URL,
+    RULES_SOURCE,
+    *RULE_PAYLOAD_SENTINELS,
 )
 
 
@@ -83,7 +91,7 @@ def label_rows(context: OpExecutionContext) -> None:
         with (
             _synthetic_step(context),
             patch("codebench_pipeline.batch_labeling.plain_complete", side_effect=_model_reply),
-            live_mcp_fixture({URL: QUOTE}),
+            live_mcp_fixture({URL: QUOTE}, admit=True),
         ):
             attempts = annotate_batches(
                 rows,
@@ -125,9 +133,15 @@ def plan_discovery(context: OpExecutionContext) -> None:
         )
 
 
+@op(out=Out(Nothing))
+def learn_rules(context: OpExecutionContext) -> None:
+    with _synthetic_step(context):
+        exercise_rules_agents()
+
+
 def build_flow_trace_job() -> JobDefinition:
     return JobDefinition(
-        graph_def=GraphDefinition(name="flow_trace_qa", node_defs=[label_rows, plan_discovery]),
+        graph_def=GraphDefinition(name="flow_trace_qa", node_defs=[label_rows, plan_discovery, learn_rules]),
         executor_def=multiprocess_executor,
     )
 
@@ -144,8 +158,8 @@ def _assert_trace(entries: Sequence[EventLogEntry]) -> None:
         if entry.dagster_event_type == DagsterEventType.STEP_WORKER_STARTED
         and entry.dagster_event is not None
     }
-    assert workers.keys() == {"label_rows", "plan_discovery"}
-    assert len(set(workers.values())) == 2 and os.getpid() not in workers.values()
+    assert workers.keys() == {"label_rows", "plan_discovery", "learn_rules"}
+    assert len(set(workers.values())) == 3 and os.getpid() not in workers.values()
 
     graph_steps: Counter[str | None] = Counter()
     for entry in entries:
@@ -154,28 +168,14 @@ def _assert_trace(entries: Sequence[EventLogEntry]) -> None:
         if message.startswith(GRAPH_PREFIX):
             assert entry.level == logging.INFO
             graph_steps[entry.step_key] += 1
-    assert graph_steps == Counter({"label_rows": 2, "plan_discovery": 1})
+    assert graph_steps == Counter({"label_rows": 2, "plan_discovery": 1, "learn_rules": 2})
 
     (terminal,) = [entry for entry in entries if entry.dagster_event_type == DagsterEventType.RUN_SUCCESS]
     projection = project_run(terminal, entries, enabled_at=0)
     _assert_no_payload(json.dumps(projection.spans))
     assert projection.rejected_graphs == 0
 
-    spans = projection.spans
-    assert all(span["status"]["code"] == 1 for span in spans)
-    root = spans[0]
-    steps = {span["spanId"]: span["name"] for span in spans if span.get("parentSpanId") == root["spanId"]}
-    assert Counter(steps.values()) == Counter({"label_rows": 1, "plan_discovery": 1})
-    projected = Counter(
-        (
-            steps[parent],
-            graph["name"].partition(" #")[0],
-            tuple(node["name"] for node in spans if node.get("parentSpanId") == graph["spanId"]),
-        )
-        for graph in spans
-        if (parent := graph.get("parentSpanId")) in steps
-    )
-    assert projected == _SHAPE
+    assert_span_tree(projection.spans)
 
 
 def _run_trace(scratch: Path, *, deployed: bool = False) -> None:

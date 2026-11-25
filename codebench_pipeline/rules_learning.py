@@ -293,7 +293,10 @@ def _capture_batch(
         except EvaluationError as exc:
             return Feedback(diagnostic=exc.diagnostic, receipts=(view,), next_rule_id=expected_id)
         accepted.append(CapturedRule(package=package, singleton=receipt))
-        return Feedback(recorded=(rule.id,), receipts=(view,), next_rule_id=f"{batch.id}-{len(accepted) + 1:02d}")
+        return Feedback(
+            recorded=(rule.id,), receipts=(view,), next_rule_id=f"{batch.id}-{len(accepted) + 1:02d}",
+            trace_status="produced",
+        )
 
     def propose_candidate(arguments: str) -> Feedback:
         proposal = CandidateProposal.model_validate_json(arguments)
@@ -315,7 +318,10 @@ def _capture_batch(
     def finish(arguments: str) -> Feedback:
         nonlocal justification
         justification = _CaptureFinish.model_validate_json(arguments).justification
-        return Feedback(recorded=tuple(entry.package.rule.id for entry in accepted))
+        return Feedback(
+            recorded=tuple(entry.package.rule.id for entry in accepted),
+            trace_status="returned" if accepted else "abstained",
+        )
 
     def closure(codes: tuple[str, ...]) -> CaptureClosure:
         return _closure(batch, tuple(accepted), tuple(dict.fromkeys((*prior_codes, *codes))))
@@ -328,7 +334,10 @@ def _capture_batch(
             _NoArguments.model_validate_json(arguments)
             reason = slate.reason
             justification = slate.narrative
-            return Feedback(recorded=slate.accepted_rule_ids)
+            return Feedback(
+                recorded=slate.accepted_rule_ids,
+                trace_status="abstained" if slate.uncovered_row_ids else "returned",
+            )
 
         return TerminalRecovery(slate, AgentTool(
             slate.reason.value, f"Close the batch with this evidenced finding: {slate.narrative}", _NoArguments, select,
@@ -490,7 +499,9 @@ class _JudgeBatch:
                 )
             finalized = receipt
             return Feedback(
-                recorded=tuple(entry.rule.id for entry in diff.add),
+                recorded=tuple(entry.rule.id for entry in receipt.submission.add),
+                dropped_ids=receipt.submission.drop,
+                trace_status="produced" if receipt.submission.add or receipt.submission.drop else "returned",
                 receipts=tuple(evidence.record(item) for item in (*receipt.additions, receipt.combined)),
             )
 

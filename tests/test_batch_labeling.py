@@ -1,4 +1,5 @@
 import json
+import os
 from collections.abc import AsyncIterator, Iterator, Mapping
 from contextlib import asynccontextmanager, contextmanager
 from email.message import Message
@@ -26,6 +27,7 @@ from codebench_pipeline.batch_labeling_protocol import LiveSupport
 from codebench_pipeline.dataset_records import CandidateRecord
 from codebench_pipeline.grounding_tools import GroundingCredentials, LiveGroundingConfig
 from codebench_pipeline.inference_capacity import CapacityConfig, CapacityUnavailable, ContextBudgetExceeded
+from codebench_pipeline.keenable_provider import admit_tool_dispatch
 from codebench_pipeline.labeling_checkpoint_store import LabelingCheckpointCache
 from codebench_pipeline.model_config import ModelConfig
 from codebench_pipeline.openai_transport import HTTPResponse
@@ -132,12 +134,14 @@ def unsupported(record: dict[str, JsonValue]) -> dict[str, JsonValue]:
 
 @contextmanager
 def live_mcp_fixture(
-    pages: dict[str, str], *, response_url: str | None = None
+    pages: dict[str, str], *, response_url: str | None = None, admit: bool = False
 ) -> Iterator[list[tuple[str, dict]]]:
     calls: list[tuple[str, dict]] = []
 
     class Session:
         async def call_tool(self, name: str, arguments: dict) -> CallToolResult:
+            if admit:
+                await admit_tool_dispatch()
             calls.append((name, arguments))
             if name == "search_web_pages":
                 if arguments["query"] == "failed":
@@ -156,13 +160,17 @@ def live_mcp_fixture(
 
     @asynccontextmanager
     async def session(api_key: str) -> AsyncIterator[Session]:
-        assert api_key.startswith("fixture-") or api_key.startswith("synthetic-")
+        if not api_key.startswith(("fixture-", "synthetic-")):
+            raise ValueError("Offline MCP fixture refused a non-synthetic credential")
         yield Session()
 
     with (
         patch.dict("os.environ", {"KEENABLE_API_KEY": "fixture-key"}),
         patch("codebench_pipeline.live_grounding.search_session", side_effect=session),
     ):
+        for name in tuple(os.environ):
+            if name.startswith(("KEENABLE_API_KEY_", "KEENABLE_ORG_")) or name == "KEENABLE_ORG":
+                del os.environ[name]
         yield calls
 
 
@@ -539,8 +547,8 @@ class BatchLabelingTests(TestCase):
             return tool_reply("finalize", {"outcome": unsupported(row)})
 
         with (
-            patch.dict("os.environ", {"KEENABLE_API_KEY_1": key}),
             live_mcp_fixture({URL: QUOTE}, response_url=returned_url),
+            patch.dict("os.environ", {"KEENABLE_API_KEY_1": key}),
         ):
             (attempt,) = self.run_batch(reply, [make_candidate("a")], out)
 

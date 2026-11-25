@@ -1,18 +1,71 @@
 import json
 from collections.abc import Callable, Generator
-from contextlib import contextmanager
+from contextlib import AbstractContextManager, contextmanager
 from contextvars import Context, ContextVar
 from dataclasses import dataclass
 from functools import wraps
 from time import monotonic_ns, time_ns
-from typing import Final, Literal, TypedDict
+from typing import Final, Literal, NotRequired, TypedDict
 from uuid import uuid4
 
 type GraphName = Literal["labeler", "rules_capture", "rules_dedup", "keenable_planner"]
+type LlmName = Literal["chat_completions"]
+type ToolName = Literal[
+    "query",
+    "page_fetch",
+    "finalize",
+    "search_documentation",
+    "fetch_documentation",
+    "add_rule",
+    "propose_candidate",
+    "page_evaluation",
+    "finish",
+    "finish_all_covered",
+    "finish_with_abstentions",
+    "finish_without_validated_rules",
+    "evaluate_rule",
+    "keep_rules",
+    "search",
+]
 type _NodeName = Literal["complete", "tools", "choose", "search"]
 type _Status = Literal["ok", "error"]
 
 _LOG_INFO: Final = ContextVar[Callable[[str], None] | None]("graph_log_info", default=None)
+
+
+class ActionReceipt(TypedDict):
+    receipt: int
+    status: Literal["returned"]
+    bundle_sha256: NotRequired[str]
+    corpus_digest: NotRequired[str]
+
+
+class ActionResult(TypedDict):
+    status: Literal["rejected", "produced", "abstained", "returned"]
+    accepted_rule_ids: NotRequired[list[str]]
+    dropped_rule_ids: NotRequired[list[str]]
+    count: NotRequired[int]
+    receipts: NotRequired[list[ActionReceipt]]
+
+
+class _CallTiming(TypedDict):
+    start_ns: int
+    end_ns: int
+    status: _Status
+    result: NotRequired[ActionResult]
+
+
+class _LlmCall(_CallTiming):
+    kind: Literal["llm"]
+    name: LlmName
+
+
+class _ToolCall(_CallTiming):
+    kind: Literal["tool"]
+    name: ToolName
+
+
+type _Call = _LlmCall | _ToolCall
 
 
 class _NodeRecord(TypedDict):
@@ -20,6 +73,7 @@ class _NodeRecord(TypedDict):
     start_ns: int
     end_ns: int
     status: _Status
+    calls: list[_Call]
 
 
 class _GraphRecord(TypedDict):
@@ -29,6 +83,52 @@ class _GraphRecord(TypedDict):
     end_ns: int
     status: _Status
     nodes: list[_NodeRecord]
+
+
+@dataclass(frozen=True, slots=True)
+class _ActiveNode:
+    origin_ns: int
+    calls: list[_Call]
+
+
+_ACTIVE_NODE: Final = ContextVar[_ActiveNode | None]("graph_active_node", default=None)
+
+
+@dataclass(slots=True)
+class CallOutcome:
+    """Record verified results independently of transport or execution timing."""
+
+    _entry: _Call | None = None
+
+    def record(self, result: ActionResult) -> None:
+        if self._entry is not None:
+            self._entry["result"] = result
+
+
+@contextmanager
+def _record_call(entry: _Call) -> Generator[CallOutcome]:
+    active = _ACTIVE_NODE.get()
+    if active is None:
+        yield CallOutcome()
+        return
+    outcome = CallOutcome(_entry=entry)
+    start = active.origin_ns + monotonic_ns()
+    entry["start_ns"] = start
+    entry["end_ns"] = start
+    active.calls.append(entry)
+    try:
+        yield outcome
+        entry["status"] = "ok"
+    finally:
+        entry["end_ns"] = active.origin_ns + monotonic_ns()
+
+
+def llm_call() -> AbstractContextManager[CallOutcome]:
+    return _record_call(_LlmCall(kind="llm", name="chat_completions", start_ns=0, end_ns=0, status="error"))
+
+
+def tool_call(name: ToolName) -> AbstractContextManager[CallOutcome]:
+    return _record_call(_ToolCall(kind="tool", name=name, start_ns=0, end_ns=0, status="error"))
 
 
 @dataclass(frozen=True, slots=True)
@@ -45,13 +145,15 @@ class GraphTrace:
         @wraps(node)
         def invoke(state: S) -> R:
             start = self._origin_ns + monotonic_ns()
-            entry = _NodeRecord(name=name, start_ns=start, end_ns=start, status="error")
+            entry = _NodeRecord(name=name, start_ns=start, end_ns=start, status="error", calls=[])
             record["nodes"].append(entry)
+            token = _ACTIVE_NODE.set(_ActiveNode(self._origin_ns, entry["calls"]))
             try:
                 result = node(state)
                 entry["status"] = "ok"
                 return result
             finally:
+                _ACTIVE_NODE.reset(token)
                 entry["end_ns"] = self._origin_ns + monotonic_ns()
 
         return invoke

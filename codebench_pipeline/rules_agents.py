@@ -3,7 +3,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from hashlib import sha256
 from http.client import HTTPException
-from typing import Final, Literal, TypedDict
+from typing import Final, Literal, TypedDict, assert_never
 from urllib.error import HTTPError
 
 from langgraph.constants import END, START
@@ -12,13 +12,17 @@ from langgraph.types import Command
 from pydantic import Field, JsonValue, TypeAdapter, ValidationError
 
 from codebench_pipeline.agent_events import InferenceError
-from codebench_pipeline.agent_trace import record_graph
+from codebench_pipeline.agent_trace import ActionResult, ToolName, llm_call, record_graph, tool_call
 from codebench_pipeline.batch_labeling_protocol import Completion, ToolCall, tool_schema
 from codebench_pipeline.model_config import ModelConfig
 from codebench_pipeline.models import Digest
 from codebench_pipeline.openai_transport import HTTPResponse, complete
 from codebench_pipeline.rules_capture_facts import CaptureRow
-from codebench_pipeline.rules_capture_grounding import DocumentationFeedback
+from codebench_pipeline.rules_capture_grounding import (
+    DocumentationDiscovery,
+    DocumentationFeedback,
+    DocumentationPage,
+)
 from codebench_pipeline.rules_contracts import Diagnostic, EvaluatedRow, EvaluationError, EvaluationReceipt
 from codebench_pipeline.rules_similarity import AgentFailure, AgentRun, EvidencePage, PageInput, ReceiptView
 from codebench_pipeline.typed_config import ConfigArtifact
@@ -95,6 +99,43 @@ class Feedback(ConfigArtifact):
     next_rule_id: str | None = None
     documentation: DocumentationFeedback | None = None
     masked_facts: tuple[CaptureRow, ...] = ()
+    trace_status: Literal["produced", "abstained", "returned"] = Field(default="returned", exclude=True)
+    dropped_ids: tuple[str, ...] = Field(default=(), exclude=True)
+
+    def action_result(self) -> ActionResult:
+        result = ActionResult(status="rejected" if self.diagnostic is not None else self.trace_status)
+        if self.receipts:
+            result["receipts"] = [
+                {
+                    "receipt": item.receipt,
+                    "status": "returned",
+                    "bundle_sha256": item.bundle_sha256,
+                    "corpus_digest": item.corpus_digest,
+                }
+                for item in self.receipts
+            ]
+            result["count"] = len(self.receipts)
+        if self.diagnostic is not None:
+            return result
+        if self.recorded or self.dropped_ids:
+            result["count"] = len(self.recorded) + len(self.dropped_ids)
+            if self.recorded:
+                result["accepted_rule_ids"] = list(self.recorded)
+            if self.dropped_ids:
+                result["dropped_rule_ids"] = list(self.dropped_ids)
+        if self.page is not None:
+            result["receipts"] = [{"receipt": self.page.receipt, "status": "returned"}]
+            result["count"] = len(self.page.rows)
+        match self.documentation:
+            case DocumentationDiscovery(hits=hits):
+                result["count"] = len(hits)
+            case DocumentationPage():
+                result["count"] = 1
+            case None:
+                pass
+            case _:
+                assert_never(self.documentation)
+        return result
 
 
 @dataclass(frozen=True, slots=True)
@@ -148,7 +189,7 @@ class TrainEvidence:
 
 @dataclass(frozen=True, slots=True)
 class AgentTool:
-    name: str
+    name: ToolName
     description: str
     input: type[ConfigArtifact]
     call: Callable[[str], Feedback]
@@ -269,9 +310,10 @@ class Conversation:
                     return Command(goto=END)
                 hashes.append(sha256(raw).hexdigest())
                 try:
-                    response = agent.request(
-                        endpoint.rstrip("/") + "/chat/completions", raw, agent.api_key, agent.model.timeout_seconds,
-                    )
+                    with llm_call() as measured:
+                        response = agent.request(
+                            endpoint.rstrip("/") + "/chat/completions", raw, agent.api_key, agent.model.timeout_seconds,
+                        )
                 except HTTPError as exc:
                     with exc:
                         diagnostic = provider_rejection(exc)
@@ -289,6 +331,7 @@ class Conversation:
                     )))
                     return Command(goto=END)
                 break
+            measured.record({"status": "rejected"})
             if agent.api_key and len(agent.api_key) >= 8 and agent.api_key.encode() in response.body:
                 return retry(turn, "response_sensitive", "Model response contained sensitive data.")
             if len(response.body) > _RESPONSE_LIMIT:
@@ -312,6 +355,7 @@ class Conversation:
             call = choice.message.tool_calls[0]
             if not any(tool.name == call.function.name for tool in offered):
                 return retry(turn, "unknown_tool", "Call only a tool offered in this turn.")
+            measured.record({"status": "produced", "count": 1})
             repair = None
             messages.append(_JSON.validate_python(
                 choice.message.model_dump(mode="json", exclude_none=True, exclude={"reasoning_content"})
@@ -322,27 +366,41 @@ class Conversation:
             nonlocal repair, status
             call = state["call"]
             if call is None:
-                raise EvaluationError(Diagnostic(code="graph_state", message="A tool node requires a model call"))
+                raise EvaluationError(
+                    Diagnostic(code="graph_state", message="A tool node requires a model call")
+                )
             name = call.function.name
             turn = state["turn"]
-            try:
-                result = tools[name].call(call.function.arguments)
-            except ValidationError as exc:
-                error = exc.errors(include_input=False, include_context=False, include_url=False)[0]
-                result = Feedback(diagnostic=Diagnostic(
-                    code="tool_input", phase="validate", field=".".join(map(str, error["loc"])), message=error["msg"],
-                ))
-            except EvaluationError as exc:
-                result = Feedback(diagnostic=exc.diagnostic)
+            tool = tools[name]
+            with tool_call(tool.name) as measured:
+                try:
+                    result = tool.call(call.function.arguments)
+                except ValidationError as exc:
+                    error = exc.errors(include_input=False, include_context=False, include_url=False)[0]
+                    result = Feedback(
+                        diagnostic=Diagnostic(
+                            code="tool_input",
+                            phase="validate",
+                            field=".".join(map(str, error["loc"])),
+                            message=error["msg"],
+                        )
+                    )
+                except EvaluationError as exc:
+                    result = Feedback(diagnostic=exc.diagnostic)
+                measured.record(result.action_result())
             if result.diagnostic is not None:
                 failed(turn, result.diagnostic)
                 if turn >= self.turns:
                     repair = f"The last submission failed with {result.diagnostic.code}. Correct it."
             elif name == self.terminal or turn == recovery_turn:
                 status = "finished"
-            messages.append({
-                "role": "tool", "tool_call_id": call.id, "content": result.model_dump_json(exclude_defaults=True),
-            })
+            messages.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": call.id,
+                    "content": result.model_dump_json(exclude_defaults=True),
+                }
+            )
             return Command(goto=END if status == "finished" or turn >= last_turn else "complete")
 
         graph = StateGraph[_State, None, _State, _State](_State, input_schema=_State, output_schema=_State)

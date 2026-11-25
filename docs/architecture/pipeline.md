@@ -6,17 +6,46 @@ Open the [local MLflow dashboard](http://localhost:5000), select the **CodeBench
 experiment, and open **Traces**. A completed Dagster run appears as one trace.
 The **Input** and **Output** previews show the job name and execution status,
 not the job's actual inputs or outputs. Find `capture_rules` and check its Dagster run ID
-to distinguish rematerializations of the same partition. Expand a step to
-inspect its agent invocations. Each visit to a LangGraph node has its own
-timing and status: a `complete → tools → complete` sequence means the model
-resumed after the tool step. A step that did not invoke an agent has no such
-children. The adaptive discovery planner uses `choose` and `search`.
+to distinguish rematerializations of the same partition. Expand the step,
+then a numbered agent invocation and **Cycle #1**. Under `complete`, select
+**LLM: chat_completions** to inspect an individual model call. Under `tools`,
+select **Tool: …** to see which tool ran, when, and for how long. If one model
+turn dispatches several tools, they appear separately under the same cycle.
+The next `complete` starts a new cycle; the adaptive discovery planner uses
+`choose` and `search` instead. Steps that never invoked an agent have no cycles.
+
+A node visit is not proof of a call. Historical traces recorded before
+call-level instrumentation have no call leaves; opening an old trace or
+retrying its export cannot recover those measurements. Inspect a newly
+executed run for the detailed hierarchy.
+
+To check the view without spending provider quota, use the synthetic trace
+job from the running release. This explicitly writes one `flow_trace_qa`
+run to Dagster; it does not materialize pipeline assets:
+
+```sh
+docker compose -p codebench --env-file "$deployment_env" exec -T \
+  -e PYTHONPATH=.:tests webserver python -m tests.e2e.test_flow_trace --deployed
+```
+
+Find the printed `CODEBENCH_TRACE_QA_RUN_ID` in **CodeBench → Traces**. For
+the rules agent, expand `learn_rules → rules_capture #1 → Cycle #1`, then
+inspect the `complete` and `tools` branches side by side.
 
 Dagster is the source of truth while a run is in progress. The trace observer
 reads persisted events after termination; it does not run assets, enable
 materialization, or make an MLflow outage a reason to repeat a model call.
-Traces identify execution steps, not their contents: look in the authorized
-pipeline evidence, not MLflow, for commands, prompts or provider responses.
+Select a **Cycle** to see its actions and observed results; select a tool
+leaf for its own outcome. An accepted rule ID identifies a rule the learner
+actually accepted, not just one the model proposed. A rejected action can
+be followed by a successful cycle in the same run.
+
+For the persisted result, select the producing **step** or the **run root**
+and open **Inputs / Outputs**. Rules runs report their materialized assets,
+partitions, available digests and counts. Evaluation reports exact matches,
+wrong matches, abstentions and evaluator errors separately: a successful
+Dagster run does not mean the rules matched every held-out row. Look in the
+authorized pipeline evidence, not MLflow, for commands, prompts or responses.
 The `mlflow_run_trace_projection` sensor checks for terminal runs at a minimum
 interval of 15 seconds. Its first tick starts a new observation window; it
 does not backfill runs from before tracing was enabled. A failed delivery

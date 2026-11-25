@@ -21,6 +21,7 @@ from urllib.request import Request, build_opener
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, JsonValue, ValidationError
 
 from .agent_events import InferenceError, parse_json
+from .agent_trace import llm_call
 from .models import Digest
 from .openai_transport import HTTPResponse, NoRedirect, complete
 from .storage import IntegrityError, fingerprint
@@ -726,12 +727,9 @@ def guarded_complete(
                     raise CapacityQuarantined("stale_before_submission")
                 if time.monotonic() >= deadline:
                     raise CapacityQuarantined("maximum_wait_exceeded")
-                response = complete(
-                    base + "/chat/completions",
-                    json.dumps(payload).encode("utf-8"),
-                    key,
-                    timeout,
-                )
+                body = json.dumps(payload).encode("utf-8")
+                with llm_call():
+                    response = complete(base + "/chat/completions", body, key, timeout)
                 terminal = _Terminal.model_validate(_decode(response.body))
                 if terminal.model != chat.model or terminal.choices[0].message.get("role") != "assistant":
                     raise CapacityQuarantined("response_identity_mismatch")

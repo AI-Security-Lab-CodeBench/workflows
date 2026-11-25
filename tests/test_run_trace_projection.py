@@ -50,19 +50,37 @@ def worker_step(context: OpExecutionContext) -> None:
     context.log.info(_PRIVATE)
     for _ in range(2):
         start = time_ns()
-        context.log.info(_PREFIX + json.dumps({
-            "graph": "rules_capture", "id": uuid4().hex, "status": "ok",
-            "start_ns": start, "end_ns": start + 2,
-            "nodes": [
-                {"name": "complete", "start_ns": start, "end_ns": start + 1, "status": "ok"},
-                {"name": "tools", "start_ns": start + 1, "end_ns": start + 2, "status": "ok"},
-            ],
-        }))
+        context.log.info(
+            _PREFIX
+            + json.dumps(
+                {
+                    "graph": "rules_capture",
+                    "id": uuid4().hex,
+                    "status": "ok",
+                    "start_ns": start,
+                    "end_ns": start + 2,
+                    "nodes": [
+                        {"name": "complete", "start_ns": start, "end_ns": start + 1, "status": "ok"},
+                        {"name": "tools", "start_ns": start + 1, "end_ns": start + 2, "status": "ok"},
+                    ],
+                }
+            )
+        )
     start = time_ns()
-    context.log.info(_PREFIX + json.dumps({
-        "graph": "labeler", "id": uuid4().hex, "status": "ok",
-        "start_ns": start, "end_ns": start, "nodes": [], "prompt": _PRIVATE,
-    }))
+    context.log.info(
+        _PREFIX
+        + json.dumps(
+            {
+                "graph": "labeler",
+                "id": uuid4().hex,
+                "status": "ok",
+                "start_ns": start,
+                "end_ns": start,
+                "nodes": [],
+                "prompt": _PRIVATE,
+            }
+        )
+    )
     context.log.info(f'{_PREFIX}{{"graph":"{_PRIVATE}"}}')
     if context.retry_number == 0:
         raise RetryRequested(max_retries=1) from RuntimeError(_PRIVATE)
@@ -117,12 +135,15 @@ class MlflowWire:
                     wire.experiment_exists = True
                     self.reply(200, b'{"experiment_id":"42"}')
                 elif (
-                    self.path == "/v1/traces" and wire.experiment_exists
+                    self.path == "/v1/traces"
+                    and wire.experiment_exists
                     and self.headers["X-MLflow-Experiment-Id"] == "42"
                     and self.headers["Content-Type"] == "application/json"
                 ):
                     wire.posts.append(_JSON.validate_json(raw))
-                    code, content_type, body = wire.acks.popleft() if wire.acks else (200, "application/json", b"{}")
+                    code, content_type, body = (
+                        wire.acks.popleft() if wire.acks else (200, "application/json", b"{}")
+                    )
                     self.reply(code, body, content_type)
                 else:
                     self.reply(400, b"{}")
@@ -162,10 +183,16 @@ class RunTraceTests(unittest.TestCase):
             running_before_deployment.execute_in_process(instance=instance)
             current = cli_job.execute_in_process(instance=instance, tags={"dagster/partition": _PRIVATE})
             wire = MlflowWire()
-            with wire.serve() as uri, patch.dict(os.environ, {
-                "MLFLOW_TRACKING_URI": uri,
-                "CODEBENCH_MLFLOW_TRACE_START_AT": cutoffs[0].isoformat(),
-            }):
+            with (
+                wire.serve() as uri,
+                patch.dict(
+                    os.environ,
+                    {
+                        "MLFLOW_TRACKING_URI": uri,
+                        "CODEBENCH_MLFLOW_TRACE_START_AT": cutoffs[0].isoformat(),
+                    },
+                ),
+            ):
                 sensor = mlflow_trace_sensor()
                 with build_sensor_context(instance=instance, last_sensor_start_time=time()) as ctx:
                     tick = sensor.evaluate_tick(ctx)
@@ -191,12 +218,21 @@ class RunTraceTests(unittest.TestCase):
             enable = time()
             with execute_job(reconstructable(worker_job), instance=instance) as result:
                 self.assertFalse(result.success)
-                self.assertIn(DagsterEventType.STEP_WORKER_STARTED, [event.event_type for event in result.all_events])
+                self.assertIn(
+                    DagsterEventType.STEP_WORKER_STARTED, [event.event_type for event in result.all_events]
+                )
                 run_id = result.run_id
             wire = MlflowWire()
-            with wire.serve() as uri, patch.dict(os.environ, {
-                "MLFLOW_TRACKING_URI": uri, "CODEBENCH_MLFLOW_TRACE_START_AT": "",
-            }):
+            with (
+                wire.serve() as uri,
+                patch.dict(
+                    os.environ,
+                    {
+                        "MLFLOW_TRACKING_URI": uri,
+                        "CODEBENCH_MLFLOW_TRACE_START_AT": "",
+                    },
+                ),
+            ):
                 with build_sensor_context(instance=instance, last_sensor_start_time=enable) as ctx:
                     tick = mlflow_trace_sensor().evaluate_tick(ctx)
             self.assertIn("acknowledged 1", tick.skip_message or "")
@@ -206,26 +242,39 @@ class RunTraceTests(unittest.TestCase):
             self.assertEqual(root["name"], f"worker_job [{run_id}]")
             self.assertEqual(root["status"], {"code": 2})
             by_name = {span["name"]: span for span in children if isinstance(span["name"], str)}
-            for key, graph_ordinals, outcome in (("worker_step", (1, 2), "retry"), ("worker_step #2", (3, 4), "error")):
+            for key, graph_ordinals, outcome in (
+                ("worker_step", (1, 2), "retry"),
+                ("worker_step #2", (3, 4), "error"),
+            ):
                 attempt = by_name[key]
                 self.assertEqual(attempt["parentSpanId"], root["spanId"])
-                self.assertEqual(attempt["attributes"], [{"key": "codebench.status", "value": {"stringValue": outcome}}])
+                self.assertEqual(
+                    attempt["attributes"], [{"key": "codebench.status", "value": {"stringValue": outcome}}]
+                )
                 for ordinal in graph_ordinals:
                     graph = by_name[f"rules_capture #{ordinal}"]
                     self.assertEqual(graph["parentSpanId"], attempt["spanId"])
+                    (cycle,) = [span for span in children if span["parentSpanId"] == graph["spanId"]]
+                    self.assertEqual(cycle["name"], "Cycle #1")
                     self.assertEqual(
-                        [span["name"] for span in children if span["parentSpanId"] == graph["spanId"]],
+                        [span["name"] for span in children if span["parentSpanId"] == cycle["spanId"]],
                         ["complete", "tools"],
                     )
-            self.assertEqual(len(children), 14)
+            self.assertEqual(len(children), 18)
 
     def test_outage_and_partial_or_invalid_ack_keep_only_unacknowledged_runs_pending(self) -> None:
         wire = MlflowWire()
         with (
-            TemporaryDirectory() as directory, DagsterInstance.local_temp(directory) as instance,
-            wire.serve() as uri, patch.dict(os.environ, {
-                "MLFLOW_TRACKING_URI": uri, "CODEBENCH_MLFLOW_TRACE_START_AT": "",
-            }),
+            TemporaryDirectory() as directory,
+            DagsterInstance.local_temp(directory) as instance,
+            wire.serve() as uri,
+            patch.dict(
+                os.environ,
+                {
+                    "MLFLOW_TRACKING_URI": uri,
+                    "CODEBENCH_MLFLOW_TRACE_START_AT": "",
+                },
+            ),
         ):
             enable = time()
             sensor = mlflow_trace_sensor()
@@ -236,23 +285,35 @@ class RunTraceTests(unittest.TestCase):
             first = cli_job.execute_in_process(instance=instance)
             second = cli_job.execute_in_process(instance=instance)
             wire.outage = False
-            wire.acks.extend((
-                (200, "application/json", b"{}"),
-                (200, "application/json", b'{"partialSuccess":{"rejectedSpans":"1","errorMessage":"private"}}'),
-                (200, "text/html", b"<html>proxy response</html>"),
-                (200, "application/json", b'{"partialSuccess":{"rejectedSpans":"0"}}'),
-            ))
+            wire.acks.extend(
+                (
+                    (200, "application/json", b"{}"),
+                    (
+                        200,
+                        "application/json",
+                        b'{"partialSuccess":{"rejectedSpans":"1","errorMessage":"private"}}',
+                    ),
+                    (200, "text/html", b"<html>proxy response</html>"),
+                    (200, "application/json", b'{"partialSuccess":{"rejectedSpans":"0"}}'),
+                )
+            )
             cursor = unavailable.cursor
             for signal in ("deferred", "deferred", "acknowledged 1", "no new terminal runs"):
-                with build_sensor_context(instance=instance, cursor=cursor, last_sensor_start_time=time()) as ctx:
+                with build_sensor_context(
+                    instance=instance, cursor=cursor, last_sensor_start_time=time()
+                ) as ctx:
                     tick = sensor.evaluate_tick(ctx)
                 self.assertIn(signal, tick.skip_message or "")
                 self.assertNotIn("private", tick.skip_message or "")
                 self.assertFalse(tick.run_requests or tick.asset_events)
                 cursor = tick.cursor
             self.assertEqual(wire.creates, 1)
-            self.assertEqual([read_spans(post)[0]["name"] for post in wire.posts], [
-                f"capture_rules [{first.run_id}]", *([f"capture_rules [{second.run_id}]"] * 3),
-            ])
+            self.assertEqual(
+                [read_spans(post)[0]["name"] for post in wire.posts],
+                [
+                    f"capture_rules [{first.run_id}]",
+                    *([f"capture_rules [{second.run_id}]"] * 3),
+                ],
+            )
             self.assertEqual(wire.posts[1], wire.posts[2])
             self.assertEqual(wire.posts[1], wire.posts[3])

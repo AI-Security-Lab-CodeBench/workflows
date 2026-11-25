@@ -11,7 +11,7 @@ from langgraph.types import Command
 from pydantic import ValidationError
 
 from .agent_events import InferenceError, parse_json
-from .agent_trace import record_graph
+from .agent_trace import CallOutcome, llm_call, record_graph
 from .inference_capacity import CapacityConfig, CapacityQuarantined, guarded_complete
 from .keenable_ledger import Ledger, SlotIdentity
 from .keenable_policy import (
@@ -132,16 +132,18 @@ class SearchPlanner:
         receipt = ledger.reserve("plan", identity)
         raw: bytes | None = None
         reason = "planner_call_failed"
+        measured = CallOutcome()
         try:
-            raw = (
-                guarded_complete(
+            if self.capacity is not None:
+                raw = guarded_complete(
                     self.endpoint, body, self.key, self.timeout_seconds, self.capacity, self.receipt_directory
-                )
-                if self.capacity is not None
-                else complete(
-                    self.endpoint.rstrip("/") + "/chat/completions", body, self.key, self.timeout_seconds
-                )
-            ).body
+                ).body
+            else:
+                with llm_call() as measured:
+                    raw = complete(
+                        self.endpoint.rstrip("/") + "/chat/completions", body, self.key, self.timeout_seconds
+                    ).body
+                measured.record({"status": "rejected"})
             if len(raw) > receipt.reserved_bytes:
                 raise KeenableError("planner_response_budget")
             reason = "planner_response_invalid"
@@ -161,9 +163,15 @@ class SearchPlanner:
             )
             ledger.finish(receipt, state="failed", reason=failure, response=raw)
             raise KeenableError(failure) from None
-        return ledger.finish(
+        saved = ledger.finish(
             receipt, state="succeeded", response=raw, payload=decision.model_dump_json().encode()
-        ), decision
+        )
+        measured.record(
+            {"status": "abstained", "count": 0}
+            if decision.option is None
+            else {"status": "produced", "count": 1}
+        )
+        return saved, decision
 
 
 @dataclass(frozen=True, slots=True)
@@ -305,7 +313,9 @@ class SearchSession:
                     "searches": (),
                     "feedback": (),
                     "decisions": (),
-                    "seen": frozenset(url for source in self.declaration.sources for url in source.exact_urls),
+                    "seen": frozenset(
+                        url for source in self.declaration.sources for url in source.exact_urls
+                    ),
                     "selected": None,
                     "stop": "budget",
                 },

@@ -20,7 +20,7 @@ from langgraph.types import Command
 from pydantic import JsonValue, TypeAdapter, ValidationError
 
 from codebench_pipeline.agent_events import InferenceError
-from codebench_pipeline.agent_trace import graph_log_context, record_graph
+from codebench_pipeline.agent_trace import graph_log_context, llm_call, record_graph, tool_call
 from codebench_pipeline.batch_labeling_config import BatchLabelingConfig
 from codebench_pipeline.batch_labeling_protocol import (
     ROW_LABELING_CONTRACT,
@@ -230,12 +230,13 @@ class _Conversation:
             raise ValueError("Grounded labeling requires a configured remote base URL")
         try:
             if config.inference_mode == "plain":
-                response = plain_complete(
-                    model.base_url.rstrip("/") + "/chat/completions",
-                    raw,
-                    self.model.execution.model_api_key,
-                    model.timeout_seconds,
-                )
+                with llm_call():
+                    response = plain_complete(
+                        model.base_url.rstrip("/") + "/chat/completions",
+                        raw,
+                        self.model.execution.model_api_key,
+                        model.timeout_seconds,
+                    )
             else:
                 response = guarded_complete(
                     model.base_url,
@@ -318,7 +319,14 @@ class _Conversation:
             if call.id in receipts:
                 result = self.observation(receipts[call.id])
             elif call.function.name == "finalize" and len(calls) == 1:
-                result = self.finalize(call.function.arguments)
+                with tool_call("finalize") as measured:
+                    result = self.finalize(call.function.arguments)
+                    if "error" in result:
+                        measured.record({"status": "rejected"})
+                    elif self.result is not None and self.result.label is not None:
+                        measured.record({"status": "produced", "count": 1})
+                    else:
+                        measured.record({"status": "abstained", "count": 0})
             else:
                 error = (
                     "Finalize must be the only tool call; wait for retrieval observations."
@@ -483,12 +491,15 @@ def _run_row(row: RowInput, model: _RowModel, out: Path) -> BatchRow:
         model.execution.grounding,
         GroundingFiles(out / "grounding"),
         grounding_turns * _TOOLS_PER_TURN,
+        trace_calls=True,
     )
     conversation = _Conversation(model, row, out, broker)
     conversation.initialize()
     graph = StateGraph[_State, None, _State, _State](_State, input_schema=_State, output_schema=_State)
     with record_graph("labeler") as trace:
-        graph.add_node("complete", trace.wrap("complete", conversation.complete), destinations=("complete", "tools", END))
+        graph.add_node(
+            "complete", trace.wrap("complete", conversation.complete), destinations=("complete", "tools", END)
+        )
         graph.add_node("tools", trace.wrap("tools", conversation.tools), destinations=("complete", END))
         graph.add_edge(START, "complete")
         graph.compile().invoke(
@@ -580,7 +591,9 @@ def run_prepared_batches(
     log_context = graph_log_context()
 
     def execute(candidate: CandidateRecord) -> LabelingAttempt:
-        result = log_context.copy().run(_checkpointed_row, prepared[candidate.candidate_id], row_model, out, generation)
+        result = log_context.copy().run(
+            _checkpointed_row, prepared[candidate.candidate_id], row_model, out, generation
+        )
         for name, body in result.files.items():
             if Path(name).name != name or name in {"", ".", ".."}:
                 raise IntegrityError("Labeling checkpoint contains a nonlocal filename")

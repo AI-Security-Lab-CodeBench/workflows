@@ -1,3 +1,4 @@
+from contextlib import ExitStack
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from hashlib import sha256
@@ -9,6 +10,7 @@ import anyio
 from mcp.types import TextContent
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
 
+from codebench_pipeline.agent_trace import tool_call
 from codebench_pipeline.grounding_tools import (
     DocumentationQuery,
     GroundingCredentials,
@@ -165,6 +167,7 @@ class LiveGrounding:
     pages: dict[str, LivePage] = field(default_factory=dict)
     response_bytes: int = 0
     incidents: dict[int, tuple[KeenableIncident, ...]] = field(default_factory=dict)
+    trace_calls: bool = field(default=False, kw_only=True)
 
     def call(self, tool: _Tool, arguments: str, pending: set[str]) -> LiveReceipt:
         return self.call_many([(tool, arguments)], pending)[0]
@@ -204,14 +207,20 @@ class LiveGrounding:
             receipts.append(receipt)
 
         async def run(operation: _Operation) -> None:
+            tool = "search" if isinstance(operation.request, QueryInput) else "fetch"
+            call_name = "query" if tool == "search" else "page_fetch"
+            stack = ExitStack()
+
             async def retrieve(key: str) -> _Response:
-                return await _retrieve(key, operation, maximum)
+                with stack:
+                    return await _retrieve(key, operation, maximum)
 
             def started() -> None:
                 if operation.started is None:
                     operation.started = monotonic_ns()
+                if self.trace_calls:
+                    stack.enter_context(tool_call(call_name))
 
-            tool = "search" if isinstance(operation.request, QueryInput) else "fetch"
             try:
                 with anyio.fail_after(self.config.timeout):
                     operation.response = await transport.call(

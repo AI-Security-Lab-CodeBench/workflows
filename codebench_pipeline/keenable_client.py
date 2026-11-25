@@ -1,10 +1,12 @@
 from collections.abc import Callable
+from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from random import uniform
 from time import sleep
 from typing import Final, Literal
 
+from .agent_trace import tool_call
 from .keenable_ledger import Ledger, SlotIdentity
 from .keenable_policy import Declaration, KeenableError, KeenableSourceAccess
 from .keenable_receipts import CallReceipt
@@ -67,7 +69,9 @@ class KeenableClient:
             self.declaration.check_current(datetime.now(UTC))
             receipt = self.ledger.reserve(kind, identity)
             try:
-                return AcquiredResponse(receipt, self.send(request))
+                with tool_call("search") if kind == "search" else nullcontext():
+                    response = self.send(request)
+                return AcquiredResponse(receipt, response)
             except KeenableError as error:
                 transient = transient_request_failure(error.code, error.status)
                 withheld = inspect and not transient
