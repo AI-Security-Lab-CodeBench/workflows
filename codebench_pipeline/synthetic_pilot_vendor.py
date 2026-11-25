@@ -9,11 +9,11 @@ from pathlib import Path
 from typing import Final, TypedDict
 from urllib.parse import urlsplit
 
-from pydantic import JsonValue
+from pydantic import JsonValue, TypeAdapter
 
 from codebench_pipeline.agent_events import InferenceError, parse_json
 from codebench_pipeline.inference_capacity import CapacityConfig, guarded_complete
-from codebench_pipeline.openai_transport import complete, parse_completion
+from codebench_pipeline.openai_transport import complete, parse_completion, strict_schema
 from codebench_pipeline.synthetic_pilot_policy import (
     OPERATIONS,
     BackendMode,
@@ -24,6 +24,7 @@ from codebench_pipeline.synthetic_pilot_policy import (
 )
 
 ENV_PREFIX: Final = "CODEBENCH_SYNTHETIC_PILOT_"
+_JSON: Final = TypeAdapter(JsonValue)
 
 
 @dataclass(frozen=True, slots=True)
@@ -130,6 +131,16 @@ class PilotBackend:
         """Perform one turn and only return candidates that match reviewed command forms."""
         settings = self.config.sampling
         mode = self.config.backend.mode
+        response_format: JsonValue = {"type": "json_object"}
+        if mode == "plain":
+            response_format = {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "pilot_candidates",
+                    "strict": True,
+                    "schema": strict_schema(_JSON.validate_python(Candidates.model_json_schema())),
+                },
+            }
         body = {
             "model": self.runtime.model,
             "messages": messages,
@@ -137,7 +148,7 @@ class PilotBackend:
             "top_p": settings.top_p,
             "seed": call_seed,
             ("max_tokens" if mode == "plain" else "max_completion_tokens"): settings.max_tokens,
-            "response_format": {"type": "json_object"},
+            "response_format": response_format,
             "stream": False,
         }
         payload = json.dumps(body, ensure_ascii=False).encode("utf-8")

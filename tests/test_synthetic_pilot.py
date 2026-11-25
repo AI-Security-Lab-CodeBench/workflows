@@ -15,7 +15,7 @@ from pydantic import ValidationError
 from codebench_pipeline.inference_capacity import CapacityConfig, CapacityUnavailable
 from codebench_pipeline.openai_transport import HTTPResponse
 from codebench_pipeline.synthetic_pilot import PilotConfiguration, execute_pilot, run_pilot
-from codebench_pipeline.synthetic_pilot_policy import PilotError, Seed, VendorConfig
+from codebench_pipeline.synthetic_pilot_policy import Candidates, PilotError, Seed, VendorConfig
 from codebench_pipeline.synthetic_pilot_vendor import ENV_PREFIX, PilotBackend, Runtime, ScopedMessages
 
 _ENDPOINT: Final = "http://127.0.0.1:1/v1"
@@ -36,6 +36,9 @@ _CONFIG: Final = VendorConfig.model_validate(
         "backend": {"mode": "sglang_guarded", "timeout": 1},
         "sampling": {"temperature": 0, "top_p": 1, "max_tokens": 256, "seed": 6},
     }
+)
+_PLAIN_CONFIG: Final = VendorConfig.model_validate(
+    {**_CONFIG.model_dump(), "backend": {"mode": "plain", "timeout": 1}}
 )
 
 
@@ -101,22 +104,22 @@ class SyntheticPilotTests(unittest.TestCase):
 
     def test_candidate_outside_scoped_read_only_contract_aborts_before_vendor_writes(self) -> None:
         examples = (
-            ("terraform validate -unknown", "terraform", "allow"),
-            ("terraform validate; printf ignored", "terraform", "allow"),
-            ("docker system df", "docker", "allow"),
-            ("terraform validate", "docker", "allow"),
-            ("terraform validate", "terraform", "ask"),
+            completion("terraform validate -unknown"),
+            completion("terraform validate; printf ignored"),
+            completion("docker system df", "docker"),
+            completion("terraform validate", "docker"),
+            completion("terraform validate", class_name="ask"),
+            HTTPResponse(completion("terraform validate").body.replace(b"candidates", b"results"), None),
         )
-        for command, util, class_name in examples:
-            with (
-                self.subTest(command=command, util=util, class_name=class_name),
-                patch(
-                    "codebench_pipeline.synthetic_pilot_vendor.guarded_complete",
-                    return_value=completion(command, util, class_name),
-                ),
-                self.assertRaises(SystemExit),
-            ):
-                self.backend.complete(self.messages, 111)
+        for config, transport in ((_PLAIN_CONFIG, "complete"), (_CONFIG, "guarded_complete")):
+            backend = PilotBackend(self.runtime, config, self.root / "receipts")
+            for response in examples:
+                with (
+                    self.subTest(mode=config.backend.mode, response=response),
+                    patch(f"codebench_pipeline.synthetic_pilot_vendor.{transport}", return_value=response),
+                    self.assertRaises(SystemExit),
+                ):
+                    backend.complete(self.messages, 111)
 
     def prepare_vendor(self, config: VendorConfig) -> Path:
         package = self.runtime.vendor_dir / "cgen"
@@ -175,10 +178,15 @@ class SyntheticPilotTests(unittest.TestCase):
         self.assertFalse(self.runtime.output_dir.exists())
 
     def test_plain_mode_calls_openai_endpoint_without_a_capacity_ledger(self) -> None:
-        plain = VendorConfig.model_validate(
-            {**_CONFIG.model_dump(), "backend": {"mode": "plain", "timeout": 1}}
-        )
-        config_dir = self.prepare_vendor(plain)
+        config_dir = self.prepare_vendor(_PLAIN_CONFIG)
+        expected_format = {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "pilot_candidates",
+                "strict": True,
+                "schema": Candidates.model_json_schema(),
+            },
+        }
 
         class ChatEndpoint(BaseHTTPRequestHandler):
             def do_POST(self) -> None:
@@ -187,6 +195,7 @@ class SyntheticPilotTests(unittest.TestCase):
                     self.path != "/v1/chat/completions"
                     or self.headers.get("Authorization") != "Bearer local-test"
                     or body.get("max_tokens") != 256
+                    or body.get("response_format") != expected_format
                     or "max_completion_tokens" in body
                     or "rid" in body
                 ):
