@@ -14,27 +14,32 @@ from codebench_pipeline.data_api import make_dataset_api
 from codebench_pipeline.dataset_artifacts import DatasetArtifactCatalog
 from codebench_pipeline.dataset_registry import StoredObjectLocation
 from codebench_pipeline.dataset_storage_io import dataset_storage_io
+from codebench_pipeline.grounding_tools import LiveGroundingConfig
 from codebench_pipeline.object_store import StorageConfig, sha256
 from codebench_pipeline.rules_artifacts import FinalizedRules, RulesCaptureArtifact, RulesDedupArtifact
 from codebench_pipeline.rules_contracts import Bundle, EvaluationReceipt, Fixture, Labels, NativeRule, Package
 from codebench_pipeline.rules_learning import CaptureResult
 from codebench_pipeline.rules_metrics import TrainFingerprint
+from codebench_pipeline.rules_registration_config import (
+    GuidePin,
+    HistoricalRegisteredRules,
+    HistoricalRulesPolicy,
+    RulesRuntime,
+    SplitPin,
+)
 from codebench_pipeline.rules_settings import (
     CAPTURE_PARTITIONS,
     RULES_PARTITIONS,
     AgentSettings,
-    GuidePin,
     LearningPins,
+    LearningPolicy,
     RulesCaptureSettings,
     RulesDedupSettings,
     RulesEvalSettings,
     RulesFinalizeSettings,
-    RulesRegistration,
-    RulesRuntime,
-    SplitPin,
-    rules_registration,
 )
 from codebench_pipeline.rules_similarity import AgentRun, CaptureDecision, CapturedRule, DedupResult
+from codebench_pipeline.train_config import MergeSettings
 from codebench_pipeline.typed_config import ConfigArtifact
 
 _ORIGIN = "http://127.0.0.1:3000"
@@ -59,6 +64,12 @@ class _LegacyCaptureSettings(ConfigArtifact):
     agent: AgentSettings
 
 
+class _LegacyEvalSettings(ConfigArtifact):
+    pins: LearningPins
+    runtime: RulesRuntime
+    test: SplitPin
+
+
 def _private_asset(item: _Example) -> AssetsDefinition:
     @asset(
         key=AssetKey(item.key),
@@ -71,12 +82,15 @@ def _private_asset(item: _Example) -> AssetsDefinition:
     return synthetic_private_output
 
 
-def _examples(settings: RulesRegistration) -> tuple[_Example, ...]:
+def _examples(settings: HistoricalRulesPolicy) -> tuple[_Example, ...]:
+    assert settings.train is not None and settings.test is not None
     pins = LearningPins(
-        train=settings.require_pin("train"), categories=settings.categories, runtime_version=settings.runtime.version,
+        train=settings.train, categories=settings.categories, runtime_version=settings.runtime.version,
         guide_sha256=settings.prompt_guide.sha256,
     )
+    policy = LearningPolicy.project(settings)
     sources = {category: sha256(category.encode()) for category in settings.categories}
+    manifests = MergeSettings(category_digests=sources)
     agent = AgentSettings.model_validate({
         "model": {
             "provider": "openai_compatible", "model": _PRIVATE + "_MODEL",
@@ -87,7 +101,7 @@ def _examples(settings: RulesRegistration) -> tuple[_Example, ...]:
     runtime = settings.runtime
     labels = Labels(category="CAT-3", risk="CAT-3.1", severity="low", action="allow")
     rule = NativeRule(
-        id=_RULE, when=_PREDICATE, labels=labels,
+        id=_RULE, scope="", when=_PREDICATE, labels=labels,
         rationale=_PRIVATE + "_RATIONALE", sources=("https://example.invalid/" + _PRIVATE,),
     )
     package = Package(rule=rule, tests=(Fixture(command=_PRIVATE + "_COMMAND", expected=labels),))
@@ -120,18 +134,19 @@ def _examples(settings: RulesRegistration) -> tuple[_Example, ...]:
         _Example(("datasets", "map_rules_capture_config"), "CAT-3", RulesCaptureSettings(
             category="CAT-3", runtime=runtime, agent=agent, sources_digest=sources["CAT-3"],
             guide_sha256=pins.guide_sha256,
+            grounding=LiveGroundingConfig(allowed_domains=["example.invalid"]),
         )),
         _Example(("datasets", "map_rules_capture_config"), "CAT-4", _LegacyCaptureSettings(
             pins=pins, category="CAT-4", runtime=runtime, agent=agent,
         )),
         _Example(("datasets", "map_rules_dedup_config"), "codebench", RulesDedupSettings(
-            pins=pins, runtime=runtime, agent=agent, category_sources_digests=sources,
+            policy=policy, runtime=runtime, agent=agent, train_sources=manifests,
         )),
         _Example(("datasets", "map_rules_finalize_config"), "codebench", RulesFinalizeSettings(
-            pins=pins, runtime=runtime,
+            policy=policy, runtime=runtime, train_sources=manifests,
         )),
         _Example(("datasets", "map_rules_eval_config"), "codebench", RulesEvalSettings(
-            pins=pins, runtime=runtime, test=settings.require_pin("test"),
+            policy=policy, runtime=runtime, test_sources=manifests,
         )),
         _Example(("codebench", "rules_dedup"), "codebench", RulesDedupArtifact(
             pins=pins, result=DedupResult(
@@ -202,23 +217,22 @@ def _query(client: TestClient, target: tuple[tuple[str, str], str], **query: Jso
 
 def test_rules_artifact_reader(tmp_path: Path) -> None:
     guide = b'{"instructions":"SYNTHETIC_PRIVATE_GUIDE","examples":[{}]}'
-    settings = RulesRegistration(
+    settings = HistoricalRulesPolicy(
         runtime=RulesRuntime(base_url="http://synthetic-private.invalid", version="sha256:" + "a" * 64),
         prompt_guide=GuidePin(path="guide.json", sha256=sha256(guide)), categories=("CAT-3", "CAT-4"),
         train=SplitPin(digest="b" * 64, row_count=17), test=SplitPin(digest="c" * 64, row_count=5),
     )
-    registration = settings.model_copy(update={"test": None}).model_dump_json()
+    legacy = settings.model_copy(update={"test": None})
+    registration = _Example(("codebench", "rules_registration"), "codebench", HistoricalRegisteredRules(
+        registration=legacy, digest=sha256(legacy.model_dump_json().encode()), guide=guide.decode(),
+    ))
     dagster_home = tmp_path / "dagster"
     dagster_home.mkdir()
     with DagsterInstance.local_temp(str(dagster_home)) as instance:
         instance.add_dynamic_partitions("codebench_train_categories", ["CAT-3", "CAT-4", "CAT-5"])
         resources = {"config_run_io_manager": ConfigRunIOManager(home=str(tmp_path))}
         assert materialize(
-            [rules_registration], instance=instance, resources=resources, partition_key="codebench",
-            run_config={"ops": {"codebench__rules_registration": {"config": {
-                "registration_json": registration, "expected_sha256": sha256(registration.encode()),
-                "guide_json": guide.decode(),
-            }}}},
+            [_private_asset(registration)], instance=instance, resources=resources, partition_key="codebench",
         ).success
         examples = _examples(settings)
         for partition in ("codebench", "CAT-3", "CAT-4"):
@@ -239,13 +253,14 @@ def test_rules_artifact_reader(tmp_path: Path) -> None:
             cells = (
                 (("datasets", "map_rules_capture_config"), "CAT-3", "category", "CAT-3"),
                 (("datasets", "map_rules_capture_config"), "CAT-4", "train_rows", 17),
-                (("datasets", "map_rules_dedup_config"), "codebench", "train_rows", 17),
+                (("datasets", "map_rules_dedup_config"), "codebench", "sources_digest", sha256(b"CAT-3")),
                 (("datasets", "map_rules_finalize_config"), "codebench", "guide_sha256", sha256(guide)),
-                (("datasets", "map_rules_eval_config"), "codebench", "test_rows", 5),
+                (("datasets", "map_rules_eval_config"), "codebench", "sources_digest", sha256(b"CAT-3")),
                 (("codebench", "rules_capture"), "CAT-3", "batch_id", "cat-3.capture-0001"),
                 (("codebench", "rules_dedup"), "codebench", "rule_id", _RULE),
                 (("codebench", "rules_finalize"), "codebench", "bundle_sha256", _BUNDLE_SHA),
                 (("codebench", "rules_finalize"), "codebench", "when", _PREDICATE),
+                (("codebench", "rules_finalize"), "codebench", "scope", "default"),
                 (("codebench", "rules_eval"), "codebench", "value", 5.0),
                 (("codebench", "rules_eval_report"), "codebench", "report_digest", _BUNDLE_SHA),
             )
@@ -265,3 +280,18 @@ def test_rules_artifact_reader(tmp_path: Path) -> None:
             assert client.post("/artifacts/data", headers=_HEADERS, json={
                 "asset_key": capture, "partition_key": "CAT-4",
             }).status_code == 404
+            assert settings.train is not None and settings.test is not None
+            holdout_config = ("datasets", "map_rules_eval_config")
+            legacy_eval = _LegacyEvalSettings(
+                pins=LearningPins(
+                    categories=settings.categories, runtime_version=settings.runtime.version,
+                    guide_sha256=settings.prompt_guide.sha256, train=settings.train,
+                ),
+                runtime=settings.runtime, test=settings.test,
+            )
+            assert materialize(
+                [_private_asset(_Example(holdout_config, "codebench", legacy_eval))],
+                instance=instance, resources=resources, partition_key="codebench",
+            ).success
+            historical = _query(client, (holdout_config, "codebench"))
+            assert [row.values["test_rows"] for row in historical.page.rows] == [5, 5]

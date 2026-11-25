@@ -1,14 +1,22 @@
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Literal, TypedDict, overload
 from uuid import UUID
 
 from dagster import AssetKey, DagsterRunStatus, RunsFilter
 from pydantic import TypeAdapter
 
-from codebench_pipeline.config_assets import GLOBAL_CONFIG, mapping_key
+from codebench_pipeline.config_assets import (
+    GLOBAL_CONFIG,
+    ConfigRunIOManager,
+    current_configuration_record,
+    mapping_key,
+    rules_policy_path,
+)
 from codebench_pipeline.dataset_branches import HISTORICAL_PROCESSING_STAGES
 from codebench_pipeline.dataset_config import load_build_config
 from codebench_pipeline.dataset_dependencies import KNOWN_STAGES
@@ -19,9 +27,17 @@ from codebench_pipeline.definitions import DEFAULT_HOME, build_definitions, data
 from codebench_pipeline.guarded_publication_controls import Action
 from codebench_pipeline.guarded_publication_runtime import preview_proposal, update_publication_control
 from codebench_pipeline.models import Digest
-from codebench_pipeline.rules_settings import read_rules_guide
+from codebench_pipeline.object_store import sha256
+from codebench_pipeline.rules_registration_config import (
+    HistoricalRegisteredRules,
+    RegisteredRules,
+    RulesPolicy,
+    read_rules_guide,
+)
+from codebench_pipeline.rules_settings import RULES_REGISTRATION
 from codebench_pipeline.runtime_instance import dataset_instance
 from codebench_pipeline.stage_configuration import stage_configs
+from codebench_pipeline.storage import IntegrityError, exclusive
 from codebench_pipeline.train_assets import register_dataset_partitions
 from codebench_pipeline.train_config import SplitSections
 from codebench_pipeline.viewer import launch_ui, preview_asset
@@ -77,6 +93,54 @@ def execute_registered_build(
     return outcome.cache_hits
 
 
+def configure_rules(
+    home: Path, *,
+    payload: bytes | None, expected_sha256: str | None, runtime_version: str | None, guide_sha256: str | None,
+) -> str:
+    """Approve a rules-only policy and refresh only the CodeBench global configuration."""
+    registry = DatasetRegistry(home)
+    path = rules_policy_path(home)
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    with exclusive(path.with_suffix(".lock")), dataset_instance(home) as instance:
+        revision = registry.current_revision(CODEBENCH_DATASET_ID)
+        spec = registry.get_snapshot(CODEBENCH_DATASET_ID, revision=revision)
+        if payload is None:
+            manager = ConfigRunIOManager(home=str(home))
+            record = current_configuration_record(instance, RULES_REGISTRATION, CODEBENCH_DATASET_ID)
+            historical = manager.materialized_scope(record, HistoricalRegisteredRules)
+            previous = historical.registration
+            policy = RulesPolicy(
+                categories=previous.categories,
+                runtime=previous.runtime.model_copy(update={"version": runtime_version or previous.runtime.version}),
+                prompt_guide=previous.prompt_guide.model_copy(
+                    update={"sha256": guide_sha256 or previous.prompt_guide.sha256}
+                ),
+            )
+            payload = policy.model_dump_json().encode()
+            approved = RegisteredRules.approve(
+                payload, sha256(payload), historical.guide if guide_sha256 is None else read_rules_guide(),
+            )
+            if path.exists() and RegisteredRules.model_validate_json(manager.read_private(path)) != approved:
+                raise IntegrityError("An approved rules policy already exists; use --config to replace it")
+        else:
+            assert expected_sha256 is not None
+            approved = RegisteredRules.approve(payload, expected_sha256, read_rules_guide())
+        categories = spec.train.sources_by_category() if spec.train is not None else {}
+        if missing := set(approved.registration.categories) - categories.keys():
+            raise IntegrityError(f"No pinned train sources configured for: {', '.join(sorted(missing))}")
+        with TemporaryDirectory(dir=path.parent) as temporary:
+            staged = Path(temporary) / path.name
+            ConfigRunIOManager.write_private(staged, approved.model_dump_json().encode(), exclusive=True)
+            os.replace(staged, path)
+        result = build_definitions(home).resolve_job_def("refresh_dataset_configuration").execute_in_process(
+            instance=instance, partition_key=CODEBENCH_DATASET_ID, asset_selection=[GLOBAL_CONFIG],
+            run_config={"ops": {"datasets__global_config": {"config": {
+                "expected_revision": revision, "expected_rules_digest": approved.digest,
+            }}}},
+        )
+        return result.run_id
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Build category-configured datasets as typed DataFrame assets."
@@ -92,8 +156,15 @@ def main() -> None:
         "test-merge": "merge_test_data",
         "full-dataset": "build_full_dataset",
     }
+    registration = subcommands.add_parser("rules-register", help="Approve rules policy in global configuration.")
+    registration.add_argument("--home", type=Path, default=DEFAULT_HOME)
+    policy = registration.add_mutually_exclusive_group(required=True)
+    policy.add_argument("--config", help="Read the private rules policy from a path or stdin (-).")
+    policy.add_argument("--migrate", action="store_true", help="Migrate the last successful legacy rules registration.")
+    registration.add_argument("--sha256", help="Expected SHA-256 of the private policy bytes supplied with --config.")
+    registration.add_argument("--runtime-version", help="Replacement evaluator version during --migrate.")
+    registration.add_argument("--guide-sha256", help="Approve the packaged guide checksum during --migrate.")
     rules_jobs = {
-        "rules-register": "register_rules",
         "rules-capture": "capture_rules",
         "rules-learn": "learn_rules",
         "rules-eval": "evaluate_rules",
@@ -101,9 +172,6 @@ def main() -> None:
     for name in rules_jobs:
         command = subcommands.add_parser(name, help="Run a manual Bashguard rules job.")
         command.add_argument("--home", type=Path, default=DEFAULT_HOME)
-        if name == "rules-register":
-            command.add_argument("--config", default="-", help="Read the private rules registration from a path or stdin.")
-            command.add_argument("--sha256", required=True, help="Expected SHA-256 of the private registration bytes.")
         if name == "rules-capture":
             command.add_argument("--category", required=True, help="Selected train category partition.")
             command.add_argument("--resume-run", type=UUID, help="Resume a specific failed capture run UUID.")
@@ -168,24 +236,26 @@ def main() -> None:
         if name in {"attest-release", "revoke-release"}:
             control.add_argument("--proposal", required=True)
     args = parser.parse_args()
+    if args.action == "rules-register":
+        if args.migrate:
+            if args.sha256 is not None:
+                registration.error("--sha256 requires --config")
+            payload = None
+        else:
+            if args.sha256 is None or args.runtime_version is not None or args.guide_sha256 is not None:
+                registration.error("--config requires --sha256 and does not accept migration overrides")
+            payload = sys.stdin.buffer.read() if args.config == "-" else Path(args.config).read_bytes()
+        run_id = configure_rules(
+            args.home, payload=payload, expected_sha256=args.sha256,
+            runtime_version=args.runtime_version, guide_sha256=args.guide_sha256,
+        )
+        print(json.dumps({"dataset": CODEBENCH_DATASET_ID, "configuration_run_id": run_id}))
+        return
     if args.action in rules_jobs:
         job_name = rules_jobs[args.action]
         partition = args.category if args.action == "rules-capture" else CODEBENCH_DATASET_ID
         job = build_definitions(args.home).resolve_job_def(job_name)
         run_config: dict[str, object] = {}
-        if args.action == "rules-register":
-            payload = sys.stdin.buffer.read() if args.config == "-" else Path(args.config).read_bytes()
-            run_config = {
-                "ops": {
-                    "codebench__rules_registration": {
-                        "config": {
-                            "registration_json": payload.decode("utf-8"),
-                            "expected_sha256": args.sha256,
-                            "guide_json": read_rules_guide(),
-                        }
-                    }
-                }
-            }
         if args.action == "rules-capture" and args.resume_run is not None:
             run_config = {"ops": {"codebench__rules_capture": {"config": {"resume_run": str(args.resume_run)}}}}
         with dataset_instance(args.home) as instance:

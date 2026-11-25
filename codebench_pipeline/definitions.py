@@ -61,7 +61,7 @@ from codebench_pipeline.review_assets import human_assets
 from codebench_pipeline.review_inputs import REVIEW_INPUT_MANAGER, review_input_manager
 from codebench_pipeline.rules_artifacts import rules_capture_inputs, rules_corpus_input
 from codebench_pipeline.rules_assets import RULES_ASSETS, RULES_JOB_SELECTIONS
-from codebench_pipeline.rules_settings import rules_mappings, rules_registration
+from codebench_pipeline.rules_settings import rules_mappings
 from codebench_pipeline.stage_descriptions import describe_stage
 from codebench_pipeline.stage_implementation import ImplementationSource
 from codebench_pipeline.storage import IntegrityError, fingerprint
@@ -167,7 +167,7 @@ def build_definitions(home: Path) -> Definitions:
         ]
     ]
     _require_scoped_configuration_edges(
-        [*config_definitions, *TRAIN_MAPPINGS, rules_registration, *rules_mapping_assets],
+        [*config_definitions, *TRAIN_MAPPINGS, *rules_mapping_assets],
         [*assets, *TRAIN_TABLES, bashguard_syntax_audit, *RULES_ASSETS],
     )
 
@@ -267,7 +267,6 @@ def build_definitions(home: Path) -> Definitions:
             *TRAIN_MAPPINGS,
             *TRAIN_TABLES,
             full_dataset,
-            rules_registration,
             *rules_mapping_assets,
             *RULES_ASSETS,
         ],

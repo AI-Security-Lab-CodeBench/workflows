@@ -27,8 +27,13 @@ def _frame(*samples: tuple[str, str]) -> pd.DataFrame:
 
 
 def test_holdout_scores_modify_as_wrong_or_abstain_without_losing_axis_credit() -> None:
+    frame = _frame(("pwd", "allow"), ("pwd -P", "modify"), ("pwd -L", "modify"))
+    frame.attrs["test_sources"] = {"CAT-6": [{
+        "repository": "fixture/data", "branch": "main", "commit": "1" * 40, "path": "test.csv",
+        "category": "CAT-6", "sha256": "2" * 64,
+    }]}
     corpus = build_corpus(
-        _frame(("pwd", "allow"), ("pwd -P", "modify"), ("pwd -L", "modify")),
+        frame,
         split="test",
         digest="b" * 64,
     )

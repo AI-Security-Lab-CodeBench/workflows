@@ -17,7 +17,7 @@ from pydantic import ValidationError
 from test_declared_dataset_graph import fixture_spec, with_keenable_declaration
 from test_keenable import source_declaration
 
-from codebench_pipeline.config_assets import mapping_key
+from codebench_pipeline.config_assets import GLOBAL_CONFIG, mapping_key
 from codebench_pipeline.dataframe_io import AssetSnapshot, DataFrameIOManager
 from codebench_pipeline.dataframe_schemas import CommandsTable
 from codebench_pipeline.dataset_config import FilteringConfig
@@ -26,6 +26,7 @@ from codebench_pipeline.dataset_registry import DatasetRegistry
 from codebench_pipeline.dataset_run import refresh_registered_configuration
 from codebench_pipeline.definitions import build_definitions, dataset_run_config
 from codebench_pipeline.human_review import HumanReviewError
+from codebench_pipeline.rules_settings import RULES_REGISTRATION
 from codebench_pipeline.runtime_instance import dataset_instance
 from codebench_pipeline.source_evidence import require_source_rights
 from codebench_pipeline.stage_configuration import DeclaredGlobalConfig, stage_configs
@@ -34,6 +35,27 @@ from codebench_pipeline.storage import IntegrityError
 
 
 class DatasetGraphTests(unittest.TestCase):
+    def test_rules_policy_and_train_holdout_dependencies_are_separate(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            graph = build_definitions(Path(temporary)).resolve_asset_graph()
+        self.assertNotIn(RULES_REGISTRATION, graph.materializable_asset_keys)
+        capture_rows = AssetKey(["train", "category_rows"])
+        train, test = (AssetKey([split, "merged_rows"]) for split in ("train", "test"))
+        stages = {
+            "rules_capture": {capture_rows},
+            "rules_dedup": {AssetKey(["codebench", "rules_capture"]), train},
+            "rules_finalize": {AssetKey(["codebench", "rules_dedup"]), train},
+            "rules_eval": {AssetKey(["codebench", "rules_finalize"]), test},
+        }
+        for name, parents in stages.items():
+            with self.subTest(stage=name):
+                settings = mapping_key(name)
+                key = AssetKey(["codebench", name])
+                self.assertEqual(graph.get(settings).parent_keys, {GLOBAL_CONFIG})
+                self.assertEqual(graph.get(key).parent_keys, parents | {settings})
+                if name != "rules_eval":
+                    self.assertNotIn(test, AssetSelection.assets(key).upstream().resolve(graph))
+
     def test_selective_collection_and_policy_scopes_have_distinct_taxonomy_lineage(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             graph = build_definitions(Path(temporary)).resolve_asset_graph()
@@ -51,10 +73,16 @@ class DatasetGraphTests(unittest.TestCase):
     def test_configuration_assets_have_consumers(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             graph = build_definitions(Path(temporary)).resolve_asset_graph()
-        configuration = AssetSelection.groups("configuration").resolve(graph) | {
+        configuration = {
             key
             for key in graph.materializable_asset_keys
-            if graph.get(key).io_manager_key == "config_run_io_manager"
+            if graph.get(key).group_name == "configuration"
+            or (
+                len(key.path) == 2
+                and key.path[0] == "datasets"
+                and key.path[1].startswith("map_")
+                and key.path[1].endswith("_config")
+            )
         }
         orphans = {key.to_user_string() for key in configuration if not graph.get(key).child_keys}
         self.assertEqual(orphans, set())

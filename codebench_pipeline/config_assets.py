@@ -40,6 +40,7 @@ from codebench_pipeline.dataset_branches import (
     Branch,
 )
 from codebench_pipeline.dataset_config import DatasetBuildSpec, DeduplicationPolicy
+from codebench_pipeline.dataset_identity import CODEBENCH_DATASET_ID
 from codebench_pipeline.dataset_registry import DatasetRegistry
 from codebench_pipeline.declared_dataset_bundle import compile_directory
 from codebench_pipeline.grounding_sources import persist_repository_origin_bindings
@@ -51,6 +52,7 @@ from codebench_pipeline.input_provenance import (
 from codebench_pipeline.labeling_stage_settings import ProposalRules
 from codebench_pipeline.object_store import sha256
 from codebench_pipeline.repository_receipts import RepositoryRun
+from codebench_pipeline.rules_registration_config import RegisteredRules
 from codebench_pipeline.stage_configuration import (
     CategoryEligibilityConfig,
     ConfigArtifact,
@@ -75,8 +77,13 @@ RegisteredConfig = DeclaredGlobalConfig
 REGISTERED_CONFIG_TYPE: Final = PythonObjectDagsterType(name="RegisteredConfig", python_type=RegisteredConfig)
 
 
+def rules_policy_path(home: Path) -> Path:
+    return home / "rules-configuration" / CODEBENCH_DATASET_ID / "approved.json"
+
+
 class GlobalConfig(Config):
     expected_revision: str = ""
+    expected_rules_digest: str = ""
 
     @classmethod
     def for_spec(cls, spec: DatasetBuildSpec) -> "GlobalConfig":
@@ -188,7 +195,7 @@ class ConfigRunIOManager(ConfigurableIOManager):
         path = self.run_output_path(context.run_id, context.asset_key, _run_output_partition(context))
         path.parent.mkdir(parents=True, exist_ok=True)
         payload = obj.model_dump_json(by_alias=True).encode()
-        if tuple(context.asset_key.path) in PRIVATE_RULES_RUN_ARTIFACTS:
+        if context.asset_key == GLOBAL_CONFIG or tuple(context.asset_key.path) in PRIVATE_RULES_RUN_ARTIFACTS:
             self.write_private(path, payload)
         else:
             path.write_bytes(payload)
@@ -352,7 +359,21 @@ def configuration_assets(home: Path, *, authoring_root: Path | None = None) -> l
             if rules != spec.rules or compiled_collection != collection:
                 raise IntegrityError("Registered settings differ from the authorized directory capture")
             spec = spec.model_copy(update={"rules": rules, "declared_collection": compiled_collection})
-        registered = RegisteredConfig.from_spec(spec, directory=approved if directory is None else directory)
+        rules_learning = None
+        if spec.dataset_id == CODEBENCH_DATASET_ID:
+            try:
+                payload = ConfigRunIOManager(home=str(home)).read_private(rules_policy_path(home))
+            except FileNotFoundError:
+                pass
+            else:
+                rules_learning = RegisteredRules.model_validate_json(payload)
+        if config.expected_rules_digest and (
+            rules_learning is None or rules_learning.digest != config.expected_rules_digest
+        ):
+            raise IntegrityError("Rules policy changed before refreshing global configuration")
+        registered = RegisteredConfig.from_spec(
+            spec, directory=approved if directory is None else directory, rules_learning=rules_learning,
+        )
         persist_repository_origin_bindings(
             registered.scopes.labeling_attempts.collection,
             RepositoryRun(home, registered.dataset_id, context.run_id),

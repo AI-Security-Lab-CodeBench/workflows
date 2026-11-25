@@ -36,22 +36,20 @@ class Corpus(ConfigArtifact):
     rows: tuple[CorpusRow, ...]
     sources: tuple[CorpusSource, ...] = ()
     sources_digest: Digest | None = None
+    category_sources_digests: dict[Category, Digest] = {}
 
     def sources_for(self, category: str) -> tuple[str, ...]:
         return tuple(source.url for source in self.sources if source.category == category)
 
 
-def _train_sources(frame: DataFrame, categories: set[str]) -> tuple[CorpusSource, ...]:
-    grouped = _SOURCES.validate_python(frame.attrs.get("train_sources"), strict=True)
+def _merged_sources(frame: DataFrame, categories: set[str], split: Split) -> dict[str, CategorySources]:
+    grouped = _SOURCES.validate_python(frame.attrs.get(f"{split}_sources"), strict=True)
     if not categories.issubset(grouped):
-        raise IntegrityError("Train corpus categories are missing pinned source provenance")
-    sources: list[CorpusSource] = []
-    for category in sorted(categories):
-        entries = grouped[category]
+        raise IntegrityError(f"{split} corpus categories are missing pinned source provenance")
+    for category, entries in grouped.items():
         if not entries or any(entry.category != category for entry in entries):
-            raise IntegrityError(f"Invalid pinned train source provenance for {category}")
-        sources.extend(_corpus_source(entry) for entry in entries)
-    return tuple(sources)
+            raise IntegrityError(f"Invalid pinned {split} source provenance for {category}")
+    return {category: CategorySources(sources=entries) for category, entries in grouped.items()}
 
 
 def _corpus_source(entry: TrainSource) -> CorpusSource:
@@ -93,5 +91,11 @@ def build_corpus(frame: DataFrame, *, split: Split, digest: Digest, category: Ca
             split=split, digest=digest, rows=tuple(rows), sources=tuple(map(_corpus_source, pinned.sources)),
             sources_digest=pinned.digest,
         )
-    sources = _train_sources(frame, {row.gold.category for row in rows}) if split == "train" else ()
-    return Corpus(split=split, digest=digest, rows=tuple(rows), sources=sources)
+    grouped = _merged_sources(frame, {row.gold.category for row in rows}, split)
+    sources = tuple(
+        _corpus_source(entry) for category in sorted(grouped) for entry in grouped[category].sources
+    ) if split == "train" else ()
+    return Corpus(
+        split=split, digest=digest, rows=tuple(rows), sources=sources,
+        category_sources_digests={key: value.digest for key, value in grouped.items()},
+    )

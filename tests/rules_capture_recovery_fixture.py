@@ -8,14 +8,13 @@ import pytest
 from dagster import AssetKey, DagsterInstance, DagsterRunStatus
 from pydantic import JsonValue, TypeAdapter
 
-from codebench_pipeline.config_assets import ConfigRunIOManager, current_configuration_record
-from codebench_pipeline.dataset_cli import main
+from codebench_pipeline.config_assets import GLOBAL_CONFIG, ConfigRunIOManager, current_configuration_record
+from codebench_pipeline.dataset_cli import configure_rules, main
 from codebench_pipeline.dataset_identity import CODEBENCH_DATASET_ID
 from codebench_pipeline.definitions import build_definitions
 from codebench_pipeline.input_provenance import current_materialization
 from codebench_pipeline.rules_artifacts import RulesCaptureArtifact
 from codebench_pipeline.rules_learning import CaptureResult
-from codebench_pipeline.rules_settings import RULES_REGISTRATION, RegisteredRules
 from codebench_pipeline.storage import IntegrityError
 
 _KEY = AssetKey(["codebench", "rules_capture"])
@@ -70,22 +69,18 @@ def exercise_capture_resume(
     definitions = build_definitions(home)
     job = definitions.resolve_job_def("capture_rules")
     manager = ConfigRunIOManager(home=str(home))
-    registered_rules = manager.materialized_scope(
-        current_configuration_record(instance, RULES_REGISTRATION, CODEBENCH_DATASET_ID), RegisteredRules,
-    )
+    config = current_configuration_record(instance, GLOBAL_CONFIG, CODEBENCH_DATASET_ID)
+    registered_rules = manager.registered(config.run_id, materialization=config).rules_learning
+    assert registered_rules is not None
     registered = registered_rules.registration
 
     def register(runtime_origin: str) -> None:
         payload = registered.model_copy(update={
             "runtime": registered.runtime.model_copy(update={"base_url": runtime_origin}),
-        }).model_dump_json()
-        assert definitions.resolve_job_def("register_rules").execute_in_process(
-            instance=instance, partition_key=CODEBENCH_DATASET_ID,
-            run_config={"ops": {"codebench__rules_registration": {"config": {
-                "registration_json": payload, "expected_sha256": sha256(payload.encode()).hexdigest(),
-                "guide_json": registered_rules.guide,
-            }}}},
-        ).success
+        }).model_dump_json().encode()
+        configure_rules(
+            home, payload=payload, expected_sha256=sha256(payload).hexdigest(), runtime_version=None, guide_sha256=None,
+        )
 
     def cli(source: str) -> None:
         monkeypatch.setattr("sys.argv", [

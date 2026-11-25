@@ -48,6 +48,7 @@ from codebench_pipeline.release_stage_settings import (
     ReleaseGroundingConfig,
     ReviewQueueConfig,
 )
+from codebench_pipeline.rules_registration_config import RegisteredRules
 from codebench_pipeline.storage import IntegrityError, fingerprint
 from codebench_pipeline.train_config import TrainConfig
 from codebench_pipeline.typed_config import ConfigArtifact, TypedConfig
@@ -184,6 +185,7 @@ class DeclaredGlobalConfig(ConfigArtifact):
     )
     rules: CategoryRules
     scopes: DeclaredScopes
+    rules_learning: RegisteredRules | None = Field(default=None, exclude_if=lambda value: value is None)
 
     def source_config(self, branch: Branch) -> DeclaredSourceStageConfig:
         return {
@@ -229,7 +231,8 @@ class DeclaredGlobalConfig(ConfigArtifact):
 
     @classmethod
     def from_spec(
-        cls, spec: DatasetBuildSpec, *, directory: ConfigDirectorySnapshot | None = None
+        cls, spec: DatasetBuildSpec, *, directory: ConfigDirectorySnapshot | None = None,
+        rules_learning: RegisteredRules | None = None,
     ) -> "DeclaredGlobalConfig":
         if spec.declared_collection is None:
             raise IntegrityError("Registered dataset has no collection declarations")
@@ -240,6 +243,7 @@ class DeclaredGlobalConfig(ConfigArtifact):
             registration_digest=fingerprint(spec.model_dump_json()),
             config_directory=spec.config_directory if directory is None else directory,
             rules=spec.rules,
+            rules_learning=rules_learning,
             train=spec.train,
             test=spec.test,
             scopes=DeclaredScopes(

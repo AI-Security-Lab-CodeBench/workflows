@@ -35,32 +35,47 @@ may consult the held-out report.
 Run these manual jobs with `python -m codebench_pipeline.dataset_cli` in the
 worker. They do not enable a sensor.
 
-1. Use `rules-register --config - --sha256 <digest>` to register private JSON
-   from standard input; hash the exact file bytes you send. The registration
-   supplies `categories`, `runtime` (`base_url`, `version`) and `prompt_guide`
-   (`path: "guide.json"`, `sha256`). The CLI reads the packaged guide and submits
-   it with the registration. The asset verifies both digests and the guide
-   schema without opening a file. Inference settings and category
-   source manifests come from the existing dataset registration.
+1. On an existing deployment, run
+   `rules-register --migrate --runtime-version "$RUNTIME_VERSION" --guide-sha256 "$GUIDE_SHA256"`.
+   This copies the exact active categories and evaluator origin from the last
+   successful rules registration, drops `train` and `test`, and approves the
+   new evaluator and packaged guide identities. Use the evaluator executable's
+   SHA-256 with its `sha256:` prefix and the plain SHA-256 of
+   `business-configs/bashguard/guide.json`. Omit an override only when its
+   identity is unchanged. Migration refuses to overwrite a different approved
+   policy. For initial setup or intentional changes use
+   `rules-register --config - --sha256 <digest>` with private JSON on standard
+   input; hash the exact file bytes you send. The policy supplies `categories`,
+   `runtime` (`base_url`, `version`) and `prompt_guide` (`path: "guide.json"`,
+   `sha256`). Split digest and row-count fields are rejected. The CLI checks the
+   guide and refreshes only `datasets/global_config`; it does not rewrite the
+   dataset registration. Only capture receives the registered live-grounding settings.
 2. Materialize `train/category_rows` for each selected category using
    `train-load --category <category>`, then run `rules-capture --category
    <category>` for that category. Capture needs neither merge nor split pin.
    It binds to the category's verified source manifest and the content digest
-   of its materialized table. Changes to other categories or merged split pins
+   of its materialized table. Changes to other categories or the test split
    do not invalidate an otherwise unchanged capture. Captures and failed runs
    made before category isolation must be rerun rather than reused.
-3. Before `rules-learn`, materialize the train merge and register its `train`
-   pin (`digest`, `row_count`) in the same registration JSON. Before `rules-eval`,
-   materialize the test merge and add its separate `test` pin in the same shape.
-   If both pins are already known, register them up front. Learning and
-   evaluation still fail closed if a required pin is absent or mismatched.
+3. Before `rules-learn`, make sure `train/merged_rows` is materialized with
+   `train-merge`; all configured train categories must have been loaded. Dedup
+   judges only the selected categories' captures. Finalization replays the
+   whole surviving bundle on every merged train row, including non-selected
+   categories, and freezes the bundle; it neither proposes rules nor consults test.
+   Before `rules-eval`, make sure `test/merged_rows` is materialized with
+   `test-merge` using the configured held-out categories loaded with `test-load`.
+   No operator copies split digests or row counts. Each stage checks its declared
+   input against the mapped source manifests. Dedup and finalization record the
+   exact train table digest and row count; evaluation records the held-out identity
+   and the frozen train lineage.
 4. Inspect `codebench/rules_eval` for the held-out metrics and
    `codebench/rules_eval_report` for the standalone report. Neither is an
    input to learning.
 
-The assets and their configuration mappers are grouped under `rules`; stage
-tags distinguish registration, capture, deduplication, finalization and
-evaluation without changing existing asset keys.
+The rules assets and their configuration mappers are grouped under `rules`.
+In their inspector, **Native evaluation scope** describes how Bashguard applies
+a rule (`simple` or `ast`), not which rows finalization replays. A legacy empty
+scope is displayed as `default` and behaves like `simple`.
 
 CodeBench builds a labeled dataset of shell commands from source material. A released row must be traceable to the text it came from, the evidence for its label, and the decision that admitted it. Commands are data throughout: no stage executes a collected command.
 

@@ -19,12 +19,14 @@ from dagster_pandera import pandera_schema_to_dagster_type
 from pandera.typing import DataFrame, Series
 from pydantic import BaseModel, ValidationError
 
-from codebench_pipeline.config_assets import ConfigRunIOManager, current_configuration_record, mapping_key
+from codebench_pipeline.config_assets import ConfigRunIOManager, mapping_key
 from codebench_pipeline.dataframe_io import DataFrameIOManager, materialized_reference
-from codebench_pipeline.dataset_identity import CODEBENCH_DATASET_ID
 from codebench_pipeline.finalization_cache_reuse import materialization_attempt_succeeded
-from codebench_pipeline.finalization_publication import TABLE_REGISTRATION_METADATA
-from codebench_pipeline.input_provenance import current_materialization, input_materialization
+from codebench_pipeline.input_provenance import (
+    current_materialization,
+    input_materialization,
+    producer_run_id,
+)
 from codebench_pipeline.models import Digest
 from codebench_pipeline.object_store import sha256
 from codebench_pipeline.rules_contracts import Bundle
@@ -33,9 +35,7 @@ from codebench_pipeline.rules_learning import CaptureResult, DedupResult
 from codebench_pipeline.rules_metrics import HeldOutMetrics, TrainFingerprint
 from codebench_pipeline.rules_settings import (
     RULES_CONFIG_IO,
-    RULES_REGISTRATION,
     LearningPins,
-    RegisteredRules,
     RulesCaptureSettings,
 )
 from codebench_pipeline.split_schema import SplitRowsTable
@@ -67,14 +67,19 @@ class FinalizedRules(ConfigArtifact):
     training: TrainFingerprint
 
 
-@input_manager(required_resource_keys={TRAIN_TABLE_IO, RULES_CONFIG_IO})
+@input_manager(required_resource_keys={TRAIN_TABLE_IO})
 def rules_corpus_input(context: InputContext) -> Corpus:
     tables = context.resources.train_table_io
     if not isinstance(tables, DataFrameIOManager) or tables.registered_revision is None:
         raise IntegrityError("Rules inputs require registered split storage")
     record = input_materialization(context)
-    if record is None:
-        raise IntegrityError("Rules inputs require a materialized split table")
+    upstream = context.upstream_output
+    if record is None or not materialization_attempt_succeeded(
+        context.instance, record,
+        output_name="result" if upstream is None or producer_run_id(upstream) is None else upstream.name,
+        retry_number="native", manager_keys=frozenset({TRAIN_TABLE_IO}),
+    ):
+        raise IntegrityError("Rules inputs require a successfully materialized split table")
     split: Split
     match context.asset_key.path:
         case ["train", "category_rows"]:
@@ -92,41 +97,28 @@ def rules_corpus_input(context: InputContext) -> Corpus:
             split = "test"
         case _:
             raise IntegrityError("Rules inputs must be a declared split table")
-    if (
-        (materialization := record.asset_materialization) is None
-        or materialization.metadata.get(TABLE_REGISTRATION_METADATA)
-        != TextMetadataValue(tables.registered_revision)
-    ):
-        raise IntegrityError(f"The {split} merge does not match the current split registration")
-    manager = context.resources.config_run_io_manager
-    if not isinstance(manager, ConfigRunIOManager):
-        raise IntegrityError("Rules split I/O requires the pinned rules registration")
-    configuration = current_configuration_record(context.instance, RULES_REGISTRATION, CODEBENCH_DATASET_ID)
-    registration = manager.materialized_scope(configuration, RegisteredRules).registration
-    pin = registration.require_pin(split)
     reference = materialized_reference(context.instance, record)
-    if reference.digest != pin.digest:
-        raise IntegrityError(f"Rules run requires the registered {split} snapshot")
     frame = tables.read_version(reference)
-    if not isinstance(frame, pd.DataFrame) or len(frame) != pin.row_count:
-        raise IntegrityError(f"The pinned {split} input is not a table with the registered row count")
-    return build_corpus(SplitRowsTable.validate(frame), split=split, digest=pin.digest)
+    if not isinstance(frame, pd.DataFrame) or frame.empty:
+        raise IntegrityError(f"Rules require a nonempty {split} table")
+    return build_corpus(SplitRowsTable.validate(frame), split=split, digest=reference.digest)
 
 
 @input_manager(required_resource_keys={RULES_CONFIG_IO})
-def rules_capture_inputs(context: InputContext) -> dict[str, RulesCaptureArtifact]:
+def rules_capture_inputs(context: InputContext) -> dict[str, RulesCaptureArtifact | None]:
     manager = context.resources.config_run_io_manager
     if not isinstance(manager, ConfigRunIOManager):
         raise IntegrityError("Capture fan-in requires private run storage")
-    configuration = current_configuration_record(context.instance, RULES_REGISTRATION, CODEBENCH_DATASET_ID)
-    selected = set(manager.materialized_scope(configuration, RegisteredRules).registration.categories)
-    captures: dict[str, RulesCaptureArtifact] = {}
-    for category in sorted(selected.intersection(context.asset_partition_keys)):
+    captures: dict[str, RulesCaptureArtifact | None] = {}
+    for category in context.asset_partition_keys:
         record = current_materialization(context.instance, context.asset_key, category)
         if record is not None and materialization_attempt_succeeded(
             context.instance, record, output_name="result", retry_number="native"
         ):
-            captures[category] = manager.materialized_scope(record, RulesCaptureArtifact)
+            try:
+                captures[category] = manager.materialized_scope(record, RulesCaptureArtifact)
+            except (IntegrityError, FileNotFoundError, ValueError):
+                captures[category] = None
     return captures
 
 

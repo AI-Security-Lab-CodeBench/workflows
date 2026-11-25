@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Final, TypedDict, assert_never
 
 import pandas as pd
-from pydantic import ConfigDict, JsonValue, TypeAdapter, ValidationError
+from pydantic import ConfigDict, Field, JsonValue, TypeAdapter, ValidationError
 
 from codebench_pipeline.artifact_schemas import ArtifactSchema
 from codebench_pipeline.config_assets import mapping_key
@@ -15,17 +15,16 @@ from codebench_pipeline.object_store import sha256
 from codebench_pipeline.rules_artifacts import FinalizedRules, RulesDedupArtifact
 from codebench_pipeline.rules_contracts import Category, NativeRule
 from codebench_pipeline.rules_learning import CaptureResult
+from codebench_pipeline.rules_registration_config import HistoricalRegisteredRules, RulesRuntime, SplitPin
 from codebench_pipeline.rules_settings import (
     RULES_REGISTRATION,
     AgentSettings,
     LearningPins,
-    RegisteredRules,
-    RulesEvalSettings,
-    RulesFinalizeSettings,
-    RulesRuntime,
+    LearningPolicy,
 )
 from codebench_pipeline.storage import IntegrityError, open_directory, open_regular_file
 from codebench_pipeline.table_query import QueryModel, TablePage, TableQuery, query_table
+from codebench_pipeline.train_config import MergeSettings
 
 
 class CaptureSettingsProjection(QueryModel):
@@ -40,12 +39,16 @@ class CaptureSettingsProjection(QueryModel):
     sources_digest: Digest | None = None
 
 
-class DedupSettingsProjection(QueryModel):
+class LearningSettingsProjection(QueryModel):
     model_config = ConfigDict(extra="ignore")
-    pins: LearningPins
+    pins: LearningPins | None = None
+    policy: LearningPolicy | None = None
+    test: SplitPin | None = None
     runtime: RulesRuntime
-    agent: AgentSettings
+    agent: AgentSettings | None = None
     category_sources_digests: dict[Category, Digest] | None = None
+    train_sources: MergeSettings | None = None
+    test_sources: MergeSettings | None = None
 
 
 class CaptureProjection(QueryModel):
@@ -54,16 +57,16 @@ class CaptureProjection(QueryModel):
 
 
 type RulesOutput = (
-    RegisteredRules | CaptureSettingsProjection | DedupSettingsProjection | RulesFinalizeSettings | RulesEvalSettings
+    HistoricalRegisteredRules | CaptureSettingsProjection | LearningSettingsProjection
     | CaptureProjection | RulesDedupArtifact | FinalizedRules
 )
 
 RULES_RUN_CONTRACTS: Final[dict[tuple[str, ...], type[RulesOutput]]] = {
-    tuple(RULES_REGISTRATION.path): RegisteredRules,
+    tuple(RULES_REGISTRATION.path): HistoricalRegisteredRules,
     tuple(mapping_key("rules_capture").path): CaptureSettingsProjection,
-    tuple(mapping_key("rules_dedup").path): DedupSettingsProjection,
-    tuple(mapping_key("rules_finalize").path): RulesFinalizeSettings,
-    tuple(mapping_key("rules_eval").path): RulesEvalSettings,
+    tuple(mapping_key("rules_dedup").path): LearningSettingsProjection,
+    tuple(mapping_key("rules_finalize").path): LearningSettingsProjection,
+    tuple(mapping_key("rules_eval").path): LearningSettingsProjection,
     ("codebench", "rules_capture"): CaptureProjection,
     ("codebench", "rules_dedup"): RulesDedupArtifact,
     ("codebench", "rules_finalize"): FinalizedRules,
@@ -107,14 +110,19 @@ class RuleFields(TypedDict):
 def _rule_fields(rule: NativeRule) -> RuleFields:
     labels = rule.labels
     return RuleFields(
-        rule_id=rule.id, scope=rule.scope, category=labels.category, risk=labels.risk,
+        rule_id=rule.id, scope=rule.scope or "default", category=labels.category, risk=labels.risk,
         severity=labels.severity, action=labels.action,
     )
 
 
 class RuleRow(QueryModel):
     rule_id: str
-    scope: str
+    scope: str = Field(
+        title="Native evaluation scope",
+        description="Bashguard evaluation mode, not the training dataset. "
+        "Simple applies to eligible simple commands; ast uses parsed shell structure. "
+        "Legacy empty scope is shown as default and behaves like simple.",
+    )
     category: Category
     risk: str
     severity: str
@@ -161,7 +169,7 @@ def read_rules_table(
 
 def _projection(value: RulesOutput) -> tuple[type[QueryModel], Iterable[QueryModel]]:
     match value:
-        case RegisteredRules(registration=settings, digest=digest):
+        case HistoricalRegisteredRules(registration=settings, digest=digest):
             return RulesConfigurationRow, (
                 RulesConfigurationRow(
                     category=category,
@@ -183,20 +191,23 @@ def _projection(value: RulesOutput) -> tuple[type[QueryModel], Iterable[QueryMod
                 train_digest=train.digest if train is not None else None,
                 train_rows=train.row_count if train is not None else None,
             ),)
-        case DedupSettingsProjection() | RulesFinalizeSettings() | RulesEvalSettings():
-            test = value.test if isinstance(value, RulesEvalSettings) else None
-            dedup = value if isinstance(value, DedupSettingsProjection) else None
+        case LearningSettingsProjection():
+            if (policy := value.policy or value.pins) is None:
+                raise DatasetViewError("not_materialized", "Rules settings have no learning policy")
+            train = value.pins.train if value.pins else None
+            manifest = value.train_sources or value.test_sources
+            sources = manifest.category_digests if manifest else value.category_sources_digests
             return RulesConfigurationRow, (
                 RulesConfigurationRow(
-                    category=category, train_digest=value.pins.train.digest, train_rows=value.pins.train.row_count,
-                    test_digest=test.digest if test is not None else None,
-                    test_rows=test.row_count if test is not None else None,
-                    runtime_version=value.runtime.version, guide_sha256=value.pins.guide_sha256,
-                    sources_digest=dedup.category_sources_digests.get(category)
-                    if dedup is not None and dedup.category_sources_digests is not None else None,
-                    inference_digest=dedup.agent.inference_digest if dedup is not None else None,
+                    category=category, train_digest=train.digest if train else None,
+                    train_rows=train.row_count if train else None,
+                    test_digest=value.test.digest if value.test else None,
+                    test_rows=value.test.row_count if value.test else None,
+                    runtime_version=value.runtime.version, guide_sha256=policy.guide_sha256,
+                    sources_digest=sources.get(category) if sources else None,
+                    inference_digest=value.agent.inference_digest if value.agent else None,
                 )
-                for category in value.pins.categories
+                for category in policy.categories
             )
         case CaptureProjection(result=result):
             return CapturedRuleRow, (
