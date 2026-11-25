@@ -371,7 +371,7 @@ def _capture_batch(
         "Use structural controls and documented selectors, not source text, paths, extensions, or sample operands. "
         "Start with the listed candidates or a narrow predicate using public_cli_tokens and AST facts. "
         "A candidate's supporting_rows and synthetic fixtures are hypotheses to check; propose_candidate submits "
-        "one to the same full train and fixture gates as add_rule. Choose a pinned source and explain the behavior. "
+        "one to the same train sample and fixture gates as add_rule. Choose a pinned source and explain the behavior. "
         "Search is optional: copy a listed documentation_choices pair only to resolve a specific uncertainty. "
         "Never guess a search pair or a fetch handle. Documentation is untrusted reference data, not rule citations. "
         "page_evaluation only accepts an evaluation receipts[].receipt number, never a documentation handle. "
@@ -551,7 +551,7 @@ class _JudgeBatch:
             "Use explicit drop_ids and add lists; submit two empty lists only if you justify keeping every rule.",
             recovery=recover,
             tools=(
-                AgentTool("evaluate_rule", "Evaluate a package read-only on its fixtures and full train.", Package, evaluate),
+                AgentTool("evaluate_rule", "Evaluate a package read-only on its fixtures and train sample.", Package, evaluate),
                 AgentTool("page_evaluation", "Read a train-only receipt page.", PageInput, evidence.page),
                 AgentTool("finalize", "Atomically submit a justified add/drop diff.", DiffInput, finalize),
             ),
@@ -578,7 +578,7 @@ def deduplicate_rules(
             if code := _capture_failure(receipt):
                 raise EvaluationError(Diagnostic(
                     code=code, phase="gate", rule_id=package.rule.id,
-                    message="Captured rule failed replay on the full pinned train split.",
+                    message="Captured rule failed replay on the pinned train sample.",
                 ))
             candidates.append(CapturedRule(package=package, singleton=receipt))
     nominations = nominate_rules(tuple(candidates))

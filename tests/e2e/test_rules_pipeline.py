@@ -14,6 +14,7 @@ from dagster import (
     AssetKey,
     DagsterInstance,
     Definitions,
+    InputContext,
     MarkdownMetadataValue,
     MetadataValue,
     TextMetadataValue,
@@ -27,7 +28,12 @@ from starlette.testclient import TestClient
 from test_declared_dataset_graph import fixture_spec
 
 from codebench_pipeline.artifact_views import ArtifactDataService, ArtifactPartitions, ArtifactTable
-from codebench_pipeline.config_assets import GLOBAL_CONFIG, ConfigRunIOManager, current_configuration_record
+from codebench_pipeline.config_assets import (
+    GLOBAL_CONFIG,
+    ConfigRunIOManager,
+    current_configuration_record,
+    mapping_key,
+)
 from codebench_pipeline.data_api import make_dataset_api
 from codebench_pipeline.data_views import DatasetDataService
 from codebench_pipeline.dataframe_io import AssetReference, DataFrameIOManager
@@ -36,15 +42,22 @@ from codebench_pipeline.dataset_cli import configure_rules, main
 from codebench_pipeline.dataset_registry import DatasetRegistry
 from codebench_pipeline.definitions import build_definitions
 from codebench_pipeline.rules_artifacts import RULES_EVAL_KEY
+from codebench_pipeline.rules_contracts import Split
 from codebench_pipeline.rules_registration_config import (
+    DEFAULT_SAMPLE,
     HistoricalRegisteredRules,
     HistoricalRulesPolicy,
     RulesPolicy,
+    SampleCount,
 )
+from codebench_pipeline.rules_sample_assets import sample_key
+from codebench_pipeline.rules_sampling import RulesSample
 from codebench_pipeline.rules_settings import RULES_PARTITIONS, RULES_REGISTRATION
 from codebench_pipeline.runtime_instance import dataset_instance
+from codebench_pipeline.storage import IntegrityError
 from codebench_pipeline.train_assets import register_dataset_partitions
 from codebench_pipeline.train_config import TrainConfig, TrainSource
+from codebench_pipeline.typed_config import ConfigArtifact
 
 _GUIDE = Path(__file__).resolve().parents[2] / "business-configs/bashguard/guide.json"
 _RUNTIME = f"sha256:{'a' * 64}"
@@ -220,6 +233,14 @@ def _split(
     return TrainConfig(sources=sources)
 
 
+def _persisted_sample(home: Path, instance: DagsterInstance, split: Split) -> RulesSample:
+    key = sample_key(split)
+    record = current_configuration_record(instance, key, "codebench")
+    config_io = ConfigRunIOManager(home=str(home))
+    assert config_io.run_output_path(record.run_id, key, "codebench").stat().st_mode & 0o777 == 0o600
+    return config_io.materialized_scope(record, RulesSample)
+
+
 def test_rules_pipeline(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     blobs: dict[str, bytes] = {}
     completion = CaptureCompletion(_complete, _MODEL)
@@ -302,22 +323,16 @@ def test_rules_pipeline(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None
         assert approved.registration.categories == _SELECTED
         assert approved.registration.runtime.base_url == services.origin
         assert approved.registration.runtime.version == _RUNTIME
-        assert set(approved.registration.model_dump()) == {"categories", "runtime", "prompt_guide"}
+        assert approved.registration.sample == DEFAULT_SAMPLE
+        assert set(approved.registration.model_dump()) == {"categories", "runtime", "prompt_guide", "sample"}
         assert set(instance.get_dynamic_partitions("codebench_train_categories")) == set(_TRAIN.values())
-        assert run("capture_rules", "CAT-3").success
-        assert completion.requests == 3
-        assert {
-            row["command"]
-            for path, request in services.calls if path == "/v1/evaluate"
-            for row in request["rows"] if row["id"].startswith("train:")
-        } == {"pwd"}
 
         assert run("load_train_category", "CAT-4").success
         assert run("load_train_category", "CAT-6").success
         assert run("load_train_category", "CAT-7").success
         assert run("merge_train_data").success
         train = manager.reference_at(["train", "merged_rows"], "codebench")
-        allowed_snapshot = train.digest
+        allowed_snapshot: str | None = train.digest
         test: AssetReference | None = None
         read_version = DataFrameIOManager.read_version
 
@@ -327,6 +342,17 @@ def test_rules_pipeline(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None
             return read_version(storage, reference)
 
         monkeypatch.setattr(DataFrameIOManager, "read_version", read_pinned)
+        monkeypatch.setattr("sys.argv", ["dataset-cli", "rules-sample-train", "--home", str(tmp_path)])
+        main()
+        train_sample = _persisted_sample(tmp_path, instance, "train")
+        assert train_sample.source_digest == train.digest and train_sample.pin.row_count == len(_TRAIN)
+        allowed_snapshot = None
+        assert run("capture_rules", "CAT-3").success
+        assert completion.requests == 3
+        assert {
+            row["id"] for path, request in services.calls if path == "/v1/evaluate"
+            for row in request["rows"] if row["id"].startswith("train:")
+        } == {row.id for row in train_sample.for_capture("CAT-3").rows}
         assert not run("learn_rules", raise_on_error=False).success
         assert completion.requests == 3
         exercise_capture_resume(tmp_path, instance, completion, monkeypatch)
@@ -351,12 +377,24 @@ def test_rules_pipeline(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None
         assert run("merge_test_data").success
         test = manager.reference_at(["test", "merged_rows"], "codebench")
         allowed_snapshot = test.digest
+        monkeypatch.setattr("sys.argv", ["dataset-cli", "rules-sample-test", "--home", str(tmp_path)])
+        main()
+        test_sample = _persisted_sample(tmp_path, instance, "test")
+        assert test_sample.source_digest == test.digest and test_sample.pin.row_count == len(_TEST)
+        allowed_snapshot = None
+        load_scope = ConfigRunIOManager.load_scope
+
+        def load_no_train_sample(config_io: ConfigRunIOManager, context: InputContext) -> ConfigArtifact:
+            assert context.asset_key != sample_key("train")
+            return load_scope(config_io, context)
+
+        monkeypatch.setattr(ConfigRunIOManager, "load_scope", load_no_train_sample)
         assert run("evaluate_rules").success
         event = instance.get_latest_materialization_event(RULES_EVAL_KEY)
         assert event is not None and event.asset_materialization is not None
         metadata = event.asset_materialization.metadata
-        assert metadata["Train digest"] == TextMetadataValue(train.digest)
-        assert metadata["Test digest"] == TextMetadataValue(test.digest)
+        assert metadata["Train digest"] == TextMetadataValue(train_sample.pin.digest)
+        assert metadata["Test digest"] == TextMetadataValue(test_sample.pin.digest)
         assert [path for path, _ in services.calls] == ["/v1/evaluate"]
         request = services.calls[0][1]
         assert {row["command"] for row in request["rows"]} == _TEST.keys()
@@ -408,8 +446,11 @@ def _assert_public_metrics(instance: DagsterInstance, home: Path, definitions: D
 
 
 def test_empty_learned_rules_pipeline(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    train_commands = {"echo train": "CAT-6", "echo background": "CAT-7"}
-    test_commands = {"echo train": "CAT-6", "whoami": "CAT-5"}
+    train_commands = {"echo train": "CAT-6"}
+    test_commands = {
+        **{f"echo synthetic {category}-{index}": f"CAT-{category}" for category in range(1, 6) for index in range(2)},
+        "echo synthetic six": "CAT-6", "echo train": "CAT-6",
+    }
     blobs: dict[str, bytes] = {}
 
     def reply(request: httpx2.Request) -> httpx2.Response:
@@ -442,6 +483,7 @@ def test_empty_learned_rules_pipeline(tmp_path: Path, monkeypatch: pytest.Monkey
             "categories": ("CAT-6",),
             "runtime": {"base_url": services.origin, "version": _RUNTIME},
             "prompt_guide": {"path": "guide.json", "sha256": sha256(_GUIDE.read_bytes()).hexdigest()},
+            "sample": {"percent": 100},
         })
         payload = policy.model_dump_json().encode()
         configure_rules(
@@ -450,23 +492,24 @@ def test_empty_learned_rules_pipeline(tmp_path: Path, monkeypatch: pytest.Monkey
         )
         definitions = build_definitions(tmp_path)
 
-        def run(name: str, partition: str = "codebench") -> None:
+        def run(name: str, partition: str = "codebench", *, selection: list[AssetKey] | None = None) -> None:
             assert definitions.resolve_job_def(name).execute_in_process(
-                instance=instance, partition_key=partition,
+                instance=instance, partition_key=partition, asset_selection=selection,
             ).success
 
         for split, commands in (("train", train_commands), ("test", test_commands)):
             for category in sorted(set(commands.values())):
                 run(f"load_{split}_category", category)
             run(f"merge_{split}_data")
+            run(f"sample_rules_{split}")
         run("capture_rules", "CAT-6")
         run("learn_rules")
         run("evaluate_rules")
 
         finalized_key = ["codebench", "rules_finalize"]
         manager = DataFrameIOManager(storage=spec.storage)
-        train = manager.reference_at(["train", "merged_rows"], "codebench")
-        test = manager.reference_at(["test", "merged_rows"], "codebench")
+        train = _persisted_sample(tmp_path, instance, "train")
+        test = _persisted_sample(tmp_path, instance, "test")
         manifest = manager.read_version(manager.reference_at(["codebench", "rules_eval_report"], "codebench"))
         assert isinstance(manifest, pd.DataFrame)
         (report_url,) = manifest["report_url"]
@@ -477,15 +520,15 @@ def test_empty_learned_rules_pipeline(tmp_path: Path, monkeypatch: pytest.Monkey
         frozen = final.asset_materialization.metadata
         metrics = scored.asset_materialization.metadata
         assert frozen["rules"] == MetadataValue.int(0)
-        assert frozen["Train digest"] == metrics["Train digest"] == MetadataValue.text(train.digest)
+        assert frozen["Train digest"] == metrics["Train digest"] == MetadataValue.text(train.pin.digest)
         assert frozen["Train rows"] == metrics["Train rows"] == MetadataValue.int(len(train_commands))
-        assert metrics["Test digest"] == MetadataValue.text(test.digest)
+        assert metrics["Test digest"] == MetadataValue.text(test.pin.digest)
         assert metrics["Test rows"] == MetadataValue.int(len(test_commands))
         assert metrics["Abstentions"] == metrics["Held-out support"] == MetadataValue.int(len(test_commands))
         assert metrics["Exact matches"] == metrics["Wrong matches"] == metrics["Evaluator errors"] == MetadataValue.int(0)
         chart = metrics["Outcome distribution"]
         assert isinstance(chart, MarkdownMetadataValue)
-        assert f"  Abstain       {len(test_commands)}  {'█' * 30}" in chart.value
+        assert f"  Abstain {len(test_commands):>7}  {'█' * 30}" in chart.value
         train_eval, test_eval = [request for path, request in services.calls if path == "/v1/evaluate"]
         empty = {"version": 1, "kind": "empty_learned", "rules": []}
         assert train_eval["bundle"] == test_eval["bundle"] == empty
@@ -519,10 +562,54 @@ def test_empty_learned_rules_pipeline(tmp_path: Path, monkeypatch: pytest.Monkey
                 row["metric"]: row["value"] for row in rows if row["cohort"] == "overall" and row["axis"] == "outcome"
             }
             assert overall == {
-                "support": 2, "correct": 0, "wrong": 0, "abstain": 2, "error": 0,
+                "support": 12, "correct": 0, "wrong": 0, "abstain": 12, "error": 0,
                 "precision": None, "coverage": 0, "recall": 0,
             }
             assert {
                 row["cohort"]: row["value"]
                 for row in rows if row["axis"] == "outcome" and row["metric"] == "abstain"
-            } == {"overall": 2, "trained": 1, "unseen": 1, "uncontaminated": 1}
+            } == {"overall": 12, "trained": 2, "unseen": 10, "uncontaminated": 11}
+
+        payload = policy.model_copy(update={"sample": SampleCount(count=6)}).model_dump_json().encode()
+        configure_rules(
+            tmp_path, payload=payload, expected_sha256=sha256(payload).hexdigest(),
+            runtime_version=None, guide_sha256=None,
+        )
+        services.calls.clear()
+        with pytest.raises(IntegrityError, match="train sample is stale"):
+            run("capture_rules", "CAT-6")
+        run("sample_rules_train")
+        with pytest.raises(IntegrityError, match="Capture partitions disagree with the pinned train sample"):
+            run("learn_rules")
+        with pytest.raises(IntegrityError, match="Dedup output disagrees"):
+            run("learn_rules", selection=[mapping_key("rules_finalize"), AssetKey(finalized_key)])
+        with pytest.raises(IntegrityError, match="Final bundle disagrees"):
+            run("evaluate_rules")
+        assert not services.calls
+
+        run("capture_rules", "CAT-6")
+        run("learn_rules")
+        services.calls.clear()
+        with pytest.raises(IntegrityError, match="test sample is stale"):
+            run("evaluate_rules")
+        assert not services.calls
+        run("sample_rules_test")
+        bounded = _persisted_sample(tmp_path, instance, "test")
+        assert bounded.pin.row_count == 6
+        assert {row.gold.category for row in bounded.corpus.rows} == set(test_commands.values())
+        run("sample_rules_test")
+        assert _persisted_sample(tmp_path, instance, "test") == bounded
+        run("evaluate_rules")
+        [(path, request)] = services.calls
+        assert path == "/v1/evaluate"
+        assert {row["id"] for row in request["rows"]} == {row.id for row in bounded.corpus.rows}
+
+        updated = spec.model_copy(update={"train": _split(blobs, 32, {"echo synthetic revision": "CAT-6"})})
+        DatasetRegistry(tmp_path).register(updated)
+        run("refresh_dataset_configuration")
+        run("load_train_category", "CAT-6")
+        run("merge_train_data")
+        services.calls.clear()
+        with pytest.raises(IntegrityError, match="Frozen bundle does not match the current train sample"):
+            run("evaluate_rules")
+        assert not services.calls

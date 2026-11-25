@@ -44,10 +44,23 @@ class GuidePin(ConfigArtifact):
     sha256: Digest
 
 
+class SampleCount(ConfigArtifact):
+    count: int = Field(gt=0)
+
+
+class SamplePercent(ConfigArtifact):
+    percent: float = Field(gt=0, le=100)
+
+
+type SampleSelection = SampleCount | SamplePercent
+DEFAULT_SAMPLE: Final = SampleCount(count=200)
+
+
 class RulesPolicy(ConfigArtifact):
     runtime: RulesRuntime
     prompt_guide: GuidePin
     categories: tuple[Category, ...] = Field(min_length=1)
+    sample: SampleSelection = DEFAULT_SAMPLE
 
     @model_validator(mode="after")
     def require_distinct_categories(self) -> Self:

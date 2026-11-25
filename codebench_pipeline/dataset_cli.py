@@ -115,6 +115,7 @@ def configure_rules(
                 prompt_guide=previous.prompt_guide.model_copy(
                     update={"sha256": guide_sha256 or previous.prompt_guide.sha256}
                 ),
+                sample=previous.sample,
             )
             payload = policy.model_dump_json().encode()
             approved = RegisteredRules.approve(
@@ -159,12 +160,16 @@ def main() -> None:
     registration = subcommands.add_parser("rules-register", help="Approve rules policy in global configuration.")
     registration.add_argument("--home", type=Path, default=DEFAULT_HOME)
     policy = registration.add_mutually_exclusive_group(required=True)
-    policy.add_argument("--config", help="Read the private rules policy from a path or stdin (-).")
+    policy.add_argument(
+        "--config", help="Read a hash-pinned policy from a path or stdin (-), including the per-split sample budget.",
+    )
     policy.add_argument("--migrate", action="store_true", help="Migrate the last successful legacy rules registration.")
     registration.add_argument("--sha256", help="Expected SHA-256 of the private policy bytes supplied with --config.")
     registration.add_argument("--runtime-version", help="Replacement evaluator version during --migrate.")
     registration.add_argument("--guide-sha256", help="Approve the packaged guide checksum during --migrate.")
     rules_jobs = {
+        "rules-sample-train": "sample_rules_train",
+        "rules-sample-test": "sample_rules_test",
         "rules-capture": "capture_rules",
         "rules-learn": "learn_rules",
         "rules-eval": "evaluate_rules",

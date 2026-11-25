@@ -104,9 +104,12 @@ SINGLETON_RUN_CONFIGS: Final = frozenset({("codebench", "full_dataset")}) | froz
 )
 PRIVATE_RULES_RUN_ARTIFACTS: Final = frozenset(
     ("codebench", name)
-    for name in ("rules_registration", "rules_capture", "rules_dedup", "rules_finalize")
+    for name in ("rules_registration", "rules_capture", "rules_dedup", "rules_finalize",
+                 "rules_train_sample", "rules_test_sample")
 ) | frozenset(
-    tuple(mapping_key(name).path) for name in ("rules_capture", "rules_dedup", "rules_finalize", "rules_eval")
+    tuple(mapping_key(name).path) for name in (
+        "rules_capture", "rules_dedup", "rules_finalize", "rules_eval", "rules_train_sample", "rules_test_sample",
+    )
 )
 PARTITIONED_RUN_CONFIGS: Final = SPLIT_CATEGORY_CONFIGS | SINGLETON_RUN_CONFIGS | PRIVATE_RULES_RUN_ARTIFACTS
 

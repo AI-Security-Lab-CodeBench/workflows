@@ -35,7 +35,6 @@ class Corpus(ConfigArtifact):
     digest: Digest
     rows: tuple[CorpusRow, ...]
     sources: tuple[CorpusSource, ...] = ()
-    sources_digest: Digest | None = None
     category_sources_digests: dict[Category, Digest] = {}
 
     def sources_for(self, category: str) -> tuple[str, ...]:
@@ -60,7 +59,7 @@ def _corpus_source(entry: TrainSource) -> CorpusSource:
     )
 
 
-def build_corpus(frame: DataFrame, *, split: Split, digest: Digest, category: Category | None = None) -> Corpus:
+def build_corpus(frame: DataFrame, *, split: Split, digest: Digest) -> Corpus:
     """Build split identities by immutable snapshot and original source order, including duplicates."""
     rows: list[CorpusRow] = []
     for index, raw in enumerate(
@@ -78,19 +77,6 @@ def build_corpus(frame: DataFrame, *, split: Split, digest: Digest, category: Ca
             }
         )
         rows.append(CorpusRow(id=f"{split}:{digest}:{index}", command=command, gold=gold))
-    if category is not None:
-        if split != "train" or not rows or any(row.gold.category != category for row in rows):
-            raise IntegrityError(f"Expected a nonempty train table containing only {category}")
-        pinned = CategorySources.model_validate({"sources": frame.attrs.get("train_sources")}, strict=True)
-        if (
-            not pinned.sources or any(source.category != category for source in pinned.sources)
-            or frame.attrs.get("train_sources_digest") != pinned.digest
-        ):
-            raise IntegrityError(f"Invalid pinned train source provenance for {category}")
-        return Corpus(
-            split=split, digest=digest, rows=tuple(rows), sources=tuple(map(_corpus_source, pinned.sources)),
-            sources_digest=pinned.digest,
-        )
     grouped = _merged_sources(frame, {row.gold.category for row in rows}, split)
     sources = tuple(
         _corpus_source(entry) for category in sorted(grouped) for entry in grouped[category].sources

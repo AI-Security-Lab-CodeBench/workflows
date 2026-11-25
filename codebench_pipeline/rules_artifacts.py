@@ -82,15 +82,6 @@ def rules_corpus_input(context: InputContext) -> Corpus:
         raise IntegrityError("Rules inputs require a successfully materialized split table")
     split: Split
     match context.asset_key.path:
-        case ["train", "category_rows"]:
-            reference = materialized_reference(context.instance, record)
-            frame = tables.read_version(reference)
-            if not isinstance(frame, pd.DataFrame):
-                raise IntegrityError("The pinned train category input is not a table")
-            return build_corpus(
-                SplitRowsTable.validate(frame), split="train", digest=reference.digest,
-                category=context.asset_partition_key,
-            )
         case ["train", "merged_rows"]:
             split = "train"
         case ["test", "merged_rows"]:

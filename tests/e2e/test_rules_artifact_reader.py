@@ -9,7 +9,7 @@ from pydantic import BaseModel, JsonValue
 from starlette.testclient import TestClient
 
 from codebench_pipeline.artifact_views import ArtifactDataService, ArtifactPartitions, ArtifactTable
-from codebench_pipeline.config_assets import PRIVATE_RULES_RUN_ARTIFACTS, ConfigRunIOManager
+from codebench_pipeline.config_assets import PRIVATE_RULES_RUN_ARTIFACTS, ConfigRunIOManager, mapping_key
 from codebench_pipeline.data_api import make_dataset_api
 from codebench_pipeline.dataset_artifacts import DatasetArtifactCatalog
 from codebench_pipeline.dataset_registry import StoredObjectLocation
@@ -27,6 +27,7 @@ from codebench_pipeline.rules_registration_config import (
     RulesRuntime,
     SplitPin,
 )
+from codebench_pipeline.rules_sample_assets import sample_key, sample_scope
 from codebench_pipeline.rules_settings import (
     CAPTURE_PARTITIONS,
     RULES_PARTITIONS,
@@ -37,6 +38,7 @@ from codebench_pipeline.rules_settings import (
     RulesDedupSettings,
     RulesEvalSettings,
     RulesFinalizeSettings,
+    RulesSampleSettings,
 )
 from codebench_pipeline.rules_similarity import AgentRun, CaptureDecision, CapturedRule, DedupResult
 from codebench_pipeline.train_config import MergeSettings
@@ -131,8 +133,16 @@ def _examples(settings: HistoricalRulesPolicy) -> tuple[_Example, ...]:
     ]
     return (
         *captures,
+        *(
+            _Example(tuple(key.path), "codebench", RulesSampleSettings(selection=policy.sample, sources=manifests))
+            for key in (
+                sample_key("train"), sample_key("test"),
+                mapping_key(sample_scope("train")), mapping_key(sample_scope("test")),
+            )
+        ),
         _Example(("datasets", "map_rules_capture_config"), "CAT-3", RulesCaptureSettings(
             category="CAT-3", runtime=runtime, agent=agent, sources_digest=sources["CAT-3"],
+            train_sample=RulesSampleSettings(selection=policy.sample, sources=manifests),
             guide_sha256=pins.guide_sha256,
             grounding=LiveGroundingConfig(allowed_domains=["example.invalid"]),
         )),
@@ -146,7 +156,7 @@ def _examples(settings: HistoricalRulesPolicy) -> tuple[_Example, ...]:
             policy=policy, runtime=runtime, train_sources=manifests,
         )),
         _Example(("datasets", "map_rules_eval_config"), "codebench", RulesEvalSettings(
-            policy=policy, runtime=runtime, test_sources=manifests,
+            policy=policy, runtime=runtime, train_sources=manifests, test_sources=manifests,
         )),
         _Example(("codebench", "rules_dedup"), "codebench", RulesDedupArtifact(
             pins=pins, result=DedupResult(
@@ -264,9 +274,21 @@ def test_rules_artifact_reader(tmp_path: Path) -> None:
                 (("codebench", "rules_eval"), "codebench", "value", 5.0),
                 (("codebench", "rules_eval_report"), "codebench", "report_digest", _BUNDLE_SHA),
             )
-            assert {key for key, *_ in cells if key in PRIVATE_RULES_RUN_ARTIFACTS} | {
+            internal = {
+                tuple(key.path) for key in (
+                    sample_key("train"), sample_key("test"),
+                    mapping_key(sample_scope("train")), mapping_key(sample_scope("test")),
+                )
+            }
+            assert {key for key, *_ in cells if key in PRIVATE_RULES_RUN_ARTIFACTS} | internal | {
                 registered.asset_key
             } == PRIVATE_RULES_RUN_ARTIFACTS
+            for key in internal:
+                assert instance.get_latest_materialization_event(AssetKey(key)) is not None
+                assert not _partitions(client, key)
+                assert client.post("/artifacts/data", headers=_HEADERS, json={
+                    "asset_key": key, "partition_key": "codebench",
+                }).status_code == 404
             for key, partition, column, expected in cells:
                 result = _query(client, (key, partition))
                 assert result.page.rows[0].values[column] == expected

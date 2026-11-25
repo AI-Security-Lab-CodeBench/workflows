@@ -34,12 +34,20 @@ from codebench_pipeline.rules_artifacts import (
     record_rules_evidence,
 )
 from codebench_pipeline.rules_capture_grounding import CaptureGrounding
-from codebench_pipeline.rules_corpus import Corpus
 from codebench_pipeline.rules_engine import BashguardClient, evaluate_corpus, freeze_learned_bundle
 from codebench_pipeline.rules_learning import capture_rules, deduplicate_rules
 from codebench_pipeline.rules_metrics import TrainFingerprint, score_holdout
-from codebench_pipeline.rules_registration_config import SplitPin
 from codebench_pipeline.rules_report_asset import rules_eval_report
+from codebench_pipeline.rules_sample_assets import (
+    require_frozen_train_source,
+    require_sample,
+    rules_test_sample,
+    rules_train_sample,
+    sample_input,
+    sample_key,
+    sample_scope,
+)
+from codebench_pipeline.rules_sampling import RulesSample
 from codebench_pipeline.rules_settings import (
     CAPTURE_PARTITIONS,
     RULES_CONFIG_IO,
@@ -53,15 +61,11 @@ from codebench_pipeline.rules_settings import (
     RulesFinalizeSettings,
 )
 from codebench_pipeline.storage import IntegrityError
-from codebench_pipeline.train_assets import TRAIN_TABLE_IO, Split
-from codebench_pipeline.train_config import MergeSettings
+from codebench_pipeline.train_assets import TRAIN_TABLE_IO
 
 _CAPTURE_KEY: Final = AssetKey(["codebench", "rules_capture"])
 _DEDUP_KEY: Final = AssetKey(["codebench", "rules_dedup"])
 _FINAL_KEY: Final = AssetKey(["codebench", "rules_finalize"])
-_CORPUS_TYPE: Final = PythonObjectDagsterType(Corpus, name="RulesCorpus")
-
-
 _CAPTURE_TYPE: Final = PythonObjectDagsterType(RulesCaptureArtifact, name="RulesCaptureArtifact")
 _CAPTURE_INPUTS_TYPE: Final = PythonObjectDagsterType(dict, name="RulesCaptureInputs")
 _DEDUP_TYPE: Final = PythonObjectDagsterType(RulesDedupArtifact, name="RulesDedupArtifact")
@@ -70,20 +74,6 @@ _FINAL_TYPE: Final = PythonObjectDagsterType(FinalizedRules, name="FinalizedRule
 
 class RulesCaptureConfig(Config):
     resume_run: str | None = None
-
-
-def _corpus_input(split: Split) -> AssetIn:
-    return AssetIn(
-        key=AssetKey([split, "merged_rows"]),
-        dagster_type=_CORPUS_TYPE,
-        input_manager_key="rules_corpus_input",
-    )
-
-
-def _require_corpus(corpus: Corpus, expected: MergeSettings, split: Split) -> SplitPin:
-    if corpus.split != split or corpus.category_sources_digests != expected.category_digests:
-        raise IntegrityError(f"The {split} merge does not match configured sources; rematerialize it")
-    return SplitPin(digest=corpus.digest, row_count=len(corpus.rows))
 
 
 def _agent(context: AssetExecutionContext, settings: AgentSettings, guide_sha256: str) -> RuleAgent:
@@ -109,20 +99,22 @@ def _agent(context: AssetExecutionContext, settings: AgentSettings, guide_sha256
     dagster_type=_CAPTURE_TYPE,
     ins={
         "settings": mapped_input("rules_capture", RulesCaptureSettings),
-        "train": AssetIn(
-            key=AssetKey(["train", "category_rows"]), dagster_type=_CORPUS_TYPE,
-            input_manager_key="rules_corpus_input",
-        ),
+        "sample": sample_input("train", for_capture=True),
     },
 )
 def rules_capture(
-    context: AssetExecutionContext, config: RulesCaptureConfig, settings: RulesCaptureSettings, train: Corpus,
+    context: AssetExecutionContext, config: RulesCaptureConfig, settings: RulesCaptureSettings, sample: RulesSample,
 ) -> Output[RulesCaptureArtifact]:
-    """Teach one category and gate each learned rule on that category's pinned rows."""
-    if train.sources_digest != settings.sources_digest:
-        raise IntegrityError("Rules capture requires the configured train category sources")
+    """Teach one category and gate each rule on its projection of the global train sample."""
+    require_sample(
+        context.instance, sample, "train", settings.train_sample.sources, settings.train_sample.selection,
+        required_categories=settings.train_sample.required_categories,
+    )
+    train = sample.for_capture(settings.category)
     source = config.resume_run
     resume = load_capture_attempt(context, settings, source) if source is not None else None
+    if resume is not None and resume.corpus_digest != train.digest:
+        raise IntegrityError("Capture resume evidence does not match the current train sample")
     client = BashguardClient(settings.runtime.base_url, settings.runtime.version)
     runtime: LabelingRuntime = context.resources.labeling_runtime
     with graph_log(context.log.info, runtime.credential):
@@ -162,7 +154,7 @@ def rules_capture(
     dagster_type=_DEDUP_TYPE,
     ins={
         "settings": mapped_input("rules_dedup", RulesDedupSettings),
-        "train": _corpus_input("train"),
+        "sample": sample_input("train"),
         "captures": AssetIn(
             key=_CAPTURE_KEY, dagster_type=_CAPTURE_INPUTS_TYPE, partition_mapping=AllPartitionMapping(),
             input_manager_key="rules_capture_inputs",
@@ -172,11 +164,15 @@ def rules_capture(
 def rules_dedup(
     context: AssetExecutionContext,
     settings: RulesDedupSettings,
-    train: Corpus,
+    sample: RulesSample,
     captures: dict[str, RulesCaptureArtifact | None],
 ) -> Output[RulesDedupArtifact]:
     """Judge proposals from exactly the selected captures sharing one pinned learning lineage."""
-    train_pin = _require_corpus(train, settings.train_sources, "train")
+    train_pin = require_sample(
+        context.instance, sample, "train", settings.train_sources, settings.policy.sample,
+        required_categories=settings.policy.categories,
+    )
+    train = sample.corpus
     policy = settings.policy
     selected: list[RulesCaptureArtifact] = []
     for category in policy.categories:
@@ -186,12 +182,13 @@ def rules_dedup(
     if any(
         item.category != category
         or item.sources_digest != settings.train_sources.category_digests.get(category)
+        or item.result.corpus_digest != train_pin.digest
         or item.guide_sha256 != policy.guide_sha256
         or item.inference_digest != settings.agent.inference_digest
         or item.result.runtime_version != settings.runtime.version
         for category, item in zip(policy.categories, selected, strict=True)
     ):
-        raise IntegrityError("Capture partitions disagree with the pinned category sources, guide, runtime or model")
+        raise IntegrityError("Capture partitions disagree with the pinned train sample, sources, guide, runtime or model")
     client = BashguardClient(settings.runtime.base_url, settings.runtime.version)
     environment: Callable[[str], str] = context.resources.rules_model_environment
     with graph_log(context.log.info, environment):
@@ -204,7 +201,7 @@ def rules_dedup(
     return Output(
         RulesDedupArtifact(pins=LearningPins(
             train=train_pin, categories=policy.categories, runtime_version=policy.runtime_version,
-            guide_sha256=policy.guide_sha256,
+            guide_sha256=policy.guide_sha256, sample=policy.sample,
         ), result=result),
         metadata={
             "rules": len(result.packages), "judge batches": len(result.decisions), "Train digest": train_pin.digest,
@@ -223,18 +220,22 @@ def rules_dedup(
     dagster_type=_FINAL_TYPE,
     ins={
         "settings": mapped_input("rules_finalize", RulesFinalizeSettings),
-        "train": _corpus_input("train"),
+        "sample": sample_input("train"),
         "dedup": AssetIn(key=_DEDUP_KEY, dagster_type=_DEDUP_TYPE),
     },
 )
 def rules_finalize(
     context: AssetExecutionContext,
     settings: RulesFinalizeSettings,
-    train: Corpus,
+    sample: RulesSample,
     dedup: RulesDedupArtifact,
 ) -> Output[FinalizedRules]:
-    """Replay the whole surviving bundle on every merged train row, then freeze it."""
-    train_pin = _require_corpus(train, settings.train_sources, "train")
+    """Replay the whole surviving bundle on the pinned train sample, then freeze it."""
+    train_pin = require_sample(
+        context.instance, sample, "train", settings.train_sources, settings.policy.sample,
+        required_categories=settings.policy.categories,
+    )
+    train = sample.corpus
     if (
         not dedup.pins.matches(settings.policy)
         or dedup.pins.train != train_pin
@@ -267,16 +268,17 @@ def rules_finalize(
     io_manager_key=TRAIN_TABLE_IO,
     required_resource_keys={RULES_CONFIG_IO},
     dagster_type=RULES_METRICS_TYPE,
+    deps=[sample_key("train")],
     ins={
         "settings": mapped_input("rules_eval", RulesEvalSettings),
-        "test": _corpus_input("test"),
+        "sample": sample_input("test"),
         "finalized": AssetIn(key=_FINAL_KEY, dagster_type=_FINAL_TYPE),
     },
 )
 def rules_eval(
     context: AssetExecutionContext,
     settings: RulesEvalSettings,
-    test: Corpus,
+    sample: RulesSample,
     finalized: FinalizedRules,
 ) -> Output[DataFrame[RulesMetricsTable]]:
     """Evaluate a frozen bundle on held-out data without model calls or reading train rows."""
@@ -285,9 +287,14 @@ def rules_eval(
         or finalized.training.categories != finalized.pins.categories
     ):
         raise IntegrityError("Final bundle disagrees with the pinned learning lineage")
-    test_pin = _require_corpus(test, settings.test_sources, "test")
+    test_pin = require_sample(context.instance, sample, "test", settings.test_sources, settings.policy.sample)
+    train_source = require_frozen_train_source(
+        context.instance, finalized.pins.train, settings.train_sources, settings.policy.categories,
+    )
+    if train_source == sample.source_digest or finalized.pins.train.digest == test_pin.digest:
+        raise IntegrityError("Holdout evaluation requires distinct train and test snapshots")
     receipt = evaluate_corpus(
-        BashguardClient(settings.runtime.base_url, settings.runtime.version), finalized.bundle, test
+        BashguardClient(settings.runtime.base_url, settings.runtime.version), finalized.bundle, sample.corpus
     )
     if receipt.bundle_sha256 != finalized.bundle_sha256:
         raise IntegrityError("Scored bundle differs from the frozen training bundle")
@@ -311,8 +318,12 @@ def rules_eval(
     )
 
 
-RULES_ASSETS: Final = (rules_capture, rules_dedup, rules_finalize, rules_eval, rules_eval_report)
+RULES_ASSETS: Final = (
+    rules_train_sample, rules_test_sample, rules_capture, rules_dedup, rules_finalize, rules_eval, rules_eval_report,
+)
 RULES_JOB_SELECTIONS: Final = {
+    "sample_rules_train": AssetSelection.assets(mapping_key(sample_scope("train")), rules_train_sample),
+    "sample_rules_test": AssetSelection.assets(mapping_key(sample_scope("test")), rules_test_sample),
     "capture_rules": AssetSelection.assets(mapping_key("rules_capture"), rules_capture),
     "learn_rules": AssetSelection.assets(
         mapping_key("rules_dedup"), mapping_key("rules_finalize"), rules_dedup, rules_finalize

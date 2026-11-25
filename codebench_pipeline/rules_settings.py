@@ -25,7 +25,14 @@ from codebench_pipeline.grounding_tools import LiveGroundingConfig
 from codebench_pipeline.model_config import ModelConfig
 from codebench_pipeline.models import Digest
 from codebench_pipeline.rules_contracts import Category
-from codebench_pipeline.rules_registration_config import RegisteredRules, RulesPolicy, RulesRuntime, SplitPin
+from codebench_pipeline.rules_registration_config import (
+    DEFAULT_SAMPLE,
+    RegisteredRules,
+    RulesPolicy,
+    RulesRuntime,
+    SampleSelection,
+    SplitPin,
+)
 from codebench_pipeline.storage import IntegrityError, fingerprint
 from codebench_pipeline.train_config import MergeSettings, TrainConfig
 from codebench_pipeline.typed_config import ConfigArtifact
@@ -41,6 +48,7 @@ class LearningPolicy(ConfigArtifact):
     categories: tuple[Category, ...]
     runtime_version: str
     guide_sha256: Digest
+    sample: SampleSelection = DEFAULT_SAMPLE
 
     @classmethod
     def project(cls, registration: RulesPolicy) -> "LearningPolicy":
@@ -48,6 +56,7 @@ class LearningPolicy(ConfigArtifact):
             categories=tuple(sorted(registration.categories)),
             runtime_version=registration.runtime.version,
             guide_sha256=registration.prompt_guide.sha256,
+            sample=registration.sample,
         )
 
 
@@ -57,8 +66,14 @@ class LearningPins(LearningPolicy):
     def matches(self, policy: LearningPolicy) -> bool:
         return (
             self.categories == policy.categories and self.runtime_version == policy.runtime_version
-            and self.guide_sha256 == policy.guide_sha256
+            and self.guide_sha256 == policy.guide_sha256 and self.sample == policy.sample
         )
+
+
+class RulesSampleSettings(ConfigArtifact):
+    selection: SampleSelection
+    sources: MergeSettings
+    required_categories: tuple[Category, ...] = ()
 
 
 class AgentSettings(ConfigArtifact):
@@ -75,6 +90,7 @@ class AgentSettings(ConfigArtifact):
 class RulesCaptureSettings(ConfigArtifact):
     category: Category
     sources_digest: Digest
+    train_sample: RulesSampleSettings
     guide_sha256: Digest
     runtime: RulesRuntime
     agent: AgentSettings
@@ -93,6 +109,7 @@ class RulesDedupSettings(RulesFinalizeSettings):
 
 class RulesEvalSettings(ConfigArtifact):
     policy: LearningPolicy
+    train_sources: MergeSettings
     test_sources: MergeSettings
     runtime: RulesRuntime
 
@@ -137,6 +154,37 @@ def rules_mappings() -> list[AssetsDefinition]:
     )}
 
     @asset(
+        key=mapping_key("rules_train_sample"),
+        group_name=RULES_GROUP,
+        tags={"stage": "rules_train_sample"},
+        partitions_def=RULES_PARTITIONS,
+        io_manager_key=RULES_CONFIG_IO,
+        dagster_type=mapping_type(RulesSampleSettings),
+        ins=inputs,
+    )
+    def train_sample_settings(global_config: RegisteredConfig) -> Output[RulesSampleSettings]:
+        rules = _approved(global_config).registration
+        return _output(RulesSampleSettings(
+            selection=rules.sample, sources=_split_sources(global_config.train, "train"),
+            required_categories=tuple(sorted(rules.categories)),
+        ))
+
+    @asset(
+        key=mapping_key("rules_test_sample"),
+        group_name=RULES_GROUP,
+        tags={"stage": "rules_test_sample"},
+        partitions_def=RULES_PARTITIONS,
+        io_manager_key=RULES_CONFIG_IO,
+        dagster_type=mapping_type(RulesSampleSettings),
+        ins=inputs,
+    )
+    def test_sample_settings(global_config: RegisteredConfig) -> Output[RulesSampleSettings]:
+        rules = _approved(global_config).registration
+        return _output(RulesSampleSettings(
+            selection=rules.sample, sources=_split_sources(global_config.test, "test"),
+        ))
+
+    @asset(
         key=mapping_key("rules_capture"),
         group_name=RULES_GROUP,
         tags={"stage": "rules_capture"},
@@ -151,11 +199,14 @@ def rules_mappings() -> list[AssetsDefinition]:
         category = context.partition_key
         if category not in rules.categories:
             raise IntegrityError("Capture partition is not selected by the approved rules policy")
-        sources = _split_sources(global_config.train, "train").category_digests
-        if category not in sources:
+        sources = _split_sources(global_config.train, "train")
+        if category not in sources.category_digests:
             raise IntegrityError(f"No pinned train sources configured for {category}")
         return _output(RulesCaptureSettings(
-            category=category, sources_digest=sources[category],
+            category=category, sources_digest=sources.category_digests[category],
+            train_sample=RulesSampleSettings(
+                selection=rules.sample, sources=sources, required_categories=tuple(sorted(rules.categories)),
+            ),
             guide_sha256=rules.prompt_guide.sha256, runtime=rules.runtime, agent=_agent(global_config, approved),
             grounding=global_config.scopes.labeling_attempts.labeling_attempts.batch.grounding,
         ))
@@ -205,8 +256,9 @@ def rules_mappings() -> list[AssetsDefinition]:
     def eval_settings(global_config: RegisteredConfig) -> Output[RulesEvalSettings]:
         rules = _approved(global_config).registration
         return _output(RulesEvalSettings(
-            policy=LearningPolicy.project(rules), test_sources=_split_sources(global_config.test, "test"),
+            policy=LearningPolicy.project(rules), train_sources=_split_sources(global_config.train, "train"),
+            test_sources=_split_sources(global_config.test, "test"),
             runtime=rules.runtime,
         ))
 
-    return [capture_settings, dedup_settings, finalize_settings, eval_settings]
+    return [train_sample_settings, test_sample_settings, capture_settings, dedup_settings, finalize_settings, eval_settings]

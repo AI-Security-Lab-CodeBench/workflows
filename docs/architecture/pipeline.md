@@ -95,10 +95,11 @@ require collection, relabeling, or approval of an existing review queue.
 
 | Stage | Data available | Decision |
 | --- | --- | --- |
-| `rules_capture` | One partition of `train/category_rows` | Propose specific CEL predicates and positive and negative fixtures. Require a correct hit, passing fixtures and no wrong matches or evaluator errors on that category. |
-| `rules_dedup` | Selected category captures and pinned `train/merged_rows` | Replay every captured package on full train before nominating similar rules and rules sharing hits. A failed replay blocks learning. The judge can inspect full-train evidence and submit a justified add/drop diff. A rewrite is a fresh rule, not an in-place change. |
-| `rules_finalize` | Deduplicated packages and pinned `train/merged_rows` | Replay the complete surviving bundle on full train and freeze it without consulting the holdout. |
-| `rules_eval` | Frozen bundle and the test member | Measure wrong predictions, abstentions, failures, coverage and exact-label accuracy. An uncovered category or an undefined metric is not evidence of perfect precision. |
+| `rules_train_sample`, `rules_test_sample` | Their own persisted `train/merged_rows` or `test/merged_rows` | Materialize one private, stratified sample per split. Store only aggregate lineage metadata in Dagster. |
+| `rules_capture` | One category projection of `rules_train_sample` | Propose specific CEL predicates and positive and negative fixtures. Require a correct hit, passing fixtures and no wrong matches or evaluator errors on that projection. |
+| `rules_dedup` | Selected category captures and `rules_train_sample` | Replay every captured package on the global train sample before nominating similar rules and rules sharing hits. A failed replay blocks learning. The judge can inspect sampled train evidence and submit a justified add/drop diff. A rewrite is a fresh rule, not an in-place change. |
+| `rules_finalize` | Deduplicated packages and `rules_train_sample` | Replay the complete surviving bundle on the global train sample and freeze it without consulting the holdout. |
+| `rules_eval` | Frozen bundle, train sample lineage metadata, and `rules_test_sample` | Score only the holdout sample. Measure wrong predictions, abstentions, failures, coverage and exact-label accuracy. An uncovered category or an undefined metric is not evidence of perfect precision. |
 | `rules_eval_report` | Held-out aggregate metrics only | Publish an interactive HTML summary without model calls or row-level data. |
 
 The trained cohort includes every selected training category, even if no
@@ -130,30 +131,47 @@ worker. They do not enable a sensor.
    `rules-register --config - --sha256 <digest>` with private JSON on standard
    input; hash the exact file bytes you send. The policy supplies `categories`,
    `runtime` (`base_url`, `version`) and `prompt_guide` (`path: "guide.json"`,
-   `sha256`). Split digest and row-count fields are rejected. The CLI checks the
-   guide and refreshes only `datasets/global_config`; it does not rewrite the
-   dataset registration. Only capture receives the registered live-grounding settings.
-2. Materialize `train/category_rows` for each selected category using
-   `train-load --category <category>`, then run `rules-capture --category
-   <category>` for that category. Capture needs neither merge nor split pin.
-   It binds to the category's verified source manifest and the content digest
-   of its materialized table. Changes to other categories or the test split
-   do not invalidate an otherwise unchanged capture. Captures and failed runs
-   made before category isolation must be rerun rather than reused.
-3. Before `rules-learn`, make sure `train/merged_rows` is materialized with
-   `train-merge`; all configured train categories must have been loaded. Dedup
-   judges only the selected categories' captures. Finalization replays the
-   whole surviving bundle on every merged train row, including non-selected
-   categories, and freezes the bundle; it neither proposes rules nor consults test.
-   Before `rules-eval`, make sure `test/merged_rows` is materialized with
-   `test-merge` using the configured held-out categories loaded with `test-load`.
-   No operator copies split digests or row counts. Each stage checks its declared
-   input against the mapped source manifests. Dedup and finalization record the
-   exact train table digest and row count; evaluation records the held-out identity
-   and the frozen train lineage.
+   `sha256`) and optional `sample`: omit it or set `{"count": 200}` to take
+   up to 200 rows **per split, not per category**, or set `{"percent": 100}`
+   for every row. Percentages must be greater than 0 and at most 100, and the
+   resulting count rounds up. Supply only one mode. Split digest and row-count
+   fields are rejected. The CLI checks the guide and refreshes only
+   `datasets/global_config`; it does not rewrite the dataset registration.
+2. Run `train-load --category <category>` for each configured train category
+   (for CAT-6-only train: `train-load --category CAT-6`), then `train-merge`,
+   then `rules-sample-train`. These commands use the same `--home`. The merge
+   and sample both use the singleton `codebench` partition. Run
+   `rules-capture --category <category>` for each approved learning category
+   and then `rules-learn`. Each capture category partition maps to the **same**
+   singleton train sample and receives only its category's rows and source URLs.
+   Dedup and finalization receive the global sampled train corpus, including
+   any sampled rows from non-capture categories. No learning job reads test.
+3. Run `test-load --category <category>` for **every** configured holdout
+   category, then `test-merge`, `rules-sample-test`, and `rules-eval`.
+   The merge, sample, evaluation and report use the `codebench` partition.
+   Test sampling does not filter by approved learning categories, so unseen
+   categories and `modify` gold labels are eligible. Each split has one
+   deterministic order: categories are interleaved by population, and within
+   each category the joint risk, severity and action strata are interleaved
+   the same way. Entries are spaced at the centers of equal-sized intervals
+   for each group, so a singleton normally appears near the middle rather
+   than at the front. Stable hashes of the original snapshot row IDs order
+   rows within each stratum, without changing their IDs. Count and percent
+   take prefixes of this same order, including at 100%. Train puts one row
+   from each approved capture category first and fails if any such category
+   is missing or the budget cannot cover them.
 4. Inspect `codebench/rules_eval` for the held-out metrics and
    `codebench/rules_eval_report` for the standalone report. Neither is an
    input to learning.
+
+Each sample is pinned to its source merge, selection policy, sampler version
+and selected row IDs; train also pins the approved capture categories.
+A changed merge, budget, sampler version or train capture category list requires rematerializing
+the affected sample; a changed train sample also requires recapturing approved
+categories and rerunning `rules-learn` before evaluation. Changing only the
+test merge does not invalidate learning. Old captures and failed capture runs
+from before sampling cannot be reused. These are manual jobs: downstream jobs
+do not silently resample or fall back to full merges.
 
 The rules assets and their configuration mappers are grouped under `rules`.
 In their inspector, **Native evaluation scope** describes how Bashguard applies
