@@ -12,6 +12,7 @@ from langgraph.types import Command
 from pydantic import Field, JsonValue, TypeAdapter, ValidationError
 
 from codebench_pipeline.agent_events import InferenceError
+from codebench_pipeline.agent_trace import record_graph
 from codebench_pipeline.batch_labeling_protocol import Completion, ToolCall, tool_schema
 from codebench_pipeline.model_config import ModelConfig
 from codebench_pipeline.models import Digest
@@ -179,7 +180,9 @@ class Conversation:
     acknowledgement: Callable[[tuple[str, ...]], ConfigArtifact] | None = None
     recovery: Callable[[tuple[str, ...]], TerminalRecovery] | None = None
 
-    def run(self, agent: RuleAgent, *, recover_only: bool = False) -> AgentRun:
+    def run(
+        self, agent: RuleAgent, *, graph_name: Literal["rules_capture", "rules_dedup"], recover_only: bool = False
+    ) -> AgentRun:
         messages: list[JsonValue] = [
             {"role": "system", "content": self.prompt + "\nPinned authoring guide:\n" + agent.guide},
             {"role": "user", "content": self.payload.model_dump_json()},
@@ -343,13 +346,14 @@ class Conversation:
             return Command(goto=END if status == "finished" or turn >= last_turn else "complete")
 
         graph = StateGraph[_State, None, _State, _State](_State, input_schema=_State, output_schema=_State)
-        graph.add_node("complete", complete_turn, destinations=("complete", "tools", END))
-        graph.add_node("tools", tool_turn, destinations=("complete", END))
-        graph.add_edge(START, "complete")
-        graph.compile().invoke(
-            {"turn": last_turn if recover_only else 0, "call": None},
-            config={"recursion_limit": 2 * recovery_turn + 1},
-        )
+        with record_graph(graph_name) as trace:
+            graph.add_node("complete", trace.wrap("complete", complete_turn), destinations=("complete", "tools", END))
+            graph.add_node("tools", trace.wrap("tools", tool_turn), destinations=("complete", END))
+            graph.add_edge(START, "complete")
+            graph.compile().invoke(
+                {"turn": last_turn if recover_only else 0, "call": None},
+                config={"recursion_limit": 2 * recovery_turn + 1},
+            )
         return AgentRun(
             model=agent.model.model, backend_revision=agent.backend_revision, guide_sha256=agent.guide_sha256,
             request_sha256=tuple(hashes), status=status, failures=tuple(failures),

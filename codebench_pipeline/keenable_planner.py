@@ -11,6 +11,7 @@ from langgraph.types import Command
 from pydantic import ValidationError
 
 from .agent_events import InferenceError, parse_json
+from .agent_trace import record_graph
 from .inference_capacity import CapacityConfig, CapacityQuarantined, guarded_complete
 from .keenable_ledger import Ledger, SlotIdentity
 from .keenable_policy import (
@@ -294,20 +295,21 @@ class SearchSession:
         graph = StateGraph[_SearchState, None, _SearchState, _SearchState](
             _SearchState, input_schema=_SearchState, output_schema=_SearchState
         )
-        graph.add_node("choose", choose, destinations=("search", END))
-        graph.add_node("search", dispatch, destinations=("choose",))
-        graph.add_edge(START, "choose")
-        result = graph.compile().invoke(
-            {
-                "leads": (),
-                "searches": (),
-                "feedback": (),
-                "decisions": (),
-                "seen": frozenset(url for source in self.declaration.sources for url in source.exact_urls),
-                "selected": None,
-                "stop": "budget",
-            },
-        )
+        with record_graph("keenable_planner") as trace:
+            graph.add_node("choose", trace.wrap("choose", choose), destinations=("search", END))
+            graph.add_node("search", trace.wrap("search", dispatch), destinations=("choose",))
+            graph.add_edge(START, "choose")
+            result = graph.compile().invoke(
+                {
+                    "leads": (),
+                    "searches": (),
+                    "feedback": (),
+                    "decisions": (),
+                    "seen": frozenset(url for source in self.declaration.sources for url in source.exact_urls),
+                    "selected": None,
+                    "stop": "budget",
+                },
+            )
         return (
             result["leads"],
             result["searches"],

@@ -15,6 +15,7 @@ from dagster import (
 from pandera.typing import DataFrame
 from pydantic import JsonValue, TypeAdapter
 
+from codebench_pipeline.agent_trace import graph_log
 from codebench_pipeline.config_assets import mapped_input
 from codebench_pipeline.dataframe_io import DataFrameIOManager
 from codebench_pipeline.dataframe_schemas import (
@@ -92,9 +93,10 @@ def annotation_assets() -> list[AssetsDefinition]:
         commands = filtered_commands.commands
         scratch = Path(mkdtemp(prefix="dataset-inference-", dir=scratch_root))
         filtered_commands.scratch = scratch
-        table = LabelingAttemptsTable.validate(
-            labeling.attempts_for_generation(commands, scratch, labeling_checkpoints, identity)
-        )
+        with graph_log(context.log.info, labeling_runtime.credential):
+            table = LabelingAttemptsTable.validate(
+                labeling.attempts_for_generation(commands, scratch, labeling_checkpoints, identity)
+            )
         table.attrs = {**commands.attrs, **table.attrs}
         verify_live_support(table, batch.grounding)
         metadata = TypeAdapter(dict[str, JsonValue])

@@ -390,7 +390,7 @@ def _capture_batch(
             AgentTool("finish", "Explain in a short sentence what was covered or why you abstained.",
                       _CaptureFinish, finish),
         ),
-    ).run(agent, recover_only=bool(accepted))
+    ).run(agent, graph_name="rules_capture", recover_only=bool(accepted))
     prior_documentation = () if previous is None else previous.documentation
     documentation = docs.evidence() if docs is not None else None
     return CaptureDecision(
@@ -544,7 +544,7 @@ class _JudgeBatch:
                 AgentTool("page_evaluation", "Read a train-only receipt page.", PageInput, evidence.page),
                 AgentTool("finalize", "Atomically submit a justified add/drop diff.", DiffInput, finalize),
             ),
-        ).run(agent)
+        ).run(agent, graph_name="rules_dedup")
         return JudgeDecision(batch_id=self.id, candidate_ids=ids, nominations=self.pairs, run=run, finalized=finalized)
 
 

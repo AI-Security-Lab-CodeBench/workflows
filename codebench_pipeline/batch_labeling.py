@@ -20,6 +20,7 @@ from langgraph.types import Command
 from pydantic import JsonValue, TypeAdapter, ValidationError
 
 from codebench_pipeline.agent_events import InferenceError
+from codebench_pipeline.agent_trace import graph_log_context, record_graph
 from codebench_pipeline.batch_labeling_config import BatchLabelingConfig
 from codebench_pipeline.batch_labeling_protocol import (
     ROW_LABELING_CONTRACT,
@@ -486,12 +487,13 @@ def _run_row(row: RowInput, model: _RowModel, out: Path) -> BatchRow:
     conversation = _Conversation(model, row, out, broker)
     conversation.initialize()
     graph = StateGraph[_State, None, _State, _State](_State, input_schema=_State, output_schema=_State)
-    graph.add_node("complete", conversation.complete, destinations=("complete", "tools", END))
-    graph.add_node("tools", conversation.tools, destinations=("complete", END))
-    graph.add_edge(START, "complete")
-    graph.compile().invoke(
-        {"turn": 0, "calls": []}, config={"recursion_limit": 2 * (grounding_turns + 1) + 1}
-    )
+    with record_graph("labeler") as trace:
+        graph.add_node("complete", trace.wrap("complete", conversation.complete), destinations=("complete", "tools", END))
+        graph.add_node("tools", trace.wrap("tools", conversation.tools), destinations=("complete", END))
+        graph.add_edge(START, "complete")
+        graph.compile().invoke(
+            {"turn": 0, "calls": []}, config={"recursion_limit": 2 * (grounding_turns + 1) + 1}
+        )
     return conversation.receipt()
 
 
@@ -575,9 +577,10 @@ def run_prepared_batches(
     generation: LabelingGeneration | None = None,
 ) -> list[LabelingAttempt]:
     row_model = _RowModel(rules, model, config, execution, maximum_context_characters)
+    log_context = graph_log_context()
 
     def execute(candidate: CandidateRecord) -> LabelingAttempt:
-        result = _checkpointed_row(prepared[candidate.candidate_id], row_model, out, generation)
+        result = log_context.copy().run(_checkpointed_row, prepared[candidate.candidate_id], row_model, out, generation)
         for name, body in result.files.items():
             if Path(name).name != name or name in {"", ".", ".."}:
                 raise IntegrityError("Labeling checkpoint contains a nonlocal filename")

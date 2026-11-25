@@ -16,6 +16,7 @@ from dagster import (
 )
 from pandera.typing import DataFrame
 
+from codebench_pipeline.agent_trace import graph_log
 from codebench_pipeline.config_assets import mapped_input, mapping_key
 from codebench_pipeline.labeling_runtime import LabelingRuntime
 from codebench_pipeline.rules_agents import RuleAgent
@@ -124,10 +125,11 @@ def rules_capture(
     resume = load_capture_attempt(context, settings, source) if source is not None else None
     client = BashguardClient(settings.runtime.base_url, settings.runtime.version)
     runtime: LabelingRuntime = context.resources.labeling_runtime
-    result = capture_rules(
-        _agent(context, settings.agent, settings.guide_sha256), train, client, category=settings.category, resume=resume,
-        grounding=CaptureGrounding(settings.grounding, runtime.execution(None, settings.grounding).grounding),
-    )
+    with graph_log(context.log.info, runtime.credential):
+        result = capture_rules(
+            _agent(context, settings.agent, settings.guide_sha256), train, client, category=settings.category, resume=resume,
+            grounding=CaptureGrounding(settings.grounding, runtime.execution(None, settings.grounding).grounding),
+        )
     if not result.complete:
         digest = record_rules_evidence(context, result)
         failures = sorted({
@@ -191,9 +193,11 @@ def rules_dedup(
     ):
         raise IntegrityError("Capture partitions disagree with the pinned category sources, guide, runtime or model")
     client = BashguardClient(settings.runtime.base_url, settings.runtime.version)
-    result = deduplicate_rules(
-        _agent(context, settings.agent, policy.guide_sha256), train, client, tuple(item.result for item in selected)
-    )
+    environment: Callable[[str], str] = context.resources.rules_model_environment
+    with graph_log(context.log.info, environment):
+        result = deduplicate_rules(
+            _agent(context, settings.agent, policy.guide_sha256), train, client, tuple(item.result for item in selected)
+        )
     if not result.complete:
         record_rules_evidence(context, result)
         raise IntegrityError("Dedup did not finalize every nominated batch")
