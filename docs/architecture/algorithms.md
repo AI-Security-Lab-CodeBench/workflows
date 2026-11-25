@@ -1,5 +1,34 @@
 # How commands become release rows
 
+**Masked Bashguard policy capture.** The pinned Bashguard service parses inert
+train commands. Capture groups rows by native shell node kinds and masked
+argument roles. Train prompts and receipt pages expose ordered roles, recognized
+public CLI selectors and AST node relationships, not raw command strings,
+filenames, unknown values or embedded programs. Syntax is not evidence of an
+operation's behavior. A learned allow must have a supported simple-call shape
+in both reviewed train data and positive fixtures. Its native guard restricts
+matching to those shapes, including executable, recognized selectors and
+operand roles. An opaque embedded program cannot be allowed. Capture and
+dedup additions both set `capture_guarded`, which activates the checked CEL
+gate even for purely structural rules. The pinned native runtime owns the
+public CLI and structural token vocabulary; no vocabulary is serialized per
+rule. The gate rejects raw source reads and literals outside that vocabulary.
+Legacy authored rules without the marker retain their existing CEL behavior.
+Native evaluation still checks original train rows and synthetic fixtures;
+matched file operands are also replaced with two benign names in a separate
+probe for filename-dependent predicates.
+
+When configured, capture can discover manuals for public operations present in
+its batch and fetch only a result from that batch. A bounded, dataset-independent
+public utility vocabulary includes commands whose operand semantics are not
+classified; grounding those names does not authorize an allow. Queries come
+from fixed operation/topic templates; model text, sample arguments and
+arbitrary URLs are not search or fetch inputs. The existing labeler grounding adapter applies
+approved origins and the shared per-organization admission ledger. Each capture
+attempt chain has at most eight lookups; private decisions retain provider
+receipts, fetched documents and incident records. Excerpts are untrusted
+reference material and do not expand the registered rule citation set.
+
 **Collection and filtering.** The dataset branch extracts examples from pinned corpora. The documentation branch captures material within a pinned scope to extract candidate commands. Both check origin and usage rights. The Keenable branch extracts examples from returned search snippets, records their provenance and makes no claims about origin rights. At the merge, records keep their branch identities, so the same source identifier in two branches cannot conflate their evidence. The filter examines shell structure and command positions to select candidates for labeling; a match alone does not establish risk.
 
 **Restarting repository capture.** A completed file is the checkpoint: the worker stores its verified bytes by Git blob ID on the dataset volume. If capture stops, rerun the stage on the same volume. It verifies and reuses completed files, downloads unfinished files from the beginning, and retains the failed attempt’s evidence. A checksum without the bytes is not a completed file. A corrupt checkpoint fails verification; a partial collection is never published as a complete table. There is no separate download database to restore.

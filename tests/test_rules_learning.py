@@ -1,5 +1,6 @@
 import json
-from collections.abc import Iterator
+from collections.abc import AsyncGenerator, Iterator
+from contextlib import asynccontextmanager
 from dataclasses import replace
 from email.message import Message
 from hashlib import sha256
@@ -9,11 +10,26 @@ from urllib.error import HTTPError
 
 import httpx2
 import pytest
+from mcp.types import CallToolResult, TextContent
 from pydantic import JsonValue, TypeAdapter
 
+from codebench_pipeline.grounding_tools import GroundingCredentials, LiveGroundingConfig
+from codebench_pipeline.keenable_admission import KeenableAdmissionLedger
+from codebench_pipeline.keenable_mcp import SearchResult
+from codebench_pipeline.keenable_provider import admit_tool_dispatch
 from codebench_pipeline.model_config import ModelConfig
 from codebench_pipeline.openai_transport import HTTPResponse
 from codebench_pipeline.rules_agents import Feedback, RuleAgent
+from codebench_pipeline.rules_capture_facts import (
+    AnalysisBatch,
+    AnalysisRow,
+    NativeAnalysis,
+    NativeCall,
+    NativeNode,
+    NativeWord,
+    project_row,
+)
+from codebench_pipeline.rules_capture_grounding import BatchDocumentation, CaptureGrounding
 from codebench_pipeline.rules_contracts import (
     Bundle,
     Diagnostic,
@@ -37,6 +53,9 @@ from codebench_pipeline.typed_config import ConfigArtifact
 
 _MODEL = "qwen38-27b-fp8"
 _PIN = "pinned-synthetic"
+_FIRST_BATCH = "cat-6.capture-0001"
+_FIRST_RULE = f"{_FIRST_BATCH}-01"
+_CAT_SHAPE = "argv.size() == 4 && argv[0] == 'cat' && argv[1] == '-n' && argv[2] == '--'"
 _SOURCE = "https://example.test/manifest"
 _GOLD = Labels(category="CAT-6", risk="CAT-6.1", severity="low", action="allow")
 _GUIDE = '{"instructions":"Synthetic test guide","examples":["positive and negative"]}'
@@ -51,6 +70,11 @@ type Step = tuple[str, ConfigArtifact | dict[str, JsonValue]]
 class _EvaluatorInput(ConfigArtifact):
     required_runtime_version: str
     bundle: Bundle
+    rows: tuple[EvaluationInput, ...]
+
+
+class _AnalyzerInput(ConfigArtifact):
+    required_runtime_version: str
     rows: tuple[EvaluationInput, ...]
 
 
@@ -112,18 +136,40 @@ def _agent(steps: Iterator[Step], observed: list[_Request] | None = None) -> Rul
         request=complete,
     )
 
-def _client(calls: list[_EvaluatorInput]) -> BashguardClient:
+def _client(
+    calls: list[_EvaluatorInput], analyses: dict[str, AnalysisRow] | None = None, *, reject_value: str = "",
+) -> BashguardClient:
     def endpoint(request: httpx2.Request) -> httpx2.Response:
+        if request.url.path == "/v1/analyze":
+            analysis = _AnalyzerInput.model_validate_json(request.content)
+            assert analysis.required_runtime_version == _PIN
+            return httpx2.Response(200, content=AnalysisBatch(
+                runtime_version=_PIN,
+                results=tuple(
+                    analyses[row.id] if analyses is not None and row.id in analyses
+                    else _simple_analysis(row.id, row.command) for row in analysis.rows
+                ),
+            ).model_dump_json())
         payload = _EvaluatorInput.model_validate_json(request.content)
         assert payload.required_runtime_version == _PIN
         calls.append(payload)
         if any(rule.when == "syntax error" for rule in payload.bundle.rules):
             return httpx2.Response(422, content=NativeFailure(runtime_version=_PIN, error=_COMPILE).model_dump_json())
+        for rule in payload.bundle.rules:
+            if reject_value and reject_value in rule.when and rule.capture_guarded:
+                return httpx2.Response(422, content=NativeFailure(
+                    runtime_version=_PIN, error=Diagnostic(
+                        code="raw_literal_overfit", phase="compile", rule_id=rule.id, field="when",
+                        message="Use documented public tokens, not raw literals.",
+                    ),
+                ).model_dump_json())
         digest = sha256(payload.bundle.model_dump_json().encode()).hexdigest()
         results: list[NativeRow] = []
         for row in payload.rows:
             matches = tuple(
                 rule for rule in payload.bundle.rules if rule.when == "true" or row.command in rule.when.split("|")
+                or (rule.when == _CAT_SHAPE and len(row.command.split()) == 4
+                    and row.command.split()[:3] == ["cat", "-n", "--"])
             )
             results.append(NativeRow(id=row.id, result=NativeResult(
                 status="matched" if matches else "abstain", basis="literal_cli_form",
@@ -137,6 +183,19 @@ def _client(calls: list[_EvaluatorInput]) -> BashguardClient:
     return BashguardClient("http://engine.test", _PIN, httpx2.MockTransport(endpoint))
 
 
+def _simple_analysis(row_id: str, command: str) -> AnalysisRow:
+    offset = 0
+    words: list[NativeWord] = []
+    for token in command.split():
+        start = command.index(token, offset)
+        offset = start + len(token)
+        words.append(NativeWord(start=start, end=offset, raw=token, value=token, static=True))
+    return AnalysisRow(id=row_id, analysis=NativeAnalysis(
+        eligible=True, reasons=(), nodes=(),
+        calls=(NativeCall(start=0, end=len(command), words=tuple(words)),),
+    ))
+
+
 def _train(*commands: str) -> Corpus:
     return Corpus(
         split="train", digest="a" * 64,
@@ -145,11 +204,153 @@ def _train(*commands: str) -> Corpus:
     )
 
 
-def _package(command: str, rule_id: str, rationale: str = "physical directory path") -> Package:
+def _package(
+    command: str, rule_id: str, rationale: str = "physical directory path", *, positive: str = "pwd -P",
+) -> Package:
     return Package(
-        rule=NativeRule(id=rule_id, when=command, labels=_GOLD, rationale=rationale, sources=(_SOURCE,)),
-        tests=(Fixture(command="pwd -P", expected=_GOLD), Fixture(command="pwd -L", expected=Other())),
+        rule=NativeRule(
+            id=rule_id, when=command, labels=_GOLD, rationale=rationale, sources=(_SOURCE,),
+            capture_allow_shapes=(tuple(positive.split()),),
+            capture_guarded=True,
+        ),
+        tests=(Fixture(command=positive, expected=_GOLD), Fixture(command="pwd -L", expected=Other())),
     )
+
+
+def test_capture_rejects_literal_filename_overfit_and_keeps_structural_rule() -> None:
+    train = _train("cat -n -- source-name.txt")
+    positive = train.rows[0].command
+    exact = _package(positive, _FIRST_RULE, positive=positive)
+    structural = exact.model_copy(update={"rule": exact.rule.model_copy(update={"when": _CAT_SHAPE})})
+    structural = structural.model_copy(update={"tests": (
+        Fixture(command=positive, expected=_GOLD),
+        Fixture(command="cat -- source-name.txt", expected=Other()),
+    )})
+    requests: list[_Request] = []
+    calls: list[_EvaluatorInput] = []
+
+    def steps() -> Iterator[Step]:
+        yield "add_rule", exact
+        diagnostic = _feedback(requests[-1]).diagnostic
+        assert diagnostic is not None and diagnostic.code == "filename_overfit"
+        yield "add_rule", structural
+        yield "finish", {"justification": "The reviewed shape has full coverage."}
+
+    result = capture_rules(_agent(steps(), requests), train, _client(calls))
+
+    assert result.complete and result.packages[0].rule.capture_allow_shapes == (("cat", "-n", "--", ""),)
+    assert any(
+        {row.command for row in call.rows} == {"cat -n -- codebench-probe-notes.txt", "cat -n -- codebench-probe-record.csv"}
+        for call in calls
+    )
+    payload = requests[0].messages[1].content
+    assert payload is not None and "source-name.txt" not in payload
+
+
+def test_benign_date_allow_only_uses_its_own_reviewed_shape() -> None:
+    train = _train("date", "pwd -P")
+    proposed = _package("date", _FIRST_RULE, positive="date").model_copy(update={"rule": NativeRule(
+        id=_FIRST_RULE, when="date", labels=_GOLD, rationale="Read the date", sources=(_SOURCE,),
+        capture_allow_shapes=(("pwd", "-P"), ("date",)),
+    )})
+    steps: tuple[Step, ...] = (
+        ("add_rule", proposed),
+        ("finish", {"justification": "Only the reviewed date invocation has fixture support."}),
+    )
+    result = capture_rules(_agent(iter(steps)), train, _client([]))
+
+    assert result.complete and len(result.packages) == 1
+    assert result.packages[0].rule.capture_allow_shapes == (("date",),)
+
+
+def test_capture_grounding_uses_shared_provider_without_raw_inputs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    docs_url = "https://example.test/manual"
+    page_text = "A program operand is distinct from a file operand."
+    calls: list[tuple[str, str]] = []
+    credentials_used: list[str] = []
+    config = LiveGroundingConfig(allowed_domains=["example.test"])
+    credentials = GroundingCredentials.bind(
+        config, {"KEENABLE_API_KEY": "synthetic-key", "KEENABLE_ORG": "synthetic-org"}.get,
+        keenable_ledger=KeenableAdmissionLedger(tmp_path / "admission"),
+    )
+    train = _train("awk -F , -- 'opaque-program' secret.csv", "getent custom-value")
+
+    class FakeSession:
+        async def call_tool(self, name: str, arguments: dict[str, JsonValue]) -> CallToolResult:
+            await admit_tool_dispatch()
+            url = arguments["url"]
+            assert isinstance(url, str)
+            calls.append((name, url))
+            return CallToolResult(content=[TextContent(
+                type="text", text=json.dumps({"url": url, "content": page_text}),
+            )])
+
+    @asynccontextmanager
+    async def session(key: str) -> AsyncGenerator[FakeSession]:
+        credentials_used.append(key)
+        yield FakeSession()
+
+    async def search(_session: FakeSession, query: str, options: tuple[int, int]) -> SearchResult:
+        assert options == (8, 500)
+        await admit_tool_dispatch()
+        calls.append(("search", query))
+        return SearchResult.model_validate_json(json.dumps({"results": [
+            {"url": docs_url, "snippet": "A public manual."},
+            {"url": "https://untrusted.test/other", "snippet": "Untrusted."},
+        ]}))
+
+    monkeypatch.setattr("codebench_pipeline.live_grounding.search_session", session)
+    monkeypatch.setattr("codebench_pipeline.live_grounding.search_snippets", search)
+    first = _simple_analysis(train.rows[0].id, train.rows[0].command)
+    assert first.analysis is not None
+    first = first.model_copy(update={"analysis": first.analysis.model_copy(update={
+        "nodes": (NativeNode(id=0, parent=-1, kind="CallExpr", start=0, end=42),),
+    })})
+    requests: list[_Request] = []
+
+    def steps() -> Iterator[Step]:
+        payload = requests[-1].messages[1].content
+        assert payload is not None
+        assert all(word in payload for word in ("CallExpr", "embedded_program", "filename", "getent"))
+        assert all(word not in payload for word in ("opaque-program", "secret.csv", "custom-value"))
+        yield "search_documentation", {"program": "privatecli", "topic": "operands"}
+        bad = _feedback(requests[-1]).diagnostic
+        assert bad is not None and bad.code == "documentation_scope"
+        yield "search_documentation", {"program": "awk", "topic": "program"}
+        discovery = _feedback(requests[-1]).documentation
+        assert discovery is not None and [hit.url for hit in discovery.hits] == [docs_url]
+        yield "fetch_documentation", {"search_receipt": discovery.receipt, "result": 1}
+        page = _feedback(requests[-1]).documentation
+        assert page is not None and page.excerpt == page_text
+        yield "search_documentation", {"program": "getent", "topic": "operands"}
+        yield "add_rule", _package(train.rows[0].command, _FIRST_RULE, positive=train.rows[0].command)
+        bad = _feedback(requests[-1]).diagnostic
+        assert bad is not None and bad.code == "opaque_allow"
+        yield "finish", {"justification": "The masked programs do not support a safe allow."}
+
+    result = capture_rules(
+        _agent(steps(), requests), train, _client([], {first.id: first}),
+        grounding=CaptureGrounding(config, credentials),
+    )
+
+    assert result.complete and not result.packages
+    assert credentials_used == ["synthetic-key"] * 3
+    assert calls == [
+        ("search", "POSIX awk manual documented distinction between embedded program, program file and input files"),
+        ("fetch_page_content", docs_url),
+        ("search", "Linux command getent manual documented operand roles and option boundary"),
+    ]
+    (evidence,) = result.batches[0].documentation
+    assert len(evidence.receipts) == 3 and all(receipt.provider_started_monotonic_ns for receipt in evidence.receipts)
+    (page,) = evidence.pages
+    assert page.content == page_text and evidence.receipts[1].response_sha256 == page.response_sha256
+    with CaptureGrounding(config, credentials).session(8) as exhausted:
+        docs = BatchDocumentation(exhausted, _FIRST_BATCH, frozenset({"awk"}), 0)
+        with pytest.raises(EvaluationError, match="grounding_budget_exhausted"):
+            docs.search('{"program":"awk","topic":"program"}')
+    assert len(calls) == 3
 
 
 def test_first_capture_request_presents_full_shipped_guide_with_8192_output_tokens() -> None:
@@ -168,15 +369,15 @@ def test_first_capture_request_presents_full_shipped_guide_with_8192_output_toke
     assert system.role == "system" and system.content is not None
     assert system.content.partition("\nPinned authoring guide:\n")[2].encode() == guide_bytes
     assert batch.content is not None
-    assert _JSON.validate_json(batch.content)["rows"] == [
-        _JSON.validate_json(row.model_dump_json()) for row in capture_batches(train)[0].rows
-    ]
+    masked = _JSON.validate_json(batch.content)["rows"]
+    assert isinstance(masked, list) and len(masked) == len(train.rows)
+    assert all(isinstance(row, dict) and "command" not in row for row in masked)
     assert request.max_completion_tokens == 8192 and request.tool_choice == "required" and request.tools
 
 
 def test_capture_retries_provider_context_rejection_without_losing_latest_tool_pair() -> None:
     train = _train("pwd -P")
-    rule_id = capture_batches(train)[0].next_rule_id
+    rule_id = _FIRST_RULE
     steps: tuple[Step, ...] = (
         ("add_rule", _package("syntax error", rule_id)),
         ("page_evaluation", {"receipt": 42}),
@@ -223,7 +424,7 @@ def test_capture_repairs_native_compile_and_fixture_failures_from_next_model_req
     requests: list[_Request] = []
     evaluations: list[_EvaluatorInput] = []
     train = _train("pwd -P", "pwd -L", "pwd -P")
-    rule_id = capture_batches(train)[0].next_rule_id
+    rule_id = _FIRST_RULE
     valid = _package("pwd -P", rule_id)
 
     def steps() -> Iterator[Step]:
@@ -254,22 +455,34 @@ def test_capture_repairs_native_compile_and_fixture_failures_from_next_model_req
 def test_judge_rejects_old_ids_and_reruns_replacement_after_readonly_preview() -> None:
     requests: list[_Request] = []
     calls: list[_EvaluatorInput] = []
-    client = _client(calls)
-    train = _train("pwd -P", "pwd -Q")
+    client = _client(calls, reject_value="fabricated-raw-value")
+    train = _train("pwd -P", "pwd --physical")
     first = _package("pwd -P", "cat-6.capture-0001-01")
-    second = _package("pwd -P|pwd -Q", "cat-6.capture-0001-02").model_copy(update={
-        "tests": (Fixture(command="pwd -Q", expected=_GOLD), Fixture(command="pwd -L", expected=Other())),
-    })
+    second = _package("pwd -P|pwd --physical", "cat-6.capture-0001-02", positive="pwd --physical")
     capture_steps: tuple[Step, ...] = (
         ("add_rule", first), ("add_rule", second), ("finish", {"justification": "Compare variants."}),
     )
     capture = capture_rules(_agent(iter(capture_steps)), train, client)
     fresh = _package("pwd -P", "cat-6.judge-0001-01")
     rejected_fresh = _package("true", fresh.rule.id)
-    why = "Drop the second rule and its -Q fixture: the unique -Q form is intentionally not retained."
+    raw_replacement = _package("argv[1] == 'fabricated-raw-value'", fresh.rule.id)
+    why = "Drop the second rule and its --physical fixture: that unique form is intentionally not retained."
 
     def steps() -> Iterator[Step]:
         assert all("modify" not in str(tool["function"]) for tool in requests[-1].tools)
+        payload = requests[-1].messages[1].content
+        assert payload is not None
+        assert "whoami" not in payload and "capture_public_tokens" not in payload
+        unguarded = raw_replacement.model_copy(update={"rule": raw_replacement.rule.model_copy(update={
+            "capture_guarded": False, "capture_allow_shapes": (),
+        })})
+        yield "evaluate_rule", unguarded
+        rejected = _feedback(requests[-1]).diagnostic
+        assert rejected is not None and rejected.code == "raw_literal_overfit"
+        yield "finalize", {"drop_ids": [second.rule.id], "add": [_JSON.validate_json(unguarded.model_dump_json())],
+                           "justification": why}
+        rejected = _feedback(requests[-1]).diagnostic
+        assert rejected is not None and rejected.code == "raw_literal_overfit"
         yield "evaluate_rule", fresh
         assert _feedback(requests[-1]).receipts[0].train_matches == 1
         yield "finalize", {"drop_ids": [second.rule.id], "add": [_JSON.validate_json(second.model_dump_json())],
@@ -291,6 +504,7 @@ def test_judge_rejects_old_ids_and_reruns_replacement_after_readonly_preview() -
     assert decision.submission == type(decision.submission)(drop=(second.rule.id,), add=(fresh,), justification=why)
     assert decision.combined.rows[1].actual == Other()
     assert [tuple(rule.id for rule in call.bundle.rules) for call in calls[2:]] == [
+        (fresh.rule.id,), (fresh.rule.id,),
         (fresh.rule.id,), (fresh.rule.id,), (fresh.rule.id,), (first.rule.id, fresh.rule.id),
     ]
     keep_steps: tuple[Step, ...] = (("finalize", {
@@ -306,7 +520,7 @@ def test_judge_rejects_old_ids_and_reruns_replacement_after_readonly_preview() -
 def test_dedup_rejects_category_rule_that_mislabels_other_train_category() -> None:
     category = _train("pwd -P")
     client = _client([])
-    package = _package("pwd -P", capture_batches(category)[0].next_rule_id)
+    package = _package("pwd -P", _FIRST_RULE)
     author: tuple[Step, ...] = (
         ("add_rule", package), ("finish", {"justification": "Covered the literal."}),
     )
@@ -378,7 +592,7 @@ def test_capture_retries_invalid_finish_using_only_closure_state(response_body: 
     train = _train("pwd -P", "pwd -L")
     requests: list[_Request] = []
     evaluations: list[_EvaluatorInput] = []
-    rule_id = capture_batches(train)[0].next_rule_id
+    rule_id = _FIRST_RULE
     valid = _package("pwd -P", rule_id)
     why = "The logical form is not covered."
     failure: Step = ("page_evaluation", {"receipt": 42})
@@ -449,7 +663,7 @@ _TRUNCATED = HTTPResponse(
 def test_double_truncated_capture_closes_only_with_supported_native_reason(accept_recovery: bool) -> None:
     train = _train("pwd -P", "pwd -L")
     evaluations: list[_EvaluatorInput] = []
-    batch_id = capture_batches(train)[0].id
+    batch_id = _FIRST_BATCH
     valid = tuple(_package("pwd -P", f"{batch_id}-{index:02d}") for index in range(1, 6))
     wait: Step = ("page_evaluation", {"receipt": 42})
     terminal = "finish_with_abstentions" if accept_recovery else "finish_all_covered"
@@ -478,12 +692,12 @@ def test_double_truncated_capture_closes_only_with_supported_native_reason(accep
 
 @pytest.mark.parametrize("tamper", [None, "order", "descriptor", "receipt", "terminal"])
 def test_capture_resume_replays_pins_and_only_requests_unfinished_closure(tamper: str | None) -> None:
-    train = _train("pwd -P", *(f"pwd -Q{index:02}" for index in range(15)), "pwd -Z")
-    first_batch, second_batch = capture_batches(train)
+    train = _train("pwd -P", *(f"pwd -Q{index:02}" for index in range(15)), "wc -l")
+    first_batch, second_batch = capture_batches(train, tuple(
+        project_row(row.id, row.gold, _simple_analysis(row.id, row.command)) for row in train.rows
+    ))
     first = _package("pwd -P", first_batch.next_rule_id)
-    second = _package("pwd -Z", second_batch.next_rule_id).model_copy(update={
-        "tests": (Fixture(command="pwd -Z", expected=_GOLD), Fixture(command="pwd -L", expected=Other())),
-    })
+    second = _package("wc -l", second_batch.next_rule_id, positive="wc -l")
     initial: tuple[Step, ...] = (
         ("add_rule", first), ("finish", {"justification": "Leave the Q forms uncovered."}), ("add_rule", second),
     )

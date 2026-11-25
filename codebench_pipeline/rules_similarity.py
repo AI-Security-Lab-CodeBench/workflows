@@ -11,6 +11,8 @@ from numpy.typing import NDArray
 from pydantic import Field
 
 from codebench_pipeline.models import Digest
+from codebench_pipeline.rules_capture_facts import CaptureRow
+from codebench_pipeline.rules_capture_grounding import CaptureDocumentationEvidence
 from codebench_pipeline.rules_contracts import (
     Category,
     Diagnostic,
@@ -21,7 +23,7 @@ from codebench_pipeline.rules_contracts import (
     Labels,
     Package,
 )
-from codebench_pipeline.rules_corpus import Corpus, CorpusRow, CorpusSource
+from codebench_pipeline.rules_corpus import Corpus, CorpusSource
 from codebench_pipeline.typed_config import ConfigArtifact
 
 SIMILARITY_REVISION: Final = "rationale-word-bigram-tfidf-lsa-sqrt24-cosine075-or-any-train-hit-v1"
@@ -30,7 +32,6 @@ _STOPWORDS: Final = frozenset(
     "a an and are as at be by can for from has have in is it of on only or that the this to when with".split()
 )
 _WORDS = re.compile(r"[^\W_]+")
-_TOKENS = re.compile(r"[A-Za-z0-9_./-]+|[^\w\s]")
 _BATCH_SIZE: Final = 16
 JUDGE_WIDTH: Final = 4
 FINISH_JUSTIFICATION_LIMIT: Final = 280
@@ -84,6 +85,7 @@ class EvidencePage(ConfigArtifact):
     total: int
     next_offset: int | None
     rows: tuple[EvaluatedRow, ...]
+    masked_facts: tuple[CaptureRow, ...] = ()
 
 
 def review_examples(receipts: tuple[EvaluationReceipt, ...]) -> tuple[EvaluatedRow, ...]:
@@ -107,7 +109,7 @@ class DiffInput(ConfigArtifact):
 class CaptureBatch(ConfigArtifact):
     id: str
     category: Category
-    rows: tuple[CorpusRow, ...]
+    rows: tuple[CaptureRow, ...]
     sources: tuple[CorpusSource, ...]
     next_rule_id: str
 
@@ -147,17 +149,23 @@ class CaptureClosure(ConfigArtifact):
         )
 
 
-def capture_batches(train: Corpus, category: Category | None = None) -> tuple[CaptureBatch, ...]:
-    """Sort literal token sequences per category and take bounded, disjoint neighborhoods."""
+def capture_batches(
+    train: Corpus, facts: tuple[CaptureRow, ...], category: Category | None = None,
+) -> tuple[CaptureBatch, ...]:
+    """Sort masked CLI roles per category and take bounded, disjoint neighborhoods."""
     if train.split != "train" or not train.rows or len({row.id for row in train.rows}) != len(train.rows):
         raise EvaluationError(Diagnostic(code="train_only", message="Expected nonempty train with distinct row IDs"))
     batches: list[CaptureBatch] = []
-    categories = {row.gold.category for row in train.rows if category is None or row.gold.category == category}
-    for selected in sorted(categories):
-        rows = sorted(
-            (row for row in train.rows if row.gold.category == selected),
-            key=lambda row: (tuple(_TOKENS.findall(row.command)), row.id),
+    categories = {row.gold.category for row in facts if category is None or row.gold.category == category}
+
+    def neighborhood(row: CaptureRow) -> tuple[tuple[tuple[tuple[str, str], ...], ...], tuple[str, ...], str]:
+        return (
+            tuple(tuple((word.role, word.token or "") for word in call) for call in row.calls),
+            tuple(node.kind for node in row.ast_nodes), row.id,
         )
+
+    for selected in sorted(categories):
+        rows = sorted((row for row in facts if row.gold.category == selected), key=neighborhood)
         sources = tuple(source for source in train.sources if source.category == selected)
         if not sources:
             raise EvaluationError(Diagnostic(code="train_sources", message=f"No pinned manifest sources for {selected}"))
@@ -184,6 +192,7 @@ class CaptureDecision(ConfigArtifact):
     descriptor_sha256: Digest | None = None
     recovery_reason: CaptureRecoveryReason | None = None
     prior_runs: tuple[AgentRun, ...] = ()
+    documentation: tuple[CaptureDocumentationEvidence, ...] = ()
 
 
 class Nomination(ConfigArtifact):

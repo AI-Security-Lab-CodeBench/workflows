@@ -63,6 +63,8 @@ class NativeRule(ConfigArtifact):
     labels: Labels
     rationale: str = Field(min_length=1)
     sources: tuple[str, ...] = Field(min_length=1)
+    capture_allow_shapes: tuple[tuple[str, ...], ...] = Field(default=(), exclude_if=lambda shapes: not shapes)
+    capture_guarded: bool = Field(default=False, exclude_if=lambda guarded: not guarded)
 
     @field_validator("sources")
     @classmethod

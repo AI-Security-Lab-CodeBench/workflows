@@ -16,6 +16,8 @@ from codebench_pipeline.batch_labeling_protocol import Completion, ToolCall, too
 from codebench_pipeline.model_config import ModelConfig
 from codebench_pipeline.models import Digest
 from codebench_pipeline.openai_transport import HTTPResponse, complete
+from codebench_pipeline.rules_capture_facts import CaptureRow
+from codebench_pipeline.rules_capture_grounding import DocumentationFeedback
 from codebench_pipeline.rules_contracts import Diagnostic, EvaluatedRow, EvaluationError, EvaluationReceipt
 from codebench_pipeline.rules_similarity import AgentFailure, AgentRun, EvidencePage, PageInput, ReceiptView
 from codebench_pipeline.typed_config import ConfigArtifact
@@ -90,11 +92,26 @@ class Feedback(ConfigArtifact):
     examples: tuple[EvaluatedRow, ...] = ()
     recorded: tuple[str, ...] = ()
     next_rule_id: str | None = None
+    documentation: DocumentationFeedback | None = None
+    masked_facts: tuple[CaptureRow, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
 class TrainEvidence:
     receipts: list[EvaluationReceipt] = field(default_factory=list)
+    capture_facts: dict[str, CaptureRow] = field(default_factory=dict)
+
+    def model_rows(self, rows: tuple[EvaluatedRow, ...]) -> tuple[EvaluatedRow, ...]:
+        return tuple(
+            row.model_copy(update={
+                "input": row.input.model_copy(update={"command": "[masked train command]"}),
+                "error": None if row.error is None else row.error.model_copy(update={"message": "Native row error."}),
+            }) if row.id in self.capture_facts else row
+            for row in rows
+        )
+
+    def model_facts(self, rows: tuple[EvaluatedRow, ...]) -> tuple[CaptureRow, ...]:
+        return tuple(self.capture_facts[row.id] for row in rows if row.id in self.capture_facts)
 
     def record(self, receipt: EvaluationReceipt) -> ReceiptView:
         if receipt.split != "train":
@@ -123,7 +140,8 @@ class TrainEvidence:
             total = len(receipt.fixtures if page.kind == "fixtures" else receipt.rows)
         return Feedback(page=EvidencePage(
             receipt=page.receipt, kind=page.kind, offset=page.offset, total=total,
-            next_offset=page.offset + len(rows) if page.offset + len(rows) < total else None, rows=rows,
+            next_offset=page.offset + len(rows) if page.offset + len(rows) < total else None,
+            rows=self.model_rows(rows), masked_facts=self.model_facts(rows),
         ))
 
 

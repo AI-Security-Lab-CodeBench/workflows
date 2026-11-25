@@ -3,11 +3,12 @@ import socket
 from collections.abc import Iterator
 from dataclasses import dataclass
 from hashlib import sha256
-from typing import Final
+from typing import Final, TypeVar
 
 import httpx2
 from pydantic import ValidationError
 
+from codebench_pipeline.rules_capture_facts import AnalysisBatch, AnalysisRow, filename_probes
 from codebench_pipeline.rules_contracts import (
     Bundle,
     Diagnostic,
@@ -26,15 +27,17 @@ from codebench_pipeline.rules_contracts import (
     Package,
 )
 from codebench_pipeline.rules_corpus import Corpus
+from codebench_pipeline.typed_config import ConfigArtifact
 
 _MAX_REQUEST_BYTES: Final = 2 << 20
 _MAX_BUNDLE_BYTES: Final = 1 << 20
 _MAX_RESPONSE_BYTES: Final = 32 << 20
 _MAX_ROWS: Final = 128
+_BatchResponse = TypeVar("_BatchResponse", bound=ConfigArtifact)
 
 
 def _batch_bodies(
-    prefix: bytes, rows: tuple[EvaluationInput, ...]
+    prefix: bytes, rows: tuple[EvaluationInput, ...], *, max_rows: int = _MAX_ROWS
 ) -> Iterator[tuple[bytes, tuple[str, ...]]]:
     batch: list[bytes] = []
     ids: list[str] = []
@@ -46,7 +49,7 @@ def _batch_bodies(
             raise EvaluationError(
                 Diagnostic(code="request_too_large", message="Single row exceeds batch limit")
             )
-        if batch and (len(batch) == _MAX_ROWS or size + len(encoded) + 1 > _MAX_REQUEST_BYTES):
+        if batch and (len(batch) == max_rows or size + len(encoded) + 1 > _MAX_REQUEST_BYTES):
             yield prefix + b",".join(batch) + b"]}", tuple(ids)
             batch, ids, size = [], [], base_size
         size += len(encoded) + bool(batch)
@@ -76,22 +79,10 @@ class BashguardClient:
         prefix = b'{"required_runtime_version":' + pin + b',"bundle":' + raw_bundle + b',"rows":['
         rules = {rule.id: rule.labels for rule in bundle.rules}
         results: list[NativeRow] = []
-        transport = self.transport or httpx2.HTTPTransport(
-            trust_env=False,
-            retries=3,
-            limits=httpx2.Limits(max_connections=4, max_keepalive_connections=2, keepalive_expiry=30),
-            socket_options=[(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)],
-        )
-        with httpx2.Client(
-            base_url=self.base_url,
-            transport=transport,
-            timeout=httpx2.Timeout(connect=5, read=35, write=10, pool=10),
-            follow_redirects=False,
-            trust_env=False,
-            headers={"Accept": "application/json", "Accept-Encoding": "identity"},
-        ) as client:
+        with self._client() as client:
             for body, ids in _batch_bodies(prefix, rows):
-                batch = self._post(client, body)
+                batch = self._post(client, "/v1/evaluate", body, NativeEvaluation)
+                self._require_pin(batch.runtime_version)
                 indexed = {row.id: row for row in batch.results}
                 if len(batch.results) != len(ids) or set(indexed) != set(ids):
                     raise EvaluationError(
@@ -121,10 +112,41 @@ class BashguardClient:
                     results.append(row)
         return tuple(results)
 
-    def _post(self, client: httpx2.Client, payload: bytes) -> NativeEvaluation:
+    def analyze(self, rows: tuple[EvaluationInput, ...]) -> tuple[AnalysisRow, ...]:
+        """Get parser facts from the same pinned service that runs CEL, without executing input."""
+        prefix = b'{"required_runtime_version":' + json.dumps(self.runtime_version).encode() + b',"rows":['
+        results: list[AnalysisRow] = []
+        with self._client() as client:
+            for body, ids in _batch_bodies(prefix, rows, max_rows=8):
+                batch = self._post(client, "/v1/analyze", body, AnalysisBatch)
+                self._require_pin(batch.runtime_version)
+                if tuple(row.id for row in batch.results) != ids:
+                    raise EvaluationError(Diagnostic(code="response_rows", message="Analyzer returned wrong row IDs"))
+                results.extend(batch.results)
+        return tuple(results)
+
+    def _client(self) -> httpx2.Client:
+        transport = self.transport or httpx2.HTTPTransport(
+            trust_env=False,
+            retries=3,
+            limits=httpx2.Limits(max_connections=4, max_keepalive_connections=2, keepalive_expiry=30),
+            socket_options=[(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)],
+        )
+        return httpx2.Client(
+            base_url=self.base_url,
+            transport=transport,
+            timeout=httpx2.Timeout(connect=5, read=35, write=10, pool=10),
+            follow_redirects=False,
+            trust_env=False,
+            headers={"Accept": "application/json", "Accept-Encoding": "identity"},
+        )
+
+    def _post(
+        self, client: httpx2.Client, path: str, payload: bytes, response_model: type[_BatchResponse]
+    ) -> _BatchResponse:
         try:
             with client.stream(
-                "POST", "/v1/evaluate", content=payload, headers={"Content-Type": "application/json"}
+                "POST", path, content=payload, headers={"Content-Type": "application/json"}
             ) as response:
                 data = bytearray()
                 for chunk in response.iter_bytes(chunk_size=65536):
@@ -139,9 +161,7 @@ class BashguardClient:
                     failure = NativeFailure.model_validate_json(data)
                     self._require_pin(failure.runtime_version, failure.error)
                     raise EvaluationError(failure.error)
-                evaluation = NativeEvaluation.model_validate_json(data)
-                self._require_pin(evaluation.runtime_version)
-                return evaluation
+                return response_model.model_validate_json(data)
         except ValidationError as exc:
             raise EvaluationError(
                 Diagnostic(code="response_schema", message="Evaluator returned an invalid protocol response")
@@ -201,6 +221,21 @@ def evaluate_package(client: BashguardClient, package: Package, train: Corpus) -
     if train.split != "train":
         raise EvaluationError(Diagnostic(code="train_only", message="Package evaluation requires train"))
     return _Evaluation(Bundle(rules=(package.rule,)), train, package.tests).run(client)
+
+
+def require_filename_invariance(
+    client: BashguardClient, package: Package, receipt: EvaluationReceipt, analyses: dict[str, AnalysisRow],
+) -> None:
+    matched = tuple(row.input for row in receipt.rows if package.rule.id in row.rule_ids)
+    probes = tuple(probe for row in matched for probe in filename_probes(row, analyses[row.id]))
+    if not probes:
+        return
+    results = client.evaluate(Bundle(rules=(package.rule,)), probes)
+    if any(row.error is not None or row.result.rule_ids != (package.rule.id,) for row in results):
+        raise EvaluationError(Diagnostic(
+            code="filename_overfit", phase="gate", rule_id=package.rule.id, field="when",
+            message="Matching behavior changed after replacing a masked filename with a benign filename.",
+        ))
 
 
 def evaluate_corpus(client: BashguardClient, bundle: Bundle, corpus: Corpus) -> EvaluationReceipt:
