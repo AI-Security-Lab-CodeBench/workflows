@@ -115,6 +115,9 @@ func matchesCaptureShape(argv, shape []string) bool {
 	if len(argv) != len(shape) {
 		return false
 	}
+	if shape[0] == "base32" || shape[0] == "base64" {
+		return argv[0] == shape[0] && slices.Equal(codecArgumentRoles(argv), shape[1:])
+	}
 	options := true
 	for index, token := range shape {
 		value := argv[index]

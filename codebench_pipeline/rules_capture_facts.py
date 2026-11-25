@@ -1,3 +1,4 @@
+import re
 from dataclasses import dataclass
 from typing import Final, Literal, Self
 
@@ -96,12 +97,15 @@ PUBLIC_PROGRAMS: Final = {**dict.fromkeys(_POSIX_PROGRAMS, "POSIX utility"),
                           **dict.fromkeys(_LINUX_PROGRAMS, "Linux command"),
                           **{name: op.documentation.rsplit(" ", 1)[0] for name, op in OPERATIONS.items()}}
 _RENAME: Final = ("codebench-probe-notes.txt", "codebench-probe-record.csv")
+_CODECS: Final = frozenset({"base32", "base64"})
+_CODEC_SELECTORS: Final = frozenset({"-d", "--decode", "-i", "--ignore-garbage"})
+DECIMAL_ROLE: Final = "@decimal"
 
 
 class ArgumentRole(ConfigArtifact):
     role: Literal[
         "program", "selector", "option_boundary", "stdin", "filename", "value", "opaque",
-        "embedded_program", "program_file", "expansion",
+        "embedded_program", "program_file", "expansion", "numeric",
     ]
     token: str | None = None
 
@@ -127,6 +131,8 @@ def roles(call: NativeCall) -> tuple[ArgumentRole, ...]:
     if not call.words:
         return ()
     first, *arguments = call.words
+    if first.static and first.value in _CODECS:
+        return _codec_roles(first.value, arguments)
     operation = OPERATIONS.get(first.value) if first.static else None
     if operation is None:
         program = (
@@ -178,16 +184,55 @@ def roles(call: NativeCall) -> tuple[ArgumentRole, ...]:
     return tuple(result)
 
 
+def _codec_roles(program: str, arguments: list[NativeWord]) -> tuple[ArgumentRole, ...]:
+    result = [ArgumentRole(role="program", token=program)]
+    options = True
+    width = False
+    operand = False
+    for word in arguments:
+        value = word.value
+        if not word.static:
+            item = ArgumentRole(role="expansion")
+        elif width and re.fullmatch(r"[0-9]{1,4}", value):
+            item = ArgumentRole(role="numeric")
+        elif width or operand:
+            item = ArgumentRole(role="opaque")
+        elif options and value == "-w":
+            width = True
+            result.append(ArgumentRole(role="selector", token=value))
+            continue
+        elif options and value in _CODEC_SELECTORS:
+            item = ArgumentRole(role="selector", token=value)
+        elif options and value == "--":
+            options = False
+            item = ArgumentRole(role="option_boundary", token=value)
+        elif value == "-":
+            operand = True
+            item = ArgumentRole(role="stdin", token=value)
+        elif value and not (options and value.startswith("-")) and not any(c in value for c in "*?["):
+            operand = True
+            item = ArgumentRole(role="filename")
+        else:
+            item = ArgumentRole(role="opaque")
+        width = False
+        result.append(item)
+    if width:
+        result[-1] = ArgumentRole(role="opaque", token="-w")
+    return tuple(result)
+
+
 def allow_shape(analysis: AnalysisRow) -> tuple[str, ...] | None:
     doc = analysis.analysis
     if doc is None or not doc.eligible or len(doc.calls) != 1:
         return None
     arguments = roles(doc.calls[0])
-    if not 1 <= len(arguments) <= 32 or arguments[0].token not in OPERATIONS or arguments[0].token == "awk":
+    if (not 1 <= len(arguments) <= 32 or arguments[0].token not in OPERATIONS.keys() | _CODECS
+            or arguments[0].token == "awk"):
         return None
-    if any(item.role not in {"program", "selector", "option_boundary", "filename", "stdin"} for item in arguments):
+    if any(item.role not in {"program", "selector", "option_boundary", "filename", "stdin", "numeric"}
+           for item in arguments):
         return None
-    return tuple(item.token or "" for item in arguments)
+    return tuple(DECIMAL_ROLE if item.role == "numeric" else item.token or "" for item in arguments)
 
 
 def project_row(row_id: str, gold: Gold, analysis: AnalysisRow) -> CaptureRow:

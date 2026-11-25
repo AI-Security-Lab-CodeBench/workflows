@@ -151,6 +151,7 @@ class AgentTool:
     description: str
     input: type[ConfigArtifact]
     call: Callable[[str], Feedback]
+    available: Callable[[], bool] | None = None
 
     def schema(self) -> dict[str, JsonValue]:
         return tool_schema(self.name, self.description, _JSON.validate_python(self.input.model_json_schema()))
@@ -213,7 +214,8 @@ class Conversation:
             recovery = self.recovery(codes) if turn == recovery_turn and self.recovery is not None else None
             terminal = self.terminal if recovery is None else recovery.tool.name
             offered = (
-                self.tools if not closing else (tools[self.terminal],)
+                tuple(tool for tool in self.tools if tool.available is None or tool.available())
+                if not closing else (tools[self.terminal],)
             ) if recovery is None else (recovery.tool,)
             if recovery is not None:
                 tools[terminal] = recovery.tool
@@ -336,7 +338,7 @@ class Conversation:
             elif name == self.terminal or turn == recovery_turn:
                 status = "finished"
             messages.append({
-                "role": "tool", "tool_call_id": call.id, "content": result.model_dump_json(),
+                "role": "tool", "tool_call_id": call.id, "content": result.model_dump_json(exclude_defaults=True),
             })
             return Command(goto=END if status == "finished" or turn >= last_turn else "complete")
 

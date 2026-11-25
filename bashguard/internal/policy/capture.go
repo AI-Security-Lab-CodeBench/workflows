@@ -26,7 +26,7 @@ const publicCLITokens = `
 	setpriv setsid ss su swapon switch_root systemctl taskset unshare uptime vmstat wall whereis
 	-F -v -f -n -b --number --number-nonblank -u --utc --universal -q --quiet --silent --verbose
 	-l -a -d -h -la -al --all -L -P --logical --physical --dereference --file-system
-	-c -m -w --bytes --lines
+	-c -m -w --bytes --lines --decode -i --ignore-garbage
 `
 
 var captureTokens = func() map[string]struct{} {
@@ -82,4 +82,42 @@ func validateCaptureExpression(rule Rule, checked *cel.Ast) error {
 
 func captureError(rule Rule, message string) error {
 	return &RuleError{RuleID: rule.ID, Field: "when", Code: "raw_literal_overfit", Detail: message}
+}
+
+func codecArgumentRoles(argv []string) []string {
+	roles := make([]string, 0, len(argv)-1)
+	options, operand := true, false
+	for i := 1; i < len(argv); i++ {
+		value := argv[i]
+		switch {
+		case operand:
+			return nil
+		case options && value == "-w":
+			i++
+			if i == len(argv) || !codecWidth(argv[i]) {
+				return nil
+			}
+			roles = append(roles, "-w", "@decimal")
+		case options && slices.Contains([]string{"-d", "--decode", "-i", "--ignore-garbage"}, value):
+			roles = append(roles, value)
+		case options && value == "--":
+			options = false
+			roles = append(roles, value)
+		case value == "-":
+			operand = true
+			roles = append(roles, value)
+		case value == "" || (options && strings.HasPrefix(value, "-")) || strings.ContainsAny(value, "*?["):
+			return nil
+		default:
+			operand = true
+			roles = append(roles, "")
+		}
+	}
+	return roles
+}
+
+func codecWidth(value string) bool {
+	return len(value) >= 1 && len(value) <= 4 && strings.IndexFunc(value, func(r rune) bool {
+		return r < '0' || r > '9'
+	}) == -1
 }

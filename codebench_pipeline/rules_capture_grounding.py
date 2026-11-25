@@ -1,6 +1,6 @@
 from collections.abc import Generator
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Final, Literal
@@ -16,6 +16,7 @@ from codebench_pipeline.rules_contracts import Diagnostic, EvaluationError
 from codebench_pipeline.typed_config import ConfigArtifact
 
 _CALL_LIMIT: Final = 8
+_BATCH_ATTEMPTS: Final = 4
 _EXCERPT_LIMIT: Final = 3000
 _TOPICS: Final = {
     "operands": "documented operand roles and option boundary",
@@ -49,61 +50,97 @@ class DocumentationSearch(ConfigArtifact):
 
 
 class DocumentationFetch(ConfigArtifact):
-    search_receipt: int = Field(ge=0)
-    result: int = Field(ge=1, le=8)
+    handle: str = Field(pattern=r"^doc-[0-9]+-[1-8]$")
 
 
 class DocumentationHit(ConfigArtifact):
-    result: int
+    handle: str
     url: str
 
 
-class DocumentationFeedback(ConfigArtifact):
-    receipt: int
-    hits: tuple[DocumentationHit, ...] = ()
-    page_id: str | None = None
-    url: str | None = None
-    excerpt: str | None = None
+class DocumentationDiscovery(ConfigArtifact):
+    kind: Literal["search_results"]
+    hits: tuple[DocumentationHit, ...]
 
 
-@dataclass(frozen=True, slots=True)
+class DocumentationPage(ConfigArtifact):
+    kind: Literal["fetched_page"]
+    page_id: str
+    url: str
+    excerpt: str
+
+
+type DocumentationFeedback = DocumentationDiscovery | DocumentationPage
+
+
+@dataclass(slots=True)
 class BatchDocumentation:
     live: LiveGrounding
     batch_id: str
     programs: frozenset[str]
     start: int
+    attempts: int = 0
+    searched: set[DocumentationSearch] = field(default_factory=set)
+    handles: dict[str, str] = field(default_factory=dict)
 
-    def search(self, arguments: str) -> DocumentationFeedback:
+    def _available(self) -> bool:
+        return self.attempts < _BATCH_ATTEMPTS and len(self.live.history) < self.live.limit
+
+    def choices(self) -> tuple[DocumentationSearch, ...]:
+        if not self._available():
+            return ()
+        return tuple(choice for program in sorted(self.programs) for choice in (
+            DocumentationSearch(program=program, topic="operands"),
+            DocumentationSearch(program=program, topic="options"),
+            *((DocumentationSearch(program=program, topic="program"),) if program == "awk" else ()),
+        ) if choice not in self.searched)
+
+    def can_fetch(self) -> bool:
+        return self._available() and bool(self.handles)
+
+    def _begin(self) -> None:
+        if not self._available():
+            raise EvaluationError(Diagnostic(
+                code="grounding_budget_exhausted", phase="documentation",
+                message="No more lookups are available. Use masked train evidence or abstain.",
+            ))
+        self.attempts += 1
+
+    def search(self, arguments: str) -> DocumentationDiscovery:
+        self._begin()
         request = DocumentationSearch.model_validate_json(arguments)
         family = PUBLIC_PROGRAMS.get(request.program)
         if family is None or request.program not in self.programs or (request.topic == "program" and request.program != "awk"):
             raise EvaluationError(Diagnostic(
-                code="documentation_scope", message="Select a supported public operation present in this batch.",
+                code="documentation_scope", message="Copy a program/topic pair from documentation_choices. "
+                "The program topic is only for awk; otherwise use operands or options.",
             ))
+        if request in self.searched:
+            raise EvaluationError(Diagnostic(
+                code="documentation_repeat", message="That pair was already searched. Fetch an offered handle, "
+                "choose a different listed pair, or work from the batch evidence.",
+            ))
+        self.searched.add(request)
         query = f"{family} {request.program} manual {_TOPICS[request.topic]}"
         receipt = self.live.call(
             "query", QueryInput(query=query, candidate_ids=[self.batch_id]).model_dump_json(), {self.batch_id}
         )
         self._require_success(receipt)
-        return DocumentationFeedback(
-            receipt=receipt.index,
-            hits=tuple(DocumentationHit(result=index, url=hit.url) for index, hit in enumerate(receipt.discovery, 1)
-                       if not urlsplit(hit.url).query),
-        )
+        hits = tuple(DocumentationHit(handle=f"doc-{receipt.index}-{index}", url=hit.url)
+                     for index, hit in enumerate(receipt.discovery, 1) if not urlsplit(hit.url).query)
+        self.handles.update((hit.handle, hit.url) for hit in hits)
+        return DocumentationDiscovery(kind="search_results", hits=hits)
 
-    def fetch(self, arguments: str) -> DocumentationFeedback:
+    def fetch(self, arguments: str) -> DocumentationPage:
+        self._begin()
         request = DocumentationFetch.model_validate_json(arguments)
-        if self.start <= request.search_receipt < len(self.live.history):
-            search = self.live.history[request.search_receipt]
-            if search.tool == "query" and request.result <= len(search.discovery):
-                url = search.discovery[request.result - 1].url
-                if not urlsplit(url).query:
-                    return self._fetch(url)
+        if (url := self.handles.pop(request.handle, None)) is not None:
+            return self._fetch(url)
         raise EvaluationError(Diagnostic(
-            code="documentation_scope", message="Use a discovery result from a search in this batch.",
+            code="documentation_scope", message="Copy an unused handle from documentation.hits in this batch.",
         ))
 
-    def _fetch(self, url: str) -> DocumentationFeedback:
+    def _fetch(self, url: str) -> DocumentationPage:
         receipt = self.live.call(
             "page_fetch", PageFetchInput(url=url, candidate_ids=[self.batch_id]).model_dump_json(), {self.batch_id},
         )
@@ -111,8 +148,8 @@ class BatchDocumentation:
         if receipt.page_id is None:
             raise EvaluationError(Diagnostic(code="documentation_response", message="No fetched page was retained."))
         page = self.live.pages[receipt.page_id]
-        return DocumentationFeedback(
-            receipt=receipt.index, page_id=receipt.page_id, url=page.url, excerpt=page.content[:_EXCERPT_LIMIT],
+        return DocumentationPage(
+            kind="fetched_page", page_id=receipt.page_id, url=page.url, excerpt=page.content[:_EXCERPT_LIMIT],
         )
 
     def evidence(self) -> CaptureDocumentationEvidence:

@@ -1,5 +1,5 @@
 import json
-from collections.abc import AsyncGenerator, Iterator
+from collections.abc import AsyncGenerator, Callable, Iterator
 from contextlib import asynccontextmanager
 from dataclasses import replace
 from email.message import Message
@@ -29,7 +29,12 @@ from codebench_pipeline.rules_capture_facts import (
     NativeWord,
     project_row,
 )
-from codebench_pipeline.rules_capture_grounding import BatchDocumentation, CaptureGrounding
+from codebench_pipeline.rules_capture_grounding import (
+    BatchDocumentation,
+    CaptureGrounding,
+    DocumentationDiscovery,
+    DocumentationPage,
+)
 from codebench_pipeline.rules_contracts import (
     Bundle,
     Diagnostic,
@@ -138,6 +143,7 @@ def _agent(steps: Iterator[Step], observed: list[_Request] | None = None) -> Rul
 
 def _client(
     calls: list[_EvaluatorInput], analyses: dict[str, AnalysisRow] | None = None, *, reject_value: str = "",
+    matches_rule: Callable[[NativeRule, str], bool] | None = None,
 ) -> BashguardClient:
     def endpoint(request: httpx2.Request) -> httpx2.Response:
         if request.url.path == "/v1/analyze":
@@ -167,7 +173,8 @@ def _client(
         results: list[NativeRow] = []
         for row in payload.rows:
             matches = tuple(
-                rule for rule in payload.bundle.rules if rule.when == "true" or row.command in rule.when.split("|")
+                rule for rule in payload.bundle.rules if (matches_rule is not None and matches_rule(rule, row.command))
+                or rule.when == "true" or row.command in rule.when.split("|")
                 or (rule.when == _CAT_SHAPE and len(row.command.split()) == 4
                     and row.command.split()[:3] == ["cat", "-n", "--"])
             )
@@ -313,18 +320,24 @@ def test_capture_grounding_uses_shared_provider_without_raw_inputs(
     def steps() -> Iterator[Step]:
         payload = requests[-1].messages[1].content
         assert payload is not None
+        parsed = _JSON.validate_json(payload)
+        choices = parsed["documentation_choices"]
+        assert isinstance(choices, list) and {"program": "getent", "topic": "operands"} in choices
         assert all(word in payload for word in ("CallExpr", "embedded_program", "filename", "getent"))
         assert all(word not in payload for word in ("opaque-program", "secret.csv", "custom-value"))
-        yield "search_documentation", {"program": "privatecli", "topic": "operands"}
+        assert all("fetch_documentation" not in str(tool["function"]) for tool in requests[-1].tools)
+        yield "search_documentation", {"program": "getent", "topic": "program"}
         bad = _feedback(requests[-1]).diagnostic
         assert bad is not None and bad.code == "documentation_scope"
         yield "search_documentation", {"program": "awk", "topic": "program"}
         discovery = _feedback(requests[-1]).documentation
-        assert discovery is not None and [hit.url for hit in discovery.hits] == [docs_url]
-        yield "fetch_documentation", {"search_receipt": discovery.receipt, "result": 1}
+        assert isinstance(discovery, DocumentationDiscovery) and [hit.url for hit in discovery.hits] == [docs_url]
+        yield "fetch_documentation", {"handle": discovery.hits[0].handle}
         page = _feedback(requests[-1]).documentation
-        assert page is not None and page.excerpt == page_text
+        assert isinstance(page, DocumentationPage) and page.excerpt == page_text
         yield "search_documentation", {"program": "getent", "topic": "operands"}
+        assert all("documentation" not in str(tool["function"]) for tool in requests[-1].tools)
+        assert all("page_evaluation" not in str(tool["function"]) for tool in requests[-1].tools)
         yield "add_rule", _package(train.rows[0].command, _FIRST_RULE, positive=train.rows[0].command)
         bad = _feedback(requests[-1]).diagnostic
         assert bad is not None and bad.code == "opaque_allow"
@@ -351,6 +364,79 @@ def test_capture_grounding_uses_shared_provider_without_raw_inputs(
         with pytest.raises(EvaluationError, match="grounding_budget_exhausted"):
             docs.search('{"program":"awk","topic":"program"}')
     assert len(calls) == 3
+
+
+def test_capture_proposes_reviewed_codec_shape_without_memorizing_inputs() -> None:
+    train = _train("base64 -w 513 private-input.bin", "base64 -w 623 another-source.csv",
+                   "base64 --unknown private-input.bin")
+    calls: list[_EvaluatorInput] = []
+    requests: list[_Request] = []
+
+    def matches(rule: NativeRule, command: str) -> bool:
+        words = command.split()
+        return (rule.capture_guarded and rule.capture_allow_shapes == (("base64", "-w", "@decimal", ""),)
+                and len(words) == 4 and words[:2] == ["base64", "-w"] and words[2].isdecimal())
+
+    def steps() -> Iterator[Step]:
+        payload = requests[-1].messages[1].content
+        assert payload is not None and all(
+            value not in payload for value in ("private-input.bin", "another-source.csv", "513", "623")
+        )
+        candidates = _JSON.validate_json(payload)["candidates"]
+        assert isinstance(candidates, list) and len(candidates) == 1
+        candidate = candidates[0]
+        assert isinstance(candidate, dict) and candidate["supporting_rows"] == ["train:0", "train:1"]
+        yield "propose_candidate", {
+            "candidate_id": candidate["id"], "source": _SOURCE, "rationale": "Encode one input with a wrap width.",
+        }
+        evaluation = _feedback(requests[-1])
+        assert evaluation.recorded == (_FIRST_RULE,) and evaluation.receipts[0].train_matches == 2
+        yield "finish", {"justification": "1"}
+        rejection = _feedback(requests[-1]).diagnostic
+        assert rejection is not None and rejection.code == "tool_input" and rejection.field == "justification"
+        yield "finish", {"justification": "Only the bounded wrap form is supported."}
+
+    result = capture_rules(_agent(steps(), requests), train, _client(calls, matches_rule=matches))
+
+    assert result.complete and result.batches[0].justification == "Only the bounded wrap form is supported."
+    (package,) = result.packages
+    assert package.rule.when == "argv.size() == 4 && argv[0] == 'base64' && argv[1] == '-w'"
+    assert {row.command.split()[2] for row in calls[0].rows if row.id.startswith("fixture:")} == {"12", "76"}
+    assert {row.command for call in calls[1:] for row in call.rows} == {
+        f"base64 -w {width} {filename}" for width in ("513", "623")
+        for filename in ("codebench-probe-notes.txt", "codebench-probe-record.csv")
+    }
+
+
+def test_capture_rejects_ast_candidate_that_disagrees_with_reviewed_train() -> None:
+    ask = _GOLD.model_copy(update={"action": "ask"})
+    train = _train(": > first.txt", ": > second.txt", ": > conflicting.txt")
+    train = train.model_copy(update={"rows": (*(
+        row.model_copy(update={"gold": ask}) for row in train.rows[:2]
+    ), train.rows[2])})
+    analyses: dict[str, AnalysisRow] = {}
+    for row in train.rows:
+        analysis = _simple_analysis(row.id, row.command)
+        assert analysis.analysis is not None
+        analyses[row.id] = analysis.model_copy(update={"analysis": analysis.analysis.model_copy(update={
+            "eligible": False, "nodes": (NativeNode(id=0, parent=-1, kind="Redirect", operator=">", start=2, end=8),),
+        })})
+    requests: list[_Request] = []
+
+    def steps() -> Iterator[Step]:
+        yield "propose_candidate", {
+            "candidate_id": "candidate-1", "source": _SOURCE, "rationale": "Check the reviewed output redirection.",
+        }
+        feedback = _feedback(requests[-1])
+        assert feedback.diagnostic is not None and feedback.diagnostic.code == "wrong_match"
+        assert feedback.receipts[0].train_wrong_matches == 1
+        yield "finish", {"justification": "The same redirect occurs under a conflicting label."}
+
+    result = capture_rules(
+        _agent(steps(), requests), train,
+        _client([], analyses, matches_rule=lambda rule, command: rule.scope == "ast" and " > " in command),
+    )
+    assert result.complete and not result.packages
 
 
 def test_first_capture_request_presents_full_shipped_guide_with_8192_output_tokens() -> None:
@@ -380,7 +466,7 @@ def test_capture_retries_provider_context_rejection_without_losing_latest_tool_p
     rule_id = _FIRST_RULE
     steps: tuple[Step, ...] = (
         ("add_rule", _package("syntax error", rule_id)),
-        ("page_evaluation", {"receipt": 42}),
+        ("add_rule", _package("true", rule_id)),
         ("finish", FinishInput(justification="No valid rules were proposed.")),
     )
     script = _agent(iter(steps))
@@ -403,10 +489,10 @@ def test_capture_retries_provider_context_rejection_without_losing_latest_tool_p
     feedback = retried.messages[-1].content
     assert feedback is not None
     diagnostic = Feedback.model_validate_json(feedback).diagnostic
-    assert diagnostic is not None and diagnostic.code == "unknown_receipt"
+    assert diagnostic is not None and diagnostic.code == "fixture_mismatch"
     assert run.request_sha256 == tuple(sha256(raw).hexdigest() for raw in attempts)
     assert [(failure.turn, failure.diagnostic.code) for failure in run.failures] == [
-        (1, "cel_compile"), (2, "unknown_receipt"), (3, "provider_context_limit"),
+        (1, "cel_compile"), (2, "fixture_mismatch"), (3, "provider_context_limit"),
     ]
 
 
@@ -576,7 +662,7 @@ def test_capture_turn_budget_forces_terminal_and_records_exhaustion() -> None:
     assert requests[-2].tool_choice == "required"
     assert requests[-1].tool_choice == {"type": "function", "function": {"name": "finish"}}
     assert len(requests[-1].tools) == 1
-    assert tuple(item.code for item in batch.run.diagnostics) == ("unknown_receipt",) * 7 + ("unknown_tool",) * 2
+    assert tuple(item.code for item in batch.run.diagnostics) == ("unknown_tool",) * 9
     assert tuple(item.turn for item in batch.run.failures) == tuple(range(1, 10))
 
 

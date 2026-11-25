@@ -243,3 +243,36 @@ func TestLearnedASTPredicateUsesNoCLITokens(t *testing.T) {
 		})
 	}
 }
+
+func TestLearnedCodecAllowRequiresReadOnlyStaticShape(t *testing.T) {
+	bundle := strings.Replace(fmt.Sprintf(bundleTemplate, "true"), `"when"`,
+		`"capture_guarded":true, "capture_allow_shapes":[["base64","-w","@decimal",""],`+
+			`["base64","--decode",""],["base32","-w","@decimal","-"]], "when"`, 1)
+	rows := `[
+		{"id":"wrapped","command":"base64 -w 0 one.bin"},
+		{"id":"renamed","command":"base64 -w 76 other.csv"},
+		{"id":"decode","command":"base64 --decode other.csv"},
+		{"id":"stdin","command":"base32 -w 12 -"},
+		{"id":"arbitrary-number","command":"base64 -w bogus one.bin"},
+		{"id":"oversized-number","command":"base64 -w 99999 one.bin"},
+		{"id":"dynamic","command":"base64 -w \"$WIDTH\" one.bin"},
+		{"id":"wildcard","command":"base64 -w 76 *.bin"},
+		{"id":"quoted-wildcard","command":"base64 -w 76 '*.bin'"},
+		{"id":"unknown","command":"base64 -w 76 --output=out.bin"},
+		{"id":"redirect","command":"base64 -w 76 one.bin > out.bin"},
+		{"id":"execute","command":"base64 --decode one.bin | bash"}
+	]`
+	rec := post(t, requestBody(testVersion, bundle, rows), http.StatusOK)
+	var got evaluation
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Results) != 12 {
+		t.Fatalf("expected all test rows: %s", rec.Body)
+	}
+	for index, row := range got.Results {
+		if row.Error != nil || (row.Result.Status == "matched") != (index < 4) {
+			t.Fatalf("unexpected codec decision: %+v", row)
+		}
+	}
+}
