@@ -1,5 +1,27 @@
 # CodeBench pipeline architecture
 
+### Inspecting a run in MLflow
+
+Open the [local MLflow dashboard](http://localhost:5000), select the **CodeBench**
+experiment, and open **Traces**. A completed Dagster run appears as one trace.
+The **Input** and **Output** previews show the job name and execution status,
+not the job's actual inputs or outputs. Find `capture_rules` and check its Dagster run ID
+to distinguish rematerializations of the same partition. Expand a step to
+inspect its agent invocations. Each visit to a LangGraph node has its own
+timing and status: a `complete → tools → complete` sequence means the model
+resumed after the tool step. A step that did not invoke an agent has no such
+children. The adaptive discovery planner uses `choose` and `search`.
+
+Dagster is the source of truth while a run is in progress. The trace observer
+reads persisted events after termination; it does not run assets, enable
+materialization, or make an MLflow outage a reason to repeat a model call.
+Traces identify execution steps, not their contents: look in the authorized
+pipeline evidence, not MLflow, for commands, prompts or provider responses.
+The `mlflow_run_trace_projection` sensor checks for terminal runs at a minimum
+interval of 15 seconds. Its first tick starts a new observation window; it
+does not backfill runs from before tracing was enabled. A failed delivery
+keeps the unacknowledged run pending. Run and span IDs remain stable on replay.
+
 For independent category-partitioned imports that do not run collection or labeling,
 see [Loading pinned train and test splits](split-loading.md).
 

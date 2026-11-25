@@ -65,6 +65,7 @@ from codebench_pipeline.rules_settings import rules_mappings
 from codebench_pipeline.stage_descriptions import describe_stage
 from codebench_pipeline.stage_implementation import ImplementationSource
 from codebench_pipeline.storage import IntegrityError, fingerprint
+from codebench_pipeline.trace_sensor import mlflow_trace_sensor
 from codebench_pipeline.train_assets import (
     TRAIN_JOBS,
     TRAIN_MAPPINGS,
@@ -286,6 +287,7 @@ def build_definitions(home: Path) -> Definitions:
             ),
         ],
         sensors=[
+            mlflow_trace_sensor(),
             AutomationConditionSensorDefinition(
                 name="dataset_build_requests",
                 target=automation_selection,
