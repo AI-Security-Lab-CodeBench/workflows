@@ -32,12 +32,14 @@ type Labels struct {
 }
 
 type Rule struct {
-	ID        string   `json:"id"`
-	Scope     string   `json:"scope,omitempty"`
-	When      string   `json:"when"`
-	Labels    Labels   `json:"labels"`
-	Rationale string   `json:"rationale"`
-	Sources   []string `json:"sources"`
+	ID                 string     `json:"id"`
+	Scope              string     `json:"scope,omitempty"`
+	When               string     `json:"when"`
+	Labels             Labels     `json:"labels"`
+	Rationale          string     `json:"rationale"`
+	Sources            []string   `json:"sources"`
+	CaptureAllowShapes [][]string `json:"capture_allow_shapes,omitempty"`
+	CaptureGuarded     bool       `json:"capture_guarded,omitempty"`
 }
 
 type Bundle struct {

@@ -86,6 +86,11 @@ func Compile(data []byte) (*Engine, error) {
 		if !ast.OutputType().IsExactType(cel.BoolType) {
 			return nil, &RuleError{RuleID: rule.ID, Field: "when", Detail: "must return bool"}
 		}
+		if rule.CaptureGuarded {
+			if err := validateCaptureExpression(rule, ast); err != nil {
+				return nil, err
+			}
+		}
 		program, err := env.Program(ast, cel.CostLimit(10000), cel.InterruptCheckFrequency(32))
 		if err != nil {
 			return nil, &RuleError{RuleID: rule.ID, Field: "when", Detail: err.Error()}
@@ -96,13 +101,24 @@ func Compile(data []byte) (*Engine, error) {
 }
 
 var (
-	categoryCodePattern = regexp.MustCompile(`^CAT-[1-9][0-9]*$`)
-	riskCodePattern     = regexp.MustCompile(`^CAT-[1-9][0-9]*\.[1-9][0-9]*$`)
+	categoryCodePattern   = regexp.MustCompile(`^CAT-[1-9][0-9]*$`)
+	riskCodePattern       = regexp.MustCompile(`^CAT-[1-9][0-9]*\.[1-9][0-9]*$`)
+	captureProgramPattern = regexp.MustCompile(`^[a-z][a-z0-9-]{0,31}$`)
 )
 
 func validateRule(rule Rule, seen map[string]bool) error {
 	if !slices.Contains([]string{"", "simple", "ast"}, rule.Scope) {
 		return &RuleError{RuleID: rule.ID, Field: "scope", Detail: "must be simple or ast"}
+	}
+	if len(rule.CaptureAllowShapes) > 0 {
+		if rule.Scope == "ast" || rule.Labels.Action != "allow" || len(rule.CaptureAllowShapes) > 16 {
+			return &RuleError{RuleID: rule.ID, Field: "capture_allow_shapes", Detail: "requires a simple allow and at most 16 positive shapes"}
+		}
+		for _, shape := range rule.CaptureAllowShapes {
+			if len(shape) == 0 || len(shape) > 32 || !captureProgramPattern.MatchString(shape[0]) {
+				return &RuleError{RuleID: rule.ID, Field: "capture_allow_shapes", Detail: "expected a bare program name and at most 31 argument roles"}
+			}
+		}
 	}
 	if rule.ID == "" || seen[rule.ID] {
 		return &RuleError{RuleID: rule.ID, Field: "id", Detail: "missing or duplicate rule ID"}

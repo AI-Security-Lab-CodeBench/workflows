@@ -6,6 +6,7 @@ type RuleError struct {
 	RuleID string
 	Field  string
 	Detail string
+	Code   string
 }
 
 func (e *RuleError) Error() string {

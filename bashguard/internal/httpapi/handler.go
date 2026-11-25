@@ -50,6 +50,24 @@ type rowResult struct {
 	Error  *diagnostic   `json:"error,omitempty"`
 }
 
+type analysisRow struct {
+	ID       rowID         `json:"id"`
+	Analysis *analysisView `json:"analysis,omitempty"`
+	Error    *diagnostic   `json:"error,omitempty"`
+}
+
+type analysisView struct {
+	Eligible bool           `json:"eligible"`
+	Reasons  []string       `json:"reasons"`
+	Nodes    []analyze.Node `json:"nodes"`
+	Calls    []analyze.Call `json:"calls"`
+}
+
+type analysisResponse struct {
+	identity
+	Results []analysisRow `json:"results"`
+}
+
 func New(version RuntimeVersion) http.Handler {
 	return &handler{version: version, batches: make(chan struct{}, 4)}
 }
@@ -59,7 +77,7 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch r.URL.Path {
 	case "/healthz", "/v1/version":
 		method = http.MethodGet
-	case "/v1/evaluate":
+	case "/v1/evaluate", "/v1/analyze":
 		method = http.MethodPost
 	default:
 		h.fail(w, http.StatusNotFound, diagnostic{Code: "not_found", Message: "unknown endpoint"})
@@ -74,10 +92,6 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, identity{RuntimeVersion: h.version})
 		return
 	}
-	h.evaluate(w, r)
-}
-
-func (h *handler) evaluate(w http.ResponseWriter, r *http.Request) {
 	select {
 	case h.batches <- struct{}{}:
 		defer func() { <-h.batches }()
@@ -85,16 +99,72 @@ func (h *handler) evaluate(w http.ResponseWriter, r *http.Request) {
 		h.fail(w, http.StatusServiceUnavailable, diagnostic{Code: "busy", Message: "evaluation capacity reached"})
 		return
 	}
+	if r.URL.Path == "/v1/analyze" {
+		h.analyze(w, r)
+		return
+	}
+	h.evaluate(w, r)
+}
+
+func (h *handler) analyze(w http.ResponseWriter, r *http.Request) {
+	var batch analysisInput
+	status, issue := decodeRequest(http.MaxBytesReader(w, r.Body, maxRequestBytes), &batch)
+	if issue != nil {
+		h.fail(w, status, *issue)
+		return
+	}
+	if issue := requireVersion(batch.RequiredRuntimeVersion); issue != nil {
+		h.fail(w, http.StatusBadRequest, *issue)
+		return
+	}
+	if !h.checkVersion(w, batch.RequiredRuntimeVersion) {
+		return
+	}
+	if issue := validateRows(batch.Rows, 8); issue != nil {
+		h.fail(w, http.StatusBadRequest, *issue)
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
+	results := make([]analysisRow, 0, len(batch.Rows))
+	for _, row := range batch.Rows {
+		if ctx.Err() != nil {
+			h.fail(w, http.StatusServiceUnavailable, diagnostic{Code: "analysis_timeout", Message: "batch did not finish", Phase: "analyze"})
+			return
+		}
+		doc, err := analyze.Analyze(*row.Command)
+		result := analysisRow{ID: row.ID}
+		if err != nil {
+			result.Error = &diagnostic{Code: "invalid_command", Message: "native parser could not analyze this row", Phase: "analyze"}
+			if problem, ok := errors.AsType[*analyze.Error](err); ok {
+				setBashPosition(result.Error, problem)
+			}
+		} else {
+			result.Analysis = &analysisView{Eligible: doc.Eligible, Reasons: doc.Reasons, Nodes: doc.Nodes, Calls: doc.Calls}
+		}
+		results = append(results, result)
+	}
+	writeJSON(w, http.StatusOK, analysisResponse{identity: identity{RuntimeVersion: h.version}, Results: results})
+}
+
+func (h *handler) checkVersion(w http.ResponseWriter, version RuntimeVersion) bool {
+	if version == h.version {
+		return true
+	}
+	h.fail(w, http.StatusConflict, diagnostic{
+		Code: "runtime_version_mismatch", Message: "requested runtime does not match the running executable",
+		Phase: "version", Field: "required_runtime_version",
+	})
+	return false
+}
+
+func (h *handler) evaluate(w http.ResponseWriter, r *http.Request) {
 	batch, status, issue := decodeBatch(http.MaxBytesReader(w, r.Body, maxRequestBytes))
 	if issue != nil {
 		h.fail(w, status, *issue)
 		return
 	}
-	if batch.RequiredRuntimeVersion != h.version {
-		h.fail(w, http.StatusConflict, diagnostic{
-			Code: "runtime_version_mismatch", Message: "requested runtime does not match the running executable",
-			Phase: "version", Field: "required_runtime_version",
-		})
+	if !h.checkVersion(w, batch.RequiredRuntimeVersion) {
 		return
 	}
 	if issue := batch.validate(); issue != nil {
@@ -109,6 +179,9 @@ func (h *handler) evaluate(w http.ResponseWriter, r *http.Request) {
 		issue := diagnostic{Code: "invalid_bundle", Message: err.Error(), Phase: "compile", Field: "bundle"}
 		if rule, ok := errors.AsType[*policy.RuleError](err); ok {
 			issue.RuleID, issue.Field, issue.Message = rule.RuleID, rule.Field, rule.Detail
+			if rule.Code != "" {
+				issue.Code = rule.Code
+			}
 		}
 		h.fail(w, http.StatusUnprocessableEntity, issue)
 		return
@@ -155,7 +228,7 @@ func (h *handler) fail(w http.ResponseWriter, status int, issue diagnostic) {
 	writeJSON(w, status, failure{identity: identity{RuntimeVersion: h.version}, Error: issue})
 }
 
-func writeJSON[T identity | failure | evaluation](w http.ResponseWriter, status int, value T) {
+func writeJSON[T identity | failure | evaluation | analysisResponse](w http.ResponseWriter, status int, value T) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	if err := json.NewEncoder(w).Encode(value); err != nil {

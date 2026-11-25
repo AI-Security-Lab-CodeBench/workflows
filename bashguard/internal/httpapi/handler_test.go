@@ -111,3 +111,135 @@ func post(t *testing.T, body string, status int) *httptest.ResponseRecorder {
 	}
 	return rec
 }
+
+func TestAnalyzeReturnsNativeSyntaxWithoutRunningCommand(t *testing.T) {
+	body := fmt.Sprintf(`{"required_runtime_version":%q,"rows":[
+		{"id":"compound","command":"cat -- 'report.txt' > result.txt"},
+		{"id":"literal","command":"awk -F , -- 'NF > 0' 'report.txt'"},
+		{"id":"invalid","command":"cat ("}
+	]}`, testVersion)
+	rec := httptest.NewRecorder()
+	New(testVersion).ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/analyze", strings.NewReader(body)))
+	var batch analysisResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &batch); err != nil {
+		t.Fatal(err)
+	}
+	if rec.Code != http.StatusOK || batch.RuntimeVersion != testVersion || len(batch.Results) != 3 {
+		t.Fatalf("incorrect pinned analysis: %s", rec.Body)
+	}
+	compound, literal, invalid := batch.Results[0], batch.Results[1], batch.Results[2]
+	if compound.Analysis == nil || compound.Analysis.Eligible || compound.ID != "compound" {
+		t.Fatalf("expected ineligible shell structure: %+v", compound)
+	}
+	foundRedirect := false
+	for _, node := range compound.Analysis.Nodes {
+		foundRedirect = foundRedirect || node.Kind == "Redirect" && node.Operator == ">"
+	}
+	if !foundRedirect || literal.Analysis == nil || !literal.Analysis.Eligible ||
+		len(literal.Analysis.Calls) != 1 || len(literal.Analysis.Calls[0].Words) != 6 ||
+		literal.Analysis.Calls[0].Words[4].Value != "NF > 0" {
+		t.Fatalf("expected native redirect and literal awk word boundaries: %s", rec.Body)
+	}
+	if invalid.Error == nil || invalid.Error.Code != "invalid_command" {
+		t.Fatalf("expected typed parser error: %+v", invalid)
+	}
+}
+
+func TestLearnedAllowIsRestrictedToSupportedPositiveShape(t *testing.T) {
+	bundle := strings.Replace(fmt.Sprintf(bundleTemplate, "true"), `"when"`, `"capture_allow_shapes":[["cat","-n","--",""]], "when"`, 1)
+	rec := post(t, requestBody(testVersion, bundle, `[
+		{"id":"first","command":"cat -n -- 'one report.txt'"},
+		{"id":"rename","command":"cat -n -- -two.csv"},
+		{"id":"no-barrier","command":"cat -n -two.csv"},
+		{"id":"stdin","command":"cat -n -- -"},
+		{"id":"independent","command":"pwd -P"},
+		{"id":"opaque","command":"awk -- 'NF > 0' report.txt"}
+	]`), http.StatusOK)
+	var batch evaluation
+	if err := json.Unmarshal(rec.Body.Bytes(), &batch); err != nil {
+		t.Fatal(err)
+	}
+	if len(batch.Results) != 6 {
+		t.Fatalf("unexpected native results: %s", rec.Body)
+	}
+	for index, row := range batch.Results {
+		if row.Error != nil || (len(row.Result.RuleIDs) > 0) != (index < 2) {
+			t.Fatalf("shape guard gave unexpected decision for %s: %s", row.ID, rec.Body)
+		}
+	}
+}
+
+func TestLearnedPredicateRejectsRawEqualityWithoutDeclaredTokens(t *testing.T) {
+	for _, when := range []string{
+		`source == 'cat -n'`,
+		`argv[0] == 'unregistered-tool'`,
+		`argv.size() > 1 && argv[1] == 'custom-database-name'`,
+		`argv.size() > 2 && argv[2] == r"NF > 0"`,
+		`argv == ['cat', '-n', '--', 'sample.csv']`,
+	} {
+		t.Run(when, func(t *testing.T) {
+			bundle := strings.Replace(fmt.Sprintf(bundleTemplate, when), `"when"`,
+				`"capture_guarded":true, "when"`, 1)
+			rec := post(t, requestBody(testVersion, bundle, `[{"id":"row","command":"cat -n"}]`), http.StatusUnprocessableEntity)
+			var rejected failure
+			if err := json.Unmarshal(rec.Body.Bytes(), &rejected); err != nil {
+				t.Fatal(err)
+			}
+			if rejected.Error.Code != "raw_literal_overfit" {
+				t.Fatalf("expected explicit learned policy rejection: %s", rec.Body)
+			}
+		})
+	}
+}
+
+func TestLearnedPredicateAcceptsRuntimeVocabulary(t *testing.T) {
+	bundle := strings.Replace(fmt.Sprintf(bundleTemplate, `argv.size() == 4 && argv[0] == 'cat' && argv[1] == '-n' && argv[2] == '--'`),
+		`"when"`, `"capture_guarded":true, "when"`, 1)
+	rec := post(t, requestBody(testVersion, bundle, `[{"id":"row","command":"cat -n -- renamed.csv"}]`), http.StatusOK)
+	var accepted evaluation
+	if err := json.Unmarshal(rec.Body.Bytes(), &accepted); err != nil {
+		t.Fatal(err)
+	}
+	if len(accepted.Results) != 1 || len(accepted.Results[0].Result.RuleIDs) != 1 {
+		t.Fatalf("expected structural matcher to survive compiler gate: %s", rec.Body)
+	}
+}
+
+func TestLearnedASTPredicateUsesNoCLITokens(t *testing.T) {
+	const structural = `ast.Stmts[0].Redirs.exists(r, operator(r) == '>')`
+	const raw = `ast.Stmts[0].Redirs.exists(r, syntax.Lit(r.Word.Parts[0]).Value == 'report.txt')`
+	const rows = `[{"id":"redirect","command":"cat >report.txt"},{"id":"near-miss","command":"cat <renamed.txt"}]`
+	for _, test := range []struct {
+		name, predicate, fields string
+		status                  int
+	}{
+		{"learned structural", structural, `"capture_guarded":true,`, http.StatusOK},
+		{"learned raw", raw, `"capture_guarded":true,`, http.StatusUnprocessableEntity},
+		{"legacy authored raw", raw, "", http.StatusOK},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			bundle := strings.Replace(fmt.Sprintf(bundleTemplate, test.predicate), `"when"`,
+				test.fields+` "scope":"ast", "when"`, 1)
+			bundle = strings.Replace(bundle, `"action":"allow"`, `"action":"ask"`, 1)
+			rec := post(t, requestBody(testVersion, bundle, rows), test.status)
+			if test.status == http.StatusUnprocessableEntity {
+				var rejected failure
+				if err := json.Unmarshal(rec.Body.Bytes(), &rejected); err != nil {
+					t.Fatal(err)
+				}
+				if rejected.Error.Code != "raw_literal_overfit" {
+					t.Fatalf("expected raw AST rejection: %s", rec.Body)
+				}
+				return
+			}
+			var accepted evaluation
+			if err := json.Unmarshal(rec.Body.Bytes(), &accepted); err != nil {
+				t.Fatal(err)
+			}
+			if len(accepted.Results) != 2 || accepted.Results[0].Result.Status != "matched" ||
+				accepted.Results[1].Result.Status != "abstain" {
+				t.Fatalf("expected only the output redirect to match: %s", rec.Body)
+			}
+		})
+	}
+}

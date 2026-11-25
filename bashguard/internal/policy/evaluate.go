@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 
 	"codebench/bashguard/internal/analyze"
 	"github.com/google/cel-go/common/types"
@@ -45,6 +46,10 @@ func (e *Engine) ClassifyWithDiagnostics(ctx context.Context, source string, fac
 	var matches []Rule
 	for _, compiled := range e.rules {
 		if compiled.rule.Scope != "ast" && !document.Eligible {
+			continue
+		}
+		if shapes := compiled.rule.CaptureAllowShapes; len(shapes) != 0 &&
+			!slices.ContainsFunc(shapes, func(shape []string) bool { return matchesCaptureShape(argv, shape) }) {
 			continue
 		}
 		if ctx.Err() != nil {
@@ -104,4 +109,25 @@ func (e *Engine) ClassifyWithDiagnostics(ctx context.Context, source string, fac
 		}
 	}
 	return result, nil
+}
+
+func matchesCaptureShape(argv, shape []string) bool {
+	if len(argv) != len(shape) {
+		return false
+	}
+	options := true
+	for index, token := range shape {
+		value := argv[index]
+		if token == "" {
+			if value == "" || value == "-" || options && strings.HasPrefix(value, "-") {
+				return false
+			}
+		} else if value != token {
+			return false
+		}
+		if token == "--" {
+			options = false
+		}
+	}
+	return true
 }

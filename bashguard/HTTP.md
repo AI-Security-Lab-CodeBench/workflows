@@ -9,6 +9,13 @@ on the internal `backend` network. It has no published port or credentials.
 
 - `GET /healthz` and `GET /v1/version` return
   `{"runtime_version":"sha256:<lowercase executable SHA-256>"}`.
+- `POST /v1/analyze` takes `required_runtime_version` and `rows` with the same row
+  schema as evaluation, but no bundle and at most eight rows. It returns the pin
+  and ordered `{id,analysis}` or `{id,error}` outcomes. Analysis includes native
+  literal eligibility, structural nodes (ID, parent, kind, operator and UTF-8
+  byte ranges), and parsed call words. This endpoint is private: call words
+  include raw values for local role projection and counterfactual construction.
+  Do not forward its unprojected response to a model, provider or log.
 - `POST /v1/evaluate` takes one UTF-8 JSON document:
   `{"required_runtime_version":"sha256:…","bundle":{…},"rows":[{"id":"row-1","command":"pwd -P","context":{"environment":"unknown","approval":"unknown"}}]}`.
   The bundle is the native version-1 bundle object, not a string, file path, or
@@ -88,3 +95,13 @@ environment variable can set the returned identity. Retain the image and its
 recorded image ID (`docker image save` to the release artifact store, or an
 immutable registry digest) with the runtime pin. Replays should load/use that
 artifact, not rebuild it: Go toolchain or target changes can change the pin.
+
+Masked capture requires this binary's `/v1/analyze`, learned-allow shape guard
+and checked CEL literal gate. Build and publish the new immutable image using
+the above procedure.
+Pair the image with the new `runtime_version` and the SHA-256 of the exact
+`business-configs/bashguard/guide.json` bytes in the rule registration. Confirm
+`/v1/version` and `/v1/analyze` against the pinned image before enabling capture.
+Old attempts do not resume under the new runtime, guide, or masked batch
+descriptor; keep old images for reproducing old evidence rather than overriding
+the pins.
