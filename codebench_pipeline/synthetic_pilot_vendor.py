@@ -133,12 +133,16 @@ class PilotBackend:
         mode = self.config.backend.mode
         response_format: JsonValue = {"type": "json_object"}
         if mode == "plain":
+            schema = Candidates.model_json_schema()
+            properties = schema["$defs"]["Candidate"]["properties"]
+            properties["command"]["enum"] = sorted(messages.commands)
+            properties["util"]["enum"] = sorted({command.split(" ", 1)[0] for command in messages.commands})
             response_format = {
                 "type": "json_schema",
                 "json_schema": {
                     "name": "pilot_candidates",
                     "strict": True,
-                    "schema": strict_schema(_JSON.validate_python(Candidates.model_json_schema())),
+                    "schema": strict_schema(_JSON.validate_python(schema)),
                 },
             }
         body = {

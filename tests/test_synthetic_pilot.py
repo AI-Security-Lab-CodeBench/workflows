@@ -4,18 +4,17 @@ import os
 import subprocess
 import tempfile
 import unittest
-from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
-from threading import Thread
 from typing import Final
 from unittest.mock import patch
 
 from pydantic import ValidationError
+from synthetic_pilot_fixtures import completion, recording_chat_endpoint
 
 from codebench_pipeline.inference_capacity import CapacityConfig, CapacityUnavailable
 from codebench_pipeline.openai_transport import HTTPResponse
 from codebench_pipeline.synthetic_pilot import PilotConfiguration, execute_pilot, run_pilot
-from codebench_pipeline.synthetic_pilot_policy import Candidates, PilotError, Seed, VendorConfig
+from codebench_pipeline.synthetic_pilot_policy import OPERATIONS, PilotError, Seed, VendorConfig
 from codebench_pipeline.synthetic_pilot_vendor import ENV_PREFIX, PilotBackend, Runtime, ScopedMessages
 
 _ENDPOINT: Final = "http://127.0.0.1:1/v1"
@@ -40,30 +39,6 @@ _CONFIG: Final = VendorConfig.model_validate(
 _PLAIN_CONFIG: Final = VendorConfig.model_validate(
     {**_CONFIG.model_dump(), "backend": {"mode": "plain", "timeout": 1}}
 )
-
-
-def completion(command: str, util: str = "terraform", class_name: str = "allow") -> HTTPResponse:
-    content = json.dumps(
-        {
-            "candidates": [
-                {
-                    "command": command,
-                    "util": util,
-                    "description": "untrusted free text",
-                    "class": class_name,
-                    "severity": "low",
-                }
-            ]
-        }
-    )
-    envelope = {
-        "id": "fixture",
-        "model": "local-alias",
-        "choices": [
-            {"index": 0, "finish_reason": "stop", "message": {"role": "assistant", "content": content}}
-        ],
-    }
-    return HTTPResponse(json.dumps(envelope).encode(), None)
 
 
 class SyntheticPilotTests(unittest.TestCase):
@@ -177,52 +152,64 @@ class SyntheticPilotTests(unittest.TestCase):
 
         self.assertFalse(self.runtime.output_dir.exists())
 
-    def test_plain_mode_calls_openai_endpoint_without_a_capacity_ledger(self) -> None:
+    def test_plain_mode_sends_seed_scoped_schema_and_fails_closed_without_retry(self) -> None:
         config_dir = self.prepare_vendor(_PLAIN_CONFIG)
-        expected_format = {
-            "type": "json_schema",
-            "json_schema": {
-                "name": "pilot_candidates",
-                "strict": True,
-                "schema": Candidates.model_json_schema(),
-            },
-        }
+        response = completion("terraform validate")
 
-        class ChatEndpoint(BaseHTTPRequestHandler):
-            def do_POST(self) -> None:
-                body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
-                if (
-                    self.path != "/v1/chat/completions"
-                    or self.headers.get("Authorization") != "Bearer local-test"
-                    or body.get("max_tokens") != 256
-                    or body.get("response_format") != expected_format
-                    or "max_completion_tokens" in body
-                    or "rid" in body
-                ):
-                    self.send_error(400)
-                    return
-                self.send_response(200)
-                self.end_headers()
-                self.wfile.write(completion("terraform validate").body)
+        with recording_chat_endpoint(lambda: response) as (endpoint, requests):
+            variables = {
+                ENV_PREFIX + "ENDPOINT": endpoint,
+                ENV_PREFIX + "MODEL": self.runtime.model,
+                ENV_PREFIX + "VENDOR_DIR": str(self.runtime.vendor_dir),
+                ENV_PREFIX + "OUTPUT_DIR": str(self.runtime.output_dir),
+            }
+            with patch.dict(os.environ, variables, clear=True):
+                for risk in ("CAT-3.1", "CAT-3.3"):
+                    seed = _SEED.model_copy(update={"risk": risk})
+                    (config_dir / "seeds.jsonl").write_text(seed.model_dump_json() + "\n")
+                    commands = {command for command, family in OPERATIONS.items() if family == risk}
+                    utilities = {command.split()[0] for command in commands}
+                    allowed = min(commands)
+                    other = min(OPERATIONS.keys() - commands)
+                    for command, util, accepted in (
+                        (allowed, allowed.split()[0], True),
+                        (other, other.split()[0], False),
+                        (allowed, other.split()[0], False),
+                    ):
+                        with self.subTest(risk=risk, command=command, util=util):
+                            requests.clear()
+                            response = completion(command, util)
+                            previous_datasets = set(self.runtime.output_dir.rglob("dataset.csv"))
+                            if accepted:
+                                result = run_pilot(config_dir)
+                                self.assertEqual((result.run_dir / "dataset.csv").read_text(), allowed)
+                            else:
+                                with self.assertRaisesRegex(
+                                    PilotError, "Vendor pilot exited with status 1"
+                                ) as error:
+                                    run_pilot(config_dir)
+                                log = Path(str(error.exception).split("; see ", 1)[1])
+                                self.assertIn("command outside the reviewed inspection forms", log.read_text())
+                                self.assertEqual(
+                                    set(self.runtime.output_dir.rglob("dataset.csv")), previous_datasets
+                                )
+                            (request,) = requests
+                            body = json.loads(request)
+                            self.assertEqual(body["max_tokens"], 256)
+                            self.assertNotIn("max_completion_tokens", body)
+                            self.assertNotIn("rid", body)
+                            response_format = body["response_format"]
+                            self.assertEqual(response_format["type"], "json_schema")
+                            structured = response_format["json_schema"]
+                            self.assertEqual(structured["name"], "pilot_candidates")
+                            self.assertIs(structured["strict"], True)
+                            schema = structured["schema"]
+                            candidate = schema["$defs"]["Candidate"]
+                            self.assertIs(schema["additionalProperties"], False)
+                            self.assertIs(candidate["additionalProperties"], False)
+                            self.assertEqual(set(candidate["properties"]["command"]["enum"]), commands)
+                            self.assertEqual(set(candidate["properties"]["util"]["enum"]), utilities)
 
-        with HTTPServer(("127.0.0.1", 0), ChatEndpoint) as server:
-            worker = Thread(target=server.serve_forever)
-            worker.start()
-            try:
-                variables = {
-                    ENV_PREFIX + "ENDPOINT": f"http://127.0.0.1:{server.server_port}/v1/",
-                    ENV_PREFIX + "MODEL": self.runtime.model,
-                    ENV_PREFIX + "VENDOR_DIR": str(self.runtime.vendor_dir),
-                    ENV_PREFIX + "OUTPUT_DIR": str(self.runtime.output_dir),
-                    ENV_PREFIX + "API_KEY": "local-test",
-                }
-                with patch.dict(os.environ, variables, clear=True):
-                    result = run_pilot(config_dir)
-            finally:
-                server.shutdown()
-                worker.join()
-
-        self.assertEqual((result.run_dir / "dataset.csv").read_text(), "terraform validate")
         self.assertEqual(list(self.runtime.output_dir.rglob("capacity")), [])
 
     def test_undeclared_backend_mode_cannot_disable_capacity_guard(self) -> None:
