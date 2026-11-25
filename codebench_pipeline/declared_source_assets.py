@@ -111,6 +111,7 @@ def declared_source_assets(branch: CollectionBranch) -> list[AssetsDefinition]:
                         labeling_runtime.credential(key_env) if key_env is not None else None,
                         settings.taxonomy,
                         capacity,
+                        reasoning_effort=inference.reasoning_effort,
                     )
                 transport = KeenableTransport(
                     KeenableCredentials.bind(keenable_credential.api_key, labeling_runtime.credential),

@@ -59,6 +59,7 @@ from codebench_pipeline.live_grounding import LiveGrounding, LiveReceipt, PageFe
 from codebench_pipeline.model_config import ModelConfig
 from codebench_pipeline.models import SemanticSnippet
 from codebench_pipeline.openai_transport import complete as plain_complete
+from codebench_pipeline.openai_transport import reasoning_template_kwargs
 from codebench_pipeline.storage import IntegrityError, digest, fingerprint
 from scripts.dataset_schema import SECRET_PATTERNS
 
@@ -209,10 +210,9 @@ class _Conversation:
         }
         if model.temperature is not None:
             body["temperature"] = model.temperature
-        if config.reasoning_effort == "none":
-            body["chat_template_kwargs"] = {"enable_thinking": False}
-        elif config.reasoning_effort is not None:
-            body["chat_template_kwargs"] = {"reasoning_effort": config.reasoning_effort}
+        template_kwargs = reasoning_template_kwargs(config.reasoning_effort)
+        if template_kwargs is not None:
+            body["chat_template_kwargs"] = template_kwargs
         elif (
             config.inference_mode == "guarded"
             and self.output_exhausted

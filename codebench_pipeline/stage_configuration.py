@@ -234,7 +234,6 @@ class DeclaredGlobalConfig(ConfigArtifact):
         if spec.declared_collection is None:
             raise IntegrityError("Registered dataset has no collection declarations")
         labeling = GuardedLabelingSettings.from_spec(spec)
-        transport = labeling.labeling_attempts
         return cls(
             dataset_id=spec.dataset_id,
             revision=spec.revision,
@@ -247,12 +246,7 @@ class DeclaredGlobalConfig(ConfigArtifact):
                 existing_datasets=collection_asset_settings(spec, "dataset"),
                 documentation_crawl=collection_asset_settings(spec, "documentation"),
                 keenable_use_cases=collection_asset_settings(spec, "keenable"),
-                discovery=DiscoveryInference(
-                    model=spec.discovery.resolve_model(transport.model, transport.batch.inference_mode),
-                    backend_revision=transport.batch.backend_revision,
-                    inference_mode=transport.batch.inference_mode,
-                    capacity=transport.batch.capacity,
-                ),
+                discovery=spec.discovery.resolve_inference(labeling.labeling_attempts),
                 merged_command_candidates=DeclaredMergeConfig(
                     merged_command_candidates=spec.declared_collection.merge_config
                 ),

@@ -77,6 +77,14 @@ class HTTPResponse:
     request_id: str | None
 
 
+def reasoning_template_kwargs(effort: str | None) -> dict[str, JsonValue] | None:
+    if effort is None:
+        return None
+    if effort == "none":
+        return {"enable_thinking": False}
+    return {"reasoning_effort": effort}
+
+
 def complete(url: str, body: bytes, key: str | None, timeout: float) -> HTTPResponse:
     headers = {"Content-Type": "application/json", "Accept": "application/json"}
     if key is not None:

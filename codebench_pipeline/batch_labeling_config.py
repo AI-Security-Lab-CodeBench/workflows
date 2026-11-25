@@ -12,11 +12,12 @@ BackendRevision = Annotated[str, Field(min_length=1)]
 InferenceMode = Literal["guarded", "plain"]
 RowConcurrency = Annotated[int, Field(ge=1, le=64)]
 MaximumGroundingTurns = Annotated[int, Field(ge=0)]
+ReasoningEffort = Annotated[str, Field(pattern=r"^(none|low|high|max)$")]
 
 
 class BatchPromptConfig(TypedConfig):
     instructions: str = Field(default="", max_length=16000)
-    reasoning_effort: str | None = Field(default=None, pattern=r"^(none|low|high|max)$")
+    reasoning_effort: ReasoningEffort | None = None
     row_concurrency: RowConcurrency = 8
     maximum_grounding_turns: MaximumGroundingTurns = 5
 

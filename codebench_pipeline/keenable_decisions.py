@@ -8,12 +8,13 @@ from typing import Literal
 from pydantic import Field, ValidationError
 
 from .agent_events import InferenceError, parse_json
+from .batch_labeling_config import ReasoningEffort
 from .inference_capacity import CapacityConfig, CapacityUnavailable, guarded_complete
 from .keenable_inspection import InspectionTaxonomy
 from .keenable_policy import Digest, KeenableError, Record, digest
 from .model_config import ModelConfig
 from .models import Identifier
-from .openai_transport import complete, parse_completion, strict_schema
+from .openai_transport import complete, parse_completion, reasoning_template_kwargs, strict_schema
 
 
 class DiscoveryDecision(Record):
@@ -53,6 +54,7 @@ class DiscoveryModel:
     key: str | None = field(repr=False)
     taxonomy: tuple[InspectionTaxonomy, ...]
     capacity: CapacityConfig | None = None
+    reasoning_effort: ReasoningEffort | None = field(default=None, kw_only=True)
 
     def choose(
         self, turn: DiscoveryTurn, evidence: Path, check_output: Callable[[bytes], None]
@@ -72,6 +74,7 @@ class DiscoveryModel:
         ]
         content = json.dumps({**turn.model_dump(mode="json"), "available": available})
         check_output(content.encode())
+        template_kwargs = reasoning_template_kwargs(self.reasoning_effort)
         body = json.dumps(
             {
                 "model": config.model,
@@ -106,6 +109,7 @@ class DiscoveryModel:
                 ),
                 "max_completion_tokens": config.max_output_tokens,
                 **({"temperature": config.temperature} if config.temperature is not None else {}),
+                **({"chat_template_kwargs": template_kwargs} if template_kwargs is not None else {}),
                 "stream": False,
             }
         ).encode()
