@@ -10,6 +10,7 @@ from unittest import TestCase
 from unittest.mock import patch
 from urllib.error import HTTPError
 
+from httpx import Request
 from jsonschema import Draft202012Validator
 from mcp.types import CallToolResult, TextContent
 from pydantic import JsonValue
@@ -27,7 +28,7 @@ from codebench_pipeline.batch_labeling_protocol import LiveSupport
 from codebench_pipeline.dataset_records import CandidateRecord
 from codebench_pipeline.grounding_tools import GroundingCredentials, LiveGroundingConfig
 from codebench_pipeline.inference_capacity import CapacityConfig, CapacityUnavailable, ContextBudgetExceeded
-from codebench_pipeline.keenable_provider import admit_tool_dispatch
+from codebench_pipeline.keenable_mcp import _before_request
 from codebench_pipeline.labeling_checkpoint_store import LabelingCheckpointCache
 from codebench_pipeline.model_config import ModelConfig
 from codebench_pipeline.openai_transport import HTTPResponse
@@ -141,7 +142,18 @@ def live_mcp_fixture(
     class Session:
         async def call_tool(self, name: str, arguments: dict) -> CallToolResult:
             if admit:
-                await admit_tool_dispatch()
+                await _before_request(
+                    Request(
+                        "POST",
+                        "https://api.keenable.test/mcp",
+                        json={
+                            "jsonrpc": "2.0",
+                            "id": len(calls) + 1,
+                            "method": "tools/call",
+                            "params": {"name": name, "arguments": arguments},
+                        },
+                    )
+                )
             calls.append((name, arguments))
             if name == "search_web_pages":
                 if arguments["query"] == "failed":

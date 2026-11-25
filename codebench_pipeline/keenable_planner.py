@@ -11,7 +11,7 @@ from langgraph.types import Command
 from pydantic import ValidationError
 
 from .agent_events import InferenceError, parse_json
-from .agent_trace import CallOutcome, llm_call, record_graph
+from .agent_trace import CallOutcome, record_graph
 from .inference_capacity import CapacityConfig, CapacityQuarantined, guarded_complete
 from .keenable_ledger import Ledger, SlotIdentity
 from .keenable_policy import (
@@ -27,6 +27,7 @@ from .keenable_policy import (
 from .keenable_receipts import CallReceipt, Lead, SearchDecision, SearchFeedback, SearchPlanReceipt
 from .keenable_transport import search_payload
 from .openai_transport import complete, parse_completion
+from .producer_trace import capture_completion, completion_span
 
 _PROMPT: Final = (
     "Choose one available option ID to find additional distinct pages matching the available topics, "
@@ -139,10 +140,12 @@ class SearchPlanner:
                     self.endpoint, body, self.key, self.timeout_seconds, self.capacity, self.receipt_directory
                 ).body
             else:
-                with llm_call() as measured:
-                    raw = complete(
+                with completion_span(body, self.key) as measured:
+                    response = complete(
                         self.endpoint.rstrip("/") + "/chat/completions", body, self.key, self.timeout_seconds
-                    ).body
+                    )
+                    raw = response.body
+                    capture_completion(measured, response, self.key)
                 measured.record({"status": "rejected"})
             if len(raw) > receipt.reserved_bytes:
                 raise KeenableError("planner_response_budget")

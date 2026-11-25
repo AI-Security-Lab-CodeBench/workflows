@@ -6,6 +6,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from codebench_pipeline.agent_trace import ActionReceipt, GraphName, LlmName, ToolName
 from codebench_pipeline.models import Digest
+from codebench_pipeline.trace_payloads import CaptureFailure
 
 GRAPH_PREFIX: Final = "CODEBENCH_GRAPH_V1 "
 _GRAPH_ID: Final = re.compile(r"[0-9a-f]{12}4[0-9a-f]{3}[89ab][0-9a-f]{15}")
@@ -45,12 +46,21 @@ class _Timing(_GraphMetadata):
 
 class _MeasuredCall(_Timing):
     result: _Result | None = None
+    inputs: Digest | CaptureFailure | None = None
+    outputs: Digest | CaptureFailure | None = None
+
+
+class _ContextWindow(_GraphMetadata):
+    prompt_tokens: _Count
+    context_limit: _Count
+    output_budget: _Count
 
 
 class _LlmCall(_MeasuredCall):
     kind: Literal["llm"]
     name: LlmName
     label: ClassVar[str] = "LLM"
+    context_window: _ContextWindow | None = None
 
 
 class _ToolCall(_MeasuredCall):

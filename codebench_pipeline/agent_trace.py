@@ -4,9 +4,12 @@ from contextlib import AbstractContextManager, contextmanager
 from contextvars import Context, ContextVar
 from dataclasses import dataclass
 from functools import wraps
+from pathlib import Path
 from time import monotonic_ns, time_ns
 from typing import Final, Literal, NotRequired, TypedDict
 from uuid import uuid4
+
+from codebench_pipeline.trace_payloads import PAYLOAD_DIR, save_payload
 
 type GraphName = Literal["labeler", "rules_capture", "rules_dedup", "keenable_planner"]
 type LlmName = Literal["chat_completions"]
@@ -31,6 +34,7 @@ type _NodeName = Literal["complete", "tools", "choose", "search"]
 type _Status = Literal["ok", "error"]
 
 _LOG_INFO: Final = ContextVar[Callable[[str], None] | None]("graph_log_info", default=None)
+_STORE: Final = ContextVar[Path | None]("trace_payload_store", default=None)
 
 
 class ActionReceipt(TypedDict):
@@ -53,11 +57,20 @@ class _CallTiming(TypedDict):
     end_ns: int
     status: _Status
     result: NotRequired[ActionResult]
+    inputs: NotRequired[str]
+    outputs: NotRequired[str]
+
+
+class ModelContext(TypedDict):
+    prompt_tokens: int
+    context_limit: int
+    output_budget: int
 
 
 class _LlmCall(_CallTiming):
     kind: Literal["llm"]
     name: LlmName
+    context_window: NotRequired[ModelContext]
 
 
 class _ToolCall(_CallTiming):
@@ -94,11 +107,26 @@ class _ActiveNode:
 _ACTIVE_NODE: Final = ContextVar[_ActiveNode | None]("graph_active_node", default=None)
 
 
+def payloads_enabled() -> bool:
+    return _ACTIVE_NODE.get() is not None and _STORE.get() is not None
+
+
 @dataclass(slots=True)
 class CallOutcome:
     """Record verified results independently of transport or execution timing."""
 
     _entry: _Call | None = None
+    _store: Path | None = None
+
+    def output(self, value: object) -> None:
+        if self._entry is not None and self._store is not None:
+            self._entry["outputs"] = save_payload(self._store, value)
+
+    def context_window(self, *, prompt_tokens: int, context_limit: int, output_budget: int) -> None:
+        if self._entry is not None and self._entry["kind"] == "llm":
+            self._entry["context_window"] = ModelContext(
+                prompt_tokens=prompt_tokens, context_limit=context_limit, output_budget=output_budget
+            )
 
     def record(self, result: ActionResult) -> None:
         if self._entry is not None:
@@ -106,12 +134,15 @@ class CallOutcome:
 
 
 @contextmanager
-def _record_call(entry: _Call) -> Generator[CallOutcome]:
+def _record_call(entry: _Call, inputs: object) -> Generator[CallOutcome]:
     active = _ACTIVE_NODE.get()
     if active is None:
         yield CallOutcome()
         return
-    outcome = CallOutcome(_entry=entry)
+    store = _STORE.get()
+    outcome = CallOutcome(entry, store)
+    if store is not None and inputs is not None:
+        entry["inputs"] = save_payload(store, inputs)
     start = active.origin_ns + monotonic_ns()
     entry["start_ns"] = start
     entry["end_ns"] = start
@@ -123,12 +154,14 @@ def _record_call(entry: _Call) -> Generator[CallOutcome]:
         entry["end_ns"] = active.origin_ns + monotonic_ns()
 
 
-def llm_call() -> AbstractContextManager[CallOutcome]:
-    return _record_call(_LlmCall(kind="llm", name="chat_completions", start_ns=0, end_ns=0, status="error"))
+def llm_call(*, inputs: object = None) -> AbstractContextManager[CallOutcome]:
+    entry = _LlmCall(kind="llm", name="chat_completions", start_ns=0, end_ns=0, status="error")
+    return _record_call(entry, inputs)
 
 
-def tool_call(name: ToolName) -> AbstractContextManager[CallOutcome]:
-    return _record_call(_ToolCall(kind="tool", name=name, start_ns=0, end_ns=0, status="error"))
+def tool_call(name: ToolName, *, inputs: object = None) -> AbstractContextManager[CallOutcome]:
+    entry = _ToolCall(kind="tool", name=name, start_ns=0, end_ns=0, status="error")
+    return _record_call(entry, inputs)
 
 
 @dataclass(frozen=True, slots=True)
@@ -168,8 +201,14 @@ def graph_log(info: Callable[[str], None], environment: Callable[[str], str | No
         tracking_uri = None
     token = _LOG_INFO.set(info if tracking_uri and tracking_uri.strip() else None)
     try:
+        directory = environment(PAYLOAD_DIR) if tracking_uri else None
+    except KeyError:
+        directory = None
+    store_token = _STORE.set(Path(directory) if directory else None)
+    try:
         yield
     finally:
+        _STORE.reset(store_token)
         _LOG_INFO.reset(token)
 
 
@@ -177,6 +216,7 @@ def graph_log_context() -> Context:
     """Capture only the trace logger for propagation across a worker boundary."""
     context = Context()
     context.run(_LOG_INFO.set, _LOG_INFO.get())
+    context.run(_STORE.set, _STORE.get())
     return context
 
 

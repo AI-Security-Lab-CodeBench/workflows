@@ -1,11 +1,13 @@
 import json
 import logging
+import os
 import re
 from collections import Counter
 from collections.abc import Iterable
 from dataclasses import dataclass
 from hashlib import sha256
 from itertools import pairwise
+from pathlib import Path
 from typing import Final, NotRequired, TypedDict
 from uuid import UUID
 
@@ -20,6 +22,7 @@ from codebench_pipeline.trace_graph_record import (
     describe_group,
     parse_graph,
 )
+from codebench_pipeline.trace_payloads import PAYLOAD_DIR, load_payload
 
 TERMINAL_EVENTS: Final = (
     DagsterEventType.RUN_SUCCESS,
@@ -83,8 +86,10 @@ def _attribute(key: str, value: str) -> _Attribute:
     return {"key": key, "value": {"stringValue": value}}
 
 
-def _business_output(span: Span, summary: CallSummary | GroupSummary) -> Span:
-    span["attributes"].append(_attribute("mlflow.spanOutputs", json.dumps(summary)))
+def _business_output(
+    span: Span, summary: CallSummary | GroupSummary, summary_key: str = "mlflow.spanOutputs"
+) -> Span:
+    span["attributes"].append(_attribute(summary_key, json.dumps(summary)))
     span["attributes"].extend(
         _attribute(f"codebench.{key}", value if isinstance(value, str) else json.dumps(value))
         for key, value in summary.items()
@@ -116,6 +121,8 @@ class _RunSpans:
         self.attempt_counts: Counter[str] = Counter()
         self.graph_counts: Counter[str] = Counter()
         self.graph_ids: set[str] = set()
+        directory = os.environ.get(PAYLOAD_DIR)
+        self.payload_directory = Path(directory) if directory else None
         self.rejected_graphs = 0
 
     def span(self, attempt: _Attempt, end_ns: int, outcome: Outcome, parent: str | None = None) -> Span:
@@ -192,12 +199,27 @@ class _RunSpans:
                     invocation = _Attempt(
                         call_id, f"{call.label}: {call.name}", call.start_ns, call.label.upper()
                     )
-                    self.spans.append(
-                        _business_output(
-                            self.span(invocation, call.end_ns, call.status, visit.span_id),
-                            describe_call(call),
+                    leaf = self.span(invocation, call.end_ns, call.status, visit.span_id)
+                    summary = describe_call(call)
+                    if call.kind == "llm" and call.context_window is not None:
+                        leaf["attributes"].append(
+                            _attribute("codebench.context_window", call.context_window.model_dump_json())
                         )
-                    )
+                    if call.inputs is None and call.outputs is None:
+                        self.spans.append(_business_output(leaf, summary))
+                        leaf["attributes"].append(_attribute("codebench.payload_capture", "not_recorded"))
+                        continue
+                    _business_output(leaf, summary, "codebench.call_summary")
+                    for key, reference, absent in (
+                        ("spanInputs", call.inputs, "no_recorded_input"),
+                        ("spanOutputs", call.outputs, "no_recorded_output"),
+                    ):
+                        payload = (
+                            load_payload(self.payload_directory, reference) if reference is not None
+                            else json.dumps({"capture_status": absent})
+                        )
+                        leaf["attributes"].append(_attribute(f"mlflow.{key}", payload))
+                    self.spans.append(leaf)
 
     def step_event(self, entry: EventLogEntry) -> None:
         key = entry.step_key

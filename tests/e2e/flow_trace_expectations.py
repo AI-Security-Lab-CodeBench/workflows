@@ -6,7 +6,8 @@ from typing import Final
 from pydantic import JsonValue, TypeAdapter
 
 from codebench_pipeline.trace_projection import Span
-from tests.e2e.flow_trace_rules_fixture import FIRST_RULE_ID, SECOND_RULE_ID
+from tests.e2e.flow_trace_payload_expectations import assert_rules_payloads, span_attributes
+from tests.e2e.flow_trace_rules_fixture import FIRST_RULE_ID, SECOND_RULE_ID, Exchange
 
 _MODEL: Final = ("LLM: chat_completions", "LLM")
 _OUTPUTS: Final = TypeAdapter(dict[str, JsonValue])
@@ -74,7 +75,10 @@ _RESULTS: Final[dict[tuple[str, int, str], dict[str, JsonValue]]] = {
 }
 
 
-def assert_span_tree(spans: Sequence[Span]) -> None:
+def assert_span_tree(
+    spans: Sequence[Span],
+    rules_exchanges: dict[str, list[Exchange]],
+) -> None:
     by_id = {span["spanId"]: span for span in spans}
     assert len(by_id) == len(spans)
     children: defaultdict[str | None, list[Span]] = defaultdict(list)
@@ -107,37 +111,48 @@ def assert_span_tree(spans: Sequence[Span]) -> None:
             assert [cycle["name"] for cycle in cycles] == [
                 f"Cycle #{number}" for number in range(1, len(expected_cycles) + 1)
             ]
+            cycle_executions: list[tuple[Span, ...]] = []
             for number, (cycle, expected_nodes) in enumerate(zip(cycles, expected_cycles, strict=True), 1):
                 assert cycle["status"]["code"] == 1
-                cycle_attributes = {
-                    attribute["key"]: attribute["value"]["stringValue"] for attribute in cycle["attributes"]
-                }
+                cycle_attributes = span_attributes(cycle)
                 cycle_output = _OUTPUTS.validate_json(cycle_attributes["mlflow.spanOutputs"])
                 assert cycle_output["execution_status"] == "ok"
                 nodes = children[cycle["spanId"]]
                 assert [node["name"] for node in nodes] == [name for name, _ in expected_nodes]
-                call_outputs: list[dict[str, JsonValue]] = []
+                call_summaries: list[dict[str, JsonValue]] = []
+                executions: list[Span] = []
                 for node, (_, expected_execution) in zip(nodes, expected_nodes, strict=True):
                     assert node["status"]["code"] == 1
                     (execution,) = children[node["spanId"]]
-                    attributes = {
-                        attribute["key"]: attribute["value"]["stringValue"]
-                        for attribute in execution["attributes"]
-                    }
+                    executions.append(execution)
+                    attributes = span_attributes(execution)
                     expected_name, expected_kind = expected_execution
                     assert execution["name"] == expected_name
                     assert json.loads(attributes["mlflow.spanType"]) == expected_kind
                     assert not children[execution["spanId"]]
-                    output = _OUTPUTS.validate_json(attributes["mlflow.spanOutputs"])
-                    call_outputs.append(output)
+                    summary_key = (
+                        "codebench.call_summary"
+                        if step["name"] == "learn_rules"
+                        else (
+                            "codebench.call_summary"
+                            if "codebench.call_summary" in attributes
+                            else "mlflow.spanOutputs"
+                        )
+                    )
+                    summary = _OUTPUTS.validate_json(attributes[summary_key])
+                    call_summaries.append(summary)
                     result = _RESULTS.get((graph_name, number, node["name"]), {})
                     assert execution["status"]["code"] == 1
-                    assert output["execution_status"] == "ok"
-                    assert {field: output.get(field) for field in result} == result
+                    assert summary["execution_status"] == "ok"
+                    assert {field: summary.get(field) for field in result} == result
                     if "business_outcome" in result:
+                        assert attributes["codebench.business_outcome"] == result["business_outcome"]
                         outcomes = cycle_output["business_outcomes"]
                         assert isinstance(outcomes, list) and result["business_outcome"] in outcomes
                     for field in ("accepted_rule_ids", "dropped_rule_ids"):
                         if field in result:
                             assert cycle_output.get(field) == result[field]
-                assert cycle_output["calls"] == call_outputs
+                assert cycle_output["calls"] == call_summaries
+                cycle_executions.append(tuple(executions))
+            if step["name"] == "learn_rules":
+                assert_rules_payloads(cycle_executions, rules_exchanges[graph_name])

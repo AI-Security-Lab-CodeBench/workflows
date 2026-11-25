@@ -309,14 +309,17 @@ class Conversation:
                     ))
                     return Command(goto=END)
                 hashes.append(sha256(raw).hexdigest())
+                measured = None
                 try:
-                    with llm_call() as measured:
+                    with llm_call(inputs=raw) as measured:
                         response = agent.request(
                             endpoint.rstrip("/") + "/chat/completions", raw, agent.api_key, agent.model.timeout_seconds,
                         )
                 except HTTPError as exc:
                     with exc:
                         diagnostic = provider_rejection(exc)
+                    if measured is not None:
+                        measured.output({"diagnostic": diagnostic.model_dump(mode="json", exclude_none=True)})
                     failed(turn, diagnostic)
                     is_context_limit = diagnostic.code == "provider_context_limit"
                     if is_context_limit and recovery is None and ack is None and len(messages) > 4:
@@ -326,14 +329,21 @@ class Conversation:
                     return Command(goto=END)
                 except (InferenceError, HTTPException, OSError) as exc:
                     status = "endpoint_error"
-                    failed(turn, Diagnostic(code="endpoint_error", phase="inference", message=(
+                    diagnostic = Diagnostic(code="endpoint_error", phase="inference", message=(
                         f"Turn {turn}: {type(exc).__name__}; check endpoint connectivity and timeout."
-                    )))
+                    ))
+                    if measured is not None:
+                        measured.output({"diagnostic": diagnostic.model_dump(mode="json", exclude_none=True)})
+                    failed(turn, diagnostic)
                     return Command(goto=END)
                 break
             measured.record({"status": "rejected"})
-            if agent.api_key and len(agent.api_key) >= 8 and agent.api_key.encode() in response.body:
-                return retry(turn, "response_sensitive", "Model response contained sensitive data.")
+            if agent.api_key and agent.api_key.encode() in response.body:
+                measured.output({"omitted": "response_sensitive"})
+                if len(agent.api_key) >= 8:
+                    return retry(turn, "response_sensitive", "Model response contained sensitive data.")
+            else:
+                measured.output(response.body)
             if len(response.body) > _RESPONSE_LIMIT:
                 return retry(
                     turn, "response_too_large", f"Model response was {len(response.body)} bytes, exceeding the "
@@ -372,7 +382,9 @@ class Conversation:
             name = call.function.name
             turn = state["turn"]
             tool = tools[name]
-            with tool_call(tool.name) as measured:
+            with tool_call(
+                tool.name, inputs={"tool_call_id": call.id, "arguments": call.function.arguments},
+            ) as measured:
                 try:
                     result = tool.call(call.function.arguments)
                 except ValidationError as exc:
@@ -388,19 +400,19 @@ class Conversation:
                 except EvaluationError as exc:
                     result = Feedback(diagnostic=exc.diagnostic)
                 measured.record(result.action_result())
+                feedback: dict[str, JsonValue] = {
+                    "role": "tool",
+                    "tool_call_id": call.id,
+                    "content": result.model_dump_json(exclude_defaults=True),
+                }
+                measured.output(feedback)
             if result.diagnostic is not None:
                 failed(turn, result.diagnostic)
                 if turn >= self.turns:
                     repair = f"The last submission failed with {result.diagnostic.code}. Correct it."
             elif name == self.terminal or turn == recovery_turn:
                 status = "finished"
-            messages.append(
-                {
-                    "role": "tool",
-                    "tool_call_id": call.id,
-                    "content": result.model_dump_json(exclude_defaults=True),
-                }
-            )
+            messages.append(feedback)
             return Command(goto=END if status == "finished" or turn >= last_turn else "complete")
 
         graph = StateGraph[_State, None, _State, _State](_State, input_schema=_State, output_schema=_State)

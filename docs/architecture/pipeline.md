@@ -19,6 +19,38 @@ call-level instrumentation have no call leaves; opening an old trace or
 retrying its export cannot recover those measurements. Inspect a newly
 executed run for the detailed hierarchy.
 
+For payload tracing, set `CODEBENCH_TRACE_PAYLOAD_DIR` in the private pipeline
+environment for **both** workers, to a directory on their shared dataset
+volume (for example `/var/lib/codebench/datasets/trace-payloads`). Enable
+this only for a tracking server whose readers may see the underlying data.
+This is a content disclosure setting, not just a logging verbosity setting.
+It is off by default.
+
+On a newly executed **LLM: chat_completions** leaf, open **Inputs / Outputs**.
+Inputs are the outgoing application request, including ordered messages, model,
+offered tools and generation options when sent. Compare successive calls to see
+which prior messages survived a context reduction. Outputs show the provider
+response or an explicit error/omission; token usage is only available when the
+provider returned it. For capacity-admitted calls, **Attributes →
+`codebench.context_window`** gives the tokenizer's prompt count, effective
+context limit and requested output-token budget. Plain requests do not
+invent a context-window limit. These are client-visible messages, not the provider's
+hidden context, model thoughts or an estimate of tokens. **Tool: …** leaves
+show the arguments and return value for that dispatch. Compare the tool-call ID
+with the assistant message and the following request where the protocol supplies
+one. **Attributes → `codebench.call_summary`** retains the execution and business
+outcomes. The graph and cycle outputs remain summaries rather than copies of
+every payload.
+
+Dagster INFO records contain only content digests, not the payload bodies.
+The observer resolves those digests from the shared directory, verifies them
+and sends the JSON to MLflow. Restrict access to **both** stores and include
+both in retention decisions. A missing or corrupt payload is marked unavailable,
+not reconstructed. Clearing the worker copy does not erase an already exported
+MLflow trace. Transport credentials are not call inputs. Sensitive content may
+be redacted or withheld; arbitrary user text is still sensitive. Old traces have
+no recoverable payloads.
+
 To check the view without spending provider quota, use the synthetic trace
 job from the running release. This explicitly writes one `flow_trace_qa`
 run to Dagster; it does not materialize pipeline assets:
@@ -44,8 +76,8 @@ For the persisted result, select the producing **step** or the **run root**
 and open **Inputs / Outputs**. Rules runs report their materialized assets,
 partitions, available digests and counts. Evaluation reports exact matches,
 wrong matches, abstentions and evaluator errors separately: a successful
-Dagster run does not mean the rules matched every held-out row. Look in the
-authorized pipeline evidence, not MLflow, for commands, prompts or responses.
+Dagster run does not mean the rules matched every held-out row. When payload
+capture is disabled, inspect the authorized pipeline evidence for row content.
 The `mlflow_run_trace_projection` sensor checks for terminal runs at a minimum
 interval of 15 seconds. Its first tick starts a new observation window; it
 does not backfill runs from before tracing was enabled. A failed delivery

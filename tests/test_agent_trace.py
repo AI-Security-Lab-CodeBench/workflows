@@ -1,3 +1,4 @@
+import json
 import os
 from logging import INFO
 from pathlib import Path
@@ -32,6 +33,7 @@ from codebench_pipeline.keenable_policy import CurrentKeenableDeclaration, Keena
 from codebench_pipeline.keenable_transport import DirectResponse, Request
 from codebench_pipeline.openai_transport import HTTPResponse
 from codebench_pipeline.rules_learning import capture_rules, deduplicate_rules
+from codebench_pipeline.trace_payloads import PAYLOAD_DIR
 
 _PREFIX = "CODEBENCH_GRAPH_V1 "
 _PRIVATE = "synthetic-private-observation"
@@ -45,7 +47,13 @@ def _node_calls(node: JsonValue) -> list[tuple[JsonValue, JsonValue, JsonValue]]
     result: list[tuple[JsonValue, JsonValue, JsonValue]] = []
     for call in calls:
         assert isinstance(call, dict)
-        assert set(call) - {"result"} == {"kind", "name", "start_ns", "end_ns", "status"}
+        assert set(call) - {"result", "inputs", "outputs", "context_window"} == {
+            "kind",
+            "name",
+            "start_ns",
+            "end_ns",
+            "status",
+        }
         assert type(node_start := node["start_ns"]) is int and type(node_end := node["end_ns"]) is int
         assert type(start := call["start_ns"]) is int and type(end := call["end_ns"]) is int
         assert node_start <= start <= end <= node_end
@@ -105,6 +113,26 @@ def _results(record: dict[str, JsonValue], name: str) -> list[JsonValue]:
     return results
 
 
+def _payloads(record: dict[str, JsonValue], name: str, directory: Path) -> list[tuple[JsonValue, JsonValue]]:
+    nodes = record["nodes"]
+    assert isinstance(nodes, list)
+    payloads: list[tuple[JsonValue, JsonValue]] = []
+    for node in nodes:
+        assert isinstance(node, dict) and isinstance(calls := node["calls"], list)
+        for call in calls:
+            assert isinstance(call, dict)
+            if call["name"] == name:
+                inputs, outputs = call["inputs"], call.get("outputs")
+                assert isinstance(inputs, str)
+                payloads.append(
+                    (
+                        json.loads((directory / inputs).read_bytes()),
+                        json.loads((directory / outputs).read_bytes()) if isinstance(outputs, str) else None,
+                    )
+                )
+    return payloads
+
+
 def test_labeler_workers_keep_each_rows_visits_under_the_step(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -114,6 +142,8 @@ def test_labeler_workers_keep_each_rows_visits_under_the_step(
         update={"inference_mode": "plain", "capacity": None, "row_concurrency": 2}
     )
     monkeypatch.setenv("MLFLOW_TRACKING_URI", "http://synthetic.invalid")
+    payload_dir = tmp_path / "payloads"
+    monkeypatch.setenv(PAYLOAD_DIR, str(payload_dir))
 
     def reply(_url: str, body: bytes, _key: str | None, _timeout: float) -> HTTPResponse:
         (row,), observations = request_parts(body)
@@ -162,6 +192,25 @@ def test_labeler_workers_keep_each_rows_visits_under_the_step(
         [{"status": "abstained", "count": 0}],
         [{"status": "produced", "count": 1}],
     ]
+    grounded = max(records, key=lambda record: len(_nodes(record)))
+    (query,) = _payloads(grounded, "query", payload_dir)
+    (page,) = _payloads(grounded, "page_fetch", payload_dir)
+    (finalize_payload,) = _payloads(grounded, "finalize", payload_dir)
+    for rpc_id, ((model_input, model_output), (tool_input, tool_output)) in enumerate(
+        zip(
+            _payloads(grounded, "chat_completions", payload_dir), (query, page, finalize_payload), strict=True
+        ),
+        1,
+    ):
+        assert isinstance(model_input, dict) and model_input["stream"] is False
+        model_call = model_output["response"]["choices"][0]["message"]["tool_calls"][-1]
+        assert tool_input["tool_call_id"] == model_call["id"]
+        assert tool_input["arguments"] == model_call["function"]["arguments"]
+        assert tool_output["response"]
+        if rpc_id <= 2:
+            assert tool_input["request"]["id"] == rpc_id
+            assert tool_input["request"]["params"]["arguments"]
+    assert finalize_payload[1] == {"response": {"recorded": "grounded"}}
 
 
 def test_capture_and_nomination_judge_emit_distinct_graph_names(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -267,25 +316,43 @@ def test_keenable_planner_records_only_bound_enabled_runs(
         search_plan=UnrestrictedSearch(mode="adaptive", max_queries=2, unrestricted_cases=("plan",)),
     )
     planner = SearchPlanner("https://model.test/v1", "test-model", None, tmp_path / "receipts")
+    payload_dir = tmp_path / "payloads"
+    monkeypatch.setenv(PAYLOAD_DIR, str(payload_dir))
     options = iter(("plan-reference", "plan-inventory"))
+    model_witness: list[tuple[JsonValue, JsonValue]] = []
+    search_witness: list[tuple[JsonValue, JsonValue]] = []
     if mode == "disabled":
         monkeypatch.delenv("MLFLOW_TRACKING_URI", raising=False)
     else:
         monkeypatch.setenv("MLFLOW_TRACKING_URI", "http://synthetic.invalid")
+    if mode in {"disabled", "standalone"}:
 
-    def decide(_url: str, _body: bytes, _key: str | None, _timeout: float) -> HTTPResponse:
-        return completion({"option": next(options)})
+        def unexpected_secret_scan(_text: str, _key: str | None) -> bool:
+            raise AssertionError("Payload data was scanned without an active payload store")
+
+        monkeypatch.setattr("codebench_pipeline.producer_trace._sensitive", unexpected_secret_scan)
+
+    def decide(_url: str, body: bytes, _key: str | None, _timeout: float) -> HTTPResponse:
+        response = completion({"option": next(options)})
+        model_witness.append((json.loads(body), json.loads(response.body)))
+        return HTTPResponse(response.body, "synthetic-request-id")
 
     retry = mode == "retry"
 
-    def search(_request: Request) -> DirectResponse:
+    def search(request: Request) -> DirectResponse:
         nonlocal retry
+        assert request.payload is not None
         if retry:
             retry = False
+            search_witness.append(
+                (json.loads(request.payload), {"error": "request_timeout", "http_status": None})
+            )
             raise KeenableError("request_timeout")
         if mode == "failure":
             raise RuntimeError(_PRIVATE)
-        return result(f"https://source.test/{_PRIVATE}")
+        response = result(f"https://source.test/{_PRIVATE}")
+        search_witness.append((json.loads(request.payload), {"response": json.loads(response.body)}))
+        return response
 
     monkeypatch.setattr("codebench_pipeline.keenable_planner.complete", decide)
     monkeypatch.setattr("codebench_pipeline.keenable.request_direct", search)
@@ -315,12 +382,17 @@ def test_keenable_planner_records_only_bound_enabled_runs(
         assert run.output_for_node("plan_searches") == "budget"
     if mode in {"disabled", "standalone"}:
         assert records == []
+        assert not payload_dir.exists()
         return
     (trace,) = records
     assert trace["graph"] == "keenable_planner"
     assert _results(trace, "chat_completions") == [{"status": "produced", "count": 1}] * (
         1 if mode == "failure" else 2
     )
+    assert _payloads(trace, "chat_completions", payload_dir) == [
+        (request, {"response": response, "provider_request_id": "synthetic-request-id"})
+        for request, response in model_witness
+    ]
     chat = [("llm", "chat_completions", "ok")]
     search_ok = [("tool", "search", "ok")]
     search_error = [("tool", "search", "error")]
@@ -329,6 +401,8 @@ def test_keenable_planner_records_only_bound_enabled_runs(
         assert _nodes(trace) == [("choose", "ok"), ("search", "error")]
         assert _calls(trace) == [chat, search_error]
     else:
+        searches = _payloads(trace, "search", payload_dir)
+        assert [(inputs["request"], outputs) for inputs, outputs in searches] == search_witness
         assert trace["status"] == "ok"
         assert _nodes(trace) == [("choose", "ok"), ("search", "ok")] * 2 + [("choose", "ok")]
         assert _calls(trace) == [

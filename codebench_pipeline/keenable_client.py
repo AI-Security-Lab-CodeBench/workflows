@@ -11,6 +11,7 @@ from .keenable_ledger import Ledger, SlotIdentity
 from .keenable_policy import Declaration, KeenableError, KeenableSourceAccess
 from .keenable_receipts import CallReceipt
 from .keenable_transport import DirectResponse, HttpStatusError, Request, transient_request_failure
+from .producer_trace import trace_json
 
 _MAX_ATTEMPTS: Final = 4
 _MAX_WAIT: Final = 30.0
@@ -69,8 +70,27 @@ class KeenableClient:
             self.declaration.check_current(datetime.now(UTC))
             receipt = self.ledger.reserve(kind, identity)
             try:
-                with tool_call("search") if kind == "search" else nullcontext():
-                    response = self.send(request)
+                with (
+                    tool_call(
+                        "search",
+                        inputs={
+                            "request": trace_json(request.payload, request.credential)
+                            if request.payload is not None
+                            else {"omitted": "no_request_body"},
+                            "slot": identity.slot,
+                        },
+                    )
+                    if kind == "search"
+                    else nullcontext()
+                ) as measured:
+                    try:
+                        response = self.send(request)
+                    except KeenableError as error:
+                        if measured is not None:
+                            measured.output({"error": error.code, "http_status": error.status})
+                        raise
+                    if measured is not None:
+                        measured.output({"response": trace_json(response.body, request.credential)})
                 return AcquiredResponse(receipt, response)
             except KeenableError as error:
                 transient = transient_request_failure(error.code, error.status)

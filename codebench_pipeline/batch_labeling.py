@@ -20,7 +20,7 @@ from langgraph.types import Command
 from pydantic import JsonValue, TypeAdapter, ValidationError
 
 from codebench_pipeline.agent_events import InferenceError
-from codebench_pipeline.agent_trace import graph_log_context, llm_call, record_graph, tool_call
+from codebench_pipeline.agent_trace import graph_log_context, record_graph, tool_call
 from codebench_pipeline.batch_labeling_config import BatchLabelingConfig
 from codebench_pipeline.batch_labeling_protocol import (
     ROW_LABELING_CONTRACT,
@@ -61,6 +61,12 @@ from codebench_pipeline.model_config import ModelConfig
 from codebench_pipeline.models import SemanticSnippet
 from codebench_pipeline.openai_transport import complete as plain_complete
 from codebench_pipeline.openai_transport import reasoning_template_kwargs
+from codebench_pipeline.producer_trace import (
+    capture_completion,
+    completion_span,
+    trace_payload_secrets,
+    trace_value,
+)
 from codebench_pipeline.storage import IntegrityError, digest, fingerprint
 from scripts.dataset_schema import SECRET_PATTERNS
 
@@ -230,13 +236,15 @@ class _Conversation:
             raise ValueError("Grounded labeling requires a configured remote base URL")
         try:
             if config.inference_mode == "plain":
-                with llm_call():
+                key = self.model.execution.model_api_key
+                with completion_span(raw, key) as measured:
                     response = plain_complete(
                         model.base_url.rstrip("/") + "/chat/completions",
                         raw,
-                        self.model.execution.model_api_key,
+                        key,
                         model.timeout_seconds,
                     )
+                    capture_completion(measured, response, key)
             else:
                 response = guarded_complete(
                     model.base_url,
@@ -308,7 +316,11 @@ class _Conversation:
         receipts = (
             dict(
                 zip(
-                    retrievals, self.broker.call_many(list(retrievals.values()), {self.identity}), strict=True
+                    retrievals,
+                    self.broker.call_many(
+                        list(retrievals.values()), {self.identity}, tool_call_ids=list(retrievals)
+                    ),
+                    strict=True,
                 )
             )
             if retrievals
@@ -319,8 +331,12 @@ class _Conversation:
             if call.id in receipts:
                 result = self.observation(receipts[call.id])
             elif call.function.name == "finalize" and len(calls) == 1:
-                with tool_call("finalize") as measured:
+                with tool_call(
+                    "finalize",
+                    inputs=trace_value({"tool_call_id": call.id, "arguments": call.function.arguments}),
+                ) as measured:
                     result = self.finalize(call.function.arguments)
+                    measured.output({"response": trace_value(result)})
                     if "error" in result:
                         measured.record({"status": "rejected"})
                     elif self.result is not None and self.result.label is not None:
@@ -496,7 +512,12 @@ def _run_row(row: RowInput, model: _RowModel, out: Path) -> BatchRow:
     conversation = _Conversation(model, row, out, broker)
     conversation.initialize()
     graph = StateGraph[_State, None, _State, _State](_State, input_schema=_State, output_schema=_State)
-    with record_graph("labeler") as trace:
+    key = model.execution.model_api_key
+
+    def contains_credential(value: str) -> bool:
+        return bool(key and key in value) or broker.credentials.contains(value)
+
+    with trace_payload_secrets(contains_credential), record_graph("labeler") as trace:
         graph.add_node(
             "complete", trace.wrap("complete", conversation.complete), destinations=("complete", "tools", END)
         )

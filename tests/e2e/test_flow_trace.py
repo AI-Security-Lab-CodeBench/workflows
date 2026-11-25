@@ -33,7 +33,12 @@ from codebench_pipeline.keenable_planner import SearchPlanner
 from codebench_pipeline.openai_transport import HTTPResponse
 from codebench_pipeline.trace_projection import GRAPH_PREFIX, project_run
 from tests.e2e.flow_trace_expectations import assert_span_tree
-from tests.e2e.flow_trace_rules_fixture import RULE_PAYLOAD_SENTINELS, exercise_rules_agents
+from tests.e2e.flow_trace_rules_fixture import (
+    MODEL_EXCHANGES,
+    MODEL_WITNESS,
+    RULE_PAYLOAD_SENTINELS,
+    exercise_rules_agents,
+)
 from tests.rules_learning_fixture import SOURCE as RULES_SOURCE
 from tests.test_batch_labeling import QUOTE, URL, batch_config, live_mcp_fixture, remote_model, row_retrieval
 from tests.test_dataset_rules import make_candidate, make_rules
@@ -43,6 +48,7 @@ from tests.test_keenable_planner import completion
 _MODEL_KEY: Final = "synthetic-trace-model-key"
 _GROUNDING_KEY: Final = "fixture-key"
 _SEARCH_KEY: Final = "synthetic-trace-search-key"
+_PAYLOAD_DIR: Final = "CODEBENCH_TRACE_PAYLOAD_DIR"
 _ROW_IDS: Final = ("synthetic-trace-row-one", "synthetic-trace-row-two")
 _COMMAND: Final = "probe inspect synthetic-trace-command"
 _PAGE_MARKER: Final = "synthetic-trace-private-page"
@@ -50,10 +56,9 @@ _PAGES: Final = (
     f"https://operator.example/{_PAGE_MARKER}/unexpected-output",
     f"https://operator.example/{_PAGE_MARKER}/quoting",
 )
+_CREDENTIALS: Final = (_MODEL_KEY, _GROUNDING_KEY, _SEARCH_KEY)
 _SENTINELS: Final = (
-    _MODEL_KEY,
-    _GROUNDING_KEY,
-    _SEARCH_KEY,
+    *_CREDENTIALS,
     *_ROW_IDS,
     _COMMAND,
     _PAGE_MARKER,
@@ -136,7 +141,7 @@ def plan_discovery(context: OpExecutionContext) -> None:
 @op(out=Out(Nothing))
 def learn_rules(context: OpExecutionContext) -> None:
     with _synthetic_step(context):
-        exercise_rules_agents()
+        exercise_rules_agents(Path(os.environ["TMPDIR"]))
 
 
 def build_flow_trace_job() -> JobDefinition:
@@ -151,7 +156,7 @@ def _assert_no_payload(text: str) -> None:
         raise AssertionError("A trace contained a synthetic sensitive payload sentinel")
 
 
-def _assert_trace(entries: Sequence[EventLogEntry]) -> None:
+def _assert_trace(entries: Sequence[EventLogEntry], scratch: Path) -> None:
     workers = {
         entry.step_key: entry.dagster_event.pid
         for entry in entries
@@ -172,10 +177,12 @@ def _assert_trace(entries: Sequence[EventLogEntry]) -> None:
 
     (terminal,) = [entry for entry in entries if entry.dagster_event_type == DagsterEventType.RUN_SUCCESS]
     projection = project_run(terminal, entries, enabled_at=0)
-    _assert_no_payload(json.dumps(projection.spans))
+    projection_json = json.dumps(projection.spans)
+    assert not any(secret in projection_json for secret in _CREDENTIALS)
     assert projection.rejected_graphs == 0
 
-    assert_span_tree(projection.spans)
+    exchanges = MODEL_EXCHANGES.validate_json((scratch / MODEL_WITNESS).read_bytes())
+    assert_span_tree(projection.spans, exchanges)
 
 
 def _run_trace(scratch: Path, *, deployed: bool = False) -> None:
@@ -190,6 +197,7 @@ def _run_trace(scratch: Path, *, deployed: bool = False) -> None:
         DAGSTER_DISABLE_TELEMETRY="1",
         MLFLOW_TRACKING_URI="http://synthetic.invalid",
     )
+    env[_PAYLOAD_DIR] = os.environ[_PAYLOAD_DIR] if deployed else str(scratch / "trace-payloads")
     with (
         patch.dict(os.environ, env, clear=True),
         DagsterInstance.local_temp(str(scratch))
@@ -203,8 +211,10 @@ def _run_trace(scratch: Path, *, deployed: bool = False) -> None:
         ) as run,
     ):
         print(f"CODEBENCH_TRACE_QA_RUN_ID={run.run_id}", flush=True)
-        assert run.success, "Synthetic Dagster job did not succeed"
-        _assert_trace(instance.all_logs(run.run_id))
+        assert run.success, "\n".join(
+            str(event.step_failure_data.error) for event in run.get_step_failure_events()
+        )
+        _assert_trace(instance.all_logs(run.run_id), scratch)
 
 
 def test_real_graphs_are_traced_under_their_worker_steps(tmp_path: Path) -> None:

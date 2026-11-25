@@ -1,5 +1,5 @@
 import json
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Callable
 from contextlib import asynccontextmanager
 from datetime import timedelta
 from re import fullmatch
@@ -9,7 +9,7 @@ import httpx
 from anyio import fail_after
 from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
-from mcp.types import TextContent
+from mcp.types import CallToolResult, TextContent
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from .keenable_policy import RESPONSE_BYTES, KeenableError
@@ -38,7 +38,7 @@ async def _before_request(request: httpx.Request) -> None:
         message: object = json.loads(request.content)
         match message:
             case {"method": "tools/call"}:
-                await admit_tool_dispatch()
+                await admit_tool_dispatch(request.content)
             case _:
                 return
 
@@ -63,7 +63,13 @@ async def search_session(api_key: str) -> AsyncGenerator[ClientSession]:
             yield session
 
 
-async def search_snippets(session: ClientSession, query: str, limits: tuple[int, int]) -> SearchResult:
+async def search_snippets(
+    session: ClientSession,
+    query: str,
+    limits: tuple[int, int],
+    *,
+    observe: Callable[[CallToolResult], None] | None = None,
+) -> SearchResult:
     """Search the index; Keenable returns the indexed excerpt inside one MCP text block."""
     max_results, snippet_max_length = limits
     with fail_after(TIMEOUT):
@@ -77,6 +83,8 @@ async def search_snippets(session: ClientSession, query: str, limits: tuple[int,
                 "disable_cards": True,
             },
         )
+    if observe is not None:
+        observe(result)
     if result.isError:
         raise KeenableError("provider_search_failed")
     match result.content:

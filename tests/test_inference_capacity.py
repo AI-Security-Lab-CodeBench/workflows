@@ -24,6 +24,7 @@ from dagster import Config, DagsterInvalidInvocationError
 from pydantic import JsonValue, ValidationError
 
 from codebench_pipeline.agent_events import parse_json
+from codebench_pipeline.agent_trace import graph_log, record_graph
 from codebench_pipeline.inference_capacity import (
     CapacityConfig,
     CapacityQuarantined,
@@ -32,6 +33,7 @@ from codebench_pipeline.inference_capacity import (
     guarded_complete,
 )
 from codebench_pipeline.openai_transport import HTTPResponse
+from codebench_pipeline.trace_payloads import PAYLOAD_DIR
 from codebench_pipeline.typed_config import TypedConfig
 
 BASE = "http://capacity.example:8080/v1"
@@ -348,9 +350,15 @@ class InferenceCapacityTests(unittest.TestCase):
 
     def test_replicated_tp_metrics_do_not_sum_and_terminal_length_releases(self) -> None:
         self.backend.finish_reason = "length"
-        with _wire(self.backend):
-            response = self.call()
-            self.call(out="next-turn")
+        logs: list[str] = []
+        directory = self.root / "trace"
+        with (
+            _wire(self.backend),
+            graph_log(logs.append, {"MLFLOW_TRACKING_URI": "fixture", PAYLOAD_DIR: str(directory)}.get),
+            record_graph("labeler") as trace,
+        ):
+            response = trace.wrap("complete", lambda _: self.call())(None)
+            trace.wrap("complete", lambda _: self.call(out="next-turn"))(None)
         self.assertEqual(_object(response.body)["model"], MODEL)
         ledger = self.ledger()
         self.assertEqual(
@@ -361,6 +369,14 @@ class InferenceCapacityTests(unittest.TestCase):
         self.assertEqual(admissions[0]["observed_running"], 2)
         self.assertEqual(admissions[0]["reservation"], CONTEXT)
         self.assertEqual(len(self.backend.generations), 2)
+        (log,) = logs
+        recorded = json.loads(log.removeprefix("CODEBENCH_GRAPH_V1 "))["nodes"][0]["calls"][0]
+        self.assertEqual(
+            recorded["context_window"], {"prompt_tokens": 24, "context_limit": CONTEXT, "output_budget": 100}
+        )
+        self.assertEqual(_object((directory / recorded["inputs"]).read_bytes()), self.backend.generations[0])
+        captured = _object((directory / recorded["outputs"]).read_bytes())
+        self.assertEqual(captured["response"], _object(response.body))
         self.assertEqual(self.backend.snapshot_index, 4)
         first_rid = self.backend.generations[0]["rid"]
         self.assertIsInstance(first_rid, str)

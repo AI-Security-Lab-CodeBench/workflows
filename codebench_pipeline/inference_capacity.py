@@ -21,9 +21,9 @@ from urllib.request import Request, build_opener
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, JsonValue, ValidationError
 
 from .agent_events import InferenceError, parse_json
-from .agent_trace import llm_call
 from .models import Digest
 from .openai_transport import HTTPResponse, NoRedirect, complete
+from .producer_trace import capture_completion, completion_span
 from .storage import IntegrityError, fingerprint
 from .typed_config import TypedConfig
 
@@ -728,11 +728,17 @@ def guarded_complete(
                 if time.monotonic() >= deadline:
                     raise CapacityQuarantined("maximum_wait_exceeded")
                 body = json.dumps(payload).encode("utf-8")
-                with llm_call():
+                with completion_span(body, key) as measured:
+                    measured.context_window(
+                        prompt_tokens=tokenization.count,
+                        context_limit=min(config.context_length, tokenization.max_model_len),
+                        output_budget=chat.max_completion_tokens,
+                    )
                     response = complete(base + "/chat/completions", body, key, timeout)
-                terminal = _Terminal.model_validate(_decode(response.body))
-                if terminal.model != chat.model or terminal.choices[0].message.get("role") != "assistant":
-                    raise CapacityQuarantined("response_identity_mismatch")
+                    capture_completion(measured, response, key)
+                    terminal = _Terminal.model_validate(_decode(response.body))
+                    if terminal.model != chat.model or terminal.choices[0].message.get("role") != "assistant":
+                        raise CapacityQuarantined("response_identity_mismatch")
             except HTTPError as error:
                 status = error.code
                 reason = "http_error_ambiguous"

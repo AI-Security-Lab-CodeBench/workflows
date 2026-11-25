@@ -211,15 +211,15 @@ class KeenableAdmission:
 
 
 _ADMISSION: Final = KeenableAdmission()
-_BEFORE_DISPATCH: Final[ContextVar[Callable[[], Awaitable[None]] | None]] = ContextVar(
+_BEFORE_DISPATCH: Final[ContextVar[Callable[[bytes | None], Awaitable[None]] | None]] = ContextVar(
     "keenable_before_dispatch", default=None
 )
 
 
-async def admit_tool_dispatch() -> None:
+async def admit_tool_dispatch(request: bytes | None = None) -> None:
     """Charge one search or fetch attempt just before sending its MCP tool request."""
     if (admit := _BEFORE_DISPATCH.get()) is not None:
-        await admit()
+        await admit(request)
 
 
 @dataclass(frozen=True, slots=True)
@@ -279,7 +279,8 @@ class KeenableTransport:
         operation: Callable[[str], Awaitable[T]],
         *,
         audit: Callable[[KeenableIncident], None],
-        on_dispatch: Callable[[], None] | None = None,
+        on_dispatch: Callable[[bytes | None, int], None] | None = None,
+        on_failure: Callable[[KeenableProviderError], None] | None = None,
     ) -> T:
         """Retry in the same organization, and expose only the terminal redacted error."""
         organizations = self.credentials.organizations
@@ -295,10 +296,10 @@ class KeenableTransport:
             organizations = (permit.org,)
             cooldown = 0.0
 
-            async def before_dispatch() -> None:
+            async def before_dispatch(request: bytes | None) -> None:
                 await _ADMISSION.dispatch(permit, self.ledger)
                 if on_dispatch is not None:
-                    on_dispatch()
+                    on_dispatch(request, attempt)
 
             dispatch_token = _BEFORE_DISPATCH.set(before_dispatch)
             try:
@@ -312,6 +313,8 @@ class KeenableTransport:
                 ExceptionGroup,
             ) as exc:
                 failure = _failure(exc)
+                if on_failure is not None:
+                    on_failure(failure.detail)
                 wait = failure.detail.retry_after_seconds
                 delay = float(wait) if wait is not None else 0.25 * 2 ** (attempt - 1)
                 for error in failure.http_errors:

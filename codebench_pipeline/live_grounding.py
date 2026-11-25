@@ -1,3 +1,4 @@
+from collections.abc import Callable
 from contextlib import ExitStack
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -7,10 +8,10 @@ from typing import Literal
 from urllib.parse import urlsplit
 
 import anyio
-from mcp.types import TextContent
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
+from mcp.types import CallToolResult, TextContent
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, TypeAdapter, ValidationError
 
-from codebench_pipeline.agent_trace import tool_call
+from codebench_pipeline.agent_trace import CallOutcome, payloads_enabled, tool_call
 from codebench_pipeline.grounding_tools import (
     DocumentationQuery,
     GroundingCredentials,
@@ -27,6 +28,7 @@ from codebench_pipeline.keenable_provider import (
     KeenableTransport,
     KeenableTransportError,
 )
+from codebench_pipeline.producer_trace import trace_json, trace_payload_secrets, trace_value
 from codebench_pipeline.storage import fingerprint
 from scripts.dataset_schema import SECRET_PATTERNS
 
@@ -98,6 +100,8 @@ _INCIDENTS = TypeAdapter(tuple[KeenableIncident, ...])
 @dataclass(slots=True)
 class _Operation:
     request: _Request
+    arguments: str
+    tool_call_id: str | None
     started: int | None = None
     finished: int | None = None
     response: _Response | _GroundingError | None = None
@@ -127,11 +131,20 @@ def trusted_live_url(config: GroundingOrigins, url: str) -> bool:
     )
 
 
-async def _retrieve(key: str, operation: _Operation, maximum: int) -> _Response:
+async def _retrieve(
+    key: str,
+    operation: _Operation,
+    maximum: int,
+    observe: Callable[[CallToolResult], None] | None,
+) -> _Response:
     async with search_session(key) as session:
         match operation.request:
             case QueryInput(query=query):
-                results = await search_snippets(session, query, (8, 500))
+                results = (
+                    await search_snippets(session, query, (8, 500), observe=observe)
+                    if observe is not None
+                    else await search_snippets(session, query, (8, 500))
+                )
                 return tuple(LiveHit(url=hit.url, snippet=hit.snippet) for hit in results.results)
             case PageFetchInput(url=url):
                 reply = await session.call_tool(
@@ -143,6 +156,8 @@ async def _retrieve(key: str, operation: _Operation, maximum: int) -> _Response:
                         "output_format": "json",
                     },
                 )
+                if observe is not None:
+                    observe(reply)
                 if reply.isError:
                     raise KeenableError("provider_fetch_failed")
                 match reply.content:
@@ -174,7 +189,13 @@ class LiveGrounding:
 
     execute = call
 
-    def call_many(self, calls: list[tuple[_Tool, str]], pending: set[str]) -> list[LiveReceipt]:
+    def call_many(
+        self,
+        calls: list[tuple[_Tool, str]],
+        pending: set[str],
+        *,
+        tool_call_ids: list[str] | None = None,
+    ) -> list[LiveReceipt]:
         """Run one row's retrieval wave; admit responses against its byte budget in request order."""
         receipts: list[LiveReceipt] = []
         operations: dict[int, _Operation] = {}
@@ -201,30 +222,72 @@ class LiveGrounding:
                     raise KeenableError("provider_credential_unavailable")
                 if maximum <= 0:
                     raise KeenableError("provider_response_budget")
-                operations[index] = _Operation(request)
+                operations[index] = _Operation(
+                    request, arguments, tool_call_ids[offset] if tool_call_ids is not None else None
+                )
             except _GROUNDING_ERRORS as error:
                 receipt = _failed(receipt, error)
             receipts.append(receipt)
 
-        async def run(operation: _Operation) -> None:
+        async def run(index: int, operation: _Operation) -> None:
             tool = "search" if isinstance(operation.request, QueryInput) else "fetch"
             call_name = "query" if tool == "search" else "page_fetch"
             stack = ExitStack()
+            measured: CallOutcome | None = None
+            output: dict[str, JsonValue] = {}
+            capture_payloads = self.trace_calls and payloads_enabled()
+
+            def capture(reply: CallToolResult) -> None:
+                if measured is not None:
+                    raw = reply.model_dump_json(by_alias=True, exclude_unset=True).encode()
+                    output["response"] = trace_json(raw)
+                    measured.output(output.copy())
 
             async def retrieve(key: str) -> _Response:
+                nonlocal measured
+                measured = None
+                output.clear()
                 with stack:
-                    return await _retrieve(key, operation, maximum)
+                    try:
+                        return await _retrieve(key, operation, maximum, capture if capture_payloads else None)
+                    except anyio.get_cancelled_exc_class():
+                        if measured is not None:
+                            measured.output({**output, "error": "provider_cancelled"})
+                        raise
 
-            def started() -> None:
+            def started(request: bytes | None, attempt: int) -> None:
+                nonlocal measured
                 if operation.started is None:
                     operation.started = monotonic_ns()
-                if self.trace_calls:
+                if capture_payloads:
+                    inputs: dict[str, JsonValue] = {
+                        "receipt_index": index,
+                        "attempt": attempt,
+                        "arguments": operation.arguments,
+                    }
+                    if operation.tool_call_id is not None:
+                        inputs["tool_call_id"] = operation.tool_call_id
+                    if request is not None:
+                        inputs["request"] = trace_json(request)
+                    measured = stack.enter_context(tool_call(call_name, inputs=trace_value(inputs)))
+                elif self.trace_calls:
                     stack.enter_context(tool_call(call_name))
+
+            def failed(error: KeenableProviderError) -> None:
+                if measured is not None:
+                    output["error"] = error.code
+                    if error.status is not None:
+                        output["http_status"] = error.status
+                    measured.output(output.copy())
 
             try:
                 with anyio.fail_after(self.config.timeout):
                     operation.response = await transport.call(
-                        tool, retrieve, audit=operation.incidents.append, on_dispatch=started
+                        tool,
+                        retrieve,
+                        audit=operation.incidents.append,
+                        on_dispatch=started,
+                        on_failure=failed,
                     )
             except TimeoutError:
                 operation.response = KeenableTransportError(KeenableProviderError(code="provider_timeout"))
@@ -236,11 +299,12 @@ class LiveGrounding:
 
         async def wave() -> None:
             async with anyio.create_task_group() as group:
-                for operation in operations.values():
-                    group.start_soon(run, operation)
+                for index, operation in operations.items():
+                    group.start_soon(run, index, operation)
 
         if operations:
-            anyio.run(wave)
+            with trace_payload_secrets(self.credentials.contains):
+                anyio.run(wave)
         for offset, receipt in enumerate(receipts[:remaining_slots]):
             if (operation := operations.get(receipt.index)) is not None:
                 if operation.incidents:

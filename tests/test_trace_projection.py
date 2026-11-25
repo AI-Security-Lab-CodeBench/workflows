@@ -226,6 +226,7 @@ class TraceProjectionTests(unittest.TestCase):
             ("name belongs to a different kind", {"name": "chat_completions"}),
             ("unknown kind", {"kind": private}),
             ("extra payload", {"arguments": private}),
+            ("non-digest payload reference", {"inputs": "../" + private}),
             ("unknown result status", {"result": {"status": private}}),
             ("extra result payload", {"result": {"status": "returned", "message": private}}),
             ("unsafe rule ID", {"result": {"status": "returned", "accepted_rule_ids": [private]}}),
