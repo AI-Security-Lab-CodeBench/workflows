@@ -15,12 +15,13 @@ from test_dataset_annotation import config, documentation
 from test_dataset_bundle import write_declared_bundle
 from test_dataset_rules import make_candidate, make_label
 
-from codebench_pipeline.business_config import load_business_rules
+from codebench_pipeline.business_config import DEFAULT_BUSINESS_CONFIG, load_business_rules
 from codebench_pipeline.category_rules import CategoryRules, CategoryRulesConfig
 from codebench_pipeline.dataset_annotation import annotate, request
 from codebench_pipeline.dataset_cli import main
 from codebench_pipeline.dataset_config import DatasetBuildSpec, load_build_config
 from codebench_pipeline.dataset_registry import DatasetRegistry
+from codebench_pipeline.labeling_stage_settings import LabelingRules
 from codebench_pipeline.storage import fingerprint
 from scripts.category_config import load_script_policy, load_taxonomy
 
@@ -45,7 +46,7 @@ class BusinessConfigurationTests(unittest.TestCase):
             json.loads(rules.examples[0].examples_json)[0]["candidate"]["candidate_id"], "example-0"
         )
 
-    def test_only_allowed_risk_examples_are_selected_without_changing_actual_documentation(self) -> None:
+    def test_hints_select_examples_without_narrowing_risks_or_changing_documentation(self) -> None:
         file = self.path.parent / "examples.json"
         families = json.loads(file.read_text())
         additional = copy.deepcopy(families[0])
@@ -61,7 +62,22 @@ class BusinessConfigurationTests(unittest.TestCase):
             ["family-0", "another-operation-family"],
         )
         self.assertEqual(payload["documentation"], [doc.model_dump(mode="json") for doc in documentation()])
-        self.assertEqual(payload["allowed_risk_ids"], ["CAT-8.1"])
+        self.assertEqual(payload["allowed_risk_ids"], ["CAT-8.1", "CAT-8.2", "other"])
+
+    def test_shipped_examples_preserve_cross_hint_and_rejection_contrasts(self) -> None:
+        rules = LabelingRules.from_rules(load_business_rules(DEFAULT_BUSINESS_CONFIG))
+        examples = [example for family in rules.examples for example in family.examples]
+        self.assertEqual(
+            {example.expected.risk_id for example in examples if example.expected.decision == "reject"},
+            {"other"},
+        )
+        self.assertTrue(
+            any(
+                example.expected.decision == "accept"
+                and example.expected.risk_id not in example.candidate.risk_candidates
+                for example in examples
+            )
+        )
 
     def test_example_documentation_never_substitutes_for_candidate_docs_or_authorizes_citations(self) -> None:
         rules, candidate = load_business_rules(self.path), make_candidate()
@@ -87,6 +103,20 @@ class BusinessConfigurationTests(unittest.TestCase):
         variants.append(empty)
         variants.append(original[:1])
         variants.append([*original, original[0]])
+        for change in (
+            {"risk_id": "CAT-8.2"},
+            {"risk_id": "other"},
+            {"risk_id": "other", "decision": "needs_review"},
+            {"risk_id": "other", "decision": "reject", "documentation_urls": []},
+            {"risk_id": "other", "decision": "reject"},
+        ):
+            changed = copy.deepcopy(original)
+            changed[0]["examples"][0]["expected"].update(change)
+            variants.append(changed)
+        for hints in (["CAT-8.99"], ["other"]):
+            changed = copy.deepcopy(original)
+            changed[0]["examples"][0]["candidate"]["risk_candidates"] = hints
+            variants.append(changed)
         for field, value in (
             ("risk_id", "CAT-9.1"),
             ("candidate_id", "example-1"),

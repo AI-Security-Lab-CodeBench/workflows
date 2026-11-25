@@ -101,7 +101,11 @@ def submitted(
     candidate_data = record["candidate"]
     assert isinstance(candidate_data, dict)
     candidate = CandidateRecord.model_validate({**candidate_data, "transformations": []})
-    label = make_label(candidate, make_rules()).model_copy(
+    choices = record["allowed_risk_ids"]
+    assert isinstance(choices, list) and choices and isinstance(choices[0], str)
+    label = make_label(
+        candidate, make_rules(), risk_id=next(iter(candidate.risk_candidates), choices[0])
+    ).model_copy(
         update={"documentation_urls": documentation_urls if documentation_urls is not None else [url]}
     )
     return {
@@ -337,22 +341,41 @@ class BatchLabelingTests(TestCase):
         self.assertEqual((stats["grounding_iterations"], stats["tool_wave_sizes"]), (0, []))
         self.assertEqual(len(stats["model_request_sha256"]), 1)
 
-    def test_finalize_schema_accepts_routed_prose_and_only_fetched_citation_options(self) -> None:
+    def test_emitted_finalize_tool_and_native_batch_accept_off_hint_and_other(self) -> None:
         out = Path(self.enterContext(TemporaryDirectory()))
         flag_passage = "Use --namespace to choose which namespace to inspect."
-        content = ("Navigation\n" * 200) + flag_passage + "\n" + ("Footer\n" * 240)
-        candidate = make_candidate("a").model_copy(
-            update={"command": "probe inspect --namespace fixture", "risk_candidates": ["CAT-8.1", "CAT-8.2"]}
-        )
+        version_passage = "`probe version` prints the local client version, not metadata or a publication."
+        content = ("Navigation\n" * 200) + flag_passage + "\n" + version_passage + "\n" + ("Footer\n" * 240)
+        cases: dict[str, tuple[str, list[str], str, str]] = {
+            "wrong_hint": ("probe inspect --namespace fixture", ["CAT-8.2"], "CAT-8.1", "accept"),
+            "multiple_hints": (
+                "probe inspect --namespace fixture",
+                ["CAT-8.2", "CAT-8.1"],
+                "CAT-8.1",
+                "accept",
+            ),
+            "empty_hints": ("probe version", [], "other", "reject"),
+        }
+        candidates = [
+            make_candidate(identity).model_copy(update={"command": command, "risk_candidates": hints})
+            for identity, (command, hints, _, _) in cases.items()
+        ]
 
-        def reply(_url: str, body: bytes, *_):
+        def reply(_url: str, body: bytes, *_args: str) -> HTTPResponse:
             (row,), results = request_parts(body)
+            identity = row["candidate"]["candidate_id"]
+            _, hints, risk_id, decision = cases[identity]
+            self.assertEqual(row["candidate"]["risk_candidates"], hints)
             parameters = next(
                 entry["function"]["parameters"]
                 for entry in json.loads(body)["tools"]
                 if entry["function"]["name"] == "finalize"
             )
             validator = Draft202012Validator(parameters)
+            label_properties = parameters["properties"]["outcome"]["properties"]["label"]["anyOf"][0][
+                "properties"
+            ]
+            self.assertCountEqual(label_properties["risk_id"]["enum"], ["CAT-8.1", "CAT-8.2", "other"])
             if not results or not results[-1].get("page"):
                 self.assertTrue(validator.is_valid({"outcome": unsupported(row)}))
                 self.assertFalse(validator.is_valid({"outcome": submitted(row, ["search-hit"])}))
@@ -360,21 +383,22 @@ class BatchLabelingTests(TestCase):
 
             page = results[-1]["page"]
             passages = page["verbatim_passages"]
-            self.assertIn(flag_passage, passages)
+            quote = version_passage if risk_id == "other" else flag_passage
+            self.assertIn(quote, passages)
             self.assertTrue(all(passage in content and len(passage) <= 260 for passage in passages))
-            evidence_id = page["evidence_ids"]["a"]
-            outcome = submitted(row, [evidence_id], quote=flag_passage)
+            evidence_id = page["evidence_ids"][identity]
+            outcome = submitted(row, [evidence_id], quote=quote)
             label = outcome["label"]
             assert isinstance(label, dict)
+            label.update(risk_id=risk_id, decision=decision)
+            if risk_id == "other":
+                label.update(description="Prints the local client version.", rationale=version_passage)
             self.assertTrue(validator.is_valid({"outcome": outcome}))
-            label_properties = parameters["properties"]["outcome"]["properties"]["label"]["anyOf"][0][
-                "properties"
-            ]
             for field in ("description", "rationale"):
                 self.assertNotIn("pattern", label_properties[field])
             for changes in (
                 {"category_id": "C"},
-                {"risk_id": "CAT-8.2"},
+                {"risk_id": "CAT-8.99"},
                 {"documentation_urls": ["https://example.org/not-fetched"]},
             ):
                 self.assertFalse(validator.is_valid({"outcome": {**outcome, "label": {**label, **changes}}}))
@@ -386,9 +410,27 @@ class BatchLabelingTests(TestCase):
             return tool_reply("finalize", {"outcome": outcome})
 
         with live_mcp_fixture({URL: content}):
-            (attempt,) = self.run_batch(reply, [candidate], out)
-        self.assertEqual(attempt.status, "success")
-        self.assertEqual([(doc.url, doc.snippet) for doc in attempt.documentation], [(URL, flag_passage)])
+            attempts = self.run_batch(reply, candidates, out)
+        self.assertCountEqual([attempt.candidate_id for attempt in attempts], cases)
+        for attempt in attempts:
+            _, hints, risk_id, decision = cases[attempt.candidate_id]
+            self.assertEqual((attempt.status, attempt.risk_candidates), ("success", hints))
+            assert attempt.label is not None
+            self.assertEqual((attempt.label.risk_id, attempt.label.decision), (risk_id, decision))
+            quote = version_passage if risk_id == "other" else flag_passage
+            self.assertEqual([(doc.url, doc.snippet) for doc in attempt.documentation], [(URL, quote)])
+
+    def test_unknown_and_reserved_hint_ids_fail_batch_preflight(self) -> None:
+        root = Path(self.enterContext(TemporaryDirectory()))
+        for bad_id in ("CAT-8.99", "CAT-9.1", "other"):
+            with self.subTest(bad_id=bad_id), self.assertRaisesRegex(ValueError, "Unknown risk hint"):
+                prepare_batch_rows(
+                    [make_candidate(risk=bad_id)],
+                    make_rules(),
+                    remote_model(),
+                    batch_config(root),
+                    implementation="fixture",
+                )
 
     def test_plain_reasoning_setting_can_produce_tools_without_exhausting_output(self) -> None:
         for effort, template in (
@@ -422,7 +464,11 @@ class BatchLabelingTests(TestCase):
             "foreign_evidence",
             "untrusted_url",
             "wrong_cited_url",
-            "wrong_route",
+            "wrong_risk",
+            "wrong_category",
+            "wrong_candidate",
+            "other_accept",
+            "unsupported_other",
             "blank_description",
         ):
             with self.subTest(failure=failure), TemporaryDirectory() as directory:
@@ -448,8 +494,17 @@ class BatchLabelingTests(TestCase):
                     assert isinstance(label, dict)
                     if failure == "wrong_cited_url":
                         label["documentation_urls"] = ["https://example.org/not-fetched"]
-                    if failure == "wrong_route":
-                        label["risk_id"] = "CAT-8.2"
+                    if failure == "wrong_risk":
+                        label["risk_id"] = "CAT-8.99"
+                    if failure == "wrong_category":
+                        label["category_id"] = "CAT-9"
+                    if failure == "wrong_candidate":
+                        outcome["candidate_id"] = "foreign"
+                    if failure == "other_accept":
+                        label["risk_id"] = "other"
+                    if failure == "unsupported_other":
+                        label.update(risk_id="other", decision="reject", documentation_urls=[])
+                        outcome.update(evidence_ids=[], grounding_quotes={})
                     if failure == "blank_description":
                         label["description"] = "  "
                     return tool_reply("finalize", {"outcome": outcome})

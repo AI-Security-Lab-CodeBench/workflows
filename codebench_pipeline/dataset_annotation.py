@@ -24,10 +24,12 @@ from codebench_pipeline.annotation_cache import (
 from codebench_pipeline.category_rules import CategoryRules, ClassRule, RiskRule, SeverityRule, StrictModel
 from codebench_pipeline.dataset_documentation_models import command_operations
 from codebench_pipeline.dataset_records import (
+    OTHER_RISK_ID,
     CandidateRecord,
     LabelDecision,
     ReviewDecision,
     index_records,
+    label_risk_ids,
     routing,
     validate_label,
 )
@@ -45,8 +47,8 @@ def candidate_schema[Model: BaseModel](model: type[Model], candidate_id: str) ->
 def label_schema(candidate: CandidateRecord, rules: CategoryRules) -> type[LabelDecision]:
     category = StrEnum("CategoryIdentity", {"expected": rules.category_id})
     utility = StrEnum("SourceUtility", {"expected": candidate.util})
-    risks = routing(candidate, rules)
-    risk_schema: dict[str, JsonValue] = {"enum": [risk for risk in risks]}
+    risks = label_risk_ids(candidate, rules)
+    risk_schema: dict[str, JsonValue] = {"enum": list[JsonValue](risks)}
     return create_model(
         "RoutedLabelDecision",
         __base__=candidate_schema(LabelDecision, candidate.candidate_id),
@@ -87,7 +89,6 @@ def request(
     docs: list[SemanticSnippet],
     rules: CategoryRules | LabelingRules,
 ) -> tuple[str, dict[str, JsonValue]]:
-    allowed = routing(candidate, rules)
     system = "\n\n".join(
         (
             rules.base_prompt,
@@ -105,7 +106,7 @@ def request(
     payload: dict[str, JsonValue] = {
         "candidate": candidate.model_dump(mode="json"),
         "documentation": [doc.model_dump(mode="json") for doc in docs],
-        "allowed_risk_ids": [risk for risk in allowed],
+        "allowed_risk_ids": list[JsonValue](label_risk_ids(candidate, rules)),
     }
     selected: list[JsonValue] = [
         {
@@ -114,7 +115,7 @@ def request(
             "examples": TypeAdapter(list[JsonValue]).validate_json(family.examples_json),
         }
         for family in rules.examples
-        if family.risk_id in allowed
+        if family.risk_id == OTHER_RISK_ID or family.risk_id in candidate.risk_candidates
     ]
     if selected:
         payload["examples"] = selected

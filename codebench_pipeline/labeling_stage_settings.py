@@ -81,6 +81,7 @@ class DemonstrationCommand(StrictModel):
     command: Text
     util: Text
     context: str
+    risk_candidates: tuple[Text, ...] = ()
 
 
 class DemonstrationPassage(StrictModel):
@@ -135,6 +136,7 @@ class LabelingExampleFamily(StrictModel):
                         command=example.candidate.command,
                         util=example.candidate.util,
                         context=example.candidate.context,
+                        risk_candidates=tuple(example.candidate.risk_candidates),
                     ),
                     documentation=tuple(
                         DemonstrationPassage(

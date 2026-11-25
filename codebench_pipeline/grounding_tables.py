@@ -13,7 +13,7 @@ from codebench_pipeline.batch_labeling import (
 )
 from codebench_pipeline.batch_labeling_config import BatchLabelingConfig
 from codebench_pipeline.batch_labeling_protocol import LiveSupport
-from codebench_pipeline.batch_labeling_ranked import QUOTA_DEFERRED, RankedLabeling
+from codebench_pipeline.batch_labeling_ranked import QUOTA_DEFERRED, QUOTA_RECEIPT, RankedLabeling
 from codebench_pipeline.dataframe_schemas import (
     FilteredCommandsTable,
     LabelingAttemptsTable,
@@ -159,7 +159,10 @@ class GuardedLabeling:
             for attempt in outcomes
         ]
         frame = validated_frame(records, LabelingAttemptsTable)
-        deferred = sum(attempt.failure_code == QUOTA_DEFERRED for attempt in outcomes)
+        deferred = sum(
+            attempt.failure_code == QUOTA_DEFERRED and attempt.attempt_evidence_reference == QUOTA_RECEIPT
+            for attempt in outcomes
+        )
         frame.attrs = {
             **commands.attrs,
             "labeling_quota": quota,

@@ -41,7 +41,11 @@ class AnnotationReviewSource:
             "candidate_id",
             validation=annotation_review_validation(ProposalRules.from_rules(resolved.rules)),
             evidence={"manifest": resolved.manifest.model_dump(mode="json")},
-            column_schema={"command": {"editable": False}},
+            column_schema={
+                column: {"editable": False}
+                for column in uncertain.columns
+                if column in {"command", "risk_candidates"}
+            },
         )
 
     def evidence(self, snapshot: ReviewSnapshot, candidate_id: str) -> EvidenceResponse:

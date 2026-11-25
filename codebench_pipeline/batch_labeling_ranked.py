@@ -15,6 +15,7 @@ from codebench_pipeline.labeling_outcomes import LabelingAttempt, failed_attempt
 from codebench_pipeline.labeling_stage_settings import LabelingRules
 from codebench_pipeline.model_config import ModelConfig
 from codebench_pipeline.repository_config import SourceWeight
+from codebench_pipeline.review_policy import requires_human_review
 from codebench_pipeline.storage import IntegrityError, fingerprint
 
 SUBRISK_QUOTA: Final = 250
@@ -102,20 +103,20 @@ class RankedLabeling:
                 routes[candidate.candidate_id] = frozenset(routing(candidate, self.rules))
             except ValueError:
                 routes[candidate.candidate_id] = frozenset()
-        possibly_routed = {identity: allowed or credits.keys() for identity, allowed in routes.items()}
         scope_candidates: dict[str, JsonValue] = {}
         for identity, allowed in routes.items():
             route_ids: list[JsonValue] = list(sorted(allowed))
             scope_candidate: dict[str, JsonValue] = {
                 "candidate": indexed[identity].model_dump_json(),
                 "weight": weights[identity],
-                "verified_routes": route_ids,
+                "eligible_risk_ids": route_ids,
             }
             scope_candidates[identity] = scope_candidate
         scope = fingerprint(
             {
                 "category": self.rules.category_id,
                 "quota": SUBRISK_QUOTA,
+                "risk_hints_advisory": True,
                 "candidates": scope_candidates,
             }
         )
@@ -125,7 +126,7 @@ class RankedLabeling:
             key=lambda row: weights[row.candidate_id],
         )
         outcomes = index_records(source_failures)
-        scheduled = Counter[str]()
+        scheduled = 0
         deferred_ids: set[str] = set()
         packet_count = 0
 
@@ -142,20 +143,15 @@ class RankedLabeling:
                     )
                 )
                 label = attempt.label
-                if label is None:
-                    continue
                 if (
-                    label.decision == "accept"
-                    and label.category_id == self.rules.category_id
-                    and label.risk_id in routes[identity]
-                    and label.category_confidence
-                    == label.risk_confidence
-                    == label.severity_confidence
-                    == label.class_confidence
-                    == "high"
+                    label is not None
+                    and label.decision == "accept"
+                    and label.risk_id in credits
+                    and not requires_human_review(label)
                 ):
                     credited = credits[label.risk_id]
-                    credited.setdefault(normalized_command(attempt.command), identity)
+                    if len(credited) < SUBRISK_QUOTA:
+                        credited.setdefault(normalized_command(attempt.command), identity)
 
         for _, tier in ranked:
             pending = deque(tier)
@@ -165,8 +161,19 @@ class RankedLabeling:
                 while pending and len(packet) < self.config.row_concurrency:
                     candidate = pending[0]
                     identity = candidate.candidate_id
+                    if not routes[identity]:
+                        pending.popleft()
+                        outcomes[identity] = failed_attempt(
+                            candidate,
+                            "routing_unverified",
+                            "Supplied risk hints do not match the configured taxonomy.",
+                            [],
+                            fingerprint({"quota_scope": scope, "candidate_id": identity}),
+                            QUOTA_RECEIPT,
+                        )
+                        continue
                     open_routes = {
-                        risk for risk in possibly_routed[identity] if len(credits[risk]) < SUBRISK_QUOTA
+                        risk for risk in credits if len(credits[risk]) < SUBRISK_QUOTA
                     }
                     if not open_routes:
                         pending.popleft()
@@ -174,7 +181,7 @@ class RankedLabeling:
                         outcomes[identity] = failed_attempt(
                             candidate,
                             QUOTA_DEFERRED,
-                            "All compatible subrisk quotas were already met; no labeling was scheduled.",
+                            "All configured subrisk quotas were already met; no labeling was scheduled.",
                             [],
                             fingerprint({"quota_scope": scope, "candidate_id": identity}),
                             QUOTA_RECEIPT,
@@ -183,46 +190,34 @@ class RankedLabeling:
                     if any(len(credits[risk]) + reservations[risk] >= SUBRISK_QUOTA for risk in open_routes):
                         break
                     pending.popleft()
-                    scheduled.update(possibly_routed[identity])
-                    if not routes[identity]:
-                        outcomes[identity] = failed_attempt(
-                            candidate,
-                            "routing_unverified",
-                            "No verified compatible subrisk could be supplied for labeling.",
-                            [],
-                            fingerprint({"quota_scope": scope, "candidate_id": identity}),
-                            QUOTA_RECEIPT,
-                        )
-                        continue
+                    scheduled += 1
                     reservations.update(open_routes)
                     packet.append(candidate)
                 if packet:
                     packet_count += 1
                     packet_path = Path("ranked-packets") / f"{packet_count:06}"
-                    commit_packet(packet_path, run_packet(packet, self.out / packet_path))
+                    attempts = run_packet(packet, self.out / packet_path)
+                    validate_attempts(packet, attempts, self.rules)
+                    by_id = index_records(attempts)
+                    commit_packet(packet_path, [by_id[row.candidate_id] for row in packet])
 
-        scoped = Counter(risk for allowed in possibly_routed.values() for risk in allowed)
-        unavailable = Counter(
-            risk for attempt in source_failures for risk in possibly_routed[attempt.candidate_id]
+        failures = Counter(
+            attempt.failure_code
+            for attempt in outcomes.values()
+            if attempt.status == "failure" and attempt.candidate_id not in deferred_ids
         )
-        deferred = Counter(risk for identity in deferred_ids for risk in possibly_routed[identity])
-        failures = {risk: Counter[str]() for risk in credits}
-        for attempt in outcomes.values():
-            if attempt.status == "failure" and attempt.candidate_id not in deferred_ids:
-                for risk in possibly_routed[attempt.candidate_id]:
-                    failures[risk][attempt.failure_code] += 1
-
+        verified = sum(attempt.status == "success" for attempt in outcomes.values())
+        blocked = failures.total()
+        failure_counts: dict[str, JsonValue] = dict(sorted(failures.items()))
         subrisks: dict[str, JsonValue] = {}
         for risk, credited in sorted(credits.items()):
             remaining = SUBRISK_QUOTA - len(credited)
-            blocked = failures[risk].total()
-            failure_counts: dict[str, JsonValue] = dict(sorted(failures[risk].items()))
             summary: dict[str, JsonValue] = {
-                "eligible_candidates": scoped[risk],
-                "scheduled_candidates": scheduled[risk],
-                "deferred_candidates": deferred[risk],
-                "source_unverified_candidates": unavailable[risk],
-                "verified_candidates": scoped[risk] - blocked - deferred[risk],
+                "eligible_candidates": len(indexed),
+                "scheduled_candidates": scheduled,
+                "deferred_candidates": len(deferred_ids),
+                "source_unverified_candidates": len(source_failures),
+                "verified_candidates": verified,
                 "blocked_candidates": blocked,
                 "failure_counts": failure_counts,
                 "credited_candidates": list(credited.values()),

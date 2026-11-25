@@ -2,6 +2,7 @@ from pandera.typing import DataFrame
 from pydantic import JsonValue
 
 from codebench_pipeline.dataframe_schemas import ProposedAnnotationsTable, frame_records, validated_frame
+from codebench_pipeline.dataset_records import OTHER_RISK_ID
 
 
 def category_eligible_annotations(
@@ -13,7 +14,9 @@ def category_eligible_annotations(
         reasons: list[str] = []
         if row["category_id"] != category_id:
             reasons.append("different_category")
-        if row["decision"] == "reject":
+        if row["risk_id"] == OTHER_RISK_ID:
+            reasons.append("no_configured_risk")
+        elif row["decision"] == "reject":
             reasons.append("label_rejected")
         if row["category_confidence"] not in ("medium", "high"):
             reasons.append("low_category_confidence")

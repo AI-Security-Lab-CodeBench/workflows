@@ -52,10 +52,10 @@ def filter_candidates(
         candidate = CandidateRecord.model_validate({name: row[name] for name in CandidateRecord.model_fields})
         reason = ""
         risks = matching_risks(candidate.command, routes)
-        if not risks:
-            reason = "outside_configured_command_families"
-        elif len(candidate.command) > config.maximum_command_characters or "\x00" in candidate.command:
+        if len(candidate.command) > config.maximum_command_characters or "\x00" in candidate.command:
             reason = "oversized_or_control_character"
+        elif candidate.util.endswith("/") or re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", candidate.util):
+            reason = "noncommand_utility"
         elif unresolved_template(candidate.command):
             reason = "unresolved_template"
         elif config.quarantine_dynamic_shell and any(

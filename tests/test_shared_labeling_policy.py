@@ -56,7 +56,7 @@ class SharedLabelingPolicyTests(unittest.TestCase):
                         self.assertEqual(compiled["description_language"], "French")
                     self.assertEqual(load_taxonomy(path).risk_ids, expected_risks)
                     self.assertEqual(load_taxonomy(path).description_language, "French")
-                    self.assertEqual(payload["allowed_risk_ids"], [expected_risks[0]])
+                    self.assertEqual(payload["allowed_risk_ids"], [*expected_risks, "other"])
                     self.assertEqual(
                         [example["risk_id"] for example in json.loads(standalone_examples)["examples"]],
                         [expected_risks[0]],

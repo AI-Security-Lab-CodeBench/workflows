@@ -118,7 +118,9 @@ class SourceBusinessTransformationTests(unittest.TestCase):
         changed = rules.model_copy(update={"risks": [unavailable, *rules.risks[1:]]})
         mapped_changed = FilterConfig.project(registered, changed)
         filtered = filter_candidates(raw, mapped_changed.routes, mapped_changed.filtered_commands)
-        self.assertEqual(filtered["filter_reason"].tolist(), ["outside_configured_command_families"])
+        self.assertEqual(filtered["risk_candidates"].tolist(), [[]])
+        self.assertEqual(filtered["filter_decision"].tolist(), ["eligible"])
+        self.assertEqual(filtered["filter_reason"].tolist(), [""])
         self.assertEqual(filtered["source_position"].tolist(), [candidate.source_position])
 
         with self.assertRaises(ValidationError) as rejected:

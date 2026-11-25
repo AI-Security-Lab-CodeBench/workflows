@@ -16,7 +16,7 @@ from codebench_pipeline.category_rules import (
     Text,
 )
 from codebench_pipeline.dataset_documentation_models import command_operations
-from codebench_pipeline.dataset_records import CandidateRecord, LabelDecision, routing, validate_label
+from codebench_pipeline.dataset_records import OTHER_RISK_ID, CandidateRecord, LabelDecision, validate_label
 from codebench_pipeline.models import SemanticSnippet
 from codebench_pipeline.storage import fingerprint
 
@@ -111,12 +111,14 @@ def compile_business_rules(
             examples_path = parent / "examples.json"
     families = TypeAdapter(list[ExampleFamily]).validate_json(read_bytes(examples_path))
     known = {risk.id for risk in rules.risks}
+    example_risks = known | {OTHER_RISK_ID}
     groups: set[tuple[str, str]] = set()
     identities: set[str] = set()
+    covered: set[str] = set()
     compiled: list[CompiledExamples] = []
     for family in families:
         key = (family.risk_id, family.operation_family)
-        if family.risk_id not in known or key in groups:
+        if family.risk_id not in example_risks or key in groups:
             raise ValueError("Foreign risk or duplicate example operation family")
         groups.add(key)
         for example in family.examples:
@@ -124,9 +126,7 @@ def compile_business_rules(
             if candidate.candidate_id in identities:
                 raise ValueError("Duplicate example candidate identity")
             identities.add(candidate.candidate_id)
-            if family.risk_id not in routing(candidate, rules):
-                raise ValueError("Example family risk is outside its candidate routing")
-            if example.expected.risk_id != family.risk_id:
+            if example.expected.risk_id not in {family.risk_id, OTHER_RISK_ID}:
                 raise ValueError("Expected label differs from its example family risk")
             operations = command_operations(candidate.candidate_id, candidate.util, candidate.command)
             relevant = [
@@ -141,6 +141,7 @@ def compile_business_rules(
             if not relevant:
                 raise ValueError("Example requires matching command documentation")
             validate_label(candidate, example.expected, rules, {doc.url for doc in relevant})
+            covered.add(example.expected.risk_id)
         compiled.append(
             CompiledExamples(
                 risk_id=family.risk_id,
@@ -150,7 +151,7 @@ def compile_business_rules(
                 .decode("utf-8"),
             )
         )
-    if {family.risk_id for family in families} != known:
+    if not known <= covered:
         raise ValueError("Examples must cover every category risk with operation families")
     if split_policy is None:
         return rules.model_copy(update={"examples": compiled})

@@ -197,7 +197,7 @@ class SourceManifestTests(unittest.TestCase):
         self.assertEqual(list(filtered["util"]), ["//", "https://example.org/reference/", "git"])
         self.assertEqual(
             list(filtered["filter_reason"]),
-            ["outside_configured_command_families", "outside_configured_command_families", ""],
+            ["noncommand_utility", "noncommand_utility", ""],
         )
 
     def test_manifest_category_and_paths_are_bound_and_file_changes_are_resolved(self) -> None:

@@ -7,9 +7,8 @@ from pydantic import JsonValue, RootModel, TypeAdapter
 
 from codebench_pipeline.category_rules import CategoryRules
 from codebench_pipeline.dataframe_io import DataFrameIOManager
-from codebench_pipeline.dataframe_schemas import frame_records, model_records
+from codebench_pipeline.dataframe_schemas import frame_records
 from codebench_pipeline.dataset_branches import COLLECTION_BRANCHES, stage_name
-from codebench_pipeline.dataset_records import CandidateRecord, routing
 from codebench_pipeline.human_review import HumanReviewError, ReviewSnapshot
 from codebench_pipeline.keenable_snippets import SnippetCollectionReceipt
 from codebench_pipeline.keenable_tables import PROVIDER_RECEIPT
@@ -181,10 +180,7 @@ def review_evidence(
     match taxonomy:
         case CategoryRules():
             rules = taxonomy.model_dump(mode="json")
-            correction_risks = routing(
-                model_records(frame.loc[frame["candidate_id"] == candidate_id], CandidateRecord)[0],
-                taxonomy,
-            )
+            correction_risks = [risk.id for risk in taxonomy.risks]
         case pd.DataFrame():
             raise IntegrityError("Immutable taxonomy is not category rules")
         case _:

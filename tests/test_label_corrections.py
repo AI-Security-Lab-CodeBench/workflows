@@ -60,10 +60,10 @@ class LabelCorrectionTests(unittest.TestCase):
                     id=identifier,
                     name=identifier,
                     definition="Synthetic risk.",
-                    command_patterns=[r"^printf"],
+                    command_patterns=[pattern],
                     guidance="Static test data.",
                 )
-                for identifier in ("CAT-99.1", "CAT-99.2")
+                for identifier, pattern in (("CAT-99.1", r"^printf"), ("CAT-99.2", r"^echo"))
             ],
             classes=[
                 ClassRule(name=name, definition="Synthetic class.") for name in ("allow", "deny", "ask")
@@ -82,7 +82,7 @@ class LabelCorrectionTests(unittest.TestCase):
             source_url="https://example.org/fixture",
             source_position="line 1",
             transformations=[],
-            risk_candidates=["CAT-99.1", "CAT-99.2"],
+            risk_candidates=["CAT-99.1"],
         )
         self.label = LabelDecision(
             candidate_id="first",
@@ -205,7 +205,7 @@ class LabelCorrectionTests(unittest.TestCase):
             self.assertEqual(blocked.exception.code, "ineligible")
             self.assertEqual(tx.list_decisions(batch.batch_id), (saved,))
 
-    def test_save_rejects_nonselected_writes_invalid_types_taxonomy_and_routing(self) -> None:
+    def test_save_rejects_nonselected_writes_invalid_types_and_taxonomy(self) -> None:
         invalid: tuple[dict[str, JsonValue], ...] = (
             {"description": "invented"},
             {"decision": "accept"},
@@ -215,6 +215,7 @@ class LabelCorrectionTests(unittest.TestCase):
             {"class": "modify"},
             {"category_id": "CAT-98"},
             {"risk_id": "CAT-98.1"},
+            {"risk_id": "other"},
             {"command": ""},
         )
         with self.store.transaction() as tx:
@@ -228,7 +229,6 @@ class LabelCorrectionTests(unittest.TestCase):
             self.assertEqual(tx.list_decisions(batch.batch_id)[0].row_revision, 0)
             self.assertEqual([entry.event for entry in tx.history(self.snapshot.dataset_id)], ["created"])
         cases = (
-            ({"risk_candidates": ["CAT-99.1"]}, self.rules, {"risk_id": "CAT-99.2"}),
             ({}, self.rules.model_copy(update={"risks": [self.rules.risks[0]]}), {"risk_id": "CAT-99.2"}),
             ({"category_id": "CAT-98"}, self.rules, {"category_id": "CAT-99"}),
             ({"documentation_urls": []}, self.rules, {"severity": "high"}),
@@ -440,15 +440,15 @@ class LabelCorrectionTests(unittest.TestCase):
                 )
             )
         batch = service.view(DatasetQueryRequest(dataset_id=spec.dataset_id)).batch
-        with self.assertRaises(HumanReviewError) as unrouted:
+        with self.assertRaises(HumanReviewError) as invalid:
             service.decide(
                 DecisionRequest(
                     dataset_id=spec.dataset_id,
                     snapshot_id=snapshot.snapshot_id,
-                    change=self.change(batch.batch_id, edits={"command": "git diff"}),
+                    change=self.change(batch.batch_id, edits={"risk_id": "CAT-99.999"}),
                 )
             )
-        self.assertEqual(unrouted.exception.code, "ineligible")
+        self.assertEqual(invalid.exception.code, "ineligible")
         saved = service.decide(
             DecisionRequest(
                 dataset_id=spec.dataset_id,

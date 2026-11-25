@@ -2,7 +2,7 @@
 
 ## Decide membership before impact
 
-For each plausible routed family, name the actual object, affected set and
+For each plausible configured family, name the actual object, affected set and
 documented effect of the visible operation. Membership needs a positive match:
 the operation performs the family action at the required scope, or directly
 inventories the resources named by the family, validates the configuration that
@@ -20,19 +20,20 @@ impact or class, but doesn't establish membership unless that effect itself
 meets a family boundary. Inspect the complete invocation: a read followed by
 deletion isn't a benign read.
 
-**Make the verdict follow the finding.** If the evidence rules out every routed
-family, return `reject` and name the failed boundary. Don't ask for production,
-approval or severity details to reconsider that verdict. If a plausible match
+**Make the verdict follow the finding.** Select a supported configured family
+even if it was not hinted. If the evidence rules out every configured family,
+return `reject` with `risk_id=other` and name the failed boundary. Don't ask
+for production, approval or severity details to reconsider that verdict. If a plausible match
 or its policy outcome turns on a concrete unresolved fact, use `needs_review`
 and say what that fact would change. Use `accept` only for a supported match
 with a supported label. Before submitting, check that the decision agrees with
 the rationale. If the rationale rules out every match, neither `accept` nor
 `needs_review` is consistent with it.
 
-Keep required provisional fields for rejects and withheld labels. A routed
-risk ID on a reject names the family considered; severity and class describe
-supported effects without borrowing that family's defaults. A rejection can be
-`allow/low` or material enough for `ask` and a higher severity. Keep confidence
+Keep required provisional fields for rejects and withheld labels. For `other`,
+severity and class describe supported effects without borrowing a family
+default. A rejection can be `allow/low` or material enough for `ask` and a
+higher severity. Keep confidence
 separate by field and preserve a supported family when only impact is uncertain.
 Follow the shared distinctions between grounded rejection, review and failed
 grounding. Required fields never make an operation a member.

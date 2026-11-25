@@ -19,6 +19,8 @@ def annotation_review_validation(rules: ProposalRules) -> dict[str, JsonValue]:
     for field in ("command", "category_id", "risk_id", "severity", "class"):
         properties[field] = {**properties[field], "minLength": 1}
     properties["category_id"] = {"const": rules.category_id}
+    risk_ids = [risk.id for risk in rules.risks]
+    properties["risk_id"] = {"enum": risk_ids}
     properties["class"] = {"enum": list(rules.classes)}
     properties["severity"] = {"enum": list(rules.severities)}
     properties["decision"] = {"enum": ["accept", "needs_review"]}
@@ -29,19 +31,9 @@ def annotation_review_validation(rules: ProposalRules) -> dict[str, JsonValue]:
     }
     properties["risk_candidates"] = {
         "type": "array",
-        "items": {"enum": [risk.id for risk in rules.risks]},
+        "items": {"enum": risk_ids},
         "uniqueItems": True,
     }
-    routes: list[dict[str, JsonValue]] = [
-        {
-            "properties": {
-                "risk_id": {"const": risk.id},
-                "risk_candidates": {"contains": {"const": risk.id}},
-                "command": {"anyOf": [{"pattern": pattern} for pattern in risk.command_patterns]},
-            },
-        }
-        for risk in rules.risks
-    ]
     return TypeAdapter(dict[str, JsonValue]).validate_python(
         {
             "taxonomy": rules.model_dump(mode="json"),
@@ -49,16 +41,16 @@ def annotation_review_validation(rules: ProposalRules) -> dict[str, JsonValue]:
                 "type": "object",
                 "properties": {
                     "category_id": {"const": rules.category_id},
+                    "risk_id": {"enum": risk_ids},
                     "decision": {"enum": ["accept", "needs_review"]},
                     "documentation_urls": {"type": "array", "minItems": 1},
                 },
-                "required": ["category_id", "decision", "documentation_urls"],
+                "required": ["category_id", "risk_id", "decision", "documentation_urls"],
             },
             "row_schema": {
                 "type": "object",
                 "properties": properties,
                 "required": sorted(set(candidate["required"]) | set(label["required"])),
-                "anyOf": routes,
                 "$defs": {**candidate.get("$defs", {}), **label.get("$defs", {})},
             },
         }
@@ -70,8 +62,15 @@ def validate_review_edits(
 ) -> None:
     original = pd.DataFrame([row])
     label = model_records(original, LabelDecision)[0]
-    if label.decision == "reject" or not label.documentation_urls or label.category_id != rules.category_id:
+    if (
+        label.decision == "reject"
+        or not label.documentation_urls
+        or label.category_id != rules.category_id
+        or label.risk_id not in {risk.id for risk in rules.risks}
+    ):
         raise HumanReviewError("ineligible", "Edits cannot override machine eligibility")
+    if edits.get("risk_candidates", row["risk_candidates"]) != row["risk_candidates"]:
+        raise HumanReviewError("ineligible", "Edits cannot change original risk hints")
     try:
         changed = pd.DataFrame([{**row, **edits}])
         candidate = model_records(changed, CandidateRecord)[0]

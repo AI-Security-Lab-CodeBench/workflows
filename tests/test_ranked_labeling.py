@@ -71,7 +71,7 @@ class RankedLabelingTests(TestCase):
             )
             for identity, risk, command, weight in (
                 ("lower", second_risk, "probe publish example", 0.7),
-                ("d-defer", first_risk, "probe inspect unnecessary", 0.9),
+                ("d-overflow", first_risk, "probe inspect unnecessary", 0.9),
                 ("c-refill", first_risk, "probe inspect unique", 0.9),
                 ("b-duplicate", first_risk, "probe   inspect example", 0.9),
                 ("a-first", first_risk, "probe inspect example", 0.9),
@@ -108,7 +108,7 @@ class RankedLabelingTests(TestCase):
                     )
                 case "b-duplicate":
                     self.assertTrue(first_started.wait(5), "First row did not start concurrently")
-                case "c-refill":
+                case "c-refill" | "d-overflow":
                     self.assertTrue(finished["a-first"].is_set(), "Refill ran before quota was available")
                 case "lower":
                     self.assertTrue(
@@ -126,12 +126,11 @@ class RankedLabelingTests(TestCase):
             labeling = bound_labeling(spec)
             attempts = labeling.attempts(filtered, home / "stage")
 
-        self.assertCountEqual(calls, ["a-first", "b-duplicate", "c-refill", "lower"])
-        self.assertEqual([call[0] for call in mcp].count("fetch_page_content"), 4)
+        self.assertCountEqual(calls, [identity for identity, _ in rows])
+        self.assertEqual([call[0] for call in mcp].count("fetch_page_content"), 5)
         verify_live_support(attempts, labeling.batch.grounding)
         self.assertEqual(list(attempts["candidate_id"]), [identity for identity, _ in rows])
         observed = attempts.set_index("candidate_id")
-        self.assertEqual(observed.loc["d-defer", "failure_code"], QUOTA_DEFERRED)
         for identity in calls:
             self.assertEqual(observed.loc[identity, "status"], "success")
             row_dir = home / "stage" / "label" / sha256(identity.encode()).hexdigest()
@@ -307,9 +306,9 @@ class RankedLabelingTests(TestCase):
 
         observed_weights = [weights[identity] for identity in inferred]
         self.assertEqual(observed_weights, sorted(observed_weights, reverse=True))
-        self.assertCountEqual(inferred, weights.keys() - {"deferred"})
+        self.assertCountEqual(inferred, weights)
         by_id = {attempt.candidate_id: attempt for attempt in attempts}
-        self.assertEqual(by_id["deferred"].failure_code, QUOTA_DEFERRED)
+        self.assertEqual(by_id["deferred"].status, "success")
         self.assertEqual(by_id["ungrounded"].status, "failure")
         self.assertEqual(by_id["ungrounded"].documentation, [])
         receipt = json.loads((scheduler.out / QUOTA_RECEIPT).read_bytes())
@@ -319,13 +318,13 @@ class RankedLabelingTests(TestCase):
             (full["shortage"], full["remaining_to_target"], full["blocked_candidates"]), (0, 0, 1)
         )
         self.assertEqual(full["credited_candidates"], [f"high-{i:03}" for i in range(249)] + ["filler"])
-        self.assertEqual(full["deferred_candidates"], 1)
-        self.assertEqual((short["state"], short["shortage"]), ("scope_exhausted", 249))
+        self.assertEqual(full["deferred_candidates"], 0)
+        self.assertEqual((short["state"], short["shortage"]), ("scope_blocked", None))
         self.assertEqual(short["credited_candidates"], ["ambiguous"])
-        self.assertEqual(short["verified_candidates"], 1)
-        self.assertEqual(short["blocked_candidates"], 0)
+        self.assertEqual(short["verified_candidates"], len(candidates) - 1)
+        self.assertEqual(short["blocked_candidates"], 1)
 
-    def test_live_documentation_failure_blocks_only_compatible_subrisk(self) -> None:
+    def test_live_documentation_failure_blocks_any_unfilled_subrisk(self) -> None:
         home = Path(self.enterContext(TemporaryDirectory()))
         rules = make_rules()
         candidate = make_candidate().model_copy(update={"command": "probe inspect row"})
@@ -375,20 +374,26 @@ class RankedLabelingTests(TestCase):
         self.assertEqual(blocked["scheduled_candidates"], 1)
         self.assertEqual(blocked["blocked_candidates"], 1)
         self.assertEqual(blocked["failure_counts"], {"missing_operation_documentation": 1})
-        self.assertEqual((empty["state"], empty["shortage"]), ("scope_exhausted", 250))
+        self.assertEqual(empty, blocked)
 
-    def test_unresolved_routing_and_label_failures_remain_visible_by_compatible_subrisk(self) -> None:
+    def test_empty_hints_are_scheduled_and_unknown_hints_remain_visible(self) -> None:
         home = Path(self.enterContext(TemporaryDirectory()))
         rules = make_rules()
         first_risk, second_risk = (item.id for item in rules.risks)
-        unknown = make_candidate("unknown").model_copy(update={"risk_candidates": []})
+        unknown = make_candidate("unknown", "CAT-8.999")
         reasons = (
             "operation_unsupported",
             "missing_operation_documentation",
             "protocol_exhausted",
             QUOTA_DEFERRED,
+            "empty",
         )
-        candidates = [make_candidate(reason, first_risk) for reason in reasons]
+        candidates = [
+            make_candidate(reason, first_risk).model_copy(
+                update={"risk_candidates": [] if reason == "empty" else [first_risk]}
+            )
+            for reason in reasons
+        ]
         failures = [
             failed_attempt(
                 candidate,
@@ -420,10 +425,8 @@ class RankedLabelingTests(TestCase):
             by_id["protocol_exhausted"].attempt_evidence_reference, "label/protocol_exhausted/receipt.json"
         )
         receipt = json.loads((scheduler.out / QUOTA_RECEIPT).read_bytes())
-        for risk, expected in (
-            (first_risk, dict.fromkeys((*reasons, "routing_unverified"), 1)),
-            (second_risk, {"routing_unverified": 1}),
-        ):
+        expected = dict.fromkeys((*reasons, "routing_unverified"), 1)
+        for risk in (first_risk, second_risk):
             with self.subTest(risk=risk):
                 row = receipt["subrisks"][risk]
                 self.assertEqual(row["state"], "scope_blocked")
@@ -431,3 +434,4 @@ class RankedLabelingTests(TestCase):
                 self.assertEqual(row["blocked_candidates"], len(expected))
                 self.assertEqual(row["failure_counts"], expected)
                 self.assertEqual(row["deferred_candidates"], 0)
+                self.assertEqual(row["scheduled_candidates"], len(candidates))

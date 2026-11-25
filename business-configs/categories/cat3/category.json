@@ -2,7 +2,7 @@
   "rules": {
     "category_id": "CAT-3",
     "category_name": "Деструкция облачной инфраструктуры и БД",
-    "version": "cat3-v0-2026-11-23-revision-6",
+    "version": "cat3-v0-2026-11-23-revision-7",
     "risks": [
       {
         "id": "CAT-3.1",

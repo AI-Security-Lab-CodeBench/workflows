@@ -66,13 +66,15 @@ def make_candidate(identity: str = "one", risk: str = "CAT-8.1") -> CandidateRec
     )
 
 
-def make_label(candidate: CandidateRecord, rules: CategoryRules) -> LabelDecision:
+def make_label(
+    candidate: CandidateRecord, rules: CategoryRules, *, risk_id: str | None = None
+) -> LabelDecision:
     return LabelDecision.model_validate(
         {
             "candidate_id": candidate.candidate_id,
             "decision": "accept",
             "category_id": rules.category_id,
-            "risk_id": candidate.risk_candidates[0],
+            "risk_id": candidate.risk_candidates[0] if risk_id is None else risk_id,
             "severity": "low",
             "class": "allow",
             "description": "Inspects the named example.",

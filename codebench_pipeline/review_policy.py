@@ -1,7 +1,9 @@
-from codebench_pipeline.dataset_records import LabelDecision
+from codebench_pipeline.dataset_records import OTHER_RISK_ID, LabelDecision
 
 
 def requires_human_review(label: LabelDecision) -> bool:
+    if label.risk_id == OTHER_RISK_ID:
+        return False
     return label.decision == "needs_review" or any(
         confidence != "high"
         for confidence in (

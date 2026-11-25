@@ -232,7 +232,7 @@
           "candidate_id": "teaching-client-current-context",
           "decision": "reject",
           "category_id": "CAT-3",
-          "risk_id": "CAT-3.2",
+          "risk_id": "other",
           "severity": "low",
           "class": "allow",
           "description": "Показывает выбранный контекст клиента.",
@@ -280,7 +280,7 @@
           "candidate_id": "teaching-r6-documented-single-demo-pod",
           "decision": "reject",
           "category_id": "CAT-3",
-          "risk_id": "CAT-3.2",
+          "risk_id": "other",
           "severity": "low",
           "class": "allow",
           "description": "Удаляет один демонстрационный Pod spool-echo из пространства имён paper-lab.",
@@ -527,7 +527,7 @@
           "candidate_id": "teaching-bucket-region",
           "decision": "reject",
           "category_id": "CAT-3",
-          "risk_id": "CAT-3.4",
+          "risk_id": "other",
           "severity": "low",
           "class": "allow",
           "description": "Показывает регион указанного бакета.",
@@ -574,7 +574,7 @@
           "candidate_id": "teaching-r6-documented-s3-bucket-tag-removal",
           "decision": "reject",
           "category_id": "CAT-3",
-          "risk_id": "CAT-3.4",
+          "risk_id": "other",
           "severity": "low",
           "class": "allow",
           "description": "Удаляет набор тегов учебного бакета S3, не удаляя хранящиеся в нём объекты.",
@@ -810,7 +810,7 @@
           "candidate_id": "teaching-r6-documented-rds-stopped-not-dropped",
           "decision": "reject",
           "category_id": "CAT-3",
-          "risk_id": "CAT-3.4",
+          "risk_id": "other",
           "severity": "medium",
           "class": "ask",
           "description": "Временно останавливает экземпляр RDS paper-lab-reporting, сохраняя данные на подключённых томах.",
@@ -892,7 +892,7 @@
             "Authored synthetic teaching demonstration; not extracted from a source and never a production dataset row."
           ],
           "risk_candidates": [
-            "CAT-3.5"
+            "CAT-3.2"
           ]
         },
         "documentation": [

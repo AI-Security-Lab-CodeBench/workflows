@@ -1,17 +1,18 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import Annotated, Literal, Protocol, TypeVar, assert_never
+from typing import Annotated, Final, Literal, Protocol, TypeVar, assert_never
 
 from pydantic import ConfigDict, Field, model_validator
 
 from codebench_pipeline.category_rules import CategoryRules, ClassName, SeverityName, StrictModel, Text
-from codebench_pipeline.labeling_stage_settings import LabelingRules, ProposalRules, matching_risks
+from codebench_pipeline.labeling_stage_settings import LabelingRules, ProposalRules
 from codebench_pipeline.models import SemanticSnippet
 
 DocumentationSnippet = SemanticSnippet
 HttpURL = Annotated[str, Field(pattern=r"^https?://[^\s/]+(?:/[^\s]*)?$")]
 Confidence = Literal["low", "medium", "high"]
+OTHER_RISK_ID: Final = "other"
 type LabelPolicy = CategoryRules | LabelingRules | ProposalRules
 
 
@@ -81,14 +82,16 @@ def index_records(records: Sequence[Record]) -> dict[str, Record]:
 
 
 def routing(candidate: CandidateRecord, rules: LabelPolicy) -> list[str]:
-    known = {risk.id for risk in rules.risks}
-    if not set(candidate.risk_candidates) <= known:
-        raise ValueError(f"Unknown routing risk for {candidate.candidate_id}")
-    matching = set(matching_risks(candidate.command, rules.risks))
-    allowed = [risk for risk in candidate.risk_candidates if risk in matching]
-    if not allowed:
-        raise ValueError(f"No supplied command pattern supports {candidate.candidate_id}")
-    return allowed
+    """Validate the stored hints without narrowing the configured taxonomy."""
+    configured = [risk.id for risk in rules.risks]
+    if not set(candidate.risk_candidates) <= set(configured):
+        raise ValueError(f"Unknown risk hint for {candidate.candidate_id}")
+    return configured
+
+
+def label_risk_ids(candidate: CandidateRecord, rules: LabelPolicy) -> list[str]:
+    """Return the available label outcomes, including the reserved no-fit value."""
+    return [*routing(candidate, rules), OTHER_RISK_ID]
 
 
 def validate_label(
@@ -99,8 +102,8 @@ def validate_label(
 ) -> None:
     if label.candidate_id != candidate.candidate_id:
         raise ValueError("Label identity differs from candidate")
-    if label.category_id != rules.category_id or label.risk_id not in routing(candidate, rules):
-        raise ValueError("Label taxonomy differs from supplied routing rules")
+    if label.risk_id not in label_risk_ids(candidate, rules) or label.category_id != rules.category_id:
+        raise ValueError("Label taxonomy differs from supplied category rules")
     match rules:
         case ProposalRules():
             classes = set(rules.classes)
@@ -120,5 +123,9 @@ def validate_label(
         raise ValueError("Duplicate documentation URLs")
     if documentation_urls is not None and not set(label.documentation_urls) <= documentation_urls:
         raise ValueError("Label cites documentation absent from supplied evidence")
+    if label.risk_id == OTHER_RISK_ID and (
+        label.decision != "reject" or not label.documentation_urls or documentation_urls is None
+    ):
+        raise ValueError("The other risk outcome requires rejection with supporting row documentation")
     if label.decision == "accept" and not label.documentation_urls:
         raise ValueError("Accepted label requires supporting documentation")

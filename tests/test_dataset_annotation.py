@@ -50,11 +50,12 @@ def config() -> ModelConfig:
 
 
 class DatasetAnnotationTests(unittest.TestCase):
-    def test_routing_constrains_candidates_without_entering_semantic_policy(self) -> None:
+    def test_request_preserves_hints_without_constraining_the_taxonomy(self) -> None:
         rules = make_rules()
         system, payload = request(make_candidate(), documentation(), rules)
         policy = json.loads(system.rsplit("\n\n", 1)[1])
-        self.assertEqual(payload["allowed_risk_ids"], ["CAT-8.1"])
+        self.assertEqual(payload["allowed_risk_ids"], ["CAT-8.1", "CAT-8.2", "other"])
+        self.assertEqual(payload["candidate"], make_candidate().model_dump(mode="json"))
         self.assertEqual(
             [(risk["id"], risk["definition"]) for risk in policy["risks"]],
             [(risk.id, risk.definition) for risk in rules.risks],
@@ -142,7 +143,7 @@ class DatasetAnnotationTests(unittest.TestCase):
                 payload = json.loads(stored["prompt"].split("\n", 1)[1])
                 records = payload.get("records", [payload])
                 for record in records:
-                    self.assertEqual(record["allowed_risk_ids"], ["CAT-8.1"])
+                    self.assertEqual(record["allowed_risk_ids"], ["CAT-8.1", "CAT-8.2", "other"])
                     self.assertEqual(record["candidate"]["source_url"], candidates[0].source_url)
                     self.assertEqual(record["candidate"]["source_position"], candidates[0].source_position)
                 self.assertEqual(
@@ -182,13 +183,15 @@ class DatasetAnnotationTests(unittest.TestCase):
             ]
             self.assertEqual(len(set(invocation_ids)), 3)
 
-    def test_taxonomy_routing_utility_and_citations_are_enforced_after_inference(self) -> None:
+    def test_taxonomy_utility_and_citations_are_enforced_after_inference(self) -> None:
         rules, candidate = make_rules(), make_candidate()
         changes: list[dict[str, JsonValue]] = [
             {"candidate_id": "other"},
             {"category_id": "CAT-2"},
-            {"risk_id": "CAT-8.2"},
             {"risk_id": "CAT-8.99"},
+            {"risk_id": "other"},
+            {"risk_id": "other", "decision": "needs_review"},
+            {"risk_id": "other", "decision": "reject", "documentation_urls": []},
             {"util": "other"},
             {"documentation_urls": ["https://example.org/invented"]},
             {"documentation_urls": ["https://example.org/docs", "https://example.org/docs"]},
@@ -204,7 +207,8 @@ class DatasetAnnotationTests(unittest.TestCase):
                 ):
                     expected_error = (
                         InferenceError
-                        if {"candidate_id", "category_id", "risk_id", "util"} & change.keys()
+                        if {"candidate_id", "category_id", "util"} & change.keys()
+                        or change.get("risk_id") == "CAT-8.99"
                         else ValueError
                     )
                     with self.assertRaises(expected_error):
@@ -213,19 +217,35 @@ class DatasetAnnotationTests(unittest.TestCase):
                 self.assertEqual(len(captured), 1)
                 self.assertEqual(captured[0].read_text(), native_response(value).stdout)
 
-    def test_candidate_shortlist_constrains_routing_when_multiple_patterns_match(self) -> None:
+    def test_structured_inference_validates_an_off_hint_match_and_grounded_other(self) -> None:
         rules = make_rules()
-        candidate = make_candidate().model_copy(
-            update={"command": "probe inspect example && probe publish example"}
-        )
-        invalid = make_label(candidate, rules).model_dump(mode="json", by_alias=True)
-        invalid["risk_id"] = "CAT-8.2"
-        with tempfile.TemporaryDirectory() as temporary:
-            with patch("codebench_pipeline.inference.subprocess.run", return_value=native_response(invalid)):
-                with self.assertRaises(InferenceError):
-                    annotate([candidate], documentation(), rules, config(), Path(temporary))
+        original = make_candidate()
+        for command, hints, risk_id, decision, snippet in (
+            ("probe publish example", ["CAT-8.1"], "CAT-8.2", "accept", "Publishes to a destination."),
+            ("probe version", [], "other", "reject", "Prints only the local client version."),
+        ):
+            with self.subTest(command=command), tempfile.TemporaryDirectory() as temporary:
+                candidate = original.model_copy(update={"command": command, "risk_candidates": hints})
+                docs = [
+                    documentation()[0].model_copy(
+                        update={"subcommands": [command.split()[1]], "snippet": snippet}
+                    )
+                ]
+                expected = make_label(original, rules).model_copy(
+                    update={
+                        "risk_id": risk_id,
+                        "decision": decision,
+                        "description": snippet,
+                        "rationale": snippet,
+                    }
+                )
+                response = native_response(expected.model_dump(mode="json", by_alias=True))
+                with patch("codebench_pipeline.inference.subprocess.run", return_value=response):
+                    self.assertEqual(
+                        annotate([candidate], docs, rules, config(), Path(temporary)), [expected]
+                    )
 
-    def test_invalid_routing_and_duplicate_candidates_fail_before_inference(self) -> None:
+    def test_invalid_hints_duplicate_candidates_and_missing_docs_fail_before_inference(self) -> None:
         candidate = make_candidate()
         cases = [
             [candidate, candidate],

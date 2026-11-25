@@ -5,6 +5,7 @@ import pandas as pd
 from pandera.typing import DataFrame
 from pydantic import JsonValue, TypeAdapter
 
+from codebench_pipeline.batch_labeling_ranked import QUOTA_DEFERRED, QUOTA_RECEIPT
 from codebench_pipeline.dataframe_schemas import LabelingAttemptsTable, model_records
 from codebench_pipeline.dataset_finalization import normalized_command
 from codebench_pipeline.dataset_records import CandidateRecord
@@ -165,7 +166,12 @@ def reconciled_counts(
         raise HumanReviewError(
             "stale", "Collection source, filter, labeling, deduplication or review counts do not reconcile"
         )
-    deferred = int((failures["failure_code"] == "quota_deferred").sum())
+    deferred = int(
+        (
+            (failures["failure_code"] == QUOTA_DEFERRED)
+            & (failures["attempt_evidence_reference"] == QUOTA_RECEIPT)
+        ).sum()
+    )
     return {
         "candidates": len(merged),
         "eligible_to_label": len(attempts),

@@ -23,6 +23,7 @@ from codebench_pipeline.agent_events import InferenceError
 from codebench_pipeline.batch_labeling_config import BatchLabelingConfig
 from codebench_pipeline.batch_labeling_protocol import (
     ROW_LABELING_CONTRACT,
+    ROW_LABELING_POLICY,
     Completion,
     LiveSupport,
     OfferedPassages,
@@ -516,6 +517,7 @@ def prepare_batch_rows(
                     "schema": SubmittedLabel.model_json_schema(),
                     "implementation": implementation,
                     "contract": ROW_LABELING_CONTRACT,
+                    "labeling_policy": ROW_LABELING_POLICY,
                 }
             ),
         )

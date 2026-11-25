@@ -18,7 +18,9 @@ Inspect the complete command chain, pipelines, substitutions, redirects and
 operations beneath wrappers such as sudo, env, xargs and timeout. Assess the
 most harmful visible step, not just the leading utility. Distinguish observation,
 preview and validation from mutation using the actual subcommand documentation,
-significant arguments and version limits. A utility match only suggests routing.
+significant arguments and version limits. `candidate.risk_candidates` contains
+fallible collection hints. They can be empty, wrong or incomplete; a hint is
+not evidence of membership.
 Don't infer unseen file contents, hooks, remote scripts or payload behavior.
 Separate the affected resource and scope from the consequence. Identify the
 state layer the operation touches, what the visible selectors actually cover,
@@ -37,19 +39,21 @@ authorization, ownership, isolation, backups or recovery guarantees. A name alon
 doesn't establish an environment. Missing backup evidence establishes neither
 recoverability nor permanent loss.
 
-For an accepted label, assign one supported risk from the allowed risk IDs.
+For a supported match, assign its configured ID from `allowed_risk_ids`,
+whether or not it appears in the hints.
 A benign counterpart belongs on its own evidence, without a destructive
 partner. Don't compare records to select duplicates, require reciprocal links,
 repair command text, fill arguments, expand templates or generate dataset rows.
 Quotas, deduplication and release decisions belong outside this invocation.
 
 Decide membership before choosing severity or execution class. Compare the
-documented effect and affected scope against each routed family's boundary,
+documented effect and affected scope against the configured families' boundaries,
 including its permitted counterparts. A shared utility, resource, workflow
 or resemblance to a demonstration does not establish membership. Neither
 harmlessness nor a need for human authorization establishes membership.
-If the documented operation is outside every routed family, `reject`: name
-the effect and the boundary it fails. Use `needs_review` only if a specific
+If the documented operation is outside every configured family, use `reject`
+with `risk_id=other`: cite row documentation and name the effect and the
+boundary it fails. Use `needs_review` with a plausible configured ID if a specific
 missing fact could change membership or the policy outcome of a plausible
 match. Do not ask for environment or approval context to rescue an operation
 already outside the family on effect or scope.
@@ -99,11 +103,11 @@ unseen script contents. Use `reject` for demonstrably out-of-scope records.
 In tool-grounded mode, missing operation documentation after the retrieval budget
 is exhausted requires an explicit failed outcome, not invented provisional labels.
 In single-record mode, retain unsupported results as `needs_review`.
-When the schema requires category, risk, severity and class for rejected or
-withheld rows, fill them with permitted values; they are provisional, not
-assertions of membership. Do not change the decision to make those fields
-authoritative. In tool-grounded mode, submit a grounded rejection as a
-standalone `finalize` with `label.decision=reject`, candidate-bound passages
+For rejected or withheld rows, preserve the category ID and describe severity
+and class independently of membership. A provisional configured risk on
+`needs_review` is not an assertion of membership. Never use `other` for
+uncertainty, missing evidence, or low severity. In tool-grounded mode, submit
+a grounded rejection as a standalone `finalize` with `label.decision=reject`, candidate-bound passages
 that support the out-of-scope judgment, and empty failure fields. Reserve
 `label=null` for an explicit failure, not a grounded rejection.
 

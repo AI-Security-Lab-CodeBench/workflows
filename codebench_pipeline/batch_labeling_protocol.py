@@ -5,7 +5,7 @@ from typing import Final, Literal
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, TypeAdapter
 
 from codebench_pipeline.batch_labeling_rows import RowEvidence
-from codebench_pipeline.dataset_records import CandidateRecord, LabelDecision, LabelPolicy, routing
+from codebench_pipeline.dataset_records import CandidateRecord, LabelDecision, LabelPolicy, label_risk_ids
 from codebench_pipeline.grounding_tools import GroundingOrigins
 from codebench_pipeline.labeling_outcomes import LabelingAttempt
 from codebench_pipeline.live_grounding import LivePage, trusted_live_url
@@ -13,6 +13,7 @@ from codebench_pipeline.models import SemanticSnippet
 from codebench_pipeline.storage import IntegrityError, fingerprint
 
 ROW_LABELING_CONTRACT: Final = "independent-row-react-v1"
+ROW_LABELING_POLICY: Final = "advisory-risk-hints-v1"
 
 
 class _Strict(BaseModel):
@@ -197,7 +198,10 @@ class RowInput:
             prose.pop("pattern", None)
             properties[field] = prose
         properties["category_id"] = {"type": "string", "enum": [rules.category_id]}
-        properties["risk_id"] = {"type": "string", "enum": list[JsonValue](routing(self.candidate, rules))}
+        properties["risk_id"] = {
+            "type": "string",
+            "enum": list[JsonValue](label_risk_ids(self.candidate, rules)),
+        }
         urls = sorted({page.url for page in evidence.values()})
         properties["documentation_urls"] = (
             {"type": "array", "items": {"type": "string", "enum": list[JsonValue](urls)}}
